@@ -52,6 +52,16 @@ an episode is open: since #11861 the label is `loom:blocked` and it stays on
 through a Doctor round-trip too, so "an open episode + the label absent" can
 only mean a human removed it.
 
+The label staying on through that round-trip had a second consequence (#14833):
+with the label present, a FAIL tick used to stand silent even when the head had
+moved, so no `champion:hold-state` record ever named the new head and
+`merge-pr.sh --release-hold` refused the release forever (the only way through
+was stripping `loom:blocked` by hand, unaudited). The `stands` answer is now
+head-scoped: a FAIL with the label on and the latest state marker at an older
+(or unrecorded) head posts the hold notice again for the current head — one
+notice per held head, no equivalence carry, the label's presence being the
+operator's standing decision.
+
 ### Two other shapes that were rejected
 
 - **Dropping `loom:pr` while on hold.** Its human path is `merge-pr.sh

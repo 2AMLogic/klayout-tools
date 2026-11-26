@@ -115,6 +115,18 @@ check_lane() { # <lane> <file> <claim-label>
     assert_file_contains "$lane: still credits #5123 for comment de-duplication" \
         "$file" "#5123"
 
+    # #15044: both reclaim recipes (bounded fallback + ordinary stale) must end
+    # their comment with the reclaim marker keyed to the claim being reclaimed,
+    # so claim-staleness.sh can recognize a reclaim the timeline still lags.
+    marker_count="$(grep -cF -- '<!-- loom:reclaim claim=$CLAIMED_AT -->' "$file")"
+    if [[ "$marker_count" -eq 2 ]]; then
+        pass "$lane: both reclaim comments carry the loom:reclaim marker (#15044)"
+    else
+        fail "$lane: expected 2 reclaim comments with the loom:reclaim marker, found $marker_count (#15044)"
+    fi
+    assert_file_contains "$lane: documents why the reclaim marker exists (#15044)" \
+        "$file" "loom:reclaim"
+
     # The defective inline computation must not come back.
     assert_file_lacks "$lane: no hand-rolled COMMENTS_AFTER computation" \
         "$file" 'COMMENTS_AFTER=$(printf'

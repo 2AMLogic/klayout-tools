@@ -244,7 +244,7 @@ Check for an argument passed via the slash command:
 
 If a number is provided (e.g., `/builder 42`):
 1. Treat that number as the target **issue** to work on; **skip** "Finding Work"
-2. **Guard before any write** (#11863): `loom-daemon forge check-claim <number>`. Exit `1`: claim (the guard itself passes your invoker's own claim when `LOOM_SWEEP_CLAIM_OWNED` names the number, and says so; never refuse on exit `1`). Exit `0` prints a token: `TARGET_IS_PR` (an issue role, #9929), `CLOSED`, `FROZEN`, `OPERATOR`, `OPEN_PR`, `MERGED_PR` (#12615) or `TRIAGE` (#12713) → refuse, writing nothing, and end with `LOOM_STEP_OUTCOME role=builder target=<n> class=refused reason=<token lowercased, e.g. merged_pr|triage>` so the step-outcome ledger can back off a repeated refusal. `BUILDING` / `LEASE_ALREADY_HELD` / `BRANCH_EXISTS` → refuse unless your invoker holds this claim (`LOOM_SWEEP_CLAIM_OWNED` names the number, or your brief says `This /loom:sweep pre-flighted #<number>`) or the operator told you to resume or force it: that overrides these three, never the seven above. Any other exit: stop. A hard-excluded label (Label Workflow) refuses too. **Split-parent refusal (#13635)**, before claiming: `loom-daemon forge parent split-state --parent <number>`; exit `0` (`SPLIT_ALL_CLOSED`: children exist and all are closed) → refuse, claim nothing, end with `class=refused reason=split_parent_children_closed`. Exit `1` proceeds; another exit is unanswered, not an all-clear
+2. **Guard before any write** (#11863): `loom-daemon forge check-claim <number>`. Exit `1`: claim (the guard itself passes your invoker's own claim when `LOOM_SWEEP_CLAIM_OWNED` names the number, and says so; never refuse on exit `1`). Exit `0` prints a token: `TARGET_IS_PR` (an issue role, #9929), `CLOSED`, `FROZEN`, `OPERATOR`, `OPEN_PR`, `MERGED_PR` (#12615) or `TRIAGE` (#12713) → refuse, writing nothing, and end with `LOOM_STEP_OUTCOME role=builder target=<n> class=refused reason=<token lowercased, e.g. merged_pr|triage>` so the step-outcome ledger can back off a repeated refusal. `BUILDING` / `LEASE_ALREADY_HELD` / `BRANCH_EXISTS` → refuse unless your invoker holds this claim (`LOOM_SWEEP_CLAIM_OWNED` names the number, or your brief says `This /loom:sweep pre-flighted #<number>`) or the operator told you to resume or force it: that overrides these three, never the seven above. Any other exit: stop. A hard-excluded label (Label Workflow) refuses too. **Split-parent refusal (#13635)**, before claiming: `loom-daemon forge parent split-state --parent <number>`; exit `0` (`SPLIT_ALL_CLOSED`: children exist and all are closed) → refuse, claim nothing, end with `class=refused reason=split_parent_children_closed`. Exit `1` proceeds (a parent whose body carries `<!-- loom:split-rescoped -->` alone on a line, written by the reviser when a post-split revision added work the children do not cover, #15242, reports `NOT_SPLIT` and is buildable); another exit is unanswered, not an all-clear
 3. Claim the issue: `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"` (`worktree.sh` leases it)
 4. Proceed directly to implementation
 5. End with the outcome line from `.loom/docs/targeted-role-invocation.md`: `LOOM_STEP_OUTCOME role=builder target=<n> class=<verdict|noop|refused|failed> reason=<token>`
@@ -561,7 +561,7 @@ from `.loom/worktrees/issue-<N>` it writes into **main** (invisible in your
 stop. `--output` does not help either: it stages a copy of the *primary's*
 `defaults/`, not your unmerged edits.
 
-In `rjwalters/loom` the installed mirrors are tracked and CI requires them current
+In `2AMLogic/loom` the installed mirrors are tracked and CI requires them current
 before merge (`check-hooks-defaults-parity.sh`, `check-dangling-links.sh`). So when your diff touches one, update it by hand
 **inside your worktree** (paths via `$WORKTREE_ABS`):
 
@@ -574,13 +574,13 @@ Then run the parity scripts above. Consumer repos: next section.
 
 ### Never fix an installed Loom file in place (consumer repos)
 
-Outside `rjwalters/loom` itself, `.loom/hooks|scripts|roles|docs|bin/` and
+Outside `2AMLogic/loom` itself, `.loom/hooks|scripts|roles|docs|bin/` and
 `.claude/commands/loom/` are resync-refreshed copies of Loom's `defaults/`. An
 in-place fix there is reverted by the next resync — or, if you *added* the file,
 orphaned with no upstream counterpart — silently, after your PR merges. Only two
 dispositions are valid:
 
-1. **Upstream it** — PR `rjwalters/loom`'s `defaults/<same relative path>`; the
+1. **Upstream it** — PR `2AMLogic/loom`'s `defaults/<same relative path>`; the
    fix returns via the normal `chore: resync installed Loom surfaces` commit.
 2. **Pin it** — add the path to that repo's `.loom/resync-ignore`, with a comment
    saying why and which upstream PR retires the pin if it is temporary.

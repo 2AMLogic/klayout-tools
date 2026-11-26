@@ -60,6 +60,14 @@ check() { # <expected> <actual> <message>
     fi
 }
 
+check_no_equivalence_call() {
+    local trace=absent
+    if [[ -e "$T/ve.argv" ]]; then
+        trace=present
+    fi
+    check absent "$trace" "$1"
+}
+
 # --- the shipped tick, verbatim but for the PR number placeholder -----------
 awk '/^```bash$/{f=1;next} /^```$/{f=0} f' "$HOLD_MD" | sed "s/^PR_NUMBER=<number>$/PR_NUMBER=$PR/" >"$T/tick.sh"
 grep -q "^PR_NUMBER=$PR$" "$T/tick.sh" || { echo "FAIL: could not extract the tick from $HOLD_MD"; exit 1; }
@@ -172,7 +180,26 @@ cat >"$T/w/.loom/scripts/merge-pr.sh" <<EOF
 #!/usr/bin/env bash
 echo "MERGE" >>"$T/writes"
 EOF
-chmod +x "$T/bin/gh" "$T/bin/loom-daemon" "$T/w/.loom/scripts/"*.sh
+# BSD `paste` (macOS) has no implicit-stdin mode: with no file operand it prints its
+# usage line and exits 1, where GNU `paste` reads stdin. Shadow `paste` on the tick's
+# PATH with that rule so a bare `... | paste -sd' '` fails here as it does on the macOS
+# leg (#13155); `paste -sd' ' -` and a file operand still work on both.
+cat >"$T/bin/paste" <<'EOF'
+#!/usr/bin/env bash
+ops=0; skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    -d) skip=1 ;;
+    -) ops=$((ops + 1)) ;;   # a bare `-` is the stdin operand
+    -*) ;;
+    *) ops=$((ops + 1)) ;;
+  esac
+done
+[ "$ops" -gt 0 ] || { echo "usage: paste [-s] [-d delimiters] file ..." >&2; exit 1; }
+PATH=${PATH#*:} exec paste "$@"
+EOF
+chmod +x "$T/bin/gh" "$T/bin/loom-daemon" "$T/bin/paste" "$T/w/.loom/scripts/"*.sh
 
 # --- harness -------------------------------------------------------------------
 reset() { # <head>
@@ -198,6 +225,20 @@ comment_as() { # <author> <body>
     jq --arg b "$2" --arg a "$1" '. + [{author: {login: $a}, body: $b}]' "$T/comments.json" >"$T/c.tmp"
     mv "$T/c.tmp" "$T/comments.json"
 }
+
+echo "--- #14833: a FAIL standing across a head move re-records its notice at the new head ---"
+# The consumer-repo regression: the label never left (a Doctor round-trip keeps
+# it, #11861), the head moved, and the tick stood silent — so no hold-state
+# record named the new head and `merge-pr.sh --release-hold` refused forever.
+reset "$A"
+tick
+push "$B"
+rm -f "$T/ve.argv"
+tick; check "COMMENT:hold;LABEL+:loom:blocked" "$WRITES" "label present, notice at A, head B: fresh notice for B, label stays"
+check_no_equivalence_call "no equivalence call — the label's presence is the operator's standing decision"
+check 1 "$(jq -r --arg h "$B" '[.[] | select(.body | startswith("<!-- champion:critical-file-hold -->")) | select(.body | contains("hold-state head=" + $h))] | length' "$T/comments.json")" "exactly one hold notice records head B"
+tick; check "LABEL+:loom:blocked" "$WRITES" "repeat tick at B: hold stands, no second notice for B"
+check 1 "$(jq -r --arg h "$B" '[.[] | select(.body | startswith("<!-- champion:critical-file-hold -->")) | select(.body | contains("hold-state head=" + $h))] | length' "$T/comments.json")" "still exactly one notice for B"
 
 echo "--- release survives repository-proven tree-identical moves; a real change re-arms ---"
 reset "$A"
@@ -235,8 +276,10 @@ operator_reassert
 tick; check "" "$WRITES" "operator re-added the label at the released head: nothing written"
 check "present" "$(label)" "label stays on"
 push "$C"
-tick; check "LABEL+:loom:blocked" "$WRITES" "a no-op move after the reassertion: hold stands, the old release is NOT carried"
+rm -f "$T/ve.argv"
+tick; check "COMMENT:hold;LABEL+:loom:blocked" "$WRITES" "a move after the reassertion: the hold is re-recorded at the new head, the old release is NOT carried (#14833)"
 check "present" "$(label)" "label still on after the move"
+check_no_equivalence_call "reasserted hold across a move: no equivalence call — the label is the operator's standing decision"
 
 echo "--- every unknown fails closed, naming why ---"
 for mode in unknown disabled; do
