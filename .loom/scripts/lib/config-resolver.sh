@@ -126,18 +126,19 @@ loom_resolve_config() {
     local defaults_path
     defaults_path=$(_loom_config_private_defaults_path)
 
-    local tier_defaults tier_legacy tier_project tier_local
+    local tier_defaults tier_legacy tier_project tier_fleet tier_local
     tier_defaults=$(_loom_config_soft_read "$defaults_path")
     tier_legacy=$(_loom_config_tracked_read "$repo_root" "$LOOM_CONFIG_LEGACY_REL")
     tier_project=$(_loom_config_tracked_read "$repo_root" "$LOOM_CONFIG_PROJECT_REL")
+    tier_fleet=$(_loom_config_soft_read "$repo_root/.loom-local/fleet-repo.json")
     tier_local=$(_loom_config_soft_read "$repo_root/$LOOM_CONFIG_LOCAL_REL")
 
-    jq -c -n \
-        --argjson a "$tier_defaults" \
-        --argjson b "$tier_legacy" \
-        --argjson c "$tier_project" \
-        --argjson d "$(_loom_config_soft_read "$repo_root/.loom-local/fleet-repo.json")" --argjson e "$tier_local" \
-        '$a * $b * $c * $d * $e'
+    # Stream the tiers (low -> high precedence) to jq on stdin, never as
+    # `--argjson` argv: Linux caps each argv string at MAX_ARG_STRLEN
+    # (128 KiB) on execve, so a tier past that size failed with "Argument
+    # list too long" (#15313). `printf` is a builtin, so no exec limit applies.
+    printf '%s\n' "$tier_defaults" "$tier_legacy" "$tier_project" "$tier_fleet" "$tier_local" \
+        | jq -c -s 'reduce .[] as $t ({}; . * $t)'
 }
 
 # loom_config_get <repo_root> <dotted.path> [default]
