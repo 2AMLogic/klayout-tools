@@ -39,10 +39,9 @@ class DerivedLayer:
     margin, restricted to wherever the bottom-plate conductor (``Metal4``)
     already comes near it. Checking this rule against raw ``Metal4`` (the way
     ``mim.space.1`` approximates ``MIMTM.1``) would be actively wrong, not
-    merely conservative: ordinary ``Metal4``-``Via4``-``Metal5`` routing
-    anywhere in the layout would falsely trip it, since an unscoped
-    "``Metal4`` must enclose every ``Via4`` by the MiM margin" check has
-    nothing to do with routing vias at all.
+    merely conservative: ordinary ``Metal4``-``Via4``-``Metal5`` routing anywhere in the
+    layout would falsely trip it, since an unscoped "``Metal4`` must enclose every
+    ``Via4`` by the MiM margin" check has nothing to do with routing vias at all.
 
     ``mode`` selects *which* derivation is applied (see the values below).
     The default, ``"sized_intersection"``, is the original (issue #345) one:
@@ -849,6 +848,7 @@ class DrcRule:
     # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
     runset_note: dict[str, Any] | None = None
     text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
+    extension_spec: Any = None  # `drc_implant_extension.ImplantExtensionSpec` (#7969)
     approximations: list[dict[str, str]] | None = None
 
 

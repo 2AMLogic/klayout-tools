@@ -93,6 +93,7 @@ from .drc_check_kinds import (
     _VERTEX_CHECKS,
     rule_threshold_fields,
 )
+from .drc_implant_extension import run_implant_extension, validate_implant_extension
 from .drc_layer_selection import (
     cell_primary_region,
     select_other_region,
@@ -131,8 +132,8 @@ _NET_SPACE_CHECKS = {"net_space"}
 
 
 def _spec_layers(rule: DrcRule) -> set[tuple[int, int]]:
-    """Layers referenced by ``region_spec``/``net_spec``/``text_exempt``, if any."""
-    specs = (rule.region_spec, rule.net_spec, rule.text_exempt)
+    """Layers referenced by the rule's spec descriptors, if any."""
+    specs = (rule.region_spec, rule.net_spec, rule.text_exempt, rule.extension_spec)
     return {layer for spec in specs if spec is not None for layer in spec.layers()}
 
 
@@ -622,25 +623,23 @@ def _derived_region_unscoped(
     size_dbu = round(derived.sized_by_um / dbu)
     if derived.mode == "holes":
         # Interior voids of the merged `base` region (#1976) --
-        # `intersect_with`/`sized_by_um` are unused for this mode. Explicit
-        # `.merged()` before `.holes()` documents the requirement even though
-        # `Region.holes()` already applies merged semantics itself -- a hole
-        # formed by several abutting drawn rectangles (the common GDS idiom
-        # for a slotted plate) is only visible once merged. A `base` region
-        # with no holes at all derives an empty region, which is simply
-        # nothing to report -- not an error.
+        # `intersect_with`/`sized_by_um` are unused for this mode. Explicit `.merged()`
+        # before `.holes()` documents the requirement even though `Region.holes()`
+        # already applies merged semantics itself -- a hole formed by several abutting
+        # drawn rectangles (the common GDS idiom for a slotted plate) is only visible
+        # once merged. A `base` region with no holes at all derives an empty region,
+        # which is simply nothing to report -- not an error.
         return base_region.merged().holes()
     if derived.mode == "gate_endcap":
-        # Endcap probe zones (#2936), e.g. sky130's `poly.8`: the part of
-        # each `base` (diffusion) edge that lies under or flush with an
-        # `intersect_with` (poly) shape is a gate end edge; extend it
-        # outward by `sized_by_um`. Only the *outer* side is probed, so poly
-        # that merely abuts the diffusion from outside never reads as a
-        # gate. The rule pairs this region with `check="enclosed"`,
-        # `other_layer=<poly>` and a zero threshold: whatever part of a probe
-        # zone is not covered by poly is the missing endcap. A flush poly
-        # edge is collinear with the diffusion edge, which `inside_part`
-        # alone excludes, hence the explicit edge AND.
+        # Endcap probe zones (#2936), e.g. sky130's `poly.8`: the part of each `base`
+        # (diffusion) edge that lies under or flush with an `intersect_with` (poly)
+        # shape is a gate end edge; extend it outward by `sized_by_um`. Only the *outer*
+        # side is probed, so poly that merely abuts the diffusion from outside never
+        # reads as a gate. The rule pairs this region with `check="enclosed"`,
+        # `other_layer=<poly>` and a zero threshold: whatever part of a probe zone is
+        # not covered by poly is the missing endcap. A flush poly edge is collinear with
+        # the diffusion edge, which `inside_part` alone excludes, hence the explicit
+        # edge AND.
         base_edges = base_region.merged().edges()
         poly_region = intersect_region.merged()
         gate_end_edges = (
@@ -654,9 +653,8 @@ def _derived_region_unscoped(
         # is measured against the joined outline, not either layer's seam.
         return base_region + intersect_region
     if derived.mode in ("overlapping", "not_interacting"):
-        # Marker-scoped whole-polygon selection (#1110): here `sized_by_um`
-        # is a guard band around the *marker* (`intersect_with`), not around
-        # `base`.
+        # Marker-scoped whole-polygon selection (#1110): here `sized_by_um` is a guard
+        # band around the *marker* (`intersect_with`), not around `base`.
         marker_region = (
             intersect_region.sized(size_dbu) if size_dbu else intersect_region
         )
@@ -1443,10 +1441,9 @@ def _prepare_drc(
 
     layout = load_layout(path, DrcError)
 
-    # `deck`'s threshold_dbu values are authored against nominal_dbu_um, not
-    # necessarily this layout's own dbu (see DrcRule's docstring / #172) —
-    # rescale so the same physical distance is checked regardless of the
-    # stream's database unit.
+    # `deck`'s threshold_dbu values are authored against nominal_dbu_um, not necessarily
+    # this layout's own dbu (see DrcRule's docstring / #172) — rescale so the same
+    # physical distance is checked regardless of the stream's database unit.
     dbu_scale = nominal_dbu_um / layout.dbu
 
     top_cells = _select_top_cells(layout, top, DrcError)
@@ -1719,6 +1716,8 @@ def _edge_pairs_for_rule(
     other_region: Any,
 ) -> tuple[Any, Any]:
     """``(edge_pairs, outside_region)`` for an edge-pair-reporting ``rule``."""
+    if rule.extension_spec is not None:
+        return run_implant_extension(cell, setup, rule, region, other_region)
     if rule.check in _NET_SPACE_CHECKS:
         return _run_net_space_check(cell, setup.layout, rule, setup.dbu_scale), None
     if rule.check in _VERTEX_CHECKS:
@@ -1818,6 +1817,7 @@ def _evaluate_rule(rule: DrcRule, setup: _DrcSetup, state: _DrcState) -> None:
     _validate_require_containment(rule)
     _validate_other_layer_selection(rule)
     _validate_layer_selection(rule)
+    validate_implant_extension(rule)
 
     # Gates that skip a rule before any layer resolution below -- see
     # `_rule_skipped_before_evaluation` for each one and why. Like a

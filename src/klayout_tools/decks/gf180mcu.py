@@ -342,34 +342,33 @@ are always the real, unmodified DRM values:
   flagged where the official rule would not look at it -- conservative (a
   false positive on geometry no ``NP.5a``/``PP.5a`` violation can hide in),
   never a missed violation.
-- ``nplus.enclosing.comp.1``/``pplus.enclosing.comp.1``: the official
-  ``NP.5b``/``PP.5b`` exclude butting edges (``nplus.edges.not
-  (nplus_butted_edges)``) and are relaxed to as little as 0.02um by the
-  ``NP.5c``/``NP.5d`` (``PP.5c``/``PP.5d``) well-context splits for a tap
-  further than 0.43um from an ``LVPWELL``/``Nwell`` edge; neither
-  sub-threshold split is expressible here, so the strict 0.16um is applied
-  to every NCOMP/PCOMP edge this rule actually checks -- **except** (issue
-  #3484) for ``pplus.enclosing.comp.1``'s PCOMP, which is now split by
-  ``DerivedLayer.context``: PCOMP within 0.429um of an ``Nwell`` or touching a
-  ``Dnwell`` stays on the strict 0.16um, the rest moves to
-  ``pplus.enclosing.comp.far.1`` (``PP.5di``, 0.02um). ``NP.5c``/``NP.5d`` and
-  ``PP.5ci`` remain unexpressed (strict). They also measure
-  with KLayout's default ``euclidian`` metric where the official rules use
-  ``projection`` -- again the conservative direction (a corner distance the
-  official rule ignores can be reported, never the reverse). **Unlike
-  ``NP.5b``, whose two sub-cases both resolve to the same 0.16um regardless
-  of well context, ``PP.5b`` itself only ever applies to a PCOMP shape
-  "(1) Inside NWELL (2) outside LVPWELL but inside DNWELL"** -- a PCOMP
-  shape with no ``Nwell``/``Dnwell`` context anywhere instead falls under
-  ``PP.5di``/``PP.5dii`` at the much looser 0.02-0.16um range above,
-  structurally incapable of being correctly checked at a flat 0.16um
-  (issue #2634, confirmed a false positive on ordinary ``ppolyf_u_*``
-  poly-resistor P+ substrate taps against a real fetched
-  ``rule_decks/pplus.drc``). ``pplus.enclosing.comp.1`` therefore also
-  carries ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``):
-  a layout drawing neither anywhere skips the whole rule rather than
-  misapplying it, while a layout drawing either keeps the approximations
-  above unchanged. ``nplus.enclosing.comp.1`` needs no equivalent gate.
+- ``nplus.enclosing.comp.1``: the official ``NP.5b`` excludes butting edges
+  (``nplus.edges.not (nplus_butted_edges)``) and is relaxed to as little as
+  0.02um by the ``NP.5c``/``NP.5d`` well-context splits for a tap further
+  than 0.43um from an ``LVPWELL``/``Nwell`` edge; neither is expressible
+  here, so the strict 0.16um is applied to every NCOMP edge including a
+  butted one, with KLayout's default ``euclidian`` metric where the
+  official rule uses ``projection`` -- the conservative direction (a corner
+  distance the official rule ignores can be reported, never the reverse).
+- ``pplus.enclosing.comp.1``/``pplus.enclosing.comp.far.1``: ``PP.5b``,
+  ``PP.5dii`` and ``PP.5di`` are transcribed on PCOMP *edges* (issue #7969,
+  ``extension_spec``): butted edges are excluded, the 0.16um checks measure
+  by ``projection``, and only the edge portions within 0.429um of a pure
+  ``Nwell`` are held to 0.16um -- the rest of the same tap is the far
+  rule's at 0.02um. **Unlike ``NP.5b``, whose two sub-cases both resolve to
+  the same 0.16um, ``PP.5b`` itself only ever applies to Pplus "(1) Inside
+  NWELL (2) outside LVPWELL but inside DNWELL"**, and a PCOMP with no
+  ``Nwell``/``Dnwell`` anywhere falls under ``PP.5di``/``PP.5dii`` at
+  0.02um (issue #2634, a confirmed false positive on ordinary
+  ``ppolyf_u_*`` poly-resistor P+ substrate taps against a real fetched
+  ``rule_decks/pplus.drc``), so the strict rule carries
+  ``requires_any_layer=((21, 0), (12, 0))`` and is skipped on a layout
+  drawing neither. Still approximated, all strict: the ``PP.5ci``/``PP.5cii``
+  context (a PCOMP inside both ``DNWELL`` and ``LVPWELL``) and a PCOMP
+  straddling a ``DNWELL`` boundary are not transcribed and keep the flat
+  0.16um with ``euclidian`` metrics, and the far rule keeps the
+  ``Nplus``-coincident PCOMP edges ``PP.5di`` drops and its ``euclidian``
+  metric (issue #7970).
 - ``comp.coverage.1`` (``DF.12``): evaluated flat (no deep/hierarchical
   mode) on merged regions, as the upstream ``comp.rb`` expression
   ``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``. A COMP
@@ -533,6 +532,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from ..drc_implant_extension import ImplantExtensionSpec
 from . import (
     BipolarDevice,
     CapacitorDevice,
@@ -1872,50 +1872,35 @@ DECK: list[DrcRule] = [
         other_layer=(31, 0),  # Pplus -- the enclosing side of the `enclosed` check
         check="enclosed",
         threshold_dbu=160,  # 0.16 um
-        # DRM 7.9 Pplus, rule "PP.5b": "Extension beyond COMP for COMP (1)
-        # Inside NWELL (2) outside LVPWELL but inside DNWELL" -> 0.16 (issue
-        # #2369), i.e. `pcomp.edges.enclosed(pplus_edges, 0.16.um,
-        # projection)` in `rule_decks/pplus.drc`. The `Pplus` mirror of
-        # `nplus.enclosing.comp.1` above, with PCOMP (`Comp` AND `Pplus`) as
-        # the derived checked region, and carrying the same two
-        # approximations (butting edges not excluded, `euclidian` rather
-        # than `projection` metric). Threshold value unmodified.
-        #
-        # UNLIKE `nplus.enclosing.comp.1` above, this rule's 0.16um
-        # threshold is NOT context-independent -- confirmed a false
-        # positive by issue #2634. The official `PP.5b` only covers `Pplus`
-        # "(1) Inside NWELL (2) outside LVPWELL but inside DNWELL"
-        # (`pp5b_pplus = pp5b_pplus_slct.and(nwell).join(
-        # pp5b_pplus_slct.not(lvpwell).and(dnwell))` in `pplus.drc`); a
-        # `PCOMP` shape with no `Nwell`/`Dnwell` context anywhere instead
-        # falls under `PP.5di`/`PP.5dii` ("outside DNWELL"), whose own
-        # threshold is only 0.02um unless the shape sits within 0.429um of
-        # a pure (non-`Dnwell`-overlapping) `Nwell` -- exactly the ordinary
-        # poly-resistor P+ substrate-tap case gf180-ldo's `divider`/
-        # `passives` cells hit, each already DRC-clean on the PDK's own
-        # deck. (`nplus.enclosing.comp.1`'s mirror, `NP.5b`, has no such
-        # split: its own two sub-cases -- "(1) inside LVPWELL (2) outside
-        # Nwell and DNWELL" -- both resolve to the same 0.16um, verified
-        # directly against a real fetched `rule_decks/{nplus,pplus}.drc`:
-        # the identical 0.11um-extension geometry reports 0 `PP.5b` findings
-        # but 4 `NP.5b` findings.) Modelling `PP.5di`/`PP.5dii`'s own
-        # 0.429um-proximity split needs a three-input derivation this
-        # engine's `DerivedLayer` has no mode for (see its docstring), so
-        # `requires_any_layer` below narrows scope instead: a layout that
-        # draws neither `Nwell` nor `Dnwell` anywhere has no PCOMP shape
-        # `PP.5b` can apply to, so the whole rule is skipped rather than
-        # misapplied at this flat, too-strict threshold. A layout that
-        # draws either layer anywhere keeps this rule's pre-#2634 behaviour
-        # unchanged (still approximate per the two approximations above,
-        # just no longer firing on well-free layouts).
+        # DRM 7.9 Pplus, rules "PP.5b" and "PP.5dii": "Extension beyond COMP"
+        # (issue #2369), i.e. `pcomp.edges.enclosed(pp5b_pplus, 0.16.um,
+        # projection)` and `pp_5d_background.enclosing(pp_5dii_foreground,
+        # 0.16.um, projection)` in `rule_decks/pplus.drc`. The `Pplus` mirror
+        # of `nplus.enclosing.comp.1` above, with PCOMP (`Comp` AND `Pplus`)
+        # as the derived checked region. `extension_spec` (issue #7969) measures
+        # both expressions on the *edges* of that region, one marker per
+        # offending edge portion: `PP.5dii` holds a PCOMP wholly outside DNWELL
+        # to this 0.16 only where its edges are not Nplus-coincident and lie
+        # within 0.429um of a pure Nwell -- the rest of the same tap is
+        # `pplus.enclosing.comp.far.1` below -- and `PP.5b` holds every PCOMP
+        # edge to this 0.16 against the Pplus edge portions that are not
+        # NCOMP-coincident and lie inside Nwell, or outside LVPWELL and inside
+        # DNWELL. The well-free gate and the approximations left are in this
+        # module's docstring.
         requires_any_layer=((21, 0), (12, 0)),  # Nwell, Dnwell
+        extension_spec=ImplantExtensionSpec(
+            nwell=(21, 0),  # Nwell
+            dnwell=(12, 0),  # Dnwell -- a well touching it is not "pure"
+            band_um=0.429,  # the PDK deck's own `sized(0.429.um)`
+            selection="near",
+            comp=(22, 0),  # Comp -- `ncomp = comp AND nplus` marks a butted edge
+            nplus=(32, 0),  # Nplus -- `PP.5dii` drops the PCOMP edges it coincides with
+            lvpwell=(204, 0),  # LVPWELL
+        ),
         derived_layer=DerivedLayer(
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
             intersect_with=(22, 0),  # Comp
-            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
-            context_sized_by_um=0.429,  # the PDK deck's own `sized(0.429.um)`
-            context="near",
         ),
         scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.5b"),
@@ -1928,7 +1913,7 @@ DECK: list[DrcRule] = [
         id="pplus.enclosing.comp.far.1",
         description=(
             "minimum Pplus implant extension beyond PCOMP (p-type diffusion) "
-            "at least 0.429um from any Nwell/Dnwell"
+            "on the edges outside DNWELL and more than 0.429um from a Nwell"
         ),
         layer=(31, 0),  # Pplus -- reporting identity, shared with the rules above
         other_layer=(31, 0),  # Pplus -- the enclosing side of the `enclosed` check
@@ -1936,22 +1921,25 @@ DECK: list[DrcRule] = [
         threshold_dbu=20,  # 0.02 um
         # DRM 7.9 Pplus, rule "PP.5di": "Extension beyond COMP: For Outside
         # DNWELL (i) For Pplus to NWELL space >= 0.43um for Pfield or LVPWELL
-        # tap" -> 0.02 (issue #3484), i.e. `pcomp.outside(dnwell).edges.not(
-        # nplus_edges).not(nwell_n_dn.sized(0.429.um))` enclosed by Pplus
-        # edges at 0.02 in `rule_decks/pplus.drc`. The far half of the split
-        # whose near half is `pplus.enclosing.comp.1` above
-        # (`DerivedLayer.context`; the strict `PP.5dii`/`PP.5b` 0.16 stays
-        # there). Errs strict exactly like `nplus.space.pcomp.far.1`: PCOMP
-        # within reach of any `Dnwell` (the `PP.5ci`/`PP.5cii` branches) is
-        # not relaxed, and selection is whole-polygon. Euclidian metric where
-        # the official rule is `projection`, as for the near rule.
+        # tap" -> 0.02 (issue #3484), i.e. `pp_5d_background.enclosing(
+        # pp_5di_foreground, 0.02.um, projection)` in `rule_decks/pplus.drc`.
+        # The complement of `PP.5dii` on the same PCOMP edges (issue #7969):
+        # the edges of a PCOMP wholly outside DNWELL more than 0.429um from a
+        # pure Nwell, selected one edge portion at a time, so a tap with one
+        # edge near a well is this rule's there and `pplus.enclosing.comp.1`'s
+        # at the well. Not transcribed, both strict (issue #7970): `PP.5di`
+        # drops the PCOMP edges that coincide with an `Nplus` edge, and
+        # measures by `projection` where this rule uses `euclidian`.
+        extension_spec=ImplantExtensionSpec(
+            nwell=(21, 0),  # Nwell
+            dnwell=(12, 0),  # Dnwell
+            band_um=0.429,  # the PDK deck's own `sized(0.429.um)`
+            selection="far",
+        ),
         derived_layer=DerivedLayer(
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
             intersect_with=(22, 0),  # Comp
-            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
-            context_sized_by_um=0.429,
-            context="far",
         ),
         scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.5di"),
