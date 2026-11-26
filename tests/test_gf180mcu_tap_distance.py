@@ -221,8 +221,8 @@ def _approximations_for(report, rule):
 
 def test_drc_rule_preserves_positional_approximations(tmp_path, monkeypatch):
     rule = next(rule for rule in get_deck("gf180mcu") if rule.id == NWELL_RULE)
-    # Call the public constructor in its order before band_spec was added.
-    positional = DrcRule(
+    # Public constructor order through the original approximations argument.
+    legacy_args = (
         rule.id,
         rule.description,
         rule.layer,
@@ -253,7 +253,9 @@ def test_drc_rule_preserves_positional_approximations(tmp_path, monkeypatch):
         rule.text_exempt,
         rule.approximations,
     )
+    positional = DrcRule(*legacy_args)
     assert positional == rule
+    assert DrcRule(*legacy_args, rule.other_layer_subtract) == rule
     monkeypatch.setattr("klayout_tools.drc.get_deck", lambda name: [positional])
     (listed,) = list_deck_rules("gf180mcu")["rules"]
     assert "edge_band" not in listed

@@ -1450,6 +1450,24 @@ the official rule's `DigiBnd`/`SRAM` (separate 0.05um/0.006um rules),
 `svaricap`, and `EdgeSeal` carve-outs are not modelled, so this rule can
 still over-report (never under-report) contacts inside those regions.
 
+`DrcRule.other_layer_subtract` (issue #7954) subtracts drawn layers from a
+two-layer rule's `other_layer` region before the rule runs, so every term
+of the rule sees the subtracted operand: the `Region.*_check` edge pairs,
+and for `"enclosing"`/`"enclosed"` the zero-overlap escape term as well. It
+transcribes a foundry `cut.not(marker)`: gf180mcu's
+`comp.enclosing.contact.1` checks `Contact` minus `SramCore` (108/5), the
+PDK deck's `contact.not(sramcore)`.
+The subtraction is geometric — a cut straddling the marker keeps its
+unmasked part, which is still measured — and each marker is read through
+the hierarchy the way `other_layer` itself is. An absent marker layer is an
+empty region: nothing is subtracted and the rule is never skipped.
+`coverage.deck_layers` and the rule's `klt deck rules` entry both list the
+subtraction layers. A `Dualgate` shape overlapping only `SramCore` produces
+no CO.4 voltage-domain warning. Overlap with the checked `Comp` or `Contact`
+layers can still trigger the warning. CO.4 reports violations on `Comp` at
+its 0.07 µm enclosure threshold. A rule that subtracts without naming an
+`other_layer` raises a `DrcError` that names the rule.
+
 This exists because an *unscoped* version of some rules would be actively
 wrong, not merely conservative: gf180mcu's `mim.enclosing.via4.1`
 (`MIMTM.2`) checks a `Metal4`-derived region's enclosure of `Via4` by
@@ -2554,6 +2572,23 @@ companions (`CO.6a`/`CO.6b`, `Vn.3c`/`Vn.3d`, `Vn.4b`/`Vn.4c`) are *not*
 transcribed (they are listed in `coverage.unmodeled_rules`, issue #3968): each conditions a 0.06 um margin on a narrow-metal
 end-of-line predicate that `DrcRule`'s vocabulary cannot express, the same
 class of gap as sky130's `m2.6` above.
+
+`comp.enclosing.contact.1` (`CO.4`, COMP overlap of contact, 0.07 um) is
+scoped the way the foundry deck scopes it (issue #7954). The PDK's own
+`rule_decks/contact.rb` checks `contact.not(sramcore)` — for the
+`enclosed(comp, 0.07.um, euclidian)` term and for the escape term alike — so
+a contact inside `SramCore` (108/5) is outside the rule. The curated rule
+subtracts that marker from its `Contact` operand
+(`DrcRule.other_layer_subtract`, see "Sized/derived-layer rules" above),
+cutting a contact at the marker edge rather than dropping it whole. Before
+#7954 the curated rule passed the whole `Contact` layer and reported every
+contact inside `SramCore`: the #5084 campaign measured 55,208 curated `CO.4`
+markers inside the two `SRAMCORE` rectangles of the `tt_um_essen` layout,
+against zero from the foundry deck. `SramCore` (108/5) is now a deck layer: a
+stream that draws it lists it under `coverage.deck_layers`/`layers_checked`
+rather than `layers_in_stream_without_rules`. `CO.3`
+(`poly2.enclosing.contact.1`) and the untranscribed `CO.6b` also exclude
+`SramCore` upstream and are not changed by #7954.
 
 The DRM 9.2 bond-pad *guideline* table (`PAD.1`, `PAD.2`, `PAD.5`–`PAD.20`) is
 not evaluated either (issue #4001): only 9.1's `PAD.4` is a coded rule. They
@@ -4633,8 +4668,9 @@ classes of rule are excluded from the gate:
 
 So the `Dualgate`-inside `Comp` stripe from issue #552 now produces a
 `comp.width.mv.1` violation and **no** warning, while the same stripe with a
-contact on it still warns — `comp.enclosing.contact.1` (`CO.4`) reads no
-marker. A marker shape that never overlaps any unscoped checked geometry
+contact on it still warns — `comp.enclosing.contact.1` (`CO.4`) does not
+read that marker. A marker shape that never overlaps any unscoped checked
+geometry
 (e.g. one drawn only over a device this deck already scopes to it correctly,
 such as a `Dualgate`-narrowed ESD diode) likewise produces no entry —
 avoiding a warning with nothing behind it. Always a list, empty for a deck

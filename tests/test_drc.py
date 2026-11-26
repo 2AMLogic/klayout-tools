@@ -1342,7 +1342,7 @@ def test_run_drc_gf180mcu_comp_lv_rules_run_without_any_dualgate(tmp_path):
 def test_run_drc_gf180mcu_dualgate_still_warns_for_unsplit_rules(tmp_path):
     """The marker registry is still live for the rules #1110 did *not*
     split: a `Comp`/`Contact` stack inside `Dualgate` is checked by
-    `comp.enclosing.contact.1` (`CO.4`), which reads no marker at all, so
+    `comp.enclosing.contact.1` (`CO.4`), which reads no voltage marker, so
     `coverage.voltage_domain_warnings` fires again.
 
     Together with the `voltage_domain_warnings == []` assertion in the
