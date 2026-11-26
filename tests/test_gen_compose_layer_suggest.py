@@ -18,7 +18,7 @@ from klayout_tools.cli import main
 from klayout_tools.decks import get_extraction_deck
 from klayout_tools.gen_compose import GenComposeError, compose
 from klayout_tools.gen_compose_layer_suggest import _candidate_climbs
-from test_gen_compose import _make_install
+from test_gen_compose import _gen_block, _make_install
 from test_gen_compose_blocking_net import _three_net_crossing_request
 
 
@@ -212,6 +212,14 @@ def test_suggested_mapping_replays_through_the_public_cli(tmp_path, pdk_root, ca
     request, gen_reports = _three_net_crossing_request(
         tmp_path, pdk_root, tmp_path / "replay.gds"
     )
+    # On the trial that moves NET_H to metal2, NET_V1 crosses the PORT stub.
+    stub = _gen_block(tmp_path, pdk_root, "resistor_strip", "stub", num=1)
+    request["blocks"].append({"id": "stub", "generator_report": stub})
+    request["placement"]["order"].append("stub")
+    request["placement"]["origins_um"]["stub"] = {"x": 0.0, "y": 20.0}
+    request["pins"] = [
+        {"net": "PORT", "block": "stub", "port": "P2", "request": {"x_um": 22.0}}
+    ]
     mode_on = json.loads(json.dumps(request))
     mode_on["routing"]["suggest_layers"] = True
     path = tmp_path / "mode_on.json"
@@ -221,9 +229,9 @@ def test_suggested_mapping_replays_through_the_public_cli(tmp_path, pdk_root, ca
     payload = json.loads(capsys.readouterr().out)
     assignments = payload["layer_suggestions"]["assignments"]
     assert assignments == {"NET_V2": "metal3"}
+    assert payload["layer_suggestions"]["candidates_evaluated"] == 5
 
-    # The human-readable text format surfaces the verdict too (its exact
-    # layout is not the contract -- just that the mapping is visible).
+    # The default text output also reports the mapping.
     assert main(["gen-compose", str(path)]) == 0
     text = capsys.readouterr().out
     assert "layer_suggestions:" in text
@@ -237,10 +245,12 @@ def test_suggested_mapping_replays_through_the_public_cli(tmp_path, pdk_root, ca
 
     assert main(["gen-compose", str(replay_path), "--format", "json"]) == 0
     replayed = json.loads(capsys.readouterr().out)
+    pin = replayed["pins"][0]
+    assert pin["net"] == "PORT" and pin["labelled"]
+    assert (pin["achieved"]["x_um"], pin["achieved"]["y_um"]) == (22.0, 20.21)
     assert replayed["unrouted_nets"] == []
     assert all(net["routed"] for net in replayed["nets"])
-    # The replay obtains the reported route outcome: the mode-on response
-    # (minus its additive layer_suggestions block) is the replay response.
+    # The replay reproduces every ordinary compose field.
     assert {k: v for k, v in payload.items() if k != "layer_suggestions"} == replayed
 
     joined, shorts = _walk_connectivity(replayed, gen_reports, request)

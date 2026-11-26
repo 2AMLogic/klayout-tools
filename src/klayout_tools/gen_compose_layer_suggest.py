@@ -56,6 +56,7 @@ from typing import Any, NamedTuple
 from ._jsonnum import is_int
 from .gen_compose_base import GenComposeError, LayerRuleError
 from .gen_compose_layer_rules import alternative_routing_roles
+from .gen_compose_port_request import CODE_CONFLICT
 
 #: Compose runs (baseline included) one suggestion request may spend before
 #: the search stops and reports ``budget_exhausted``. Each unit is one full
@@ -267,10 +268,9 @@ def _search_for_assignment(
 ) -> _SearchOutcome:
     """Evaluate candidates until a win, the budget, or the space runs out.
 
-    Candidates run against throwaway outputs in a scratch directory; a
-    candidate whose own floors reject it (e.g. a plane whose deck minimum
-    width exceeds the inherited ``routing.width_um``) raises inside its
-    evaluation and is skipped -- not a search failure, the next candidate.
+    Each candidate runs against a throwaway output. A deck floor violation
+    or a collision between a candidate route and a requested pin stub
+    rules out that assignment. Fixed pin conflicts and I/O errors propagate.
     """
     evaluated = 1  # the baseline run, whose unrouted nets seed best_unrouted
     best_unrouted = baseline_unrouted
@@ -293,6 +293,11 @@ def _search_for_assignment(
                 report = compose(candidate, request_dir)
             except LayerRuleError:
                 continue
+            except GenComposeError as exc:
+                obstacle = (exc.details or {}).get("conflicts_with", {})
+                if exc.code == CODE_CONFLICT and "net" in obstacle:
+                    continue
+                raise
             unrouted = list(report.get("unrouted_nets") or [])
             if not unrouted:
                 winner = climbs
