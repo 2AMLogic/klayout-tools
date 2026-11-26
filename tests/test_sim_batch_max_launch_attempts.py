@@ -212,11 +212,18 @@ def test_verified_limit_allows_capacity_retry(tmp_path):
     runner.queue("launch", fake_completed(returncode=75, stderr=_CAPACITY_REFUSAL))
     config = resolve(tmp_path, max_launch_attempts=2, capacity_wait_s=90)
     clock = _FakeClock()
+    phases = []
     sb.launch_job(
-        config, "fixture", runner=runner, monotonic=clock.monotonic, sleep=clock.sleep
+        config,
+        "fixture",
+        runner=runner,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        on_phase=phases.append,
     )
     assert len(runner.argvs_matching("--apply")) == 2
     assert len(clock.sleeps) == 1
+    assert phases == ["launching", "launch_refused", "launching"]
 
 
 @pytest.mark.parametrize("refusal", [_CAP_REFUSAL, _VCPU_REFUSAL])
@@ -344,6 +351,57 @@ def test_deck_attach_reports_stored_limits(tmp_path, monkeypatch, size, limits):
         assert shard.get("max_launch_attempts") == expected[shard["job_id"]]
 
 
+@pytest.mark.parametrize("interrupted", ["probe", "apply"])
+def test_sharded_resubmit_after_launch_interruption(tmp_path, monkeypatch, interrupted):
+    runner, _ = _split_runner(monkeypatch)
+    transport = sb._run_subprocess
+    events = []
+    interrupt = True
+
+    def interrupt_once(argv, timeout_s):
+        nonlocal interrupt
+        if "launch" in argv:
+            job = argv[argv.index("--job") + 1]
+            phase = "apply" if "--apply" in argv else "probe"
+            events.append((job, phase))
+            if phase == interrupted and interrupt:
+                interrupt = False
+                raise KeyboardInterrupt
+            if phase == "probe":
+                return fake_completed(REPORT)
+        return transport(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", interrupt_once)
+    request = _ceiling_request(tmp_path, max_launch_attempts=2, max_units_per_job=1)
+    request["corners"] = {"temperature_c": [0, 1]}
+    _write_body(tmp_path)
+    path = str(_write_request(tmp_path, request))
+    out = tmp_path / "out"
+    manifest = out / sb.BATCH_SHARDS_FILENAME
+    with pytest.raises(KeyboardInterrupt):
+        sim.run_sim(path, submit_only=True, artifacts_dir=str(out))
+
+    first, second = json.loads(manifest.read_text())["shards"]
+    job, sibling = first["job_id"], second["job_id"]
+    assert first["state"] == ("submitted" if interrupted == "probe" else "launching")
+    assert (first["launch_started_at"] is None) == (interrupted == "probe")
+    assert second["state"] == "pending"
+
+    # The pending sibling never uploaded a job.
+    runner.queue("head-object", fake_completed(returncode=254, stderr="Not Found"))
+    report = sim.run_sim(path, submit_only=True, artifacts_dir=str(out))
+    assert [s["job_id"] for s in report["shards"]] == [job, sibling]
+    first, second = json.loads(manifest.read_text())["shards"]
+    if interrupted == "probe":
+        assert [phase for j, phase in events if j == job] == ["probe", "probe", "apply"]
+        assert first["state"] == "launched"
+    else:
+        assert [phase for j, phase in events if j == job] == ["probe", "apply"]
+        assert first["state"] == "launching"
+    assert [phase for j, phase in events if j == sibling] == ["probe", "apply"]
+    assert second["state"] == "launched"
+
+
 def test_split_corner_surfaces_unconfirmed_limit_without_applying(
     tmp_path, monkeypatch
 ):
@@ -360,7 +418,45 @@ def test_split_corner_surfaces_unconfirmed_limit_without_applying(
         assert "batch_launch_attempts_unsupported" in loss["message"]
     assert not runner.argvs_matching("--apply")
     manifest = json.loads((tmp_path / ".klt/sim/batch-shards.json").read_text())
-    assert all(shard["state"] == "submitted" for shard in manifest["shards"])
+    for shard in manifest["shards"]:
+        assert shard["state"] == "submitted"
+        assert shard["launch_started_at"] is None
+
+
+def test_attach_launches_submitted_shards_only_after_probe(tmp_path, monkeypatch):
+    runner, _ = _split_runner(monkeypatch)
+    request = _ceiling_request(tmp_path, max_launch_attempts=2, max_units_per_job=1)
+    request["corners"] = {"temperature_c": [0, 1]}
+    _write_body(tmp_path)
+    path = str(_write_request(tmp_path, request))
+    out = tmp_path / "out"
+    manifest = out / sb.BATCH_SHARDS_FILENAME
+    # No fleet report confirms the limit on the first submission.
+    sim.run_sim(path, artifacts_dir=str(out))
+    jobs = [entry["job_id"] for entry in json.loads(manifest.read_text())["shards"]]
+    for job in jobs:
+        runner.queue(f"{job}/status.json", fake_completed(returncode=1))
+
+    observed = {}
+    transport = sb._run_subprocess
+
+    def recover(argv, timeout_s):
+        if "launch" in argv:
+            job = argv[argv.index("--job") + 1]
+            entries = json.loads(manifest.read_text())["shards"]
+            state = next(e["state"] for e in entries if e["job_id"] == job)
+            observed.setdefault(job, []).append(state)
+            if "--apply" not in argv:
+                return fake_completed(REPORT)
+        return transport(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", recover)
+    sim.run_sim(path, attach_job_id=str(manifest), artifacts_dir=str(out))
+    assert [s["state"] for s in json.loads(manifest.read_text())["shards"]] == [
+        "collected",
+        "collected",
+    ]
+    assert observed == {job: ["submitted", "launching"] for job in jobs}
 
 
 def test_split_decks_leave_unconfirmed_jobs_submitted(tmp_path, monkeypatch):
@@ -372,4 +468,6 @@ def test_split_decks_leave_unconfirmed_jobs_submitted(tmp_path, monkeypatch):
         assert unit["diagnostics"][0]["code"] == "batch_launch_attempts_unsupported"
     assert not runner.argvs_matching("--apply")
     manifest = json.loads((tmp_path / "out/batch-shards.json").read_text())
-    assert all(shard["state"] == "submitted" for shard in manifest["shards"])
+    for shard in manifest["shards"]:
+        assert shard["state"] == "submitted"
+        assert shard["launch_started_at"] is None

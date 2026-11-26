@@ -3274,16 +3274,11 @@ def test_a_lost_shard_never_aborts_its_siblings(tmp_path, monkeypatch):
     runner.outputs = {"report.json": _sim_report(corner_ids=("tt_1.800_0",))}
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
-    calls = {"n": 0}
-    real_launch = sb.launch_job
-
-    def _flaky_launch(config, job_id, *, runner=None):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise sb.BatchError("create-fleet refused every pool")
-        return real_launch(config, job_id, runner=runner)
-
-    monkeypatch.setattr(sb, "launch_job", _flaky_launch)
+    runner.queue("--apply", fake_completed())
+    runner.queue(
+        "--apply",
+        fake_completed(returncode=1, stderr="create-fleet refused every pool"),
+    )
 
     corners, _, environment = sb._run_batch_fleet(
         corner_points=_corner_points(2),
@@ -7443,20 +7438,12 @@ def test_shard_map_tracks_launch_state_and_is_self_describing(tmp_path, monkeypa
         assert all(entry[k] for k in ("submitted_at", "launched_at", "collected_at"))
 
 
-def test_failed_launch_leaves_the_shard_unlaunched_and_says_so(
+def test_applied_launch_timeout_leaves_the_shard_launching(
     tmp_path, monkeypatch, capsys
 ):
-    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
-    real_launch = sb.launch_job
-    launched: list[str] = []
-
-    def _launch(config, job_id, **kwargs):
-        if launched:
-            raise sb.BatchError("client died")
-        launched.append(job_id)
-        return real_launch(config, job_id, **kwargs)
-
-    monkeypatch.setattr(sb, "launch_job", _launch)
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    runner.queue("--apply", fake_completed())
+    runner.queue("--apply", subprocess.TimeoutExpired("launch", 60))
     fleet()
     states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
     assert states == ["collected", "launching"]

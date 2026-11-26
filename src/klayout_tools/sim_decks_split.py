@@ -23,6 +23,7 @@ import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any, cast
 
 from . import (
@@ -210,8 +211,7 @@ def run_split(
         try:
             sim_batch.submit_job(config, job_id, spec)
             manifest.mark(index, "submitted")
-            manifest.mark(index, "launching")
-            sim_batch.launch_job(config, job_id)
+            sim_batch.launch_job(config, job_id, on_phase=partial(manifest.mark, index))
             manifest.mark(index, "launched")
             report = sim_decks._collect_decks_batch(
                 config, job_id, worker, outdir=outdir
@@ -219,8 +219,6 @@ def run_split(
             manifest.mark(index, "collected")
             state = "collected" if report.get("status") == "pass" else "failed"
         except sim_batch.BatchError as exc:
-            if exc.code in sim_batch.UNLAUNCHED_CODES:
-                manifest.unlaunch(index)
             report = _failure_report(
                 worker,
                 code=exc.code or "batch_error",

@@ -100,6 +100,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from . import (
@@ -147,7 +148,6 @@ from .sim_batch_transport import (
     _RETRYABLE_LAUNCH_CODES,
     LAUNCH_LIMIT_EXHAUSTED,
     LAUNCH_LIMIT_UNSUPPORTED,
-    UNLAUNCHED_CODES,
     _classify_launch_failure,
     _run_checked,
     _verify_launch_limit,
@@ -1205,6 +1205,10 @@ def submit_job(
         )
 
 
+def _ignore_phase(state: str) -> None:
+    """The ``on_phase`` default: no shard map to tell."""
+
+
 def launch_job(
     config: BatchConfig,
     job_id: str,
@@ -1214,6 +1218,7 @@ def launch_job(
     monotonic: Callable[[], float] | None = None,
     jitter: Callable[[], float] | None = None,
     on_refusal: Callable[[BatchError, int], None] | None = None,
+    on_phase: Callable[[str], None] = _ignore_phase,
 ) -> None:
     """Shell out to 2am's ``batch-fleet-provision.sh launch --job <id>
     --apply --profile <profile>``. For a capped job the report-only form must
@@ -1254,6 +1259,8 @@ def launch_job(
     ``on_refusal`` (issue #4018) is called with each refusal being waited out
     and the attempt count, just before the backoff sleep -- how a sharded run
     reports "waiting for capacity" across all its shards.
+    ``on_phase`` records ``launching`` immediately before each paid command
+    and ``launch_refused`` when the fleet confirms a capacity refusal.
     """
     run = runner if runner is not None else _run_subprocess
     sleep = sleep if sleep is not None else time.sleep
@@ -1273,6 +1280,7 @@ def launch_job(
             if needs_report:
                 _verify_launch_limit(config, [*launch, *options], run)
                 needs_report = False
+            on_phase("launching")
             _run_checked(
                 run,
                 argv,
@@ -1283,7 +1291,10 @@ def launch_job(
             )
             return
         except BatchError as exc:
-            if exc.code not in _RETRYABLE_LAUNCH_CODES or config.capacity_wait_s <= 0:
+            if exc.code not in _RETRYABLE_LAUNCH_CODES:
+                raise
+            on_phase("launch_refused")
+            if config.capacity_wait_s <= 0:
                 raise
             remaining = config.capacity_wait_s - (monotonic() - started)
             if remaining <= 0:
@@ -2698,8 +2709,8 @@ class _ShardManifest:
 
     def mark(self, index: int, state: str) -> None:
         """Advance shard ``index`` to ``state`` and stamp its timestamp. A
-        field already stamped (a re-attach to a shard the prior run took
-        further) is left as it was, and the state never moves backwards."""
+        field already stamped is preserved. A capacity refusal returns an
+        attempted launch to submitted so it can safely be retried."""
         key = str(index)
         with self._lock:
             entry = self._entries.get(key)
@@ -2710,31 +2721,17 @@ class _ShardManifest:
                 entry = self._entries[key] = dict(prior)
             order = list(self._STATE_FIELDS)
             current = entry.get("state")
+            if state == "launch_refused":
+                if current == "launching":
+                    entry["state"] = "submitted"
+                    self._flush_locked()
+                return
             if current in order and order.index(current) >= order.index(state):
                 return
             entry["state"] = state
             field = self._STATE_FIELDS[state]
             if entry.get(field) is None:
                 entry[field] = datetime.now(timezone.utc).isoformat()
-            self._flush_locked()
-
-    def unlaunch(self, index: int) -> None:
-        """Roll shard ``index`` back from ``launching`` to ``submitted`` after
-        a refused launch (issue #4018): the provisioner creates no instance on
-        a refusal, so the job is exactly "submitted, never launched" and
-        ``--resume`` must launch it rather than poll for a ``status.json``
-        that will never appear."""
-        key = str(index)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                prior = self.prior.get(key)
-                if prior is None:
-                    return
-                entry = self._entries[key] = dict(prior)
-            if entry.get("state") != "launching":
-                return
-            entry["state"] = "submitted"
             self._flush_locked()
 
     def unlaunched(self) -> int:
@@ -2833,28 +2830,6 @@ def _poll_status_interruptibly(
         _signal_handlers_restore(prev_handlers)
 
 
-def _ignore_phase(state: str) -> None:
-    """The ``on_phase`` default: no shard map to tell."""
-
-
-def _launch_noting_refusal(
-    config: BatchConfig,
-    job_id: str,
-    runner: remote_transport.CommandRunner | None,
-    notify: Callable[[str], None],
-    launch_kwargs: dict[str, Any] | None,
-) -> None:
-    """:func:`launch_job`, telling ``notify`` ``"launch_refused"`` when the
-    fleet refused capacity or the read-only limit check failed. In either
-    case the shard map must show the job as never launched."""
-    try:
-        launch_job(config, job_id, runner=runner, **(launch_kwargs or {}))
-    except BatchError as exc:
-        if exc.code in UNLAUNCHED_CODES:
-            notify("launch_refused")
-        raise
-
-
 def _launch_attached_if_unlaunched(
     config: BatchConfig,
     job_id: str,
@@ -2873,8 +2848,7 @@ def _launch_attached_if_unlaunched(
     if _read_status(config, job_id, run) is not None:
         notify("launched")
         return None
-    notify("launching")
-    _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
+    launch_job(config, job_id, runner=runner, on_phase=notify, **(launch_kwargs or {}))
     launched_at = now()
     notify("launched")
     sys.stderr.write(
@@ -2991,8 +2965,7 @@ def _run_batch_job(
     submit_job(config, job_id, spec, runner=runner)
     notify("submitted")
     sim_batch_observer.report_submitted(job_id)
-    notify("launching")
-    _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
+    launch_job(config, job_id, runner=runner, on_phase=notify, **(launch_kwargs or {}))
     timestamps["client_launched_at"] = now()
     notify("launched")
     # Emit the job id before polling so an interrupted client can attach.
@@ -3549,10 +3522,7 @@ class _BatchFleetRun:
             self.watch.phase(index, state)
             if self.manifest is None:
                 return
-            if state == "launch_refused":
-                self.manifest.unlaunch(index)
-            else:
-                self.manifest.mark(index, state)
+            self.manifest.mark(index, state)
             if state == "launched":
                 self.watch.launched(index)
 
@@ -3982,12 +3952,9 @@ def _submit_batch_shards(
             manifest.mark(index, "submitted")
             state = "submitted"
         if state == "submitted":
-            manifest.mark(index, "launching")
-            try:
-                launch_job(config, job_id, runner=runner)
-            except BatchError:
-                manifest.unlaunch(index)
-                raise
+            launch_job(
+                config, job_id, runner=runner, on_phase=partial(manifest.mark, index)
+            )
             manifest.mark(index, "launched")
         elif state == "launching":
             # Outcome unknown: launching again could bill the shard twice.
