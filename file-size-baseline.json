@@ -77,7 +77,7 @@
     },
     {
       "path": "native/wave/src/build.rs",
-      "lines": 655
+      "lines": 545
     },
     {
       "path": "native/wave/src/fst.rs",
