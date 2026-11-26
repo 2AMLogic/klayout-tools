@@ -198,15 +198,15 @@ class DerivedLayer:
     ``context_sized_by_um``, then the derived region is split by whole
     polygon with ``interacting`` (``context="near"``) or ``not_interacting``
     (``context="far"``). This is how a rule pair expresses gf180mcu's
-    ``NP.3``/``PP.5`` well-distance splits -- e.g. a ``PCOMP`` (``Comp`` AND
-    ``Pplus``) is held to the strict 0.16 um when it comes within 0.429 um
-    of an ``Nwell``/``Dnwell`` and to the relaxed value otherwise -- without
-    a third chained derivation. The two halves are an exact complement of
-    each other, so a polygon is never checked against neither or both.
-    Context layers absent from the stream contribute an empty region (every
-    polygon is then ``"far"``) and never cause the rule to be skipped.
-    Whole-polygon selection errs strict: a polygon that is only partly
-    within reach of the context is entirely ``"near"``.
+    ``NP.3`` well-distance split -- e.g. a ``PCOMP`` (``Comp`` AND ``Pplus``)
+    within 0.429 um of an ``Nwell``/``Dnwell`` keeps 0.16 um from ``Nplus``
+    and 0.08 um otherwise -- without a third chained derivation. The ``PP.5``
+    split selects edges instead (:class:`DrcRule.extension_spec`). The two
+    halves are an exact complement of each other, so a polygon is never
+    checked against neither or both. Context layers absent from the stream
+    contribute an empty region (every polygon is then ``"far"``) and never
+    cause the rule to be skipped. Whole-polygon selection errs strict: a
+    polygon that is only partly within reach of the context is ``"near"``.
 
     **Second context stage (issue #3682).** ``context2_layers`` /
     ``context2_sized_by_um`` / ``context2`` repeat the same partition as a
@@ -748,12 +748,11 @@ class DrcRule:
     correctly apply to, so the whole rule is skipped (not silently
     evaluated at the wrong, stricter threshold) rather than reported
     against an empty-but-still-flat-0.16um checked region. A layout that
-    draws *either* layer anywhere keeps today's unchanged (and still
-    approximate -- butting edges, ``euclidian`` vs. ``projection``, see the
-    rule's own comment in ``decks/gf180mcu.py``) flat 0.16um behaviour,
-    since this gate cannot further narrow *which* ``PCOMP`` shapes within
-    that layout are in which DRM sub-case without the same unsupported
-    three-input derivation.
+    draws *either* layer anywhere has each ``PCOMP`` edge portion assigned to
+    its own sub-case by ``extension_spec`` (issue #7969); the gate cannot do
+    that itself, and only decides whether the rule applies at all. What is
+    still approximate is listed in the rule's own comment in
+    ``decks/gf180mcu.py``.
 
     Defaults to ``None`` (every pre-existing rule), under which this gate
     never applies and a rule behaves exactly as it did before this field
