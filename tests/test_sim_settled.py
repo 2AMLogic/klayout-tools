@@ -72,6 +72,34 @@ def test_windows_are_back_to_back_and_reported():
     json.dumps(report)
 
 
+def test_only_trailing_complete_windows_are_reduced(monkeypatch):
+    scale = [float(i) for i in range(416)]
+    clock = [i % 2 for i in range(len(scale))]
+    mean = [t + 1.0 for t in scale]
+    peak = [-2.0 * t for t in scale]
+    reduced = []
+    original = sim_settled.sim_cycle_mean.time_weighted_mean
+
+    def record_mean(scale, values, start, end):
+        reduced.append((start, end))
+        return original(scale, values, start, end)
+
+    monkeypatch.setattr(sim_settled.sim_cycle_mean, "time_weighted_mean", record_mean)
+    out = sim_settled.compute_settled(
+        scale, clock, mean, peak, level=0.5, cycles=2, mean_tol_pct=1, peak_tol_pct=1
+    )
+
+    # 208 rising edges span 103 complete two-cycle windows and one extra cycle.
+    assert out.windows_total == 103
+    assert len(out.windows) == 100
+    assert (out.windows[0]["t_start"], out.windows[0]["t_end"]) == (12.5, 16.5)
+    assert (out.windows[-1]["t_start"], out.windows[-1]["t_end"]) == (408.5, 412.5)
+    assert out.mean_delta_pct == pytest.approx(100 * 4 / 411.5)
+    assert out.peak_delta_pct == pytest.approx(100 * 8 / 825)
+    assert out.settled is True
+    assert reduced == [(w["t_start"], w["t_end"]) for w in out.windows]
+
+
 def test_from_skips_early_edges():
     out = _compute(12, None, start=3.0)
     assert out.windows[0]["t_start"] == pytest.approx(3.2375)

@@ -60,7 +60,8 @@
 #        ALSO used for DECISION=ALREADY_ESCALATED (the issue carries
 #        loom:operator — a human already owns it, #6942).
 #   1  = usage or environment error (bad args, `gh`/`jq` missing, a required
-#        `gh` read failed)
+#        `gh` read failed, or a `jq` parse of a payload this script relies on
+#        failed (#15253) — a failed read is an error, never a verdict)
 #   10 = NOT_OPEN (issue is closed — nothing left to reconcile)
 #   11 = MISMATCH (APPROVED comment present, loom:issue missing, --apply not
 #        passed — report only)
@@ -115,8 +116,12 @@ emit() {
 # Keep `gh`'s stdout (the JSON we parse) and stderr SEPARATE — `gh` writes
 # incidental content to stderr even on success (update-notifier banners,
 # rate-limit hints), and merging streams can corrupt the payload before jq
-# sees it (#5455).
-GH_STDERR="$(mktemp)"
+# sees it (#5455). A failed mktemp is an environment error, not a silently
+# empty capture file (#15253).
+GH_STDERR="$(mktemp)" || {
+  echo "ERROR: mktemp failed (TMPDIR='${TMPDIR:-/tmp}' missing or full?) — cannot isolate gh/jq stderr" >&2
+  exit 1
+}
 trap 'rm -f "$GH_STDERR" 2>/dev/null || true' EXIT
 
 # --- Step 1: current state and labels ----------------------------------------
@@ -125,13 +130,25 @@ ISSUE_JSON="$(gh issue view "$ISSUE" --json state,labels 2>"$GH_STDERR")" || {
   exit 1
 }
 
-STATE_UC="$(jq -r '.state // empty' <<<"$ISSUE_JSON" 2>/dev/null | tr '[:lower:]' '[:upper:]')"
+# Every jq read below feeds the payload over a stdin pipe (`printf '%s\n'
+# "$VAR" | jq ...`, #15253), never a `<<<` here-string: Bash materializes
+# here-strings >=64 KiB into a $TMPDIR temp file, which fails outright under
+# ENOSPC — and each lookup fails closed (nonzero jq status -> exit 1 with an
+# ERROR diagnostic), because a failed read and a legitimate no-match must
+# not both collapse into an empty result.
+STATE_UC="$(printf '%s\n' "$ISSUE_JSON" | jq -r '.state // empty | ascii_upcase' 2>"$GH_STDERR")" || {
+  echo "ERROR: could not read #$ISSUE's state from the issue payload: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
 if [[ -n "$STATE_UC" && "$STATE_UC" != "OPEN" ]]; then
   emit "NOT_OPEN" "issue state is $STATE_UC — nothing to reconcile"
   exit 10
 fi
 
-HAS_ISSUE_LABEL="$(jq -e '.labels[] | select(.name=="loom:issue")' <<<"$ISSUE_JSON" >/dev/null 2>&1 && echo yes || echo no)"
+HAS_ISSUE_LABEL="$(printf '%s\n' "$ISSUE_JSON" | jq -r 'if any(.labels[]?; .name=="loom:issue") then "yes" else "no" end' 2>"$GH_STDERR")" || {
+  echo "ERROR: could not read #$ISSUE's labels from the issue payload: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
 
 # --- Step 1a: the comments, TRUSTED AUTHORS ONLY (#9548) ---------------------
 # "Champion Review: APPROVED" is a control phrase: it makes this script apply
@@ -165,7 +182,11 @@ COMMENTS_JSON="$(gh api "repos/{owner}/{repo}/issues/$ISSUE/comments" --paginate
 # timeline event Step 2 below is trying to confirm predates it — which is
 # exactly how issue #7287 got incorrectly re-escalated on a second run
 # despite the promotion having genuinely landed (#7299).
-APPROVED_COMMENT="$(jq -c '
+#
+# Fails closed (#15253): a truncated/unparseable payload exits 1 here instead
+# of masquerading as "no verdict found" — `sort_by(...) | last // empty`
+# exits 0 with empty output when valid JSON simply contains no match.
+APPROVED_COMMENT="$(printf '%s\n' "$COMMENTS_JSON" | jq -c '
   [.[] | select(
       .body != null
       and (.body | contains("Champion Review: APPROVED"))
@@ -173,7 +194,10 @@ APPROVED_COMMENT="$(jq -c '
     )]
   | sort_by(.created_at)
   | last // empty
-' <<<"$COMMENTS_JSON" 2>/dev/null || true)"
+' 2>"$GH_STDERR")" || {
+  echo "ERROR: could not parse #$ISSUE's trusted comments while looking for the APPROVED verdict: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
 
 if [[ -z "$APPROVED_COMMENT" || "$APPROVED_COMMENT" == "null" ]]; then
   emit "OK" "no 'Champion Review: APPROVED' verdict comment from a trusted author on this issue — nothing to reconcile"
@@ -194,7 +218,11 @@ fi
 # read (or the APPROVED-comment match above) being reliable at all. Checked
 # BEFORE Step 2 so a timeline hiccup or a self-match on an old comment (the
 # exact #7287 failure this fix addresses) can never override it (#7299).
-if jq -e '.labels[] | select(.name=="loom:building" or .name=="loom:blocked")' <<<"$ISSUE_JSON" >/dev/null 2>&1; then
+PROGRESS_LABEL="$(printf '%s\n' "$ISSUE_JSON" | jq -r '[.labels[] | select(.name=="loom:building" or .name=="loom:blocked") | .name] | first // empty' 2>"$GH_STDERR")" || {
+  echo "ERROR: could not read #$ISSUE's labels while checking for later-lifecycle labels: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
+if [[ -n "$PROGRESS_LABEL" ]]; then
   emit "OK" "loom:issue is currently absent but a later-lifecycle label (loom:building/loom:blocked) is present — promotion landed and the issue has since progressed"
   exit 0
 fi
@@ -206,7 +234,10 @@ fi
 # check the label timeline for a `labeled loom:issue` event that happened
 # AFTER the newest APPROVED comment: if one exists, the promotion landed and
 # this is not #6862's failure mode at all (#6933).
-APPROVED_AT="$(jq -r '.created_at // empty' <<<"$APPROVED_COMMENT")"
+APPROVED_AT="$(printf '%s\n' "$APPROVED_COMMENT" | jq -r '.created_at // empty' 2>"$GH_STDERR")" || {
+  echo "ERROR: could not read the APPROVED comment's created_at on #$ISSUE: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
 
 TIMELINE_JSON="$(gh api "repos/{owner}/{repo}/issues/$ISSUE/timeline" --paginate 2>"$GH_STDERR")" || {
   echo "ERROR: 'gh api .../issues/$ISSUE/timeline' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
@@ -216,12 +247,18 @@ TIMELINE_JSON="$(gh api "repos/{owner}/{repo}/issues/$ISSUE/timeline" --paginate
 # Newest `labeled loom:issue` event (by created_at) in the timeline — mirrors
 # check-evaluating-staleness.sh's own `sort_by`-free `last` selection pattern.
 # RFC3339 UTC timestamps compare correctly as plain strings, so no epoch
-# conversion is needed just to find the max.
-LATEST_LABELED_AT="$(jq -r '
+# conversion is needed just to find the max. Fails closed (#15253): an
+# unparseable timeline exits 1 rather than collapsing into an empty
+# LATEST_LABELED_AT (which reads as "no evidence" and produces a false
+# MISMATCH — or a label write under --apply).
+LATEST_LABELED_AT="$(printf '%s\n' "$TIMELINE_JSON" | jq -r '
   [.[] | select(.event=="labeled" and .label.name=="loom:issue") | .created_at]
   | sort
   | last // empty
-' <<<"$TIMELINE_JSON" 2>/dev/null || true)"
+' 2>"$GH_STDERR")" || {
+  echo "ERROR: could not parse #$ISSUE's label timeline: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
 
 if [[ -n "$LATEST_LABELED_AT" && -n "$APPROVED_AT" && "$LATEST_LABELED_AT" > "$APPROVED_AT" ]]; then
   emit "OK" "loom:issue was applied after the APPROVED comment and the issue has since progressed — nothing to reconcile"
@@ -247,7 +284,11 @@ WRITE_REPO="$(source "$(dirname "${BASH_SOURCE[0]}")/lib/forge-helpers.sh" && lo
 # retired names `labels migrate` has not moved yet (#11795; #11843 drops
 # --with-retired); the fallback is for a missing or older daemon.
 # requires-daemon: labels optional   a missing or older binary takes the fallback list
-if HELD="$(jq -r --arg h "$("${LOOM_DAEMON_BIN:-loom-daemon}" labels list --property hold --with-retired 2>/dev/null || echo loom:blocked loom:operator loom:frozen loom:operator-only loom:operator-decision loom:operator-mechanical loom:operator-blocked loom:needs-capability)" '[.labels[].name | select(IN($h | splits("[ \n]+")))] | first // empty' <<<"$ISSUE_JSON" 2>/dev/null)" && [[ -n "$HELD" ]]; then
+HELD="$(printf '%s\n' "$ISSUE_JSON" | jq -r --arg h "$("${LOOM_DAEMON_BIN:-loom-daemon}" labels list --property hold --with-retired 2>/dev/null || echo loom:blocked loom:operator loom:frozen loom:operator-only loom:operator-decision loom:operator-mechanical loom:operator-blocked loom:needs-capability)" '[.labels[].name | select(IN($h | splits("[ \n]+")))] | first // empty' 2>"$GH_STDERR")" || {
+  echo "ERROR: could not read #$ISSUE's labels for the hold check (#6942): $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
+if [[ -n "$HELD" ]]; then
   emit "ALREADY_ESCALATED" "$REASON; the issue carries the hold $HELD — a human owns it, nothing further to do"
   exit 0
 fi
@@ -256,7 +297,7 @@ fi
 # issue whose author is not trusted (or cannot be verified) is left as it is —
 # a trusted maintainer adopts it by hand. Fail closed: only TRUSTED proceeds.
 GATE_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge promotion-author --number "$ISSUE" --repo "$WRITE_REPO" 2>"$GH_STDERR")" || GATE_OUT="UNKNOWN the author check failed: $(tr '\n' ' ' <"$GH_STDERR")"
-GATE="$(head -n1 <<<"$GATE_OUT")"
+GATE="${GATE_OUT%%$'\n'*}"
 if [[ "$GATE" != "TRUSTED" ]]; then
   emit "ALREADY_ESCALATED" "$REASON; not completed: author gate says $GATE (#10827) — a trusted maintainer must adopt it by applying loom:issue"
   exit 0
@@ -278,7 +319,7 @@ VERIFY_JSON="$(gh issue view "$ISSUE" --repo "$WRITE_REPO" --json labels 2>"$GH_
   exit 13
 }
 
-if ! jq -e '.labels[] | select(.name=="loom:issue")' <<<"$VERIFY_JSON" >/dev/null 2>&1; then
+if ! printf '%s\n' "$VERIFY_JSON" | jq -e '.labels[] | select(.name=="loom:issue")' >/dev/null 2>"$GH_STDERR"; then
   emit "ESCALATED" "$REASON; edit ran but the read-back STILL shows loom:issue missing"
   exit 13
 fi

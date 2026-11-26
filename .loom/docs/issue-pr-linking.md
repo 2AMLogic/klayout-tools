@@ -31,7 +31,7 @@ auto-close is still how an issue gets closed) or `Part of #N` (which is what
 ## The trailer contract
 
 ```
-Loom-Issue: rjwalters/loom#9465
+Loom-Issue: 2AMLogic/loom#9465
 ```
 
 - **Owner/repo is required.** A bare `Loom-Issue: #9465` does not parse. The
@@ -52,7 +52,7 @@ one `owner/repo#N` per line, deduped and sorted).
 `loom-daemon merge-pr-refs loom-issue-trailer-warnings --pr N` reports lines
 that *look* like a trailer but will not parse — a backticked one, or one
 missing the `owner/repo` slug. Both live in
-[`loom-daemon/src/merge_pr/refs.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/merge_pr/refs.rs).
+[`loom-daemon/src/merge_pr/refs.rs`](https://github.com/2AMLogic/loom/blob/main/loom-daemon/src/merge_pr/refs.rs).
 
 ## Why not `Refs #N`
 
@@ -120,6 +120,80 @@ operator-handoff sections, and scan every commit message on the branch too
 commit's subject, #9105). `merge-pr.sh` detects the contradiction pre-merge and
 reopens the issue if GitHub closed it anyway, but that leaves a close/reopen
 flicker plus notification churn — it is a backstop, not the plan.
+
+## A quoted example can close a different issue on a final PR (#15046)
+
+The #4569 rules, and the scan that backed them, were scoped to the tracked issue
+of a non-closing PR: the scan substituted only that issue's number, so on a final
+PR that closes issue A it said nothing about an example in the body naming issue
+B — and the whole section was framed as a rule for `Part of #N` bodies, which a
+Builder on a final PR had no reason to run.
+
+The final-PR shape came from a downstream report (#15046; observed by the
+reporter, not reproduced in this repo): a final PR that quoted a closing
+reference in an inline code span had the quoted keyword and number read as a
+closing reference. **Measured since (#15058), GitHub's `closingIssuesReferences`
+ignored every inline-code-span closer it was possible to isolate** — the report
+is not reproducible on today's parser; whatever closed that issue, the backticks
+were not it. The rewrite rule is kept for code spans regardless: one word of
+cost, and no dependence on GitHub's parser staying put. The Guide's docs-only PR
+is the same failure in another template (#14176): `### Changes` prose of the
+shape `drops closed #N` registered as a closing reference —
+`closingIssuesReferences` returned the unrelated issue before the wording was
+changed.
+
+The remedy stays in `builder-pr.md` → "Multi-PR landings": break the adjacency in
+every quoted example (an intervening word, `Closes issue #N`, or a nonnumeric
+placeholder) on every surface — inline code, fenced blocks, checklists, test plans,
+commit subjects and bodies — and scan the body and the branch's commit messages
+for a closing keyword adjacent to **any** issue number, not only the tracked one,
+including the full-URL form since #15058. A final PR's scan may print only issues
+it delivers; a partial PR's must print nothing.
+
+## Measured GitHub closing-parser behavior (#15058)
+
+Every surface below was settled from attributable existing PRs — real bodies,
+real `closingIssuesReferences` readouts, real close events — plus a live
+placement fixture carried by #15058's own PR body, PR #15089 (open, base
+`main`): five adjacencies targeting already-closed issues plus the real control,
+read back as `closingIssuesReferences = [4569, 14176, 15058]` — blockquote and
+URL fixtures present, fenced and inline-code fixtures absent, control present.
+No disposable repository, no merge experiments on active issues.
+
+| Placement in a PR body (base = default branch) | `closingIssuesReferences` | Evidence |
+|---|---|---|
+| Plain prose, any position — mid-sentence, checklist, test plan | **counts** | #4569 (observed: `then close #2` in an operator-handoff list closed #2 on merge); #14176 (measured: `drops closed #N` prose listed the unrelated issue) |
+| Blockquoted line (`> … closes #N …`) | **counts** | PR #12122: body's only keyword-adjacent `#10444` sat inside a blockquote; refs = `[10444, 11613, 12039]` alongside the two plain-text closers |
+| Full issue URL (`Closes https://github.com/OWNER/REPO/issues/N`) | **counts, and closes on merge** | 2AMLogic/2am PR #4161: refs = `[4160]`, issue #4160 closed 2 s after the merge; PR #3983: same shape (closed at merge, later reopened and re-closed manually) |
+| Inline code span (`` `Closes #N` ``) | **does not count** | PR #14383: `` `Closes #14059` `` / `` `Closes #14052` `` twice each (prose + checklist), tracked issue plain; refs = `[14351]` only |
+| Fenced code block | **does not count** | PR #8199: fenced parser-fixture line naming `#1`/`#2`; refs = `[]`. Canonical single-space form: PR #15089's fenced `Closes #9879` fixture absent from its readout `[4569, 14176, 15058]` |
+
+GitHub's documentation names only the two shorthand syntaxes (`KEYWORD #N`,
+`KEYWORD OWNER/REPOSITORY#N`), colons and uppercase — it is silent on URLs,
+fences, quotes and code spans, so the table is the authority ([docs: linking a
+pull request to an issue](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue)).
+
+### Reconciling the #9879 comment
+
+`forge-helpers.sh`'s Gitea fallback (`forge_pr_close_targets`, #9879) strips
+fenced blocks **and blockquoted lines** before its regex, and its comment claimed
+GitHub's API-computed field carries "this same fence-awareness". Measured above,
+that claim is half right: GitHub ignores fences (agreeing with the strip) but
+**does** parse blockquoted closers (PR #12122) and full-URL closers (2am #4161),
+which the Gitea regex does not match at all. The Gitea strip is therefore
+deliberately **stricter** than GitHub for a blockquoted closer — a divergence
+noted here and left alone: changing Gitea-side behavior is out of scope for
+#15058. The comment in `forge-helpers.sh` now records the same.
+
+### What the scan is
+
+The Builder scan is a **precautionary local approximation**, deliberately
+over-strict: it matches inline-code and fenced examples GitHub (measured)
+ignores, because a match a Builder cannot explain is rewritten rather than
+trusted to a parser GitHub documents nothing about. Since #15058 it also matches
+the full-URL form, which really does close. Once a PR is open, GitHub's own
+answer is `closingIssuesReferences`, the field `forge_pr_close_targets()` reads
+— the readout, not the scan, is the authority.
 
 ## What this does not fix
 

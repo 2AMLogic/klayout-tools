@@ -15,6 +15,13 @@
 #   Builder - `forge check-claim` before the loom:building claim, with the
 #             never-overridable tokens refusing and the invoker's own claim
 #             allowed.
+#   Doctor  - `forge pr view <N>` before the claim: its non-zero exit refuses
+#             an issue number, then state and the skip labels refuse (#14939).
+#
+# On a Gitea checkout `gh` cannot read the remote, so Judge and Doctor read
+# the gate through `loom-daemon forge pr view`, which serves the Gitea API
+# with the inherited GITEA_URL / GITEA_TOKEN (#14939); that command literal is
+# pinned here for both roles.
 #
 # Each path ends with the LOOM_STEP_OUTCOME line, whose classes live in
 # defaults/docs/targeted-role-invocation.md. A later trim could silently drop
@@ -33,8 +40,9 @@ DOC="$REPO_ROOT/defaults/docs/targeted-role-invocation.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-for f in "$CMDS/judge.md" "$CMDS/curator.md" "$CMDS/builder.md" "$DOC" \
-    "$SKILLS/loom-judge/SKILL.md" "$SKILLS/loom-curator/SKILL.md" "$SKILLS/loom-builder/SKILL.md"; do
+for f in "$CMDS/judge.md" "$CMDS/curator.md" "$CMDS/builder.md" "$CMDS/doctor.md" "$DOC" \
+    "$SKILLS/loom-judge/SKILL.md" "$SKILLS/loom-curator/SKILL.md" \
+    "$SKILLS/loom-builder/SKILL.md" "$SKILLS/loom-doctor/SKILL.md"; do
     if [[ ! -f "$f" ]]; then
         echo -e "${RED}FAIL${NC}: missing $f" >&2
         exit 1
@@ -69,17 +77,31 @@ before() {
 }
 
 PROBE="(.pull_request != null), .state, ([.labels[].name]"
+# #14939: the gate read on a Gitea checkout, where `gh` cannot resolve the
+# remote. The same literal for both PR roles.
+GITEA_VIEW="loom-daemon forge pr view <number> --json number,state,labels,headRefOid,mergeable"
+GITEA_CRED="\`GITEA_URL\` and \`GITEA_TOKEN\`"
 
 check_judge() {
     local J="$1" where="$2"
     expect "$where judge: REST kind/state/label probe" "$J" "$PROBE"
     expect "$where judge: an issue number refuses"     "$J" "\`false\` (an issue number; Judge is a PR role)"
     expect "$where judge: closed, frozen and operator refuse" "$J" "\`closed\`, \`loom:frozen\`, any \`loom:operator*\` label (#11861; retired names too), or a failed read"
+    expect "$where judge: a Gitea checkout reads the gate through forge pr view" "$J" "$GITEA_VIEW"
+    expect "$where judge: the Gitea read names the inherited credential" "$J" "$GITEA_CRED"
     expect "$where judge: fallback PRs stay review-only" "$J" "\"Fallback Queue\" rules (guard, review only, never claim or label)"
     expect "$where judge: a priority label alone is unlabelled" "$J" "Neither those nor a verdict label (e.g. only \`loom:important\`)"
     expect "$where judge: a judged PR is a no-op"      "$J" "A verdict label without \`loom:review-requested\` → no-op"
     expect "$where judge: outcome line"                "$J" "LOOM_STEP_OUTCOME role=judge"
     before "$where judge: probe precedes the claim"    "$J" "$PROBE" "claim exactly as Primary Queue step 2"
+}
+
+check_doctor() {
+    local D="$1" where="$2"
+    expect "$where doctor: forge pr view gate read"            "$D" "$GITEA_VIEW"
+    expect "$where doctor: the gate names the inherited credential" "$D" "$GITEA_CRED"
+    expect "$where doctor: outcome line"                       "$D" "LOOM_STEP_OUTCOME role=doctor"
+    before "$where doctor: the gate precedes the claim"         "$D" "$GITEA_VIEW" "Claim the PR exactly as in Work Process step 2"
 }
 
 check_curator() {
@@ -110,12 +132,14 @@ echo "Test group 1: role prompts (defaults/.claude/commands/loom)"
 check_judge   "$(args "$CMDS/judge.md")"   "prompt"
 check_curator "$(args "$CMDS/curator.md")" "prompt"
 check_builder "$(args "$CMDS/builder.md")" "prompt"
+check_doctor  "$(args "$CMDS/doctor.md")"  "prompt"
 
 echo ""
 echo "Test group 2: generated agent-skill copies carry the same gates"
 check_judge   "$(args "$SKILLS/loom-judge/SKILL.md")"   "skill"
 check_curator "$(args "$SKILLS/loom-curator/SKILL.md")" "skill"
-check_builder "$(args "$SKILLS/loom-builder/SKILL.md")" "skill"
+check_builder "$(args "$SKILLS/loom-builder/SKILL.md")"  "skill"
+check_doctor  "$(args "$SKILLS/loom-doctor/SKILL.md")"   "skill"
 
 echo ""
 echo "Test group 3: an attended sweep tells its Task Builders the claim is theirs"

@@ -71,20 +71,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-fixture.sh
 # Colors
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-YELLOW='\033[0;33m'  # retired() below
-
-
-# An assertion that CANNOT survive the port to Rust, retired under the
-# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
-# deleted: a reader must be able to see what was removed, why, and what proves
-# the property now. Counted as run so the totals stay honest.
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
 
 # --- Minimal logging shims the extracted functions call ---
 info()    { echo "INFO: $*"; }
@@ -671,7 +657,7 @@ lt_backticked_body='## Summary
 
 Implements the first slice.
 
-`Loom-Issue: rjwalters/loom#9465`'
+`Loom-Issue: 2AMLogic/loom#9465`'
 reset_log
 PR_JSON="$(jq -n --arg body "$lt_backticked_body" '{body: $body}')"
 DRY_RUN=true
@@ -680,7 +666,7 @@ unset DRY_RUN
 lt_err="$(read_stderr)"
 assert_contains "$lt_err" "[dry-run] Unparseable Loom-Issue trailer (#9465)" \
   "LT1: backticked Loom-Issue trailer under --dry-run -> warning carries the [dry-run] prefix"
-assert_contains "$lt_err" '"`Loom-Issue: rjwalters/loom#9465`"' \
+assert_contains "$lt_err" '"`Loom-Issue: 2AMLogic/loom#9465`"' \
   "LT1: warning quotes the offending line verbatim"
 assert_eq "" "$(read_log)" \
   "LT1: the warning is advisory only -- no forge mutation"
@@ -697,14 +683,14 @@ assert_not_contains "$lt_err" "[dry-run]" \
 
 # LT2: the same trailer as PLAIN TEXT -> parses, so nothing to warn about.
 reset_log
-PR_JSON='{"body":"Implements the first slice.\n\nLoom-Issue: rjwalters/loom#9465"}'
+PR_JSON='{"body":"Implements the first slice.\n\nLoom-Issue: 2AMLogic/loom#9465"}'
 run_capturing_stderr _check_partial_increment_close_conflict
 assert_not_contains "$(read_stderr)" "Loom-Issue trailer" \
   "LT2: plain-text 'Loom-Issue: owner/repo#N' trailer -> no warning (no false positive)"
 
 # LT3: BOTH shapes for the same issue -> the plain one already carries the link.
 reset_log
-PR_JSON='{"body":"Implements the first slice.\n\n`Loom-Issue: rjwalters/loom#9465`\nLoom-Issue: rjwalters/loom#9465"}'
+PR_JSON='{"body":"Implements the first slice.\n\n`Loom-Issue: 2AMLogic/loom#9465`\nLoom-Issue: 2AMLogic/loom#9465"}'
 run_capturing_stderr _check_partial_increment_close_conflict
 assert_not_contains "$(read_stderr)" "Loom-Issue trailer" \
   "LT3: backticked + plain trailer for the same issue -> no warning"
@@ -742,7 +728,7 @@ FAKEDAEMON
 chmod +x "$fake_daemon_lt"
 
 reset_log
-PR_JSON='{"body":"Implements a slice.\n\nPart of #123\n\n`Loom-Issue: rjwalters/loom#9465`"}'
+PR_JSON='{"body":"Implements a slice.\n\nPart of #123\n\n`Loom-Issue: 2AMLogic/loom#9465`"}'
 saved_self_bin="${LOOM_DAEMON_SELF_BIN:-}"
 export LOOM_TEST_REAL_DAEMON_BIN="${LOOM_DAEMON_SELF_BIN:-${LOOM_DAEMON_BIN:-$(command -v loom-daemon)}}"
 export LOOM_DAEMON_SELF_BIN="$fake_daemon_lt"

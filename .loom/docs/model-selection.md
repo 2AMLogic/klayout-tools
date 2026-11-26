@@ -2,7 +2,7 @@
 
 How Loom resolves each worker's model, the Judge-rejection escalation ladder, and
 the suggested-model defaults by role. Retuning these defaults is measurement-gated
-— see [`docs/model-selection-retune.md`](https://github.com/rjwalters/loom/blob/main/docs/model-selection-retune.md).
+— see [`docs/model-selection-retune.md`](https://github.com/2AMLogic/loom/blob/main/docs/model-selection-retune.md).
 
 For *task-oriented* recipes that combine these keys with the runtime, credential-pool
 and spend-bound axes ("put the expensive model on Judge", "minimize wall-clock"), see
@@ -17,9 +17,67 @@ Model selection is a first-class orchestration concern (issue #3477, Phase 1). E
 3. **Role default** — `.loom/roles/<role>.json` → `suggestedModel` (ships as an alias). The `/loom:sweep` skill passes the resolved model to role subagents via the Task tool's `model` parameter.
 4. **Session default** — when nothing above resolves, NO `--model` flag (and no Task `model` param) is emitted at all, and the worker inherits the parent session/CLI default. This is the zero-config behavior: nothing configured means nothing changes.
 
-Tier 2's keys can also be set per-host without committing them: `config_resolver.rs` merges the committed `.loom-project/project.json` and then the ungitted, highest-precedence `.loom-local/local.json` overlay over `.loom/config.json` (see [`docs/design/config-resolution-tiers.md`](https://github.com/rjwalters/loom/blob/main/docs/design/config-resolution-tiers.md)) — so a one-host model override belongs in `.loom-local/local.json`, which **must stay gitignored**: unignored it is untracked dirt, and `check-main-clean.sh --quarantine` stashes untracked dirt between sweep waves, silently reverting the override (#8075).
+Tier 2's keys can also be set per-host without committing them: `config_resolver.rs` merges the committed `.loom-project/project.json` and then the ungitted, highest-precedence `.loom-local/local.json` overlay over `.loom/config.json` (see [`docs/design/config-resolution-tiers.md`](https://github.com/2AMLogic/loom/blob/main/docs/design/config-resolution-tiers.md)) — so a one-host model override belongs in `.loom-local/local.json`, which **must stay gitignored**: unignored it is untracked dirt, and `check-main-clean.sh --quarantine` stashes untracked dirt between sweep waves, silently reverting the override (#8075).
 
 The spawn plumbing also honors a `LOOM_MODEL` environment variable (`spawn-claude.sh`, `claude-wrapper.sh`): it is injected as `--model <value>` unless an explicit `--model` is already present in the args. Retries inside `claude-wrapper.sh` always reuse the same model — transport-level failures (token exhaustion, crashes, 5xx) are not quality signals and never change the model.
+
+### Attended subagents (Task-tool spawns)
+
+The chain above governs the **attended** path too — any session spawning a
+`loom-<role>` subagent through the Agent/Task tool — via a deterministic
+lookup instead of hand-reading config (issue #13956):
+
+```bash
+./.loom/scripts/resolve-role-model.sh <role> --json
+# -> {"role":"judge","model":"claude-opus-5-5","source":"roleConfig.model","task_model":"opus"}
+```
+
+`source` names the tier that supplied the model (`param` | `roleConfig.model`
+| `suggestedModel` | `inherit`), so an experiment can confirm what actually
+ran. `model` is the real resolved value (a pinned ID stays a pinned ID);
+**`task_model` is the value to pass** as the Task tool's `model` parameter —
+the #4282 degradation to the nearest Task-passable alias, since that
+parameter is alias-only and rejects a pinned ID (#14133). `task_model: null`
+(nothing configured, or no alias for the model) means omit the parameter, and
+the subagent inherits the parent session's model — the zero-config behavior is
+byte-for-byte unchanged. The bare form prints just the model and exits 3 with
+no output when nothing is configured; `--task-alias` (bare form only — a
+no-op under `--json`) prints the alias and exits 3 when there is none. The
+shipped `defaults/.claude/agents/*.md` carry no
+`model:` frontmatter (a test asserts it): a role's model comes from config at
+spawn time, never from a hardcoded tier — the #13956 operator ruling declined
+per-role pins in shipped files so per-role experiments stay possible.
+
+**Reasoning effort has no attended-path knob.** The Task tool's interface
+carries model only, so a `roleEfforts` setting remains a daemon-path setting
+(the role runner resolves effort per role in `role_runner/model_resolution.rs`).
+Configuring effort for attended subagents would require a harness change, not a
+Loom one.
+
+**Running the "opposite mix"** (the per-role experiment the ruling asks for):
+pin models per role in `.loom/config.json` (committed) or
+`.loom-local/local.json` (per-host, gitignored) — for example strong
+Curator/Judge with a cheaper Builder:
+
+```json
+{
+  "terminals": [
+    { "id": "curator", "roleConfig": { "roleFile": "curator.md", "model": "claude-opus-5" } },
+    { "id": "judge",   "roleConfig": { "roleFile": "judge.md",   "model": "claude-opus-5" } },
+    { "id": "builder", "roleConfig": { "roleFile": "builder.md", "model": "claude-sonnet-4-6" } }
+  ]
+}
+```
+
+…and the reverse (cheap Curator/Judge, strong Builder) by swapping the
+values. A tier-2 pin beats the role JSON's `suggestedModel` and is never
+overridden by the escalation ladder (see "Precedence interaction" above).
+Compare mixes on outcome telemetry — merged work, review bounces, cost via
+`agent-metrics.sh --by-model` (#3482) and the sweep records' `models_used` /
+`tokens_by_model` — not on impressions. The setting survives every
+reinstall/resync untouched: config lives outside `defaults/`, and the
+resolution happens at spawn time, so a config edit applies to the next spawn
+with no resync. The per-mix read-out report is tracked separately (#14067).
 
 **Escalation on Judge rejection (`sweep.escalation`, Phase 2, issue #3481)**:
 
@@ -61,7 +119,7 @@ The ladder is configured in `.loom/config.json`:
 
 > **Retuning these defaults is measurement-gated.** Whether to flip a role's
 > default `opus → sonnet` ("cheap-first") is decided by measured data, not edited
-> blind — see [`docs/model-selection-retune.md`](https://github.com/rjwalters/loom/blob/main/docs/model-selection-retune.md)
+> blind — see [`docs/model-selection-retune.md`](https://github.com/2AMLogic/loom/blob/main/docs/model-selection-retune.md)
 > (upstream Loom repo) for the decision inequality and the `agent-metrics.sh
 > --by-model` (#3482) gating procedure. Builder is the only real candidate; no
 > default has been flipped.

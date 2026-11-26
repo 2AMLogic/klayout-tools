@@ -1,3 +1,6 @@
+---
+disable-model-invocation: true
+---
 # Champion: Common Utilities
 
 This file contains shared utilities, protocols, and information used across all Champion workflows.
@@ -32,7 +35,7 @@ After evaluating both queues:
 
 **Merge-risk hold census (mandatory line, #6720).** A held PR does not merge and
 does not report itself; without a standing count, a pile grows unseen. On
-`rjwalters/loom` it reached **21 held PRs, 20 of them conflicting**, and was
+`2AMLogic/loom` it reached **21 held PRs, 20 of them conflicting**, and was
 found only because an operator inspected PR labels by hand. Run the single
 `gh pr list` query in `champion-pr-merge.md` → "Held-PR Census" **in this pass**
 (never restate numbers from a previous one) and emit one line:
@@ -192,7 +195,7 @@ bare `state == OPEN` read — whenever the referenced issue carries
 `loom:epic`. This works without `LOOM_EPIC_SUPERVISOR` being enabled anywhere
 (that daemon mechanism only reconciles epics inside its own registered
 workspace and cannot see across repos — see
-[`daemon-reference.md`'s "Epic supervisor"](https://github.com/rjwalters/loom/blob/main/defaults/docs/daemon-reference.md#epic-supervisor-3842)
+[`daemon-reference.md`'s "Epic supervisor"](https://github.com/2AMLogic/loom/blob/main/defaults/docs/daemon-reference.md#epic-supervisor-3842)
 section for how the two complement each other).
 
 ### Step 1 — parse the reference (cross-repo aware)
@@ -235,10 +238,31 @@ parse_blocker_ref() {
 # "Blocked by: #1 (x), #3 (y)" would yield only #1) — under-parsing here is
 # the highest-severity failure mode (see champion-pr-merge.md Step 5's own
 # comment on ALL_DEPS), so the two-stage shape is load-bearing, not stylistic.
+#
+# The sed stage between them is the #14732 parent-reference rule. A mixed
+# line like "Part of #2. Depends on #4" passes the phrase gate via the real
+# dependency, and the whole-line ref scan would yield BOTH numbers — reading
+# the issue's PARENT as a blocker. That is how a phase child got walked into
+# its parent's dependency cycle and routed to an operator for a loop it was
+# not on. Masking the `Part of`-introduced reference before extraction keeps
+# the rest of the line intact: the sed keys off the introducing phrase, never
+# the number, so a parent genuinely declared again as a dependency
+# ("Depends on #2 (parent). Part of #2") still counts — matching the Rust
+# side (loom-daemon/src/dep_classify/refs.rs, part_of_spans).
+#
+# #14750 extends the mask to match that Rust side exactly: the phrase is
+# matched case-insensitively (`PART OF #2` masks here too — the character
+# classes spell it out because ERE sed has no (?i)), and the one bounded
+# word `Epic` may sit between the phrase and the reference (`Part of Epic
+# #2` is Loom's own generated vocabulary, written into every epic-phase
+# issue by champion-epic.md / epic.md). No wider word run is admitted:
+# "Part of issue #2" and "Part of the work tracked in #2" keep the
+# established whole-line capture.
 extract_blocker_refs() {
   local body="$1"
   printf '%s\n' "$body" \
     | grep -E '(Blocked by|Depends on|Requires)[*_:[:space:]]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|#[0-9]+)' \
+    | sed -E 's/[Pp][Aa][Rr][Tt] [Oo][Ff][*_:.[:space:]]*([Ee][Pp][Ii][Cc][*_:.[:space:]]*)?([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+/ /g' \
     | grep -Eo '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|#[0-9]+)' \
     | sort -u
 }
