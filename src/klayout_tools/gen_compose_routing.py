@@ -192,6 +192,15 @@ def _endpoint_stub_widen_um(
 #: (issue #1567).
 _ViaDropHop = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 
+#: Rejection for a backbone outside ``deck.metals`` whose pin is on it (#7957).
+_BACKBONE_OFF_METALS_REASON = (
+    "the backbone is drawn outside the resolved PDK's metals stack, and "
+    "gen_compose draws no contact from it down to this pin's own metal "
+    "pad -- the route would end as an uncontacted overlap rather than a "
+    "connection. Route this net with routing.layer_role set to a metal "
+    "role, or pin it to a port on the backbone's own layer (issue #7957)"
+)
+
 
 def _resolve_via_drop_layer(
     deck: ExtractionDeck,
@@ -213,11 +222,10 @@ def _resolve_via_drop_layer(
 
     Returns ``(ladder, error)``:
 
-    * ``(None, None)`` -- no drop needed. Either ``port_layer`` already *is*
-      ``route_layer`` (the pre-#454 single-metal routing path, unchanged), or
-      ``route_layer`` itself is not a member of ``deck.metals`` (a
-      ``"poly"``/``"tap"``-role backbone has no metals stack to walk, so it
-      draws directly exactly as it always has).
+    * ``(None, None)`` -- no drop needed: ``port_layer`` already *is* ``route_layer``
+      (the pre-#454 single-metal path, unchanged), or no stack joins them to walk:
+      ``route_layer`` is not a member of ``deck.metals`` and neither is ``port_layer``,
+      or ``port_layer`` is a layer the deck models in no recognised role (as before).
     * ``(ladder, None)`` -- a drop is needed and fully resolved. ``ladder`` is
       a non-empty, ordered tuple of :data:`_ViaDropHop` entries -- one per via
       the backbone must drop through between ``route_layer`` and
@@ -237,10 +245,10 @@ def _resolve_via_drop_layer(
       ordinary metals-stack hops up to ``route_layer`` -- a real contact
       reaching the diffusion, not just a metal stub sitting near it.
     * ``(None, reason)`` -- a drop is needed but not resolvable (the deck
-      declares no via for one of the hops the ladder needs, or the pin sits
-      on the deck's bare ``poly`` layer, which no via in the metals stack
-      reaches) -- the caller reports the net unroutable rather than drawing a
-      disconnected short.
+      declares no via for one of the hops the ladder needs; the pin is a
+      bare-``poly`` gate; or, issue #7957, the backbone is outside
+      ``deck.metals`` while the pin is on it) -- the caller reports the net
+      unroutable rather than drawing a disconnected short.
 
     That last case is issue #492: before it, a metal-role backbone ending on
     a bare-poly gate port fell into the ``(None, None)`` "unrelated role,
@@ -249,17 +257,8 @@ def _resolve_via_drop_layer(
     joining the two. That is an open net (or, where the stub crosses other
     geometry, a short) that only a later ``klt drc``/``klt extract``/``klt
     lvs`` run would surface, with nothing pointing back at the cause. It is
-    now an explicit rejection naming the fix. Issue #1894 found the same
-    failure shape one branch over: a diffusion-role port (``deck.active``)
-    fell into that same "unrelated role, nothing to do" branch, so no
-    licon/mcon contact was ever drawn between the routed metal and the
-    diffusion it was meant to strap -- ``"routed": true`` and a clean ``klt
-    drc`` both held while `klt extract` recovered either an unstrapped node
-    (the strap never landed) or a short (an unrelated net's own via-drop
-    landing pad overlapped the un-tracked stub, invisible to the same-block
-    footprint-collision check since it never saw a landing pad for this leg
-    at all). That branch is now resolved via ``deck.contact`` instead,
-    exactly like the bare-poly case above but with a real contact available.
+    now an explicit rejection naming the fix. Issue #1894 found the same failure
+    shape one branch over (a diffusion-role pin), issue #7957 on the backbone side.
     """
     if route_layer == port_layer:
         return None, None
@@ -267,9 +266,10 @@ def _resolve_via_drop_layer(
         route_idx = deck.metals.index(route_layer)
     except ValueError:
         # The backbone itself is not on a declared routing-metal level (e.g.
-        # routing.layer_role "tap"): there is no metals stack to drop through,
-        # so draw directly on route_layer exactly as before #454.
-        return None, None
+        # routing.layer_role "tap"/"poly"): no metals stack to drop through, so
+        # it draws directly as before #454 -- unless the pin *is* on the stack
+        # (issue #7957): no via joins them, so the stripe would only overlap.
+        return None, _BACKBONE_OFF_METALS_REASON if port_layer in deck.metals else None
     try:
         port_idx = deck.metals.index(port_layer)
     except ValueError:
@@ -389,18 +389,17 @@ def _resolve_cross_block_route_layer(
     the *same* ``_PDK_ROLE_LAYERS`` table :func:`_resolve_route_layer` reads
     (never a second, private layer map).
 
-    Reuses :func:`_resolve_via_drop_layer` verbatim to confirm the two
-    resolved layers are connectable by a via-drop ladder in the resolved PDK
-    family's own ``ExtractionDeck.metals``/``.vias`` stack, and to resolve
-    which via(s) connect them -- the identical hop-resolution logic
-    :func:`route_two_pin`'s check 6 (via-drop) already relies on, called here
-    with the roles reversed (``route_layer`` slot = the cross-block layer,
-    ``port_layer`` slot = the primary ``layer_role``) rather than
-    reimplemented a second time. ``via_layers`` is returned for
-    completeness/testability only -- the actual via-drop(s) a leg falling
-    back to this cross layer needs are re-resolved per pin by check 6 itself
-    (:func:`route_two_pin`), since that is also where a pin's own reported
-    layer, not just the two routing layers, enters the picture.
+    Reuses :func:`_resolve_via_drop_layer` verbatim to confirm the two resolved layers
+    are connectable by a via-drop ladder in the resolved PDK family's own
+    ``ExtractionDeck.metals``/``.vias`` stack, and to resolve which via(s) connect
+    them -- the identical hop-resolution logic :func:`route_two_pin`'s check 6
+    (via-drop) already relies on, called here with the roles reversed (``route_layer``
+    slot = the cross-block layer, ``port_layer`` slot = the primary ``layer_role``)
+    rather than reimplemented a second time. ``via_layers`` is returned for
+    completeness/testability only -- the actual via-drop(s) a leg falling back to this
+    cross layer needs are re-resolved per pin by check 6 itself
+    (:func:`route_two_pin`), since that is also where a pin's own reported layer,
+    not just the two routing layers, enters the picture.
 
     Raises :class:`GenComposeError` when either role does not resolve (the
     same errors :func:`_resolve_route_layer` raises), when the two roles
@@ -430,7 +429,8 @@ def _resolve_cross_block_route_layer(
     deck = get_extraction_deck(_pdk_family(variant))
     ladder, error = _resolve_via_drop_layer(deck, cross_layer, route_layer)
     if ladder is None:
-        reason = error or (
+        # #7957: a non-metals cross-block role keeps the generic wording (no pin here).
+        reason = (error if cross_layer in deck.metals else None) or (
             f"'{cross_layer_role}' and '{layer_role}' are not both members of "
             "the PDK's metals/via stack"
         )

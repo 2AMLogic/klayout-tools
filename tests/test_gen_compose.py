@@ -2952,13 +2952,15 @@ def test_compose_labels_jogged_route_exactly_once_not_per_segment(tmp_path, pdk_
 def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
     tmp_path, pdk_root
 ):
-    # "tap" is a valid routable role but is neither a `metals[]` entry nor the
-    # deck's `poly` layer, so `_resolve_label_layer` finds no label convention
-    # for it -- the metal is still drawn, but no label, and a note explains
-    # why. (Since #210 gave `poly` a `poly_label`, poly no longer exercises
-    # this path; `tap` still does.)
+    # "tap" is a valid routable role but is neither a `metals[]` entry nor the deck's
+    # `poly` layer, so `_resolve_label_layer` finds no label convention for it: the
+    # stripe is still drawn, unlabelled, with a note saying why (poly got a
+    # `poly_label` in #210; `tap` still has none). Since #7957 a `tap` backbone
+    # lands only on a same-layer port, so both terminals are re-reported on `tap`.
     r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
     r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    for port in r1["ports"] + r2["ports"]:  # onto tap.drawing (65/44)
+        port["layer"] = {"layer": 65, "datatype": 44, "name": None}
     output = tmp_path / "unlabelled.gds"
     report = compose(
         {
@@ -2991,11 +2993,9 @@ def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
     layout = kdb.Layout()
     layout.read(str(output))
     top = layout.cell("unlabelled_0")
-    tap = layout.layer(65, 44)
-    paths = [s for s in top.shapes(tap).each() if s.is_path()]
-    assert len(paths) == 1  # metal still drawn
-    li1_pin = layout.layer(67, 5)
-    assert list(top.shapes(li1_pin).each()) == []  # but no label anywhere
+    paths = [s for s in top.shapes(layout.layer(65, 44)).each() if s.is_path()]
+    assert len(paths) == 1  # the tap stripe is still drawn
+    assert list(top.shapes(layout.layer(67, 5)).each()) == []  # but no li1.pin label
 
 
 def test_compose_reports_unroutable_net_as_partial_success(tmp_path, pdk_root):
@@ -7374,14 +7374,14 @@ def test_resolve_via_drop_layer_bare_poly_gate_port_is_rejected():
     assert "gate_contact" in error
 
 
-def test_resolve_via_drop_layer_poly_route_layer_still_draws_directly():
-    # The rejection above is about the *pin's* layer, not the backbone's: a
-    # route whose own layer_role resolves outside the metals stack (e.g.
-    # "poly"/"tap") has no stack to walk and keeps drawing directly.
+def test_resolve_via_drop_layer_poly_route_to_a_metal_pin_is_rejected():
+    # The mirror of the rejection above (#7957): a backbone whose own layer_role
+    # resolves outside the metals stack (e.g. "poly"/"tap") has no stack to walk,
+    # and a pin *on* `deck.metals` is only overlapped, never contacted.
     deck = get_extraction_deck("sky130")
     ladder, error = _resolve_via_drop_layer(deck, deck.poly, (67, 20))
-    assert ladder is None
-    assert error is None
+    assert ladder is None and "routing.layer_role" in (error or "")
+    assert _resolve_via_drop_layer(deck, deck.poly, deck.poly) == (None, None)  # direct
 
 
 def test_resolve_via_drop_layer_adjacent_metals_resolves_the_via():

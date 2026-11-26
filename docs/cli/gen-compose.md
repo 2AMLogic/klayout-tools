@@ -1483,7 +1483,7 @@ since via-drop only ever applies between two declared routing-metal levels.
 
 One case draws a *contact* ladder down to a deck diffusion-class role instead
 of declining to act, one case draws a multi-level *ladder* between two metal
-levels, and one case is rejected outright, reporting the net unroutable
+levels, and two cases are rejected outright, reporting the net unroutable
 rather than drawing something that does not connect:
 
 - A pin reported on a deck **diffusion-class role** — `ExtractionDeck.active`
@@ -1566,6 +1566,18 @@ rather than drawing something that does not connect:
   and the two ways forward — re-run the block's generator with
   `params.gate_contact: true` so the gate reports a contacted `"metal"`-role
   pad, or name the gate with `pins[]` (below) instead of routing to it.
+- A backbone on a layer *outside* the metals stack — a `routing.layer_role`
+  (or a net's own `connectivity[].layer_role`) resolving to `"poly"`,
+  `"tap"`, or another non-metal role — whose pin *is* on
+  `ExtractionDeck.metals` (issue #7957): the bare-poly case above, mirrored
+  onto the backbone side. No via joins a non-metal backbone to a metal pad,
+  so before #7957 the leg was drawn as an uncontacted stripe *over* the pad
+  and reported `"routed": true` with `unrouted_nets: []`, while `klt extract`
+  recovered the two terminals as separate clusters. The rejection's `reason`
+  names the fix — route the net on a metal role, or pin it to a port on the
+  backbone's own layer. A genuine same-layer landing (a `"poly"` route to a
+  bare-poly gate) still routes directly. Regression:
+  `tests/test_gen_compose_poly_route_access.py`.
 
   A third check (#469) generalizes both checks above from *reported*
   `ports[]` geometry to the block's **actual drawn** shapes. The two checks
