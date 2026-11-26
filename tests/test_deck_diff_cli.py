@@ -207,6 +207,32 @@ def test_cli_installed_side_reports_hand_edit_as_changed(tmp_path, capsys):
     assert "9.99" in text
 
 
+def test_cli_deck_diff_reports_co4_sramcore_input(tmp_path, capsys):
+    rule_id = "comp.enclosing.contact.1"
+    assert main(["deck", "rules", "--deck", "gf180mcu", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    co4 = next(rule for rule in report["rules"] if rule["id"] == rule_id)
+
+    # Recreate the saved inventory before CO.4 subtracted SramCore.
+    co4["layers"] = ["Comp", "Contact"]
+    co4["layer_refs"] = [
+        {"name": "Comp", "layer": 22, "datatype": 0},
+        {"name": "Contact", "layer": 33, "datatype": 0},
+    ]
+    saved = _save(tmp_path / "before.json", report)
+    assert (
+        main(["deck", "diff", "--from", saved, "--to", "installed", "--format", "json"])
+        == 3
+    )
+    (change,) = json.loads(capsys.readouterr().out)["changed"]
+    assert change["id"] == rule_id
+    assert change["fields"]["layers"]["to"] == ["Comp", "Contact", "SramCore"]
+    assert change["fields"]["layer_refs"]["to"] == [
+        *co4["layer_refs"],
+        {"name": "SramCore", "layer": 108, "datatype": 5},
+    ]
+
+
 def test_cli_installed_side_with_explicit_deck_flag(tmp_path, capsys):
     assert main(["deck", "rules", "--deck", "sky130", "--format", "json"]) == 0
     saved = tmp_path / "sky130.json"

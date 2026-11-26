@@ -21,6 +21,12 @@ from ._digest import content_hash
 from ._report_verify import get_path, hash_check
 from .extract_resistance_graph_caps import RESISTANCE_GRAPH_CAP_FLAGS
 from .extract_spef import ExtractError
+from .runset_deck_vars import (
+    RESERVED_RUNSET_VARS as RESERVED_RUNSET_VARS,
+)
+from .runset_deck_vars import (
+    normalize_deck_vars,
+)
 
 #: ``engine`` value selecting the PDK-runset engine (the ``klt lvs`` spelling).
 RUNSET_ENGINE = "klayout-runset"
@@ -32,31 +38,23 @@ DEFAULT_ENGINE = "klayout"
 #: Every accepted ``--engine`` value, in help/error order.
 ENGINES = (DEFAULT_ENGINE, RUNSET_ENGINE)
 
-#: ``-rd`` names the engine sets itself; ``--deck-var`` may not override them.
-RESERVED_RUNSET_VARS = ("input", "schematic", "report", "top", "topcell")
-
 
 def parse_deck_vars(raw_vars: Any) -> dict[str, str]:
     """Validate and normalise a ``{name: value}`` ``--deck-var`` mapping.
 
-    Mirrors ``lvs_runset._parse_deck_vars``: a reserved name the engine sets
-    itself is an :class:`ExtractError`, and scalars are stringified (``bool``
-    lower-cased, so the runset's own ``bool_check?`` reads it).
+    The policy is :func:`klayout_tools.runset_deck_vars.normalize_deck_vars`,
+    shared with ``klt lvs``; this wrapper raises :class:`ExtractError` with
+    ``klt extract``'s wording (``bool`` lower-cased, so the runset's own
+    ``bool_check?`` reads it).
     """
-    raw_vars = raw_vars or {}
-    if not isinstance(raw_vars, dict):
-        raise ExtractError("deck_vars must be a JSON object of name -> value")
-    deck_vars: dict[str, str] = {}
-    for name, value in raw_vars.items():
-        if name in RESERVED_RUNSET_VARS:
-            raise ExtractError(
-                f"--deck-var may not set '{name}': the {RUNSET_ENGINE} engine "
-                f"sets {', '.join(RESERVED_RUNSET_VARS)} itself"
-            )
-        if isinstance(value, (dict, list)) or value is None:
-            raise ExtractError(f"deck_vars['{name}'] must be a string, number or bool")
-        deck_vars[name] = str(value).lower() if isinstance(value, bool) else str(value)
-    return deck_vars
+    return normalize_deck_vars(
+        raw_vars,
+        error_cls=ExtractError,
+        not_object="deck_vars must be a JSON object of name -> value",
+        reserved=f"--deck-var may not set '{{name}}': the {RUNSET_ENGINE} engine "
+        f"sets {{reserved}} itself",
+        not_scalar="deck_vars['{name}'] must be a string, number or bool",
+    )
 
 
 #: A SPICE parameter name as ``--device-param`` accepts it on the right of ``=``.

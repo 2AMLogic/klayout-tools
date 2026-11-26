@@ -363,6 +363,8 @@ def fetch_to(
     directory = (
         os.path.dirname(os.path.abspath(output)) if isinstance(output, str) else None
     )
+    if directory is not None:
+        os.makedirs(directory, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".klt-artifact-", suffix=".part", dir=directory)
     try:
         with os.fdopen(fd, "wb") as handle:

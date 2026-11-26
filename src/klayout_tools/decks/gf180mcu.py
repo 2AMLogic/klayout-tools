@@ -291,20 +291,16 @@ are always the real, unmodified DRM values:
   be flagged even though the real DRM's ``Vn.2b`` would flag them (the same
   class of context-collapsing approximation as ``nwell.space.1`` below).
 - ``nwell.space.1``: the official ``NW.2a``/``NW.2b`` split Nwell-to-Nwell
-  spacing by net-potential context (``NW.2a`` 0.6um for equipotential wells
-  that may later be merged, ``NW.2b`` 1.4um for wells at different
-  potentials); our engine has no connectivity/netlist information, only
-  geometry, so it cannot distinguish the two contexts. Approximated using
-  the less strict ``NW.2a`` (equipotential) value across the whole ``Nwell``
-  drawn layer — this means two Nwell shapes at genuinely different
-  potentials, spaced between 0.6um and 1.4um apart, will **not** be flagged
-  even though the real DRM's ``NW.2b`` would flag them.
+  spacing by net-potential context (``NW.2a`` 0.6um equipotential,
+  ``NW.2b`` 1.4um at different potentials); with no netlist the engine
+  cannot tell the two apart, so the less strict ``NW.2a`` value covers the
+  whole ``Nwell`` layer: differently-potentiated wells 0.6-1.4um apart are
+  **not** flagged, though the real DRM's ``NW.2b`` would flag them.
 - ``nwell.enclosing.comp.1``: the official ``DF.4d`` scopes to NCOMP (the
   ``comp`` drawn layer where it overlaps ``Nplus``, i.e. specifically an
   Nwell tap) rather than all of ``comp``; approximated as Nwell enclosing
-  the whole ``comp`` drawn layer, since isolating NCOMP requires the same
-  boolean layer expression (``comp AND Nplus``) our engine does not
-  evaluate.
+  the whole ``comp`` drawn layer, since isolating NCOMP needs the boolean
+  layer expression (``comp AND Nplus``) our engine does not evaluate.
 - ``nplus.space.pcomp.1``/``pplus.space.ncomp.1``: the official ``NP.3a``/
   ``PP.3a`` are one of four well-context splits of the same
   implant-to-opposite-diffusion spacing rule -- ``NP.3b``/``NP.3c`` (and
@@ -904,7 +900,10 @@ DECK: list[DrcRule] = [
         other_layer=(33, 0),  # Contact
         check="enclosing",
         threshold_dbu=70,  # 0.07 um
-        # DRM 7.12 Contact, rule "CO.4": "COMP overlap of contact" -> 0.07um
+        # DRM 7.12 Contact, rule "CO.4": "COMP overlap of contact" -> 0.07um.
+        # The PDK deck's CO.4 operand is `contact.not(sramcore)`, both terms
+        # (#7954): a contact inside `SramCore` (108/5) is outside this rule.
+        other_layer_subtract=((108, 5),),
         scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_provenance("7.12 Contact", "CO.4"),
     ),
@@ -2619,6 +2618,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (210, 0): "MVSD",
     (11, 39): "MVPSD",
     (226, 0): "LDMOS_XTOR",
+    (108, 5): "SramCore",
 }
 
 #: Everything this deck knowingly does not transcribe (`coverage.unmodeled_rules`):

@@ -743,21 +743,11 @@ class DrcRule:
     (2) outside Nwell and DNWELL" -- both resolve to the *same* 0.16um
     value, so ``nplus.enclosing.comp.1`` needs no equivalent gate). Setting
     ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``) on
-    ``pplus.enclosing.comp.1`` matches this exactly: a layout that draws
-    neither anywhere has no shape this rule's 0.16um threshold can
-    correctly apply to, so the whole rule is skipped (not silently
-    evaluated at the wrong, stricter threshold) rather than reported
-    against an empty-but-still-flat-0.16um checked region. A layout that
-    draws *either* layer anywhere has each ``PCOMP`` edge portion assigned to
-    its own sub-case by ``extension_spec`` (issue #7969); the gate cannot do
-    that itself, and only decides whether the rule applies at all. What is
-    still approximate is listed in the rule's own comment in
-    ``decks/gf180mcu.py``.
-
-    Defaults to ``None`` (every pre-existing rule), under which this gate
-    never applies and a rule behaves exactly as it did before this field
-    existed -- skipped only by the pre-existing missing-``layer``/
-    ``other_layer``/``derived_layer`` input checks.
+    ``pplus.enclosing.comp.1`` skips the strict check when neither layer
+    is present. If either is present, ``extension_spec`` selects the PCOMP
+    edge portions for the appropriate sub-case (#7969). See the rule in
+    ``decks/gf180mcu.py`` for remaining approximations.
+    Defaults to ``None``: no gate, so a rule skips only on a missing input layer.
 
     ``voltage_independent`` (issue #2369) opts a rule out of
     ``run_drc()``'s ``coverage.voltage_domain_warnings`` gate (issue #552/
@@ -814,6 +804,12 @@ class DrcRule:
     "description"}`` records. ``coverage.approximated_rules`` includes them for
     checked rules, even with zero violations. ``runset_note`` is reported for
     rules that produced a finding. ``None`` declares no approximations.
+
+    ``other_layer_subtract`` (#7954) names layers carved out of the
+    ``other_layer`` region before the check, escape term included: gf180mcu's
+    ``comp.enclosing.contact.1`` checks ``Contact`` minus ``SramCore`` (108/5),
+    the foundry ``contact.not(sramcore)``. An absent layer is an empty region
+    and never skips the rule; without ``other_layer`` it is a ``DrcError``.
     """
 
     id: str
@@ -847,8 +843,9 @@ class DrcRule:
     # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
     runset_note: dict[str, Any] | None = None
     text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
-    extension_spec: Any = None  # `drc_implant_extension.ImplantExtensionSpec` (#7969)
     approximations: list[dict[str, str]] | None = None
+    other_layer_subtract: tuple[tuple[int, int], ...] = ()
+    extension_spec: Any = None  # `drc_implant_extension.ImplantExtensionSpec` (#7969)
 
 
 class UnknownDeckError(Exception):
