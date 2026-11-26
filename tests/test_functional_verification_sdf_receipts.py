@@ -15,10 +15,14 @@ from klayout_tools import signoff
 from klayout_tools.cli import main
 from test_functional_verification import (
     _RESULTS_XML_WITH_SKIP,
+    _SDF_DUT_V,
+    _SDF_TESTBENCH_PY,
     _base_request,
     _sdf_request,
+    _sdf_text,
     _setup_inputs,
     _stub_runner,
+    _write,
     _write_request,
 )
 from test_signoff import STA_MULTI_CORNER_CLEAN_ENVELOPE
@@ -28,16 +32,20 @@ class ReceiptRunner:
     def __init__(self, *, missing=(), build_text="clean\n", test_text="clean\n"):
         self.missing = missing
         self.text = {"build": build_text, "test": test_text}
+        # Every runner step this spy was asked to take, in order (issue #7983).
+        self.calls: list[str] = []
 
     def _capture(self, phase, path):
         if phase not in self.missing:
             Path(path).write_text(self.text[phase])
 
     def build(self, **kwargs):
+        self.calls.append("build")
         Path(kwargs["build_dir"]).mkdir(parents=True, exist_ok=True)
         self._capture("build", kwargs["log_file"])
 
     def test(self, **kwargs):
+        self.calls.append("test")
         self._capture("test", kwargs["log_file"])
         Path(kwargs["results_xml"]).write_text(_RESULTS_XML_WITH_SKIP)
 
@@ -173,3 +181,131 @@ def test_non_sdf_regression_does_not_require_annotation_logs(tmp_path, monkeypat
     item = _tier_item(report, tmp_path, 7)
     assert item["status"] == "unmet"
     assert item["reason"] == "not_post_layout"
+
+
+# -- SDF TIMESCALE versus the model's unit (issue #7983) --------------------
+#
+# Icarus applies each SDF delay in the annotated module's own unit. cocotb's
+# Icarus runner passes `options.timescale` as the compile-time default, which
+# a module's own `timescale` declaration overrides, so only models that
+# declare none take the request's unit.
+
+
+def _unit_request(
+    tmp_path,
+    *,
+    model_timescale: str | None = None,
+    request_timescale: list[str] | None = None,
+    sdf_timescale: str = "1ns",
+    sdf_text: str | None = None,
+    scope: str | None = None,
+) -> str:
+    """A cocotb request annotating ``u_inv``'s ``a -> y`` arc, with the cell
+    model's own `` `timescale `` (``None``: none declared) and the request's
+    ``options.timescale`` (``None``: the ``["1ns", "1ps"]`` default).
+    ``sdf_text`` replaces the SDF and ``scope`` sets ``options.sdf.scope``."""
+    models = _SDF_DUT_V
+    if model_timescale is not None:
+        directive = f"`timescale {model_timescale}\nmodule klt_inv"
+        models = models.replace("module klt_inv", directive)
+    _write(tmp_path / "dly.v", models)
+    _write(tmp_path / "test_dly.py", _SDF_TESTBENCH_PY)
+    if sdf_text is None:
+        header = "(TIMESCALE 1ns)"
+        sdf_text = _sdf_text().replace(header, f"(TIMESCALE {sdf_timescale})")
+    _write(tmp_path / "route.sdf", sdf_text)
+    sdf_option: dict = {"file": "route.sdf"}
+    if scope is not None:
+        sdf_option["scope"] = scope
+    options = {"coverage": False, "sdf": sdf_option}
+    if request_timescale is not None:
+        options["timescale"] = request_timescale
+    return _write_request(
+        tmp_path / "request.json",
+        {
+            "sources": ["dly.v"],
+            "hdl_toplevel": "dly",
+            "testbench": {"module": "test_dly"},
+            "options": options,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_timescale", "request_timescale"),
+    [("1ps/1ps", None), (None, ["1ps", "1ps"])],
+    ids=["model-declares-ps", "request-default-is-ps"],
+)
+def test_conflicting_unit_is_refused_and_never_built(
+    tmp_path, monkeypatch, model_timescale, request_timescale
+):
+    """A matching request default cannot mask a conflicting model
+    declaration: the model's own ``1ps`` wins over the request's ``1ns``, and
+    the refusal arrives before the runner is asked to build anything. With no
+    declaration the request's unit is the model's unit, compared the same
+    way."""
+    request = _unit_request(
+        tmp_path,
+        model_timescale=model_timescale,
+        request_timescale=request_timescale,
+    )
+    runner = ReceiptRunner()
+    _stub_runner(monkeypatch, runner)
+    with pytest.raises(fv.FunctionalVerificationError) as excinfo:
+        fv.run_functional_verification(request)
+    message = str(excinfo.value)
+    assert "the SDF file is in 1ns" in message
+    assert "'u_inv' (CELLTYPE \"klt_inv\", `timescale 1ps)" in message
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    ("request_timescale", "sdf_timescale", "unit"),
+    [(None, "1ns", "1ns"), (["1ps", "1ps"], "1ps", "1ps")],
+    ids=["default-unit", "request-unit"],
+)
+def test_matching_cocotb_run_records_both_units_and_the_original_digest(
+    tmp_path, monkeypatch, request_timescale, sdf_timescale, unit
+):
+    """The matching control: the receipt carries the SDF's ``TIMESCALE``, the
+    unit its delays were applied in, and the digest of the caller's own SDF."""
+    request = _unit_request(
+        tmp_path, request_timescale=request_timescale, sdf_timescale=sdf_timescale
+    )
+    runner = ReceiptRunner()
+    _stub_runner(monkeypatch, runner)
+    report = fv.run_functional_verification(request)
+    annotation = report["environment"]["sdf"]
+    assert annotation["annotated"] is True
+    assert (annotation["timescale"], annotation["time_unit"]) == (unit, unit)
+    assert (
+        annotation["file"]["sha256"]
+        == "sha256:" + hashlib.sha256((tmp_path / "route.sdf").read_bytes()).hexdigest()
+    )
+    assert runner.calls == ["build", "test"]
+
+
+def test_delay_outside_any_cell_under_an_unresolvable_scope_is_refused(
+    tmp_path, monkeypatch
+):
+    """The annotation root is where ``options.sdf.scope`` points; when that
+    names no instance in the sources, the root's unit cannot be established."""
+    request = _unit_request(
+        tmp_path,
+        sdf_text=(
+            "(DELAYFILE\n"
+            '  (SDFVERSION "3.0")\n'
+            "  (TIMESCALE 1ns)\n"
+            "  (DELAY (ABSOLUTE (INTERCONNECT a u_inv.a (1:1:1))))\n"
+            ")\n"
+        ),
+        scope="no_such_instance",
+    )
+    runner = ReceiptRunner()
+    _stub_runner(monkeypatch, runner)
+    with pytest.raises(fv.FunctionalVerificationError) as excinfo:
+        fv.run_functional_verification(request)
+    message = str(excinfo.value)
+    assert "the DELAY clauses outside any CELL (the annotation root)" in message
+    assert "options.sdf.scope does not resolve" in message
+    assert runner.calls == []

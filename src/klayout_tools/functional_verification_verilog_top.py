@@ -13,7 +13,6 @@ import os
 import subprocess
 from typing import Any
 
-from ._artifact_envelope import RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._verilog_top import plusargs, require_module_declared
@@ -268,7 +267,7 @@ def _run_verilog_top(
     sdf_renamed: list[dict[str, str]],
     source_defines: dict[str, Any],
     tools: list[dict[str, Any]],
-    repo_root: RepoRoot,
+    repo_root: str | None,
 ) -> dict[str, Any]:
     """Build the bench with ``iverilog``, run it with ``vvp`` and assemble the
     ordinary report (issue #4083). No cocotb is involved. ``repo_root`` is the
@@ -373,19 +372,13 @@ def _run_verilog_top(
                 "sdf": (
                     None
                     if sdf is None
-                    else {
-                        # Retyped to the hashed envelope (issue #5784).
-                        "file": _hashed_path_envelope(sdf["file"], repo_root=repo_root),
-                        "corner": sdf["corner"],
-                        "entries": sdf["entries"],
-                        **({"scope": sdf["scope"]} if "scope" in sdf else {}),
-                        "annotated": True,
-                        "partial": bool(sdf_dropped_counts),
-                        "dropped": _fv._sdf_dropped_report(
-                            sdf_dropped_counts, sdf_pre_dropped_arcs
-                        ),
-                        **_fv._sdf_renamed_report(sdf_renamed),
-                    }
+                    else _fv._sdf_annotation_report(
+                        sdf,
+                        repo_root,
+                        sdf_dropped_counts,
+                        sdf_pre_dropped_arcs,
+                        sdf_renamed,
+                    )
                 ),
             },
         }
