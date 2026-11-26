@@ -115,9 +115,10 @@ non-passing record by signature. There are seven:
 | `7384e3a1a7` | drc | findings | 2 rules | 1 |
 | `aa96635c2d` | drc | findings | 2 rules | 1 |
 
-The two timeout clusters are not defects of a kind. The extract timeouts
-match a known, since-fixed defect (#5893, see below). The DRC timeouts are a
-runtime observation.
+The triage tool groups timeouts by stage. All 43 extraction timeouts share
+the same signature because each run reached the 300-second limit. The
+signature does not identify the operation that consumed the time. The same
+grouping applies to the 19 DRC timeouts.
 
 A DRC finding alone is not evidence of a tool bug. The eight designs with
 findings share seven rules:
@@ -159,10 +160,13 @@ whose original launch Spot reclaimed: `tt_um_74hct00` (96),
 on six of the same seven rules. They were not compared with the foundry
 decks, so this report does not attribute them.
 
-`klt extract` timed out on 43 of the 82 designs. The worker's `klt 0.9.0`
-predates the extraction performance fix in #6081, which closed #5893. These
-timeouts are recorded as that known defect, not as a new one, and they say
-nothing about current `main`.
+Two of the 43 extraction timeouts have separate before-and-after measurements
+on `ttgf0p2`. The fix for #5893 reduced extraction on
+`tt_um_MATTHIAS_M_PAL_TOP_WRAPPER` from 2,262.7 s to 83.6 s. On
+`tt_um_2048_vga_game`, extraction went from a 300 s timeout to finishing in
+112.0 s. The other 41 slots reached the 300 s limit on the fleet's
+`klt 0.9.0` image. Their causes remain unverified.
+[Measurements in PR #6081](https://github.com/2AMLogic/klayout-tools/pull/6081)
 
 ## Observations that are not confirmed tool defects
 
@@ -319,10 +323,10 @@ shows its reason in the last column.
 
 Each row is one paid launch. A logical shard whose original launch was
 reclaimed was resubmitted once under a new group ID, from the same commit
-and source archive. Observed seconds run from the harness start to the job's
-final status.
+and source archive. Harness seconds run from harness start to final job
+status and exclude instance startup and cleanup.
 
-| Logical shard | Job | Instance type, AZ | Harness start (UTC) | Observed s | Result |
+| Logical shard | Job | Instance type, AZ | Harness start (UTC) | Harness s | Result |
 | --- | --- | --- | --- | ---: | --- |
 | `0/5` | `gf180-5084-736501e9ab6f-0-s00` | `m6i.4xlarge`, `us-east-1f` | 2026-11-25 08:25 | 1,565 | reclaimed by Spot, no output |
 | `0/5` | `gf180-5084-736501e9ab6f-r0-s00` | `m6i.4xlarge`, `us-east-1f` | 2026-11-26 11:29 | 4,434 | done, exit 0, 46 records |
@@ -332,21 +336,25 @@ final status.
 | `3/5` | `gf180-5084-736501e9ab6f-3-s00` | `m6i.4xlarge`, `us-east-1f` | 2026-11-25 12:19 | 3,613 | done, exit 0, 42 records |
 | `4/5` | `gf180-5084-736501e9ab6f-4-s00` | `m7i.4xlarge`, `us-east-1a` | 2026-11-25 07:15 | 3,899 | done, exit 0, 40 records |
 
-Cost is an estimate, not a bill. The submit role cannot read Cost Explorer,
-so each launch is priced as its observed interval at the on-demand rate for
-the instance type, from `BATCH_ONDEMAND_RATES` in the 2am fleet
-configuration. That is a ceiling for a Spot instance. $4.47 covers
-EC2 compute for all seven launches by that method. Instance boot and
-shutdown fall outside the observed intervals and are not counted; the two
-launches checked started their harness about 30 seconds after EC2 launch.
+The conservative estimated bound for all seven launches was **$17.86**,
+within the **$20** campaign cap. The submit role could not read Cost
+Explorer, so the final billed amount is unknown.
 
-Storage and transfer add under $0.20. The seven job folders hold
-0.58 GiB for 30 days, and about 0.5 GB of shard output was
-downloaded in all. The campaign cap was $20.
+For the five original launches, the ledger priced each interval from EC2
+launch through confirmed termination at the observed Spot rate, for an
+estimated **$1.01091** in compute. Using on-demand rates for those same
+intervals and including disk, public IPv4, retained storage and transfer
+gave a **$4.95** bound for those five.
+[Original launch ledger](https://github.com/2AMLogic/klayout-tools/issues/5084#issuecomment-7156986590)
 
-Spot prices for the two instance types used ranged from $0.20 to $0.82 per
-hour during the campaign, so the billed compute is expected to be well
-below the ceiling.
+The November 25 pre-submit estimate included those five launches, both
+replacements and shared storage and transfer reserves. It allowed 4.25 hours
+per replacement at up to $1.428/hour for EC2, including the least favorable
+cleanup timing. That projection gives the $17.86 campaign bound. Both
+replacements were confirmed terminated within their allowances.
+[Campaign projection](https://github.com/2AMLogic/klayout-tools/issues/5084)
+· [Replacement admission](https://github.com/2AMLogic/klayout-tools/issues/5084#issuecomment-7190807270)
+· [Termination record](https://github.com/2AMLogic/klayout-tools/issues/5084#issuecomment-7194006899)
 
 Spot reclaimed two of the seven launches, both on November 25 in the
 `m6i.4xlarge` / `us-east-1f` pool, at 1,565 s and 263 s. Neither had written
@@ -379,6 +387,7 @@ python3 scripts/tt_corpus_batch.py collect --commit "$commit" --count 5 \
   signoff runset, and a pass here is not a signoff claim.
 - Every measurement is of `klt 0.9.0` on KLayout `0.30.13`. Current `main`
   has changed since, including the extraction performance fix in #6081.
-- Cost figures are estimates from observed intervals and published rates.
+- The campaign cost bound combines observed instance lifetimes for the five
+  original launches with reserved lifetimes for the two replacements.
 - The raw outputs live in the fleet's job folders, which expire after 30
   days. The per-design table above is the durable record.
