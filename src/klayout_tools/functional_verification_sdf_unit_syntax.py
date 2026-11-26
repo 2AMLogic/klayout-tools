@@ -10,8 +10,10 @@ from .functional_verification_base import FunctionalVerificationError
 #: A time unit with its ``1``/``10``/``100`` multiplier, in any spacing or
 #: case, optionally followed by a precision: a Verilog `` `timescale ``
 #: argument, or an SDF header written ``(TIMESCALE 1ns/1ps)``.
+_TIME_SUFFIX = r"(?:ms|us|ns|ps|fs|s)"
 _TIME_UNIT_RE = re.compile(
-    r"0*([1-9][0-9]*)\s*(ms|us|ns|ps|fs|s)(?:\s*/\s*0*[1-9][0-9]*\s*(?:ms|us|ns|ps|fs|s))?",
+    rf"0*([1-9][0-9]*)(?:\.0+)?\s*({_TIME_SUFFIX})"
+    rf"(?:\s*/\s*0*[1-9][0-9]*(?:\.0+)?\s*{_TIME_SUFFIX})?",
     re.IGNORECASE,
 )
 

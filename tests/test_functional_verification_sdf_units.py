@@ -412,7 +412,7 @@ def test_actual_sdf_header_sets_the_unit(tmp_path, monkeypatch, header):
     assert "1000x too large" in _refused(tmp_path, monkeypatch, request)
 
 
-@pytest.mark.parametrize("invalid", ["0ps", "1ns extra"])
+@pytest.mark.parametrize("invalid", ["0ps", "1.5 ns", "1ns extra"])
 def test_invalid_multiplier_or_trailing_text_is_a_typed_refusal(
     tmp_path, monkeypatch, invalid
 ):
@@ -450,16 +450,17 @@ def test_matching_preprocessed_attributed_model_runs_on_icarus(tmp_path):
     assert (annotation["timescale"], annotation["time_unit"]) == ("1ps", "1ps")
 
 
-def test_split_sdf_keeps_the_actual_header_unit(tmp_path):
+@pytest.mark.parametrize("unit", ["1ps", "1.00 ps"])
+def test_split_sdf_keeps_the_actual_header_unit(tmp_path, unit):
     # The vector endpoint sends this entry to the second annotation file.
     path = tmp_path / "split.sdf"
     path.write_text(
         _sdf("1ps", _ROOT_CELL.replace("a u1.A", "a[0] u1.A")).replace(
-            "(TIMESCALE 1ps)", "/* (TIMESCALE 1ns) */ ( TiMeScAlE 1ps)"
+            "(TIMESCALE 1ps)", f"/* (TIMESCALE 1ns) */ ( TiMeScAlE {unit})"
         )
     )
     original, deferred = sdf._split_sdf_bus_port_interconnects(str(path), {"a"})
-    assert "( TiMeScAlE 1ps)" in original
+    assert f"( TiMeScAlE {unit})" in original
     assert "(TIMESCALE 1ps)" in deferred
 
 

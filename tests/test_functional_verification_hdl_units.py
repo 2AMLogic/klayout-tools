@@ -7,6 +7,7 @@ import pytest
 
 from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
 from klayout_tools.functional_verification import run_functional_verification
+from klayout_tools.functional_verification_base import FunctionalVerificationError
 from klayout_tools.functional_verification_hdl_units import _verilog_time_units
 from test_functional_verification_verilog_top import _stage_sdf_units
 
@@ -26,6 +27,18 @@ def test_matching_sdf_inherits_compilation_unit(tmp_path):
 @pytest.mark.parametrize(
     "flags",
     [
+        ["-v"],
+        *[
+            [f"-g{prefix}{feature}"]
+            for feature in (
+                "strict-ca-eval",
+                "shared-loop-index",
+                "io-range-error",
+                "xtypes",
+                "icarus-misc",
+            )
+            for prefix in ("", "no-")
+        ],
         ["-gassertions"],
         ["-gsupported-assertions"],
         ["-gno-assertions"],
@@ -66,3 +79,45 @@ def test_resetall_restores_compilation_declaration():
         "`resetall\nmodule b; endmodule",
     ]
     assert _verilog_time_units(texts, "100ns") == {"a": "1ns", "b": "10ps"}
+
+
+@needs_icarus
+@pytest.mark.parametrize(
+    "scale,delay", [("1", "0.5"), ("10", "0.05"), ("100", "0.005")]
+)
+def test_matching_decimal_sdf_timescale(tmp_path, scale, delay):
+    request = _stage_sdf_units(
+        tmp_path,
+        sdf_timescale=f"{scale}.0 ns",
+        leaf_timescale=f"{scale}ns/1ps",
+        delay=delay,
+    )
+    report = run_functional_verification(request)
+    sdf = report["environment"]["sdf"]
+    assert report["status"] == "pass" and sdf["annotated"]
+    assert sdf["timescale"] == sdf["time_unit"] == f"{scale}ns"
+
+
+@needs_icarus
+@pytest.mark.parametrize("sdf_unit", ["1ns", "1ps"])
+def test_repeated_module_timeunit(tmp_path, sdf_unit):
+    request = _stage_sdf_units(tmp_path, sdf_timescale=sdf_unit)
+    leaf = tmp_path / "and_cell.v"
+    code = leaf.read_text().replace("`timescale 1ns/1ps", "`timescale 100ps/1ps")
+    leaf.write_text(
+        code.replace("  and (", "  timeunit 1ns/1ps;\n  and (").replace(
+            "  specify", "  timeunit 1ns/1ps;\n  specify"
+        )
+    )
+    if sdf_unit == "1ps":
+        with pytest.raises(FunctionalVerificationError, match="1000x too large"):
+            run_functional_verification(request)
+    else:
+        report = run_functional_verification(request)
+        assert report["status"] == "pass"
+        assert report["environment"]["sdf"]["time_unit"] == sdf_unit
+
+
+def test_disagreeing_module_redeclaration_keeps_unit_unknown():
+    text = "module leaf; timeunit 1ns/1ps; wire x; timeunit 10ps; endmodule"
+    assert _verilog_time_units([text], "1ns") == {"leaf": None}

@@ -32,6 +32,25 @@ def _hdl_code(text: str) -> str:
     return _HDL_LITERAL.sub(lambda m: m[0] if m[0][0] == "\\" else " ", text)
 
 
+# Icarus accepts both forms of each of these feature switches. They leave
+# the compilation-unit model intact. Include selection is replayed by -E.
+_UNIT_NEUTRAL_SWITCHES = {
+    f"-g{prefix}{feature}"
+    for prefix in ("", "no-")
+    for feature in (
+        "assertions",
+        "icarus-misc",
+        "io-range-error",
+        "relative-include",
+        "shared-loop-index",
+        "std-include",
+        "strict-ca-eval",
+        "strict-expr-width",
+        "xtypes",
+    )
+}
+
+
 def _check_build_args(args: list[str]) -> None:
     """Accept options that preserve the unit scan, refuse inputs with unmodeled
     compilation-unit semantics, such as -u or an additional command file."""
@@ -43,20 +62,15 @@ def _check_build_args(args: list[str]) -> None:
         elif arg == "-T":
             if next(operands, None) in ("min", "typ", "max"):
                 continue
-        elif arg.startswith(("-D", "-I", "-W")) or arg in (
+        elif arg in _UNIT_NEUTRAL_SWITCHES or arg.startswith(("-D", "-I", "-W")):
+            continue
+        elif arg in (
+            "-v",
             "-g2012",
             "-g2005-sv",
-            "-grelative-include",
-            "-gno-relative-include",
-            "-gstd-include",
-            "-gno-std-include",
             "-gspecify",
             "-ginterconnect",
-            "-gassertions",
             "-gsupported-assertions",
-            "-gno-assertions",
-            "-gstrict-expr-width",
-            "-gno-strict-expr-width",
             "-Tmin",
             "-Ttyp",
             "-Tmax",
@@ -148,11 +162,18 @@ def _compilation_default(texts: list[str], compiler_default: str | None) -> str 
     return compiler_default
 
 
-def _local_unit(text: str, start: int, token: re.Match[str]) -> str | None:
+def _local_unit(
+    text: str, start: int, token: re.Match[str], current: str | None
+) -> str | None:
+    declared = _declared_unit(text, token.end())
+    # A later declaration can repeat a module's unit. If it agrees, even
+    # a declaration in a nested scope leaves the established unit intact.
+    if declared == current:
+        return current
     header = _MODULE_HEADER.match(text, start)
     if header is None or header.end() != token.start():
         return None
-    return _declared_unit(text, token.end())
+    return declared
 
 
 def _verilog_time_units(
@@ -177,5 +198,5 @@ def _verilog_time_units(
             elif token["end"]:
                 module = None
             elif token["local"] and module is not None:
-                units[module] = _local_unit(text, header_start, token)
+                units[module] = _local_unit(text, header_start, token, units[module])
     return units
