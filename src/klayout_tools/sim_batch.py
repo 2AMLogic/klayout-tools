@@ -357,12 +357,10 @@ class BatchConfig:
         fields: dict[str, Any] = {}
         if self.image_profile is not None:
             fields["image_profile"] = self.image_profile
-        limit = self.max_launch_attempts
         if shards is not None:
-            limits = {(entry or {}).get("max_launch_attempts") for entry in shards}
-            limit = limits.pop() if len(limits) == 1 else None
-        if limit is not None:
-            fields["max_launch_attempts"] = limit
+            _batch_common.set_shared_launch_limit(fields, shards)
+        elif self.max_launch_attempts is not None:
+            fields["max_launch_attempts"] = self.max_launch_attempts
         if include_concurrency and self.max_concurrent_jobs is not None:
             fields["max_concurrent_jobs"] = self.max_concurrent_jobs
         return fields

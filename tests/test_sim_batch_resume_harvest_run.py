@@ -31,7 +31,9 @@ from test_sim_batch import (
 pytestmark = pytest.mark.usefixtures("bare_name_ngspice_resolution")
 
 
-def _harvest_run_fixture(tmp_path, monkeypatch, *, fail_second_shard):
+def _harvest_run_fixture(
+    tmp_path, monkeypatch, *, fail_second_shard, max_launch_attempts=None
+):
     """A run_sim-level sharded batch run over 4 units / 2 hosts against the
     fake S3 transport, sharing one artifacts dir. The second shard's job
     reports terminally failed when `fail_second_shard` (exit code 1), so the
@@ -53,6 +55,8 @@ def _harvest_run_fixture(tmp_path, monkeypatch, *, fail_second_shard):
         return inner(argv, timeout_s)
 
     def _register_shard_report(argv, timeout_s):
+        if "launch" in argv and "--apply" not in argv:
+            return fake_completed(f"launch attempts: 0 of {max_launch_attempts}")
         captured = uploaded_request_of(argv)
         if captured is not None:
             document, job_id = captured
@@ -76,6 +80,8 @@ def _harvest_run_fixture(tmp_path, monkeypatch, *, fail_second_shard):
         tmp_path,
         corners={"supply_v": {"vdd": [1.6, 1.8, 2.0, 2.2]}, "temperature_c": [27]},
     )
+    if max_launch_attempts is not None:
+        request["batch"]["max_launch_attempts"] = max_launch_attempts
     path = _write_request(tmp_path, request)
     artifacts = tmp_path / "artifacts"
 
@@ -91,7 +97,7 @@ def test_run_sim_resume_harvests_a_retained_shard_map(tmp_path, monkeypatch, cap
     shard map -- reusing the collected shard's units, submitting only the
     outstanding ones, and merging the full matrix back in order."""
     runner, run, submitted, artifacts = _harvest_run_fixture(
-        tmp_path, monkeypatch, fail_second_shard=True
+        tmp_path, monkeypatch, fail_second_shard=True, max_launch_attempts=2
     )
     first = run()
     ids = [c["corner_id"] for c in first["corners"]]
@@ -126,6 +132,10 @@ def test_run_sim_resume_harvests_a_retained_shard_map(tmp_path, monkeypatch, cap
     assert second["environment"]["resume"]["resumed_corners"] == 2
     assert second["environment"]["models_lib_sha256_scope"] == "client"
     fleet = second["environment"]["remote"]["fleet"]
+    # The fake serves a legacy uncapped contract for the recovered job.
+    assert "max_launch_attempts" not in fleet[0]
+    assert [entry["max_launch_attempts"] for entry in fleet[1:]] == [2, 2]
+    assert "max_launch_attempts" not in second["environment"]["remote"]
     summary = second["environment"]["remote"]["run"]
     assert summary["declared_hosts"] == 2
     assert summary["rounds"] == 2
@@ -161,17 +171,21 @@ def test_run_sim_resume_with_every_shard_done_dispatches_nothing(
     recorded job is terminal -- so the harvest covers the whole matrix, the
     dispatch set is empty, and the rerun is equivalent to a plain attach."""
     runner, run, submitted, artifacts = _harvest_run_fixture(
-        tmp_path, monkeypatch, fail_second_shard=True
+        tmp_path, monkeypatch, fail_second_shard=True, max_launch_attempts=2
     )
     first = run()
     ids = [c["corner_id"] for c in first["corners"]]
     lost_ids = {c["corner_id"] for c in first["corners"] if c["status"] != "pass"}
     assert len(lost_ids) == 2
     manifest_path = artifacts / sb.BATCH_SHARDS_FILENAME
+    shards = json.loads(manifest_path.read_text())["shards"]
+    for shard in shards:
+        runner.queue(
+            f"/{shard['job_id']}/job.json -",
+            fake_completed(json.dumps({"cmd": "true", "max_launch_attempts": 2})),
+        )
     failed_job = next(
-        entry["job_id"]
-        for entry in json.loads(manifest_path.read_text())["shards"]
-        if entry["state"] != "collected"
+        entry["job_id"] for entry in shards if entry["state"] != "collected"
     )
     # The interrupted shard's job later finished on the fleet (the fleet has
     # no cancel): its status now reads done, persistently.
@@ -203,6 +217,8 @@ def test_run_sim_resume_with_every_shard_done_dispatches_nothing(
     assert second["environment"]["resume"]["resumed_corners"] == 4
     assert second["environment"]["models_lib_sha256_scope"] == "client"
     fleet = second["environment"]["remote"]["fleet"]
+    assert [entry["max_launch_attempts"] for entry in fleet] == [2, 2]
+    assert second["environment"]["remote"]["max_launch_attempts"] == 2
     assert [entry["job_id"] for entry in fleet] == [
         entry["job_id"] for entry in first["environment"]["remote"]["fleet"]
     ]

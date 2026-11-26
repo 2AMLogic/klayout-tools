@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from . import sim_batch
+from . import _batch_common, sim_batch
 from .sim_batch_shards import load_resume_shard_map
 
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
@@ -330,7 +330,11 @@ def harvest_resume_shards(
     if collected_indexes:
         _mark_map_collected(path, document, collected_indexes)
     _report_harvest(corners_out, harvested_indexes, path)
-    return corners_out, engine_version, {"fleet": fleet} if fleet else None
+    if not fleet:
+        return corners_out, engine_version, None
+    harvested = {"fleet": fleet}
+    _batch_common.set_shared_launch_limit(harvested, fleet)
+    return corners_out, engine_version, harvested
 
 
 def harvest_resume_shard_map(
@@ -468,6 +472,7 @@ def merge_resume_environment(
         for entry in harvested["fleet"]
         if not (isinstance(entry, dict) and entry.get("job_id") in dispatched_jobs)
     ] + dispatched_fleet
+    _batch_common.set_shared_launch_limit(result, result["fleet"])
     return result
 
 
