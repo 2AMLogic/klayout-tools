@@ -1483,7 +1483,7 @@ since via-drop only ever applies between two declared routing-metal levels.
 
 One case draws a *contact* ladder down to a deck diffusion-class role instead
 of declining to act, one case draws a multi-level *ladder* between two metal
-levels, and one case is rejected outright, reporting the net unroutable
+levels, and two cases are rejected outright, reporting the net unroutable
 rather than drawing something that does not connect:
 
 - A pin reported on a deck **diffusion-class role** — `ExtractionDeck.active`
@@ -1566,6 +1566,18 @@ rather than drawing something that does not connect:
   and the two ways forward — re-run the block's generator with
   `params.gate_contact: true` so the gate reports a contacted `"metal"`-role
   pad, or name the gate with `pins[]` (below) instead of routing to it.
+- A backbone on a layer *outside* the metals stack, such as `"poly"` or
+  `"tap"`, whose pin *is* on `ExtractionDeck.metals` (issue #7957).
+  No via joins a non-metal backbone to a metal pad, so before #7957 the leg
+  was drawn as an uncontacted stripe *over* the pad and reported `"routed": true` with `unrouted_nets: []`, while `klt extract`
+  recovered the two terminals as separate clusters. The rejection's `reason`
+  identifies the effective backbone layer and the pin layer. Set the applicable
+  `connectivity[].legs[].layer_role` or `connectivity[].layer_role` override
+  to a metal role, or clear it to inherit a metal role. If the leg inherits
+  `routing.layer_role`, change that default to a metal role. Alternatively,
+  select a port on the backbone's own layer. A genuine same-layer landing
+  (a `"poly"` route to a bare-poly gate) still routes directly. Regression:
+  `tests/test_gen_compose_poly_route_access.py`.
 
   A third check (#469) generalizes both checks above from *reported*
   `ports[]` geometry to the block's **actual drawn** shapes. The two checks
@@ -3290,7 +3302,12 @@ snapped to the manufacturing grid; points are enumerated per net polygon, so lon
 nets are fine, and a polygon the grid misses still gets one fallback point near its centre) and `max_candidates` (default 20000; a hit
 cap adds a `warnings[]` entry and `truncated: true`). When no point is legal
 the request fails (exit 1) with the per-category rejection counts and example
-candidates.
+candidates. An `up_to` role outside the metals stack (`"poly"`, `"tap"`) is
+rejected too, since no via ladder reaches the label's metal from it (issue
+#7957); the error names the effective `access.up_to` and tells you to set
+`ports_from_labels.access.up_to`, or the name's own `access.up_to`, to a metal
+role. `routing.layer_role` and `connectivity[]` overrides do not affect this
+search.
 
 **Cut arrays (`via_array`).** `[rows, cols]` makes every hop of the ladder a
 rows x cols cut array centred on the landing point, at a pitch of the cut side
