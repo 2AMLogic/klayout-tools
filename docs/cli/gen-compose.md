@@ -1474,17 +1474,12 @@ targeted emitters (`Q0_E`/`Q1_E`/`Q2_E`) into one node — every other emitter
 and every base tie stays its own distinct node, matching the hand-drawn `klt
 draw` workaround #454 was filed to replace.
 
-A pin whose own layer is not a member of the resolved family's
-`ExtractionDeck.metals` stack, but which a `routing.layer_role` shape already
-covers at that position (e.g. a guard ring's ordinary `TAP_*` port, always
-reported on the metals-stack `"metal"` role itself), is left exactly as
-before #454 — drawn directly on `routing.layer_role`, no via-drop attempted,
-since via-drop only ever applies between two declared routing-metal levels.
-
-One case draws a *contact* ladder down to a deck diffusion-class role instead
-of declining to act, one case draws a multi-level *ladder* between two metal
-levels, and one case is rejected outright, reporting the net unroutable
-rather than drawing something that does not connect:
+A route can land directly on a pin whose declared layer matches the
+backbone. For example, an ordinary guard-ring `TAP_*` port on `"metal"`
+accepts a `"metal"` route. When the layers differ, the router needs a
+supported via or contact path. A sky130A `cap_top_plate` or
+`cap2_top_plate` port has no supported drop from a routing metal, so both
+ordinary compose and layer suggestion report that leg as open.
 
 - A pin reported on a deck **diffusion-class role** — `ExtractionDeck.active`
   or `ExtractionDeck.tap` (issue #2312 added the latter; on a family whose

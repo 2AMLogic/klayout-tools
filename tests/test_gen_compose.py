@@ -7279,18 +7279,11 @@ def test_resolve_via_drop_layer_same_layer_needs_no_drop():
     assert error is None
 
 
-def test_resolve_via_drop_layer_unrelated_role_needs_no_drop():
-    # A role that is neither a metals-stack level, nor the deck's poly
-    # layer, nor a diffusion-class (`active`/`tap`) layer -- via-drop only
-    # ever applies between two declared routing-metal levels, so this keeps
-    # the pre-#454 "draw directly on route_layer" behavior rather than being
-    # treated as "needs a drop but none found". sky130's `nwell` (64/20) is
-    # such a layer: no `klt gen` generator reports a port on it, but the
-    # deck models it.
+def test_resolve_via_drop_layer_rejects_an_unsupported_pin_layer():
     deck = get_extraction_deck("sky130")
     ladder, error = _resolve_via_drop_layer(deck, (67, 20), deck.nwell)
     assert ladder is None
-    assert error is None
+    assert error is not None and "no supported via-drop" in error
 
 
 def test_resolve_via_drop_layer_tap_role_port_resolves_a_contact_hop():

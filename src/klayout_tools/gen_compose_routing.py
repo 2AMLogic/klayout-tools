@@ -213,8 +213,7 @@ def _resolve_via_drop_layer(
 
     Returns ``(ladder, error)``:
 
-    * ``(None, None)`` -- draw directly when the layers match, or when
-      a metal route reaches a legacy port with no modeled via convention.
+    * ``(None, None)`` -- draw directly when the layers match.
     * ``(ladder, None)`` -- a drop is needed and fully resolved. ``ladder`` is
       a non-empty, ordered tuple of :data:`_ViaDropHop` entries -- one per via
       the backbone must drop through between ``route_layer`` and
@@ -233,11 +232,8 @@ def _resolve_via_drop_layer(
       licon/comp-contact that lands on ``deck.metals[0]``), followed by the
       ordinary metals-stack hops up to ``route_layer`` -- a real contact
       reaching the diffusion, not just a metal stub sitting near it.
-    * ``(None, reason)`` -- a drop is needed but not resolvable (the deck
-      declares no via for one of the hops the ladder needs, or the pin sits
-      on the deck's bare ``poly`` layer, which no via in the metals stack
-      reaches) -- the caller reports the net unroutable rather than drawing a
-      disconnected short.
+    * ``(None, reason)`` -- the router has no supported via path between the
+      layers. The caller reports the leg as unroutable.
 
     That last case is issue #492: before it, a metal-role backbone ending on
     a bare-poly gate port fell into the ``(None, None)`` "unrelated role,
@@ -309,7 +305,7 @@ def _resolve_via_drop_layer(
             # recognises a substrate/well tie from (`extract.py`'s
             # `tap_substrate`) -- and `deck.contact` lands on it exactly as
             # it lands on `deck.active`. Before #2312 a `deck.tap` port fell
-            # through to the "unrelated role, nothing to do" branch below,
+            # through to the old "unrelated role, nothing to do" branch,
             # i.e. the identical uncontacted-stub failure #1894 fixed for
             # `deck.active`. On a family whose `tap` role *is* its `active`
             # role (gf180mcu, both `(22, 0)`) the two tests coincide and
@@ -340,11 +336,10 @@ def _resolve_via_drop_layer(
                     )
                 )
             return tuple(contact_ladder), None
-        # Any other non-metals-stack, non-diffusion-class role (no current
-        # `klt gen` generator reports a port this way, but a deck may model
-        # such a layer) keeps the pre-#454 behavior: drawn directly on
-        # route_layer, no via.
-        return None, None
+        return None, (
+            "this pin is outside the deck's metal stack and the router has "
+            "no supported via-drop to its layer"
+        )
     lo, hi = (route_idx, port_idx) if route_idx < port_idx else (port_idx, route_idx)
     ladder: list[_ViaDropHop] = []
     for via_index in range(lo, hi):
@@ -1234,11 +1229,8 @@ def _leg_plane_clears_ring(
        :func:`_ring_conductor_layers` *and* be separated from it by at least
        one via in the deck's own ``metals``/``vias`` stack, resolved through
        the same :func:`_resolve_via_drop_layer` the router's via-drop check
-       already uses. A pair the deck cannot resolve at all -- ``(None,
-       reason)`` (no via declared for a needed hop, a bare-poly ring), or
-       ``(None, None)`` (the backbone is not on a metals-stack level, or the
-       ring's layer is not a deck-known role) -- is *not* evidence of
-       isolation, so it falls back to rejecting exactly as before.
+       already uses. If the router cannot resolve a ladder between the
+       layers, this check cannot establish isolation and rejects the leg.
     2. **The via-drop landing pads.** A cleared backbone is not enough: the
        ladder that carries each endpoint down to its own pad
        (:func:`_resolve_via_drop_layer` again) lands an intermediate pad on
@@ -3154,11 +3146,9 @@ def _resolve_via_drops(
     and an ``extraction_deck`` are given (pre-#454 callers that pass neither
     draw exactly as before, no via-drop). For each endpoint (``(pin, port,
     position)``) whose own reported layer differs from the route layer,
-    either resolve the connecting via-drop ladder (drop needed and available
-    -- possibly more than one via, issue #1567), find nothing to do (not a
-    metals-stack level -- an unrelated role, unchanged legacy behavior), or
-    report ``reason`` (a drop is needed but not resolvable; the caller rejects
-    the whole net as unroutable). Uses ``effective_route_layer`` (#1168): when
+    either resolve the connecting via-drop ladder (possibly more than one
+    via, issue #1567) or report why the leg is unroutable.
+    Uses ``effective_route_layer`` (#1168): when
     the same-layer-short retry switched this leg to
     ``cross_block_route_layer``, every endpoint whose own pad sits on the
     *primary* ``route_layer`` now needs exactly the drop this already knows
