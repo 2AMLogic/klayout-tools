@@ -219,7 +219,7 @@ def run_split(
             manifest.mark(index, "collected")
             state = "collected" if report.get("status") == "pass" else "failed"
         except sim_batch.BatchError as exc:
-            if exc.code == sim_batch.LAUNCH_LIMIT_UNSUPPORTED:
+            if exc.code in sim_batch.UNLAUNCHED_CODES:
                 manifest.unlaunch(index)
             report = _failure_report(
                 worker,
@@ -304,7 +304,6 @@ def attach_split(
     reports: list[dict[str, Any]] = []
     shards: list[dict[str, Any]] = []
     unfinished: list[dict[str, Any]] = []
-    extra: dict[str, Any] = {}
     for index, ids in enumerate(slices):
         entry = entries[index]
         job_id = str(entry["job_id"])
@@ -326,9 +325,13 @@ def attach_split(
             unfinished.append(
                 {"index": index, "job_id": job_id, "state": state, "unit_ids": ids}
             )
-        extra = config.launch_environment()
         reports.append(report)
-        shards.append(_shard_summary(index, ids, job_id, state))
+        summary = _shard_summary(index, ids, job_id, state)
+        remote = report["environment"]["remote"]
+        if "max_launch_attempts" in remote:
+            summary["max_launch_attempts"] = remote["max_launch_attempts"]
+        shards.append(summary)
+    extra = config.launch_environment(shards=shards)
     if unfinished:
         extra.update(unfinished_shards=unfinished, resumable=True)
     return merge_reports(
@@ -377,7 +380,8 @@ def _attach_shard(
             ),
             "failed",
         )
-    report = sim_decks._collect_decks_batch(config, job_id, worker, outdir=outdir)
+    submitted = sim_batch._submitted_job_config(config, job_id)
+    report = sim_decks._collect_decks_batch(submitted, job_id, worker, outdir=outdir)
     return report, ("collected" if report.get("status") == "pass" else "failed")
 
 
@@ -459,8 +463,9 @@ def _attach_single_job(
                 "bucket/profile/region, or expired)",
                 code=sim_batch.BATCH_UNKNOWN_JOB_CODE,
             )
+        submitted = sim_batch._submitted_job_config(config, job_id)
         report = sim_decks._collect_decks_batch(
-            config, job_id, worker_request, outdir=outdir
+            submitted, job_id, worker_request, outdir=outdir
         )
     except sim_batch.BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc

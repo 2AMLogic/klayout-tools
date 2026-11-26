@@ -38,6 +38,14 @@ def fake_completed(
     )
 
 
+def read_job_contract(argv, specs):
+    """Serve a stored job.json, or an uncapped contract for a pre-existing job."""
+    uri, destination = argv[-2:]
+    assert uri.endswith("/job.json") and destination == "-"
+    spec = specs.get(uri.split("/")[-2])
+    return fake_completed(json.dumps(spec.to_job_json() if spec else {"cmd": "true"}))
+
+
 class FakePopen:
     """Completed OpenROAD invocation with the engine's Popen interface."""
 

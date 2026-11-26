@@ -29,7 +29,6 @@ class _MultiFleet(_FakeFleet):
 
     def __init__(self, status=None):
         super().__init__(status or {"state": "done", "exit_code": "0"})
-        self.specs: dict[str, sb.BatchJobSpec] = {}
         self.statuses: dict[str, dict] = {}
 
     def submit(self, config, job_id, spec, **kwargs):

@@ -144,8 +144,10 @@ from .sim_batch_reattach import (
     _try_reattach_shard,
 )
 from .sim_batch_transport import (
+    _RETRYABLE_LAUNCH_CODES,
     LAUNCH_LIMIT_EXHAUSTED,
     LAUNCH_LIMIT_UNSUPPORTED,
+    UNLAUNCHED_CODES,
     _classify_launch_failure,
     _run_checked,
     _verify_launch_limit,
@@ -346,14 +348,21 @@ class BatchConfig:
     max_launch_attempts: int | None = None
 
     def launch_environment(
-        self, *, include_concurrency: bool = False
+        self,
+        *,
+        include_concurrency: bool = False,
+        shards: Sequence[dict[str, Any] | None] | None = None,
     ) -> dict[str, Any]:
-        """Simulation launch settings recorded in single-job and fleet reports."""
+        """Report a shared fleet limit only when every supplied shard confirms it."""
         fields: dict[str, Any] = {}
         if self.image_profile is not None:
             fields["image_profile"] = self.image_profile
-        if self.max_launch_attempts is not None:
-            fields["max_launch_attempts"] = self.max_launch_attempts
+        limit = self.max_launch_attempts
+        if shards is not None:
+            limits = {(entry or {}).get("max_launch_attempts") for entry in shards}
+            limit = limits.pop() if len(limits) == 1 else None
+        if limit is not None:
+            fields["max_launch_attempts"] = limit
         if include_concurrency and self.max_concurrent_jobs is not None:
             fields["max_concurrent_jobs"] = self.max_concurrent_jobs
         return fields
@@ -1114,12 +1123,6 @@ def _aws_argv(config: BatchConfig, *args: str) -> list[str]:
     return argv + list(args)
 
 
-#: The refusal codes :func:`submit_launch` waits out under ``capacity_wait_s``.
-_RETRYABLE_LAUNCH_CODES = frozenset(
-    {BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE}
-)
-
-
 def _capacity_backoff_s(retry_index: int, jitter: Callable[[], float]) -> float:
     """The jittered, capped delay before capacity re-launch ``retry_index``
     (``0`` = the first re-launch). ``jitter`` returns a float in ``[0, 1)``."""
@@ -1262,13 +1265,16 @@ def launch_job(
     options = ["--profile", config.profile]
     if config.region:
         options += ["--region", config.region]
-    _verify_launch_limit(config, [*launch, *options], run)
+    needs_report = config.max_launch_attempts is not None
     argv = [*launch, "--apply", *options]
     started = monotonic()
     attempts = 0
     while True:
         attempts += 1
         try:
+            if needs_report:
+                _verify_launch_limit(config, [*launch, *options], run)
+                needs_report = False
             _run_checked(
                 run,
                 argv,
@@ -1375,6 +1381,31 @@ def job_exists(
 
     run = runner if runner is not None else _run_subprocess
     return _job_head(config, job_id, run) is not None
+
+
+def _submitted_job_config(
+    config: BatchConfig,
+    job_id: str,
+    runner: remote_transport.CommandRunner | None = None,
+) -> BatchConfig:
+    """Read the launch limit from the job being collected, including legacy jobs."""
+    uri = f"{job_uri(config, job_id)}/job.json"
+    try:
+        result = _run_checked(
+            runner if runner is not None else _run_subprocess,
+            _aws_argv(config, "s3", "cp", uri, "-"),
+            _BATCH_AWS_TIMEOUT_S,
+            "aws s3 cp (submitted job.json)",
+            redact=config.bucket,
+        )
+        spec = json.loads(result.stdout)
+        if not isinstance(spec, dict):
+            raise ValueError("expected a job object")
+        limit = _resolve_max_launch_attempts(spec)
+    except (BatchError, ValueError, SimError) as exc:
+        # This job still exists. A contract read error must not invite a paid resubmit.
+        raise SimError(f"cannot read launch limit from job {job_id!r}: {exc}") from exc
+    return replace(config, max_launch_attempts=limit)
 
 
 def _advance_interrupted_clock(
@@ -2821,7 +2852,7 @@ def _launch_noting_refusal(
     try:
         launch_job(config, job_id, runner=runner, **(launch_kwargs or {}))
     except BatchError as exc:
-        if exc.code in _RETRYABLE_LAUNCH_CODES or exc.code == LAUNCH_LIMIT_UNSUPPORTED:
+        if exc.code in UNLAUNCHED_CODES:
             notify("launch_refused")
         raise
 
@@ -2906,6 +2937,7 @@ def _run_batch_job(
                 "bucket/profile/region, or expired)",
                 code=BATCH_UNKNOWN_JOB_CODE,
             )
+        submitted = _submitted_job_config(config, job_id, runner)
         attach_timestamps: dict[str, str | None] = {
             "client_submitted_at": None,
             "client_launched_at": None,
@@ -2913,8 +2945,10 @@ def _run_batch_job(
             "client_collected_at": None,
         }
         if launch_if_unlaunched:
+            # A paid relaunch must still verify the caller's requested ceiling,
+            # even when the existing job was uploaded by an uncapped legacy client.
             attach_timestamps["client_launched_at"] = _launch_attached_if_unlaunched(
-                config,
+                config if config.max_launch_attempts is not None else submitted,
                 job_id,
                 runner=runner,
                 now=now,
@@ -2922,7 +2956,7 @@ def _run_batch_job(
                 launch_kwargs=launch_kwargs,
             )
         return _poll_and_collect(
-            config=config,
+            config=submitted,
             job_id=job_id,
             corner_points=corner_points,
             keep_artifacts=keep_artifacts,
@@ -3843,7 +3877,10 @@ def _run_batch_fleet(
         if environment is not None or config.max_launch_attempts is not None:
             environment = {
                 **(environment or {}),
-                **config.launch_environment(include_concurrency=True),
+                **config.launch_environment(
+                    include_concurrency=True,
+                    shards=(environment or {}).get("fleet", []) if resume else None,
+                ),
             }
         environment = _batch_common.resumable(environment, manifest)
         if fleet.unfinished:

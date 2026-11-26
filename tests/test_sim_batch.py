@@ -30,6 +30,7 @@ from helpers.subprocess_fakes import (
     INPUTS_UPLOAD_ARGV,
     fake_completed,
     inputs_upload_of,
+    read_job_contract,
     uploaded_input_bytes,
     uploaded_request_of,
 )
@@ -53,11 +54,8 @@ class _FakeRunner:
     """Records every argv; returns canned responses keyed by a substring of
     the joined argv, in call order, falling back to a default success.
 
-    Mirrors `tests/test_remote_transport.py`'s `_FakeRunner`, with one
-    addition the S3 transport needs: an ``outputs`` payload the fake
-    materializes into the destination directory when it sees the
-    ``s3 cp ... outputs/ <dir> --recursive`` collect call, standing in for
-    what a real download would have written.
+    S3 reads serve an uncapped job contract by default and materialize
+    ``outputs`` in the destination directory on a recursive collect.
     """
 
     def __init__(self) -> None:
@@ -91,6 +89,8 @@ class _FakeRunner:
                 if isinstance(item, Exception):
                     raise item
                 return item
+        if joined.endswith("/job.json -"):
+            return read_job_contract(argv, {})
         return self.default
 
     def _outputs_for(self, s3_uri: str) -> dict[str, str]:

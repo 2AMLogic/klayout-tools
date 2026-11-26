@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 
 LAUNCH_LIMIT_UNSUPPORTED = "batch_launch_attempts_unsupported"
 LAUNCH_LIMIT_EXHAUSTED = "batch_launch_attempts_exhausted"
+_RETRYABLE_LAUNCH_CODES = frozenset(
+    {BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE}
+)
+UNLAUNCHED_CODES = _RETRYABLE_LAUNCH_CODES | {LAUNCH_LIMIT_UNSUPPORTED}
 
 
 def _run_checked(
@@ -102,9 +106,12 @@ def _verify_launch_limit(
             argv,
             _BATCH_LAUNCH_TIMEOUT_S,
             "batch-fleet-provision.sh launch report",
+            classify=_classify_launch_failure,
             redact=config.bucket,
         )
     except (BatchError, UnicodeError) as exc:
+        if isinstance(exc, BatchError) and exc.code in _RETRYABLE_LAUNCH_CODES:
+            raise
         raise BatchError(
             f"could not verify max_launch_attempts={limit}: {exc}",
             code=LAUNCH_LIMIT_UNSUPPORTED,

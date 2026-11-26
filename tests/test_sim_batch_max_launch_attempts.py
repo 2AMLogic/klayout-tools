@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import jsonschema
@@ -11,7 +12,9 @@ from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 from test_sim_batch import (
+    _CAP_REFUSAL,
     _CAPACITY_REFUSAL,
+    _VCPU_REFUSAL,
     _batch_request,
     _ceiling_request,
     _FakeClock,
@@ -214,6 +217,131 @@ def test_verified_limit_allows_capacity_retry(tmp_path):
     )
     assert len(runner.argvs_matching("--apply")) == 2
     assert len(clock.sleeps) == 1
+
+
+@pytest.mark.parametrize("refusal", [_CAP_REFUSAL, _VCPU_REFUSAL])
+@pytest.mark.parametrize("matching_retry", [True, False])
+def test_probe_retries_before_apply(tmp_path, refusal, matching_retry):
+    runner = _FakeRunner()
+    runner.queue("launch", fake_completed(REPORT, returncode=75, stderr=refusal))
+    runner.queue("launch", fake_completed(REPORT if matching_retry else "no limit"))
+    clock = _FakeClock()
+    config = resolve(tmp_path, max_launch_attempts=2, capacity_wait_s=90)
+    kwargs = dict(runner=runner, monotonic=clock.monotonic, sleep=clock.sleep)
+    if matching_retry:
+        sb.launch_job(config, "fixture", **kwargs)
+        probe, retry, apply = runner.calls
+        assert probe == retry == [arg for arg in apply if arg != "--apply"]
+        assert "--apply" in apply
+    else:
+        with pytest.raises(sb.BatchError) as exc:
+            sb.launch_job(config, "fixture", **kwargs)
+        assert exc.value.code == sb.LAUNCH_LIMIT_UNSUPPORTED
+        assert len(runner.calls) == 2 and not runner.argvs_matching("--apply")
+    assert len(clock.sleeps) == 1
+
+
+def test_probe_and_apply_share_capacity_wait_budget(tmp_path):
+    runner = _FakeRunner()
+    refusal = fake_completed(REPORT, returncode=75, stderr=_VCPU_REFUSAL)
+    for response in [refusal, fake_completed(REPORT), refusal]:
+        runner.queue("launch", response)
+    clock = _FakeClock()
+    with pytest.raises(sb.BatchError) as exc:
+        sb.launch_job(
+            resolve(tmp_path, max_launch_attempts=2, capacity_wait_s=1),
+            "fixture",
+            runner=runner,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+    assert exc.value.code == sb.BATCH_NO_CAPACITY_CODE
+    assert clock.sleeps == [1]
+    assert ["--apply" in argv for argv in runner.calls] == [False, False, True]
+
+
+@pytest.mark.parametrize("stored", [{}, {"max_launch_attempts": 3}])
+def test_corner_attach_reports_stored_limit(tmp_path, monkeypatch, stored):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    runner.queue(
+        "/job.json -", fake_completed(json.dumps({"cmd": "klt sim", **stored}))
+    )
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    request = _ceiling_request(tmp_path, max_launch_attempts=2)
+    _write_body(tmp_path)
+    report = sim.run_sim(
+        str(_write_request(tmp_path, request)), attach_job_id="old-job"
+    )
+    remote = report["environment"]["remote"]
+    assert remote["job_id"] == "old-job"
+    if stored:
+        assert remote["max_launch_attempts"] == stored["max_launch_attempts"]
+    else:
+        assert "max_launch_attempts" not in remote
+    assert not runner.argvs_matching("launch")
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [[{}, {}], [{"max_launch_attempts": 3}] * 2, [{}, {"max_launch_attempts": 2}]],
+)
+def test_corner_shard_attach_reports_stored_limits(tmp_path, monkeypatch, stored):
+    runner, _ = _split_runner(monkeypatch)
+    request = _ceiling_request(tmp_path, max_units_per_job=1, max_launch_attempts=2)
+    request["corners"] = {"temperature_c": [0, 1]}
+    _write_body(tmp_path)
+    path = str(_write_request(tmp_path, request))
+    # Upload and keep the shard map, then serve the contracts the attach client finds.
+    for _ in stored:
+        runner.queue("launch", fake_completed(REPORT))
+        runner.queue("launch", fake_completed())
+    submitted = sim.run_sim(path, submit_only=True)
+    for shard, fields in zip(submitted["shards"], stored, strict=True):
+        runner.queue(
+            f"/{shard['job_id']}/job.json -",
+            fake_completed(json.dumps({"cmd": "true", **fields})),
+        )
+    runner.calls.clear()
+    report = sim.run_sim(path, attach_job_id=submitted["manifest_path"])
+    remote = report["environment"]["remote"]
+    assert [entry.get("max_launch_attempts") for entry in remote["fleet"]] == [
+        s.get("max_launch_attempts") for s in stored
+    ]
+    if stored[0] and stored[0] == stored[1]:
+        assert remote["max_launch_attempts"] == stored[0]["max_launch_attempts"]
+    else:
+        assert "max_launch_attempts" not in remote
+    assert not runner.argvs_matching("launch")
+
+
+@pytest.mark.parametrize(
+    "size, limits",
+    [(3, [None]), (3, [3]), (1, [None] * 3), (1, [3] * 3), (1, [None, 2, 3])],
+)
+def test_deck_attach_reports_stored_limits(tmp_path, monkeypatch, size, limits):
+    fleet = _install_and_fleet(monkeypatch)
+    request = _request(tmp_path, count=3, max_units_per_job=size, max_launch_attempts=2)
+    _run(tmp_path, request)
+    # Emulate contracts written by a previous submitter using the same request.
+    for job, limit in zip(fleet.specs, limits, strict=True):
+        fleet.specs[job] = replace(fleet.specs[job], max_launch_attempts=limit)
+    target = (
+        str(tmp_path / "out/batch-shards.json")
+        if size == 1
+        else next(iter(fleet.specs))
+    )
+    report = _run(tmp_path, request, attach_job_id=target)
+    assert report["status"] == "pass"
+    remote = report["environment"]["remote"]
+    if len(set(limits)) == 1 and limits[0] is not None:
+        assert remote["max_launch_attempts"] == limits[0]
+    else:
+        assert "max_launch_attempts" not in remote
+    expected = dict(zip(fleet.specs, limits, strict=True))
+    for shard in remote.get("shards", []):
+        assert shard.get("max_launch_attempts") == expected[shard["job_id"]]
 
 
 def test_split_corner_surfaces_unconfirmed_limit_without_applying(
