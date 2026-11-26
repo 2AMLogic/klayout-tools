@@ -323,6 +323,16 @@ def test_resume_environment_merges_jobs_without_changing_inputs(sharded):
     assert (harvested, dispatched) == originals
 
 
+def test_resume_environment_uses_latest_job_observation_for_shared_limit():
+    recovered = {"job_id": "recovered", "max_launch_attempts": 2}
+    prior = {"job_id": "reobserved"}
+    current = {"job_id": "reobserved", "max_launch_attempts": 2}
+
+    merged = sbr.merge_resume_environment({"fleet": [recovered, prior]}, current)
+
+    assert merged == {"fleet": [recovered, current], "max_launch_attempts": 2}
+
+
 @pytest.mark.parametrize("environment", [None, {"job_id": "one"}, {"fleet": [None]}])
 def test_resume_environment_without_harvest_leaves_dispatch_unchanged(environment):
     assert sbr.merge_resume_environment(None, environment) is environment

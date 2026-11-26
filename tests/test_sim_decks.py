@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import read_job_contract
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 from klayout_tools import sim_decks as sd
@@ -1101,21 +1102,17 @@ class TestRemoteDispatch:
 
 
 class _FakeFleet:
-    """Stands in for the batch transport primitives ``_run_decks_batch``
-    uses: submit captures the job spec, poll returns a canned status, and
-    collect *executes* the captured worker request locally into the
-    collected tree (report.json plus the artifacts/ subtree), exactly what
-    the real harness's outputs/ upload carries back."""
+    """Store submitted specs, return canned status and execute the worker locally."""
 
     def __init__(self, status: dict, *, fail_collect: bool = False):
         self.status = status
         self.spec: sb.BatchJobSpec | None = None
-        self.job_id = "batch-fake-0001"
+        self.specs: dict[str, sb.BatchJobSpec] = {}
         self.fail_collect = fail_collect
 
     def submit(self, config, job_id, spec, **kwargs):
         self.spec = spec
-        self.job_id = job_id
+        self.specs[job_id] = spec
 
     def launch(self, config, job_id, **kwargs):
         pass
@@ -1153,6 +1150,9 @@ class _FakeFleet:
 
 
 def install_fake_batch(monkeypatch, fleet: _FakeFleet) -> _FakeFleet:
+    monkeypatch.setattr(
+        sb, "_run_subprocess", lambda argv, _: read_job_contract(argv, fleet.specs)
+    )
     monkeypatch.setattr(sb, "submit_job", fleet.submit)
     monkeypatch.setattr(sb, "launch_job", fleet.launch)
     monkeypatch.setattr(sb, "poll_status", fleet.poll)
