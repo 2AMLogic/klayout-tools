@@ -256,7 +256,8 @@ def _portion(spans: _Spans) -> tuple[Any, Any]:
     lo, hi = spans[0][0], max(span[1] for span in spans)
     first, last = spans[0][2], next(span[2] for span in spans if span[1] == hi)
     longest = max(spans, key=lambda span: span[1] - span[0])
-    ux, uy, _ = _line(first)
+    # A zero-length corner can sort first at the low endpoint.
+    ux, uy, _ = _line(longest[2])
     start = _end_at(first, lo, ux, uy)
     end = _end_at(last, hi, ux, uy)
     if longest[2].dx() * ux + longest[2].dy() * uy < 0:

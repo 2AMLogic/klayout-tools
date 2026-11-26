@@ -249,6 +249,20 @@ def _exact(edge):
     return (edge.x1, edge.y1, edge.x2, edge.y2)
 
 
+@pytest.mark.parametrize("endpoints", [(0, 0, 1000, 0), (1000, 1000, 0, 0)])
+def test_corner_markers_at_both_endpoints_preserve_the_original_pair(endpoints):
+    first = kdb.Edge(*endpoints)
+    facing = kdb.Edge(first.p1 + kdb.Vector(0, 80), first.p2 + kdb.Vector(0, 80))
+    pairs = kdb.EdgePairs()
+    pairs.insert(kdb.EdgePair(first, facing))
+    for point in (first.p1, first.p2):
+        pairs.insert(kdb.EdgePair(kdb.Edge(point, point), kdb.Edge(point, point)))
+
+    (fused,) = _one_per_portion([pairs]).each()
+    assert _exact(fused.first) == _exact(first)
+    assert _exact(fused.second) == _exact(facing)
+
+
 def test_fused_portion_is_oriented_as_klayout_orients_its_own_pair():
     """KLayout reports an enclosure pair with its two edges running the same
     way, and every ``enclosed`` marker in the engine is rendered from a pair
