@@ -205,7 +205,7 @@ rule. Devices and nets come from the extraction envelope. A skipped slot
 shows its reason in the last column.
 
 | Shuttle | Design | DRC | DRC s | DRC markers | Extract | Extract s | Devices / nets |
-| --- | --- | --- | ---: | --- | --- | --- | ---: | --- |
+| --- | --- | --- | ---: | --- | --- | --- | ---: |
 | ttgf0p1 | `tt_um_MichaelBell_tinyQV` | skipped | – | – | skipped | – | no individual layout (combined shuttle macro) |
 | ttgf0p1 | `tt_um_algofoogle_raybox_zero` | skipped | – | – | skipped | – | no individual layout (combined shuttle macro) |
 | ttgf0p1 | `tt_um_chip_rom` | skipped | – | – | skipped | – | no individual layout (combined shuttle macro) |
