@@ -162,6 +162,34 @@ def test_markers_sit_on_the_edge_portion_they_flag(tmp_path):
     assert box["bottom"] <= 0 and box["top"] >= 1000
 
 
+def test_markers_span_one_edge_each_on_every_side_of_the_tap(tmp_path):
+    """A strict marker's ``bbox`` and ``polygon`` span the flagged ``PCOMP``
+    edge portion and the ``Pplus`` edge facing it, on all four sides alike:
+    a uniformly short tap gives four markers, each the quad of one edge."""
+    _, _, report = _counts(
+        tmp_path, _pcomp_tap((80, 80, 80, 80), [(NWELL, _WELL_AROUND)])
+    )
+    quads = [
+        (-80, 0, 0, 1000),
+        (0, -80, 2000, 0),
+        (0, 1000, 2000, 1080),
+        (2000, 0, 2080, 1000),
+    ]
+    assert (
+        sorted(
+            (b["left"], b["bottom"], b["right"], b["top"])
+            for b in _boxes(report, STRICT)
+        )
+        == quads
+    )
+    assert sorted(
+        tuple(sorted(map(tuple, v["polygon"]))) for v in report["violations"]
+    ) == sorted(
+        tuple(sorted([(left, bottom), (left, top), (right, bottom), (right, top)]))
+        for left, bottom, right, top in quads
+    )
+
+
 def test_partially_butted_edge_reports_only_the_unbutted_portion(tmp_path):
     """An ``NCOMP`` butting the lower 600nm of the right edge: its ``Pplus``
     edge is ``NCOMP``-coincident and dropped, while the upper 400nm has a
@@ -178,6 +206,21 @@ def test_partially_butted_edge_reports_only_the_unbutted_portion(tmp_path):
     strict, far, report = _counts(tmp_path, shapes)
     assert (strict, far) == (1, 0)
     assert _boxes(report, STRICT) == [dict(left=2000, bottom=600, right=2080, top=1000)]
+
+
+def test_nplus_coincident_edge_inside_the_band_is_still_measured_strictly(tmp_path):
+    """The in-band portion neither transcribed expression measures: a
+    ``PCOMP`` edge that coincides with an ``Nplus`` edge while the tap is
+    outside ``Nwell``.  ``PP.5dii`` drops it and ``PP.5b``'s background holds
+    no ``Pplus`` inside ``Nwell``, so the pinned deck reports nothing here.
+    The rule keeps its previous flat measurement for it rather than leaving
+    it unchecked, as the far rule does for the same edges (issue #7970)."""
+    strict, far, report = _counts(
+        tmp_path,
+        _pcomp_tap((200, 200, 0, 200), [(NWELL, _WELL_FROM_RIGHT), *_BUTTED_NCOMP]),
+    )
+    assert strict >= 1 and far == 0
+    assert all(box["left"] == box["right"] == 2000 for box in _boxes(report, STRICT))
 
 
 @pytest.mark.parametrize(

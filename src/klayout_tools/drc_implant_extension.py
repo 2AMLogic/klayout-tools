@@ -32,7 +32,8 @@ so the split is made on the edges of the unclipped checked region.
 of the two 0.16 um expressions and a ``selection="far"`` rule to ``PP.5di``'s
 portion, one marker per checked edge portion. The portions neither 0.16 um
 expression looks at -- a ``PCOMP`` inside both ``DNWELL`` and ``LVPWELL``
-(``PP.5ci``/``PP.5cii``), or one straddling a ``DNWELL`` boundary -- keep the
+(``PP.5ci``/``PP.5cii``), one straddling a ``DNWELL`` boundary, or an edge
+portion inside the band that coincides with an ``Nplus`` edge -- keep the
 rule's previous measurement: its own threshold with the engine's default
 metric, against the ``Pplus`` edge portions those expressions drop.
 """
@@ -248,15 +249,18 @@ def _fuse(spans: _Spans, merged: Any) -> None:
 
 def _portion(spans: _Spans) -> tuple[Any, Any]:
     """The fused first edge of overlapping ``spans`` and the second edge of
-    the longest of them."""
+    the longest of them.  The fused edge runs the way that pair's first edge
+    does, so the result is oriented as KLayout orients the pair it extends."""
     import klayout.db as kdb
 
     lo, hi = spans[0][0], max(span[1] for span in spans)
-    ux, uy, _ = _line(spans[0][2])
     first, last = spans[0][2], next(span[2] for span in spans if span[1] == hi)
+    longest = max(spans, key=lambda span: span[1] - span[0])
+    ux, uy, _ = _line(first)
     start = _end_at(first, lo, ux, uy)
     end = _end_at(last, hi, ux, uy)
-    longest = max(spans, key=lambda span: span[1] - span[0])
+    if longest[2].dx() * ux + longest[2].dy() * uy < 0:
+        start, end = end, start
     return kdb.Edge(start.x, start.y, end.x, end.y), longest[3]
 
 

@@ -364,8 +364,9 @@ are always the real, unmodified DRM values:
   ``rule_decks/pplus.drc``), so the strict rule carries
   ``requires_any_layer=((21, 0), (12, 0))`` and is skipped on a layout
   drawing neither. Still approximated, all strict: the ``PP.5ci``/``PP.5cii``
-  context (a PCOMP inside both ``DNWELL`` and ``LVPWELL``) and a PCOMP
-  straddling a ``DNWELL`` boundary are not transcribed and keep the flat
+  context (a PCOMP inside both ``DNWELL`` and ``LVPWELL``), a PCOMP
+  straddling a ``DNWELL`` boundary and a PCOMP edge portion inside the band
+  that coincides with an ``Nplus`` edge are not transcribed and keep the flat
   0.16um with ``euclidian`` metrics, and the far rule keeps the
   ``Nplus``-coincident PCOMP edges ``PP.5di`` drops and its ``euclidian``
   metric (issue #7970).

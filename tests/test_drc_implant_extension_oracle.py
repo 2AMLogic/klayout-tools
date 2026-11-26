@@ -242,3 +242,50 @@ def test_zero_length_first_edges_follow_klayout_merging():
         ((0, 0), (1000, 0)),
         ((700, 700), (700, 700)),
     ]
+
+
+def _exact(edge):
+    """An edge with its direction kept, unlike :func:`_canon`."""
+    return (edge.x1, edge.y1, edge.x2, edge.y2)
+
+
+def test_fused_portion_is_oriented_as_klayout_orients_its_own_pair():
+    """KLayout reports an enclosure pair with its two edges running the same
+    way, and every ``enclosed`` marker in the engine is rendered from a pair
+    of that shape.  A portion is therefore reported exactly as the expression
+    that flags it reports its own pair, on every side of the tap alike; a
+    portion fused from several pairs takes the orientation of the pair whose
+    second edge it keeps, whichever way round that pair runs."""
+    cell, layout = _loaded(_pcomp_tap((80, 80, 80, 80), [(NWELL, _WELL_AROUND)]))
+    pp5b, _, pp5dii = _foundry_pp5(cell, layout)
+    own = {
+        (_exact(pair.first), _exact(pair.second))
+        for edge_pairs in (pp5b, pp5dii)
+        for pair in edge_pairs.each()
+    }
+    strict, _far = _curated_pp5(cell, layout)
+    fused = [(_exact(pair.first), _exact(pair.second)) for pair in strict.each()]
+    assert len(fused) == 4, fused
+    stray = [pair for pair in fused if pair not in own]
+    assert not stray, stray
+
+    for span in (
+        (((0, 1000, 1500, 1000), 1080), ((900, 1000, 2000, 1000), 1180)),
+        (((1500, 1000, 0, 1000), 1080), ((2000, 1000, 900, 1000), 1180)),
+        (((2000, 1000, 400, 1000), 1180), ((0, 1000, 1500, 1000), 1080)),
+    ):
+        raw = kdb.EdgePairs()
+        for (x1, y1, x2, y2), facing_y in span:
+            raw.insert(
+                kdb.EdgePair(
+                    kdb.Edge(x1, y1, x2, y2), kdb.Edge(x1, facing_y, x2, facing_y)
+                )
+            )
+        (pair,) = list(_one_per_portion([raw]).each())
+        (x1, y1, x2, y2), facing_y = max(
+            span, key=lambda run: abs(run[0][2] - run[0][0])
+        )
+        assert _exact(pair.first) == (
+            (0, 1000, 2000, 1000) if x2 > x1 else (2000, 1000, 0, 1000)
+        )
+        assert _exact(pair.second) == (x1, facing_y, x2, facing_y)

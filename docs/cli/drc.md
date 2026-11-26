@@ -2646,11 +2646,12 @@ its far side -- the 434 outside-well markers of the #5084 corpus ledger. A
 `Pplus` edge portion coincident with an `NCOMP` edge is not measured, and
 both 0.16 µm checks use the `projection` metric, which removes the ledger's
 other 11. A `PCOMP` not wholly outside `DNWELL` is the strict rule's. Still
-strict, and unchanged: a `PCOMP` inside both `DNWELL` and `LVPWELL` (the
-untranscribed `PP.5ci`/`PP.5cii` split) or straddling a `DNWELL` boundary
-keeps the flat 0.16 µm with `euclidian` metrics, and the far rule still
-measures the `Nplus`-coincident `PCOMP` edges `PP.5di` drops, with
-`euclidian` metrics (#7970).
+strict: a `PCOMP` inside both `DNWELL` and `LVPWELL` (the untranscribed
+`PP.5ci`/`PP.5cii` split) or straddling a `DNWELL` boundary keeps the flat
+0.16 µm with `euclidian` metrics, and so does a `PCOMP` edge portion inside
+the band that coincides with an `Nplus` edge -- the butted-edge portion
+`PP.5dii` drops, which the far rule likewise still measures when `PP.5di`
+drops it, both with `euclidian` metrics (#7970).
 
 `DerivedLayer` also takes an optional **second context stage**
 (`context2_layers`, `context2_sized_by_um`, `context2`, issue #3682): the same
