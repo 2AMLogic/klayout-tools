@@ -9,7 +9,12 @@ from unittest.mock import Mock
 import pytest
 
 from klayout_tools import sim
-from klayout_tools.sim_plot import render_waveform_svg
+from klayout_tools.sim_plot import (
+    measurement_plot_path,
+    prepare_annotations,
+    render_waveform_svg,
+    write_corner_plots,
+)
 from test_sim import _stub_subprocess_run_with_waveform, _write_body, _write_request
 
 _SVG_ROOT_RE = re.compile(r"^<svg\b")
@@ -108,13 +113,17 @@ def test_render_waveform_svg_window_shades_a_rect():
     assert 'fill="#fde68a"' in svg
 
 
-def test_render_waveform_svg_no_window_omits_shading():
+@pytest.mark.parametrize(
+    "window", [None, (3e-6, 4e-6)], ids=["absent", "outside-sweep"]
+)
+def test_render_waveform_svg_omits_shading_without_window_overlap(window):
     svg = render_waveform_svg(
         signal_name="v(out)",
         corner_id="tt",
         x_values=[0.0, 1e-6, 2e-6],
         y_values=[0.0, 1.0, 1.0],
         x_axis_label="time",
+        window=window,
     )
     assert "#fde68a" not in svg
 
@@ -154,6 +163,63 @@ def test_render_waveform_svg_escapes_signal_and_corner_id():
     assert "<out>" not in svg
     assert "&lt;out&gt;" in svg
     assert "&amp;" in svg
+
+
+def test_prepare_annotations_skips_unrecognized_signals_and_invalid_windows():
+    signals, hints = prepare_annotations(
+        [
+            {"name": "ratio", "spice": ".meas tran ratio PARAM='a/b'"},
+            {
+                "name": "avgout",
+                "spice": ".meas tran avgout AVG v(out) FROM=start TO=2n",
+            },
+        ]
+    )
+
+    assert signals == {"ratio": None, "avgout": "v(out)"}
+    assert hints == {"v(out)": {"window": None, "target": None}}
+
+
+@pytest.mark.parametrize(
+    "waveform",
+    [
+        pytest.param("{", id="malformed-json"),
+        pytest.param('{"variables":[{"name":"time"}],"points":[[0]]}', id="sweep-only"),
+        pytest.param(
+            '{"variables":[{"name":"time"},{"name":"v(out)","index":1}],"points":[]}',
+            id="no-samples",
+        ),
+    ],
+)
+def test_write_corner_plots_skips_unplottable_waveform(tmp_path, waveform):
+    artifact = tmp_path / "waveform.json"
+    artifact.write_text(waveform)
+    plots = write_corner_plots(
+        corner={"corner_id": "tt", "artifacts": {"waveform": str(artifact)}},
+        plot_dir=str(tmp_path),
+        analysis_kind="tran",
+        hints_by_signal={},
+    )
+
+    assert plots == []
+    assert list(tmp_path.glob("*.svg")) == []
+
+
+@pytest.mark.parametrize(
+    ("worst_case", "signal"),
+    [
+        pytest.param(None, "v(out)", id="no-worst-case"),
+        pytest.param({"corner_id": "tt"}, None, id="no-signal"),
+        pytest.param({"corner_id": "ss"}, "v(out)", id="signal-only-at-other-corner"),
+    ],
+)
+def test_measurement_plot_path_requires_signal_at_worst_corner(worst_case, signal):
+    plots = {
+        "tt": [{"signal": "v(out)", "path": "tt_out.svg"}],
+        "ss": [{"signal": "v(in)", "path": "ss_in.svg"}],
+    }
+
+    assert measurement_plot_path({"worst_case": worst_case}, signal, plots) is None
 
 
 def test_plot_annotations_are_parsed_once_for_all_corners(tmp_path, monkeypatch):
