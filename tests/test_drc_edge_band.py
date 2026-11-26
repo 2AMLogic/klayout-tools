@@ -297,7 +297,8 @@ def test_list_rules_reports_the_band_and_its_inner_threshold():
         "inner_threshold_um": 0.02,
     }
     # Additive: no rule without a band grows the key.
-    others = [entry for entry in listing["rules"] if entry["id"] != RULE]
+    banded = {rule.id for rule in get_deck("gf180mcu") if rule.band_spec is not None}
+    others = [entry for entry in listing["rules"] if entry["id"] not in banded]
     assert others and all("edge_band" not in entry for entry in others)
 
 
@@ -350,7 +351,10 @@ def _banded_rule(tmp_path, monkeypatch, **overrides):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"check": "enclosing"}, "only valid on 'enclosed' checks, not 'enclosing'"),
+        (
+            {"check": "enclosing"},
+            "only valid on 'enclosed' or 'separation' checks, not 'enclosing'",
+        ),
         ({"other_layer": None}, "requires other_layer"),
         ({"require_containment": True}, "cannot be combined with require_containment"),
         ({"threshold_dbu": 20}, "inner_threshold_dbu must be below threshold_dbu"),

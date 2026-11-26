@@ -1,9 +1,18 @@
-"""Strict GF180 tap enclosure at touching wells and shielded implants."""
+"""Strict GF180 tap enclosure at touching wells and shielded implants.
+
+``NP.5b`` measures by ``projection`` (issue #7970): a pair's implant edge is
+reported over the stretch it faces the tap edge, and an edge butted to the
+opposite diffusion is not measured at all. The marker lists below are the
+pinned ``NP.5b``/``NP.5di``/``NP.5dii`` expressions' own on the same
+geometry, KLayout 0.30.12, except where a test says otherwise.
+"""
 
 import klayout.db as kdb
 import pytest
 
 from klayout_tools.drc import run_drc
+from test_drc_butted_diffusion import PP_ENC_FAR, PPLUS, _boxes
+from test_drc_butted_diffusion import _run as _run_pair
 from test_drc_edge_band import (
     COMP,
     DNWELL,
@@ -33,8 +42,8 @@ def test_dnwell_contact_keeps_the_opposite_tap_edge_strict(
     assert len(markers) == expected
     if expected:
         assert sorted(map(tuple, markers[0]["polygon"])) == [
-            (-80, -139),
-            (-80, 1139),
+            (-80, 0),
+            (-80, 1000),
             (0, 0),
             (0, 1000),
         ]
@@ -56,10 +65,11 @@ def test_strict_edges_are_shielded_by_the_enclosing_implant(tmp_path, mixed):
     baseline = polygons("one-implant.gds")
     if mixed:
         # The strict part of the top edge starts at the well boundary.
-        assert [(361, 1080), (500, 1000), (1000, 1000), (1080, 1080)] in baseline
+        assert [(500, 1000), (500, 1080), (1000, 1000), (1000, 1080)] in baseline
     else:
         assert len(baseline) == 4
-    assert any((1080, 1080) in polygon and (1000, 0) in polygon for polygon in baseline)
+    right_edge = [(1000, 0), (1000, 1000), (1080, 0), (1080, 1000)]
+    assert right_edge in baseline
     shapes.append({"layer": list(NPLUS), "box": [1085, 0, 1095, 1000]})
     assert polygons("with-neighbor.gds") == baseline
 
@@ -81,6 +91,25 @@ def _notched_implant():
     return kdb.Polygon([kdb.Point(x, y) for x, y in points])
 
 
+#: A second, passing tap deep inside a well: it uses the band, the first
+#: tap does not.
+_REMOTE_BANDED_TAP = [
+    (COMP, kdb.Box(10000, 0, 11000, 1000)),
+    (NPLUS, kdb.Box(9800, -200, 11200, 1200)),
+    (NWELL, kdb.Box(9000, -1000, 12000, 2000)),
+]
+
+
+def _butted_sloped_shapes():
+    """The sloped tap under an implant that overhangs 100nm everywhere but
+    hugs the tap's right edge (x=1000), which a PCOMP east of it shares."""
+    implant = kdb.Region(_sloped_tap().sized(100)) & kdb.Region(
+        kdb.Box(-1000, -1000, 1000, 2000)
+    )
+    pcomp = kdb.Box(1000, -500, 2000, 1500)
+    return [(COMP, _sloped_tap()), (NPLUS, implant), (COMP, pcomp), (PPLUS, pcomp)]
+
+
 def _marker_vertices(path, shapes):
     layout = kdb.Layout()
     layout.dbu = 0.001
@@ -95,10 +124,7 @@ def _marker_vertices(path, shapes):
 def test_remote_banded_tap_preserves_strict_sloped_markers(tmp_path):
     shapes = [(COMP, _sloped_tap()), (NPLUS, _notched_implant())]
     baseline = _marker_vertices(tmp_path / "strict.gds", shapes)
-    assert baseline == [
-        [(707, 998), (810, 963), (810, 1120), (810, 1132)],
-        [(707, 998), (810, 1120), (820, 960), (846, 1120)],
-    ]
+    assert baseline == [[(810, 963), (810, 1120), (820, 960), (846, 1120)]]
 
     # A well can also cut the same source edge just before the violation.
     # The marker is still wholly strict, even though the tap spans the well.
@@ -108,13 +134,7 @@ def test_remote_banded_tap_preserves_strict_sloped_markers(tmp_path):
         == baseline
     )
 
-    shapes.extend(
-        [
-            (COMP, kdb.Box(10000, 0, 11000, 1000)),
-            (NPLUS, kdb.Box(9800, -200, 11200, 1200)),
-            (NWELL, kdb.Box(9000, -1000, 12000, 2000)),
-        ]
-    )
+    shapes.extend(_REMOTE_BANDED_TAP)
     assert _marker_vertices(tmp_path / "remote.gds", shapes) == baseline
 
 
@@ -136,15 +156,87 @@ def test_sloped_tap_inside_well_has_only_foundry_band_markers(tmp_path):
 def test_strict_part_of_a_sloped_edge_starts_at_its_well_crossing(tmp_path):
     shapes = [
         (COMP, _sloped_tap()),
-        (NPLUS, _notched_implant()),
-        (NWELL, kdb.Box(-1000, -1000, 711, 2000)),
+        (NPLUS, _sloped_tap().sized(100)),
+        (NWELL, kdb.Box(-1000, -1000, 811, 2000)),
     ]
-    # At x=711 the original tap edge crosses at y=996 on the 1 nm grid.
-    # Cutting either already-rounded marker at x=711 instead gives y=997.
+    # At x=811 the original tap edge crosses at y=963 on the 1 nm grid, and
+    # the band's sloped marker ends where the strict one starts. The band
+    # markers and the two straight strict markers are the pinned statements'
+    # own; the pinned NP.5b cuts the implant edge at the well instead, so its
+    # sloped marker starts at (780, 973) on the same stretch.
     assert _marker_vertices(tmp_path / "crossing.gds", shapes) == [
-        [(711, 996), (810, 963), (810, 1120), (810, 1132)],
-        [(711, 996), (810, 1120), (819, 960), (845, 1120)],
+        [(382, -100), (382, 0), (811, -100), (811, 0)],
+        [(382, 1000), (382, 1100), (700, 1000), (700, 1100)],
+        [(700, 1000), (732, 1095), (811, 963), (843, 1058)],
+        [(811, -100), (811, 0), (1000, -100), (1000, 0)],
+        [(811, 963), (843, 1058), (1000, 900), (1032, 995)],
+        [(1000, 0), (1000, 900), (1100, 0), (1100, 900)],
     ]
+
+
+def test_a_butted_edge_of_a_crossing_sloped_tap_is_not_measured(tmp_path):
+    shapes = _butted_sloped_shapes()
+    # No well: the right edge has no extension and is butted, the other
+    # four have 100nm. All four markers are the pinned NP.5b's.
+    assert _marker_vertices(tmp_path / "strict.gds", shapes) == [
+        [(-100, 0), (-100, 1000), (0, 0), (0, 1000)],
+        [(0, -100), (0, 0), (1000, -100), (1000, 0)],
+        [(0, 1000), (0, 1100), (700, 1000), (700, 1100)],
+        [(700, 1000), (732, 1095), (968, 911), (1000, 1005)],
+    ]
+
+    # The well ends at x=711. The right edge, now wholly strict, stays
+    # unmeasured; the sloped edge's strict marker starts at the crossing.
+    shapes.append((NWELL, kdb.Box(-1000, -1000, 711, 2000)))
+    crossing = [
+        [(282, -100), (282, 0), (711, -100), (711, 0)],
+        [(282, 1000), (282, 1100), (700, 1000), (700, 1100)],
+        [(700, 1000), (711, 996), (734, 1094), (745, 1090)],
+        [(711, -100), (711, 0), (1000, -100), (1000, 0)],
+        [(711, 996), (743, 1091), (968, 911), (1000, 1005)],
+    ]
+    assert _marker_vertices(tmp_path / "crossing.gds", shapes) == crossing
+    shapes.extend(_REMOTE_BANDED_TAP)
+    assert _marker_vertices(tmp_path / "remote.gds", shapes) == crossing
+
+
+def test_a_butted_edge_in_the_strict_part_of_a_mixed_tap_is_not_measured(tmp_path):
+    """The well ends at x=600: the under-extended top edge is in the band up
+    to there and strict beyond, and the butted right edge is strict. The top
+    edge is reported in both portions; the right edge, whose Nplus is butted
+    to PCOMP, is not. Both markers are the pinned statements' own."""
+    shapes = [
+        (COMP, kdb.Box(0, 0, 1000, 1000)),
+        (COMP, kdb.Box(1000, -160, 2000, 1160)),
+        (NPLUS, kdb.Box(-160, -160, 1000, 1080)),
+        (PPLUS, kdb.Box(1000, -320, 2160, 1320)),
+        (NWELL, kdb.Box(-1000, -1000, 600, 3000)),
+    ]
+
+    assert _marker_vertices(tmp_path / "crossing.gds", shapes) == [
+        [(171, 1000), (171, 1080), (600, 1000), (600, 1080)],
+        [(600, 1000), (600, 1080), (1000, 1000), (1000, 1080)],
+    ]
+
+
+def test_the_far_pplus_enclosure_rule_keeps_its_shielding(tmp_path):
+    """``PP.5di`` reads the same shielded region check. A second ``Pplus``
+    sliver whose far edge is 19nm from the PCOMP's right edge -- behind the
+    implant enclosing it -- adds no fifth marker to the four a 10nm
+    extension gives."""
+    shapes = [(COMP, (0, 0, 1000, 1000)), (PPLUS, (-10, -10, 1010, 1010))]
+
+    baseline = _boxes(_run_pair(tmp_path, shapes, [PP_ENC_FAR]), PP_ENC_FAR)
+
+    assert baseline == [
+        (-10, 0, 0, 1000),
+        (0, -10, 1000, 0),
+        (0, 1000, 1000, 1010),
+        (1000, 0, 1010, 1000),
+    ]
+    shapes.append((PPLUS, (1015, 0, 1019, 1000)))
+    with_neighbor = _run_pair(tmp_path, shapes, [PP_ENC_FAR], name="neighbor.gds")
+    assert _boxes(with_neighbor, PP_ENC_FAR) == baseline
 
 
 def test_dnwell_cut_in_implant_sets_band_enclosure(tmp_path):
@@ -163,16 +255,18 @@ def test_dnwell_cut_in_implant_sets_band_enclosure(tmp_path):
 
 
 @pytest.mark.parametrize("interior_well", [False, True])
-def test_strict_corner_is_reported_once(tmp_path, interior_well):
+def test_a_notched_implant_corner_is_clean_by_projection(tmp_path, interior_well):
+    """The notch corner at (1025, 1158) is 159.97nm from the tap's corner.
+    `NP.5b` measures by `projection`, which pairs neither tap edge with
+    either notch edge, so nothing is reported -- the pinned statement's own
+    result. Under `euclidian` both adjacent tap edges paired with that
+    corner, and the band reported it once."""
     shapes = [
-        {"layer": list(COMP), "box": [0, 0, 1000, 1000]},
-        # Two rectangles form an implant with a notch at (1025, 1158).
-        {"layer": list(NPLUS), "box": [-500, -500, 1500, 1158]},
-        {"layer": list(NPLUS), "box": [-500, 1158, 1025, 1500]},
+        (COMP, kdb.Box(0, 0, 1000, 1000)),
+        (NPLUS, kdb.Box(-500, -500, 1500, 1158)),
+        (NPLUS, kdb.Box(-500, 1158, 1025, 1500)),
     ]
     if interior_well:
-        shapes.append({"layer": list(NWELL), "box": [300, 300, 500, 500]})
+        shapes.append((NWELL, kdb.Box(300, 300, 500, 500)))
 
-    assert [m["bbox"] for m in _markers(_run(tmp_path, shapes))] == [
-        {"left": 1000, "bottom": 1000, "right": 1025, "top": 1158}
-    ]
+    assert _marker_vertices(tmp_path / "notched.gds", shapes) == []

@@ -341,7 +341,7 @@ also the order a `--rules` subset executes in.
 | `nominal_dbu_um` | The deck's nominal database unit in um; `threshold_dbu = threshold_um / nominal_dbu_um`. |
 | `rule_count` | Total registered rules in the deck. |
 | `groups.check` / `groups.scope` | Rule counts per check kind and per non-empty `scope` (the existing `DrcRule.scope` metadata `coverage.deck_scope` is built from), sorted by key. |
-| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `edge_band` (`{context_layers, exclude_layers, band_width_um, inner_threshold_um}`, present only on a rule that declares `DrcRule.band_spec` — gf180mcu's `nplus.enclosing.comp.1`, whose `threshold_um` is the band's limit and whose interior allows `inner_threshold_um`; see "Well-band split of `nplus.enclosing.comp.1`" in the gf180mcu section below), `scope` (`null` when unset), `threshold_um` / `threshold_max_um` (the rule's distance threshold and optional upper bound in um; `null` for check kinds without a single distance threshold — `area`, `density`, `antenna`, `ongrid`, `angle`, `comp_coverage`, `tap_distance` — and `threshold_max_um` is `null` unless the rule has an upper bound). Pin a threshold to a deck via `provenance.deck.content_hash`. |
+| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `edge_band` (`{context_layers, exclude_layers, band_width_um, inner_threshold_um}`, plus `strict_layers` when the spec declares any; present only on a rule that declares `DrcRule.band_spec` — gf180mcu's `nplus.enclosing.comp.1` and `pplus.space.ncomp.1`, whose `threshold_um` is the band's limit and whose interior allows `inner_threshold_um`; see "Well-band split of `nplus.enclosing.comp.1`" and "Butted-diffusion exclusions" in the gf180mcu section below), `butted_edges` (`{side, mask_layers, mask_intersect, metrics}`, present only on a rule that declares `DrcRule.butted_spec` — gf180mcu's `nplus.enclosing.comp.1` and `pplus.enclosing.comp.far.1`), `scope` (`null` when unset), `threshold_um` / `threshold_max_um` (the rule's distance threshold and optional upper bound in um; `null` for check kinds without a single distance threshold — `area`, `density`, `antenna`, `ongrid`, `angle`, `comp_coverage`, `tap_distance` — and `threshold_max_um` is `null` unless the rule has an upper bound). Pin a threshold to a deck via `provenance.deck.content_hash`. |
 | `provenance` | The shared block, pinning the deck's content hash; no `input`, since no layout was read. |
 
 A listing **is not a DRC verdict**: it carries no `status`, `violations` or
@@ -1440,8 +1440,8 @@ skips the rule as `inapplicable` (`no_applicable_geometry`). The input
 stream is never modified — the join is computed in memory.
 
 `DrcRule.other_layer_selection` (also issue #2688) narrows a two-layer rule's
-`other_layer` side to a whole-polygon sub-population. Its only value,
-`"squares"`, keeps the *merged* `other_layer` polygons that are squares
+`other_layer` side to a whole-polygon sub-population. One value, `"squares"`,
+keeps the *merged* `other_layer` polygons that are squares
 (`Region.squares()`, the complement of the DRC-DSL `non_squares` selector),
 so contact bars are neither margin-checked nor reported as escapes by that
 rule. `activ.enclosing.cont.1` uses it to match `Cnt.c`'s `cont_sq`
@@ -1449,6 +1449,11 @@ selection. It remains a **corrected subset** of `Cnt.c`, not an equivalent:
 the official rule's `DigiBnd`/`SRAM` (separate 0.05um/0.006um rules),
 `svaricap`, and `EdgeSeal` carve-outs are not modelled, so this rule can
 still over-report (never under-report) contacts inside those regions.
+
+`"not_butted"` (issue #7970) is the other value: on a `derived_layer` rule
+it drops every `other_layer` polygon that touches a butted diffusion pair,
+gf180mcu's `nplus.not_interacting(ncomp_butted)`. See "Butted-diffusion
+exclusions" in the gf180mcu section below.
 
 This exists because an *unscoped* version of some rules would be actively
 wrong, not merely conservative: gf180mcu's `mim.enclosing.via4.1`
@@ -2587,14 +2592,15 @@ context our engine has no data for at all — net-potential
 which require netlist/connectivity information the geometry-only check
 primitives don't have, or a well/butting context selected by a boolean our
 engine cannot evaluate (issue #2369's six implant rules:
-`nplus.space.pcomp.1`/`pplus.space.ncomp.1` collapse the `DNWELL`/`LVPWELL`
-splits `NP.3b`-`NP.3e`/`PP.3b`-`PP.3e` onto the stricter 0.16 µm everywhere;
+`nplus.space.pcomp.1`/`pplus.space.ncomp.1` keep the `DNWELL`/`LVPWELL`
+branches `NP.3b`/`PP.3b` at the stricter 0.16 µm;
 `nplus.enclosing.poly2.1`/`pplus.enclosing.poly2.1` measure every transistor
 gate rather than only the matching channel type, because the official
-`ngate`/`pgate` is a four-layer boolean; `nplus.enclosing.comp.1`/
-`pplus.enclosing.comp.1` apply the strict 0.16 µm to butted edges the
-official rules exclude, and use KLayout's default `euclidian` metric where
-`NP.5b`/`PP.5b` use `projection`). Each is called out explicitly in its
+`ngate`/`pgate` is a four-layer boolean; `pplus.enclosing.comp.1` applies
+the strict 0.16 µm to butted edges `PP.5b` excludes, with KLayout's default
+`euclidian` metric where the official rule uses `projection` -- issue
+#7969; the other implant rules now carry the foundry exclusions, see
+"Butted-diffusion exclusions" below). Each is called out explicitly in its
 rule's docstring in `gf180mcu.py`; the threshold values used are always the
 real, unmodified DRM values, and every implant approximation errs strict
 (over-flagging), never permissive -- **with one exception, fixed in issue
@@ -2631,8 +2637,8 @@ where the context is positively identified: selection is whole-polygon (a
 `PCOMP` only partly within reach stays strict), and the `DNWELL`/`LVPWELL`
 branches (`NP.3bii`, `PP.5ci`) are **not** relaxed -- anything within reach of
 a `Dnwell` stays on the strict near rule. The mirrored `pplus.space.ncomp.1`
-keeps the flat strict value; `nplus.enclosing.comp.1` selects its threshold
-per edge (next paragraph).
+selects its threshold by well depth (issue #7970, below);
+`nplus.enclosing.comp.1` selects its threshold per edge (next paragraph).
 
 **Well-band split of `nplus.enclosing.comp.1` (issue #7955).** The same flat
 0.16 µm flagged an NCOMP tap sitting deep inside a large `Nwell`. The foundry
@@ -2654,8 +2660,9 @@ edge at the cut for the check to measure -- into:
 - the **interior**: the part deeper than 0.429 µm inside such a well, held to
   0.02 µm (`NP.5dii`);
 - everything else -- no `Nwell` under the edge, no well drawn at all, or a tap
-  that touches a `DNWELL` polygon anywhere -- at the flat 0.16 µm, exactly as
-  before the split.
+  that touches a `DNWELL` polygon anywhere -- at the flat 0.16 µm. This is
+  `NP.5b`'s part, which since issue #7970 also drops the butted `Nplus` edges
+  and measures by `projection`, like the foundry statement.
 
 An edge exactly 0.429 µm from the boundary is in the band. On a 1 µm `Comp`
 square with 80 nm of `Nplus`, the single rule reports **0** markers with a
@@ -2674,16 +2681,120 @@ Contact with `DNWELL` anywhere on a well excludes that whole polygon from
 `nplus.not(dnwell).not_outside(nwell)`. A nearby `DNWELL` can therefore cut
 the implant short even when both the tap and its well are clear of `DNWELL`.
 
-The strict fallback measures to the drawn implant with the `euclidian`
-metric, a conservative approximation where the foundry specifies `projection`.
-It keeps the 0.16 µm limit for taps touching `DNWELL`, where the foundry has
-a separate `NP.5c` split for `DNWELL`/`LVPWELL`. Butted edges are checked
-here and handled under `NP.6` in the foundry deck.
-A `PCOMP` inside an `Nwell` is always within reach of the
-oversized well, so `pplus.enclosing.comp.1` holds it to 0.16 µm however deep
-it sits -- which is also what the foundry deck requires there, since `PP.5b`
-measures against the `Pplus` edges *inside* the well and only `PP.5d`
-(taps outside a well) is distance-split.
+What the split still leaves approximated: the strict fallback keeps the
+0.16 µm limit for taps touching `DNWELL`, where the foundry has a separate
+`NP.5c` split for `DNWELL`/`LVPWELL`; and butted edges *inside* the well are
+checked, where `NP.5di`/`NP.5dii` drop an NCOMP edge that coincides with a
+`Pplus` edge (the foundry deck hands butted pairs to `NP.6`). Outside the
+well it is `NP.5b`'s part, measured by `projection` against the implant
+edges the butted selection leaves (issue #7970, next section). The `PCOMP`
+side is deliberately not given a band: its own foundry rules differ. A
+`PCOMP` inside an `Nwell` is always within reach of the oversized well, so
+`pplus.enclosing.comp.1` holds it to 0.16 µm however deep it sits -- which
+is also what the foundry deck requires there, since `PP.5b` measures
+against the `Pplus` edges *inside* the well and only `PP.5d` (taps outside
+a well) is distance-split.
+
+**Butted-diffusion exclusions and the `NCOMP` well-depth split (issue
+#7970).** The pinned `rule_decks/{nplus,pplus}.drc` do not measure an
+implant against the diffusion it is butted to. A butted pair is one `Comp`
+split between `Nplus` and `Pplus`: along the shared edge neither implant
+extends past its own diffusion, and the foundry tables drop that geometry
+before measuring. The curated rules kept it, so four spacing and
+far-enclosure categories reported 180 markers on five Tiny Tapeout layouts
+where the pinned tables report none. They now carry the foundry selections:
+
+- **Spacing** (`nplus.space.pcomp.1`, `nplus.space.pcomp.far.1`,
+  `pplus.space.ncomp.1`): `other_layer_selection="not_butted"` drops every
+  `other_layer` polygon that touches a butted pair -- a polygon of the
+  other implant's diffusion (`other_layer` AND
+  `derived_layer.intersect_with`) touching one of the derived layer's. That
+  is the deck's `nplus.not_interacting(ncomp_butted)` (`NP.3d`/`NP.3e`
+  permit zero space there), mirrored for `pplus`: the implant of the pair
+  is not measured at all, while an unrelated implant with a sub-minimum gap
+  in the same cell still is. Both Nplus rules keep ordinary shielded
+  `separation`, like the pinned `NP.3cii`.
+- **`pplus.space.ncomp.1` by well depth**: `PP.3ci` needs only 0.08 µm from
+  an NCOMP part at least 0.429 µm inside a pure Nwell; `PP.3a` and `PP.3cii`
+  keep 0.16 µm everywhere else. The rule keeps its id and its 0.16 µm
+  `threshold_dbu` and declares the split with `DrcRule.band_spec`, as
+  `nplus.enclosing.comp.1` does -- but cut by *area*, as the pinned deck
+  cuts it (`ncomp.and(nwell_n_dn_sized_in)` and its complement), and
+  measured by `Region.separation_check`. A shape crossing the 0.429 µm
+  boundary is therefore held to 0.16 µm on the part within reach of the
+  well edge and to 0.08 µm on the deep part. `strict_layers` names
+  `LVPWELL`: `PP.3a` keeps 0.16 µm on an NCOMP inside it however deep it
+  sits. With Nwell from (−2000, −2000) to (5000, 5000), COMP from (0, 0) to
+  (1000, 1000), Nplus from (−200, −200) to (1200, 1200) and Pplus 60, 80,
+  100, 160 and 200 nm from the COMP's right edge, the rule reports 1, 0, 0,
+  0 and 0 markers; with no well, or with the well edge within 0.429 µm, the
+  100 nm gap is still reported.
+- **Enclosure**: `DrcRule.butted_spec`
+  (`drc_butted_diffusion.ButtedEdgeSpec`) names, segment by segment, the
+  edges of one operand that coincide with an edge of a mask. It is applied
+  to the pairs of the rule's shielded `Region.enclosed_check`: a pair whose
+  masked side is butted throughout is not reported, and what remains of the
+  others is measured again with the `projection` metric of the DRC
+  `edges.enclosed` the foundry statements compile to. The shielding stays,
+  so an implant behind the one enclosing a tap still adds no marker (issue
+  #7955). `NP.5b` masks the enclosing `Nplus` edges with `PCOMP`; `PP.5di`
+  the checked `PCOMP` edges with `Nplus`. In the ordinary butted pair each
+  implant runs past the `Comp` above and below, so 0.16 µm stubs of the
+  coincident edge remain: `projection` does not pair them with the butted
+  edge, where `euclidian` did. On `nplus.enclosing.comp.1` the selection
+  applies to `NP.5b`'s edges only, outside the band and the interior.
+
+`--list-rules` shows the edge selection under the rule's `butted_edges` key.
+
+Replayed on the five pinned layouts, with inputs checked against the
+campaign catalogue hashes (curated engine on the `klayout` 0.30.13 wheel;
+the pinned table bodies, commit `10ee7fc`, run flat on one thread with the
+KLayout 0.30.12 binary):
+
+| Curated rule | Pinned statements | Before | After | Pinned tables |
+| --- | --- | ---: | ---: | ---: |
+| `nplus.space.pcomp.1` | `NP.3a`, `NP.3ci` | 11 | 0 | 0 |
+| `nplus.space.pcomp.far.1` | `NP.3cii` | 34 | 0 | 0 |
+| `pplus.space.ncomp.1` | `PP.3a`, `PP.3ci` | 117 | 0 | 0 |
+| `pplus.enclosing.comp.far.1` | `PP.5di` | 18 | 0 | 0 |
+| `nplus.enclosing.comp.1` | `NP.5b` | 29 | 11 | 0 |
+
+"Before" is these rules ahead of the change, on top of the #7955 band. The
+markers removed -- 8 on `tt_um_analog_factory_test` and 3 on
+`tt_um_LPCAS_TTGF0P3_TP1` for `nplus.space.pcomp.1`, 28 and 6 for
+`nplus.space.pcomp.far.1`, 24 / 76 / 9 / 8 for `pplus.space.ncomp.1`
+(analog factory test, `tt_um_essen`, LPCAS, `tt_um_tnt_gf_vco`), 12 and 6
+for `pplus.enclosing.comp.far.1`, and 12 and 6 of `nplus.enclosing.comp.1`
+-- match, bounding box for bounding box and with multiplicity, what the
+pinned tables report in the campaign ledger's experimental copy (butted
+geometry retained, `PP.3ci` at 0.16 µm, `euclidian` metric). The four
+spacing and far-enclosure categories now agree with the unmodified pinned
+tables. What does not: the 11 `nplus.enclosing.comp.1` markers left on the
+analog factory test (8) and LPCAS (3) are NCOMP edges butted to a PCOMP
+inside an Nwell, which `NP.5di`/`NP.5dii` drop and the #7955 band keeps --
+they equal those two statements run without their `.not(pplus.edges)`; and
+`pplus.enclosing.comp.1` keeps its 445 markers pending #7969. The four
+far-well bounds the ledger saw only with edge shielding off were
+butted-pair markers and are gone; on the Linux KLayout 0.30.12 binary the
+copy's ordinary shielded `NP.3cii` reported all 28 of them by itself.
+
+The three layouts the campaign's last shard added, which the ledger did not
+compare, replay the same way (`tt_um_74hct00`, `tt_um_algofoogle_gf_analog`
+and `tt_um_cw_testbuffer`; "before" and "after" as above, pinned tables
+zero throughout):
+
+| Curated rule | Pinned statements | Before | After |
+| --- | --- | ---: | ---: |
+| `nplus.space.pcomp.1` | `NP.3a`, `NP.3ci` | 49 | 0 |
+| `nplus.space.pcomp.far.1` | `NP.3cii` | 68 | 0 |
+| `pplus.space.ncomp.1` | `PP.3a`, `PP.3ci`, `PP.3cii` | 98 | 0 |
+| `pplus.enclosing.comp.far.1` | `PP.5di` | 45 | 0 |
+| `nplus.enclosing.comp.1` | `NP.5b` | 90 | 45 |
+
+Every marker these layouts lose matches its statement in the experimental
+copy, bounding box for bounding box and with multiplicity, and the 45
+`nplus.enclosing.comp.1` markers they keep (12 and 33) equal `NP.5dii`
+without its `.not(pplus.edges)`.
 
 `DerivedLayer` also takes an optional **second context stage**
 (`context2_layers`, `context2_sized_by_um`, `context2`, issue #3682): the same

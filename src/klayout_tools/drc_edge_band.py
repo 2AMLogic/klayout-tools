@@ -1,6 +1,7 @@
-"""``DrcRule.band_spec``: an ``"enclosed"`` rule held to two different
-thresholds, selected per edge by how deep the edge sits inside a context
-layer (issue #7955).
+"""``DrcRule.band_spec``: a two-layer rule held to two different thresholds,
+selected by how deep the checked geometry sits inside a context layer --
+per edge for an ``"enclosed"`` rule (issue #7955), per area for a
+``"separation"`` rule (issue #7970).
 
 Split out of :mod:`klayout_tools.drc` to respect its per-file size ratchet,
 and following :mod:`klayout_tools.drc_text_exempt` (#5442) in keeping the
@@ -32,9 +33,20 @@ it. One tap can carry edges in both classes -- near the well's boundary on
 one side, deep inside on the others -- and selecting a class by clipping
 the tap polygon would leave an artificial edge at the cut for the enclosure
 check to measure. So the split is made on the *edges* of the unclipped
-checked region instead. Strict segments retain the shielded enclosure
-pairs from the original region check. The two well-depth classes use the
-foundry expressions on their selected edges.
+checked region instead. The two well-depth classes use the foundry
+expressions on their selected edges. Everything else keeps the shielded
+pairs of the ``Region.enclosed_check`` the rule ran before it had a band.
+
+The ``separation`` flavour is gf180mcu's ``PP.3``. There the pinned deck
+(``rule_decks/pplus.drc``) selects by *area*, with a boolean clip: an NCOMP
+part at least 0.43 um inside a pure Nwell (``ncomp.and(
+nwell_n_dn_sized_in)``) needs 0.08 um from Pplus (``PP.3ci``), the rest
+0.16 um (``PP.3a``, ``PP.3cii``). The cut leaves an artificial edge inside
+the original shape, which an enclosure check would measure as a
+zero-extension side; a separation check only pairs it with ``other_layer``
+geometry overlapping the checked shape there. So the band is cut here
+exactly as the foundry cuts it, and each part is measured by
+``Region.separation_check`` -- shielded, like the deck's own ``separation``.
 """
 
 from __future__ import annotations
@@ -42,16 +54,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .drc_butted_diffusion import (
+    ButtedEdgeSelection,
+    butted_edge_selection,
+    rest_pairs,
+    run_butted_edge_check,
+)
+
 #: ``EdgeBandSpec`` metric names -> the ``klayout.db.Region`` constants.
 _METRICS = {"euclidian": "Euclidian", "projection": "Projection"}
+
+#: The check kinds a ``band_spec`` splits, and how: ``"enclosed"`` per edge,
+#: ``"separation"`` per area.
+_BANDED_CHECKS = ("enclosed", "separation")
 
 
 @dataclass(frozen=True)
 class EdgeBandSpec:
     """Deck-owned inputs for a :class:`~klayout_tools.decks.DrcRule` whose
-    ``check`` is ``"enclosed"``.
+    ``check`` is ``"enclosed"`` or ``"separation"``.
 
-    The checked region's edges are split three ways, each measured against
+    The checked geometry is split three ways, each measured against
     ``other_layer`` at its own threshold:
 
     - **band**: the part within ``band_width_um`` of the boundary of a
@@ -59,10 +82,20 @@ class EdgeBandSpec:
       rule's ``threshold_dbu`` with ``band_metrics``;
     - **interior**: the part of such a polygon deeper than ``band_width_um``
       from its boundary, at ``inner_threshold_dbu`` with ``inner_metrics``;
-    - **everything else** -- no context under the edge, or a checked polygon
-      that touches an ``exclude_layers`` polygon anywhere -- at
-      ``threshold_dbu`` with the engine's default ``euclidian`` metric,
-      exactly as the rule behaved without a ``band_spec``.
+    - **everything else** -- no context under it, or (``"enclosed"`` only) a
+      checked polygon that touches an ``exclude_layers`` polygon anywhere --
+      at ``threshold_dbu``, exactly as the rule behaved without a
+      ``band_spec`` unless its ``butted_spec`` names another metric for this
+      class.
+
+    For ``"enclosed"`` the classes are *edges* of the unclipped checked
+    region; for ``"separation"`` they are *areas*, the checked region clipped
+    by the interior and its complement (see the module docstring).
+
+    ``strict_layers`` (``"separation"`` only) names layers whose area is
+    never interior, however deep it sits: the part of the interior they
+    cover is measured with the band and the rest. gf180mcu names ``LVPWELL``
+    there -- ``PP.3a`` keeps 0.16 um on an NCOMP inside it whatever the well.
 
     An absent layer contributes an empty region. Without context every edge
     keeps the flat threshold. Without exclusions all context polygons qualify.
@@ -84,6 +117,7 @@ class EdgeBandSpec:
     inner_threshold_dbu: int
     band_metrics: str = "projection"
     inner_metrics: str = "euclidian"
+    strict_layers: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.context_layers:
@@ -100,7 +134,7 @@ class EdgeBandSpec:
 
     def layers(self) -> tuple[tuple[int, int], ...]:
         """Every layer this spec reads, in declaration order."""
-        return (*self.context_layers, *self.exclude_layers)
+        return (*self.context_layers, *self.exclude_layers, *self.strict_layers)
 
 
 def validate_edge_band(rule: Any) -> None:
@@ -114,10 +148,10 @@ def validate_edge_band(rule: Any) -> None:
         return
     from .drc import DrcError  # local: `drc` imports this module
 
-    if rule.check != "enclosed":
+    if rule.check not in _BANDED_CHECKS:
         raise DrcError(
-            f"rule '{rule.id}': band_spec is only valid on 'enclosed' checks, "
-            f"not '{rule.check}'"
+            f"rule '{rule.id}': band_spec is only valid on 'enclosed' or "
+            f"'separation' checks, not '{rule.check}'"
         )
     if rule.other_layer is None:
         raise DrcError(f"rule '{rule.id}': band_spec requires other_layer")
@@ -130,12 +164,18 @@ def validate_edge_band(rule: Any) -> None:
             f"rule '{rule.id}': band_spec inner_threshold_dbu must be below "
             "threshold_dbu"
         )
+    if spec.strict_layers and rule.check != "separation":
+        raise DrcError(
+            f"rule '{rule.id}': band_spec strict_layers is only meaningful on "
+            "'separation' checks"
+        )
 
 
 def edge_band_fields(rule: Any, nominal_dbu_um: float) -> dict[str, Any]:
     """``--list-rules`` JSON for ``rule.band_spec``: an ``edge_band`` object
     naming both layer sets, the band width and the interior's own threshold
-    in um. Empty for a rule without one, so no other rule's JSON changes."""
+    in um, plus ``strict_layers`` when the spec declares any. Empty for a
+    rule without one, so no other rule's JSON changes."""
     spec = rule.band_spec
     if spec is None:
         return {}
@@ -145,6 +185,13 @@ def edge_band_fields(rule: Any, nominal_dbu_um: float) -> dict[str, Any]:
             "exclude_layers": [_layer_str(layer) for layer in spec.exclude_layers],
             "band_width_um": spec.band_width_um,
             "inner_threshold_um": round(spec.inner_threshold_dbu * nominal_dbu_um, 9),
+            **(
+                {}
+                if not spec.strict_layers
+                else {
+                    "strict_layers": [_layer_str(layer) for layer in spec.strict_layers]
+                }
+            ),
         }
     }
 
@@ -158,11 +205,21 @@ def run_edge_band_check(
     reports a banded rule like any other: ``EdgePairs`` through the ordinary
     per-pair path, and the zero-overlap escape term (issue #318) as polygons
     (``None`` when the rule opts out with ``report_escapes=False``). Pairs
-    come in a fixed order -- band, interior, then the rest.
+    come in a fixed order -- band, interior, then the rest (interior first
+    for ``"separation"``).
+
+    ``drc._edge_pairs_for_rule`` routes every rule carrying a ``band_spec``
+    or a ``butted_spec`` here. One with a ``butted_spec`` but no band is a
+    single class (:func:`run_butted_edge_check`). On an ``"enclosed"`` rule
+    carrying both, the rest class goes through its butted selection
+    (:func:`rest_pairs`): the band and the interior are ``NP.5di``/``NP.5dii``,
+    which keep their operand.
     """
     import klayout.db as kdb
 
     spec = rule.band_spec
+    if spec is None:
+        return run_butted_edge_check(cell, setup, rule, region, other_region)
     layout = setup.layout
     region = region.merged()
     other_region = other_region.merged()
@@ -170,9 +227,12 @@ def run_edge_band_check(
     exclude = _joined_region(cell, layout, spec.exclude_layers)
     pure = context.not_interacting(exclude)
     width_dbu = round(spec.band_width_um / layout.dbu)
-    # A stream too coarse to resolve the band cannot place any edge in it:
+    # A stream too coarse to resolve the band cannot place anything in it:
     # relax nothing, rather than call the whole well "interior".
     inner = pure.sized(-width_dbu) if width_dbu > 0 else kdb.Region()
+    if rule.check == "separation":
+        return _separation_pairs(cell, setup, rule, region, other_region, inner), None
+
     excluded, eligible = region.split_interacting(exclude)
     at_well, away_from_well = eligible.split_interacting(pure)
     well_edges = at_well.edges()
@@ -195,10 +255,11 @@ def run_edge_band_check(
         )
 
     distance = round(rule.threshold_dbu * setup.dbu_scale)
+    selection = butted_edge_selection(rule, cell, layout)
     strict = excluded + away_from_well
-    edge_pairs.insert(strict.enclosed_check(other_region, distance))
+    edge_pairs.insert(rest_pairs(strict, other_region, distance, selection))
     crossing = at_well.not_inside(pure)
-    edge_pairs.insert(_strict_parts(crossing, other_region, pure, distance))
+    edge_pairs.insert(_strict_parts(crossing, other_region, pure, distance, selection))
 
     outside_region = None
     if rule.report_escapes:
@@ -206,12 +267,18 @@ def run_edge_band_check(
     return edge_pairs, outside_region
 
 
-def _strict_parts(crossing: Any, implant: Any, wells: Any, distance: int) -> Any:
+def _strict_parts(
+    crossing: Any,
+    implant: Any,
+    wells: Any,
+    distance: int,
+    selection: ButtedEdgeSelection | None,
+) -> Any:
     """Shielded enclosure on the perimeter of crossing taps outside the wells."""
     import klayout.db as kdb
 
     result = kdb.EdgePairs()
-    shielded = set(crossing.enclosed_check(implant, distance).each())
+    shielded = set(rest_pairs(crossing, implant, distance, selection).each())
     if not shielded:
         return result
 
@@ -226,18 +293,22 @@ def _strict_parts(crossing: Any, implant: Any, wells: Any, distance: int) -> Any
     well_index = kdb.Shapes()
     well_index.insert(wells)
     for pair in candidates.each():
-        tap_edge = kdb.Edges(pair.first)
-        partner = kdb.Edges(pair.second)
-        for marker in tap_edge.enclosed_check(partner, distance).each():
+        for marker in _marker(pair.first, pair, distance, selection).each():
             if marker in shielded:
-                result.insert(_clip_strict_marker(pair, marker, well_index, distance))
+                result.insert(
+                    _clip_strict_marker(pair, marker, well_index, distance, selection)
+                )
     # Adjacent source edges can reproduce the same corner pair. Deduplicate
     # after clipping so distinct strict portions of a marker are preserved.
     return kdb.EdgePairs(list(dict.fromkeys(result.each())))
 
 
 def _clip_strict_marker(
-    source: Any, marker: Any, well_index: Any, distance: int
+    source: Any,
+    marker: Any,
+    well_index: Any,
+    distance: int,
+    selection: ButtedEdgeSelection | None,
 ) -> Any:
     import klayout.db as kdb
 
@@ -252,10 +323,45 @@ def _clip_strict_marker(
         if marker_box.inside(part.bbox()):
             return kdb.EdgePairs(marker)
         if marker_box.touches(part.bbox()):
-            result.insert(
-                kdb.Edges(part).enclosed_check(kdb.Edges(source.second), distance)
-            )
+            result.insert(_marker(part, source, distance, selection))
     return result
+
+
+def _marker(
+    checked: Any, pair: Any, distance: int, selection: ButtedEdgeSelection | None
+) -> Any:
+    """``checked`` -- the pair's tap edge, or a stretch of it -- measured
+    against the pair's implant edge: the marker, through the rule's butted
+    selection when it carries one."""
+    import klayout.db as kdb
+
+    if selection is None:
+        return kdb.Edges(checked).enclosed_check(kdb.Edges(pair.second), distance)
+    return selection.measure(checked, pair, distance)
+
+
+def _separation_pairs(
+    cell: Any, setup: Any, rule: Any, region: Any, other_region: Any, inner: Any
+) -> Any:
+    """The ``separation`` flavour: the interior as an area, minus whatever
+    ``strict_layers`` covers, and its complement in the checked region, each
+    measured against ``other_region`` by ``Region.separation_check``."""
+    import klayout.db as kdb
+
+    spec = rule.band_spec
+    deep = inner - _joined_region(cell, setup.layout, spec.strict_layers)
+    edge_pairs = kdb.EdgePairs()
+    for checked, threshold_dbu, metrics in (
+        (region & deep, spec.inner_threshold_dbu, spec.inner_metrics),
+        (region - deep, rule.threshold_dbu, spec.band_metrics),
+    ):
+        distance = round(threshold_dbu * setup.dbu_scale)
+        edge_pairs.insert(
+            checked.separation_check(
+                other_region, distance, metrics=getattr(kdb.Region, _METRICS[metrics])
+            )
+        )
+    return edge_pairs
 
 
 def _joined_region(cell: Any, layout: Any, layers: tuple[tuple[int, int], ...]) -> Any:

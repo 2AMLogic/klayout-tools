@@ -747,13 +747,11 @@ class DrcRule:
     neither anywhere has no shape this rule's 0.16um threshold can
     correctly apply to, so the whole rule is skipped (not silently
     evaluated at the wrong, stricter threshold) rather than reported
-    against an empty-but-still-flat-0.16um checked region. A layout that
-    draws *either* layer anywhere keeps today's unchanged (and still
-    approximate -- butting edges, ``euclidian`` vs. ``projection``, see the
-    rule's own comment in ``decks/gf180mcu.py``) flat 0.16um behaviour,
-    since this gate cannot further narrow *which* ``PCOMP`` shapes within
-    that layout are in which DRM sub-case without the same unsupported
-    three-input derivation.
+    against an empty-but-still-flat-0.16um checked region. A layout that draws
+    *either* layer anywhere keeps this rule checked -- still approximate (butting
+    edges, ``euclidian`` vs. ``projection``, the rule's own comment in
+    ``decks/gf180mcu.py``) -- and narrows which ``PCOMP`` shapes fall in which DRM
+    sub-case only as far as the rule's own ``derived_layer`` expresses (#3484).
 
     Defaults to ``None`` (every pre-existing rule), under which this gate
     never applies and a rule behaves exactly as it did before this field
@@ -776,20 +774,21 @@ class DrcRule:
     conservative value every pre-existing rule keeps, so the gate's
     behaviour is unchanged for them.
 
-    ``other_layer_selection`` (issue #2688) narrows the ``other_layer``
-    side of a two-layer rule to a whole-polygon sub-population of that
-    drawn layer, the same way a ``.not(...)``-free official selector does.
-    The only supported value is ``"squares"``: ``other_layer``'s *merged*
-    polygons filtered by ``klayout.db.Region.squares()`` -- the complement
-    of the DRC-DSL ``non_squares`` selector sg13g2's runset uses to split
-    square contacts from contact bars (``contbar = cont_nseal.non_squares;
-    cont_sq = cont_nseal.not(contbar)``, ``ihp-sg13g2.drc``). A contact bar
-    (or any non-square merged contact shape) is therefore neither measured
-    for margin nor reported by the #318 zero-overlap escape term of a rule
-    using this selection -- matching ``Cnt.c``, which never applied to
-    bars (those are ``CntB.*``'s job). ``None`` (the default, every
-    pre-existing rule) reads ``other_layer``'s full drawn shapes exactly as
-    before this field existed. Any other value is a deck-authoring mistake
+    ``other_layer_selection`` (issue #2688) narrows the ``other_layer`` side of a
+    two-layer rule to a whole-polygon sub-population of that drawn layer, the same way a
+    ``.not(...)``-free official selector does. ``"squares"``: ``other_layer``'s *merged*
+    polygons filtered by ``klayout.db.Region.squares()`` -- the complement of the
+    DRC-DSL ``non_squares`` selector sg13g2's runset uses to split square contacts from
+    contact bars (``contbar = cont_nseal.non_squares; cont_sq =
+    cont_nseal.not(contbar)``, ``ihp-sg13g2.drc``). A contact bar (or any non-square
+    merged contact shape) is therefore neither measured for margin nor reported by the
+    #318 zero-overlap escape term of a rule using this selection -- matching ``Cnt.c``,
+    which never applied to bars (those are ``CntB.*``'s job). ``"not_butted"`` (issue
+    #7970) drops, on a ``derived_layer`` rule, every ``other_layer`` polygon touching a
+    butted diffusion pair, gf180mcu's NP.3/PP.3 operand; see
+    :mod:`klayout_tools.drc_butted_diffusion`. ``None`` (the default, every pre-existing
+    rule) reads ``other_layer``'s full drawn shapes exactly as before this field
+    existed. Any other value is a deck-authoring mistake
     :func:`~klayout_tools.drc.run_drc` rejects loudly with the rule id.
 
     ``layer_selection`` (issues #2943, #3139) is the same ``"squares"``
@@ -848,6 +847,7 @@ class DrcRule:
     # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
     runset_note: dict[str, Any] | None = None
     text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
+    butted_spec: Any = None  # `drc_butted_diffusion.ButtedEdgeSpec` -- butted edges
     band_spec: Any = None  # `drc_edge_band.EdgeBandSpec` -- thresholds by depth (#7955)
     approximations: list[dict[str, str]] | None = None
 
