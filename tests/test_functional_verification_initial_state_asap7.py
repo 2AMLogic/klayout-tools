@@ -29,7 +29,7 @@ ASAP7_UDPS = """\
 primitive altos_dff (q, v, clk, d, xcr);
 \toutput q; reg q; input v, clk, d, xcr;
 \ttable
-\t\t* ? ? ? ? : ? : x;
+\t\t* ? ? ? : ? : x;
 \t\t? (x1) 0 0 : ? : 0;
 \t\t? (x1) 1 0 : ? : 1;
 \t\t? 0 ? ? : ? : -;
@@ -270,3 +270,73 @@ def test_udp_spelling_preserves_the_drive_list(tmp_path, escaped):
     )
     assert [e["instance"] for e in drivable] == ["f0", "l0"]
     assert not unsupported
+
+
+def _header_form(udps: str) -> str:
+    """Move each state-holding UDP's output register into its port list."""
+
+    def header(m: re.Match[str]) -> str:
+        inputs = ", ".join(f"input {p.strip()}" for p in m[2].split(","))
+        return f"primitive {m[1]} (output reg q, {inputs});"
+
+    return re.sub(
+        r"primitive (altos_\w+) \(q, [^)]*\);\n\toutput q; reg q; input ([^;]*);",
+        header,
+        udps,
+    )
+
+
+#: Equivalent spellings of the output register, each valid Verilog for Icarus.
+REGISTER_SPELLINGS = {
+    "header": _header_form,
+    "body_output_reg": lambda udps: udps.replace("output q; reg q;", "output reg q;"),
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(REGISTER_SPELLINGS))
+def test_udp_output_register_spelling_preserves_the_drive_list(tmp_path, spelling):
+    """``primitive p (output reg q, input d, input clk);`` and ``output reg
+    q;`` in the body are the same state-holding UDP as ``output q; reg q;``:
+    the drive list is unchanged."""
+    _stage_asap7(tmp_path)
+    text = REGISTER_SPELLINGS[spelling](ASAP7_UDPS)
+    assert "output q; reg q;" not in text
+    udps = tmp_path / "asap7_udps.v"
+    udps.write_text(text, encoding="utf-8")
+    drivable, unsupported = sequential_elements(
+        str(tmp_path / "asap7_drivable_net.v"),
+        [str(udps), str(tmp_path / "asap7_models.v")],
+        "top",
+    )
+    assert [e["instance"] for e in drivable] == ["f0", "l0"]
+    assert not unsupported
+
+
+@pytest.mark.parametrize("udp", ["generic_mux", "lib__udp_dff", "lib__udp_dlatch"])
+def test_declared_combinational_udp_ignores_the_sky130_name_fallback(tmp_path, udp):
+    """A UDP the supplied files declare keeps its declared classification: a
+    two-input table with no ``current`` column is combinational even when its
+    name matches the sky130 ``udp_dff``/``udp_dlatch`` fallback."""
+    (tmp_path / "comb.v").write_text(
+        f"primitive {udp} (q, d, clk);\n"
+        "\toutput q; input d, clk;\n"
+        "\ttable\n\t\t0 ? : 0;\n\t\t1 ? : 1;\n\tendtable\n"
+        "endprimitive\n"
+        "module wrapped (Q, D, CLK);\n"
+        "\toutput Q; input D, CLK;\n"
+        f"\t{udp} (Q, D, CLK);\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "net.v").write_text(
+        "module top (clk, d, q);\n"
+        "  input clk, d; output q;\n"
+        "  wrapped f0 (.CLK(clk), .D(d), .Q(q));\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    drivable, unsupported = sequential_elements(
+        str(tmp_path / "net.v"), [str(tmp_path / "comb.v")], "top"
+    )
+    assert drivable == []
+    assert unsupported == []

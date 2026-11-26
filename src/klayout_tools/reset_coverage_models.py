@@ -136,7 +136,16 @@ def _names(decl: str) -> list[str]:
     ]
 
 
-def _build_model(name: str, body: str, state_udps: set[str]) -> _CellModel:
+def _is_state_udp(udps: dict[str, bool], primitive: str) -> bool:
+    """A declared primitive keeps its declared classification -- including
+    combinational. Only a type no supplied file declares falls back on the
+    sky130 ``udp_dff*``/``udp_dlatch*`` name."""
+    if primitive in udps:
+        return udps[primitive]
+    return _SEQ_UDP_RE.search(primitive) is not None
+
+
+def _build_model(name: str, body: str, udps: dict[str, bool]) -> _CellModel:
     inputs: list[str] = []
     outputs: list[str] = []
     for direction, decl in _DIR_RE.findall(body):
@@ -150,9 +159,7 @@ def _build_model(name: str, body: str, state_udps: set[str]) -> _CellModel:
         (t, "") for t in _ANON_INST_RE.findall(body) if t not in _ANON_INST_EXCLUDE
     ]
     model.primitives = [t.lstrip("\\") for t, _ in instances]
-    model.sequential = any(
-        t in state_udps or _SEQ_UDP_RE.search(t) for t in model.primitives
-    )
+    model.sequential = any(_is_state_udp(udps, t) for t in model.primitives)
     if model.sequential:
         for pin in inputs:
             if pin in _ASYNC_PINS:
@@ -168,15 +175,20 @@ def _build_model(name: str, body: str, state_udps: set[str]) -> _CellModel:
     return model
 
 
-def _holds_state(body: str) -> bool:
-    """Whether a ``primitive`` body is a state-holding UDP: its output is a
+def _holds_state(header: str, body: str) -> bool:
+    """Whether a ``primitive`` is a state-holding UDP: its output is a
     declared register and its table's rows read ``inputs : current :
-    next`` (a combinational UDP's single row is ``inputs : output``)."""
+    next`` (a combinational UDP's single row is ``inputs : output``).
+
+    The output and its register are declared either in the body
+    (``output q; reg q;``) or in the header itself (``primitive p (output reg
+    q, input d, clk);``); both spellings are read."""
+    decls = "".join(f"{p.strip()};" for p in header.split(",") if p.strip()) + body
     outputs: set[str] = set()
-    for direction, decl in _DIR_RE.findall(body):
+    for direction, decl in _DIR_RE.findall(decls):
         if direction == "output":
             outputs.update(_names(decl))
-    regs = {n for decl in _REG_DECL_RE.findall(body) for n in _names(decl)}
+    regs = {n for decl in _REG_DECL_RE.findall(decls) for n in _names(decl)}
     if not regs & outputs:
         return False
     table = _TABLE_RE.search(body)
@@ -185,21 +197,19 @@ def _holds_state(body: str) -> bool:
     return any(row.count(":") == 2 for row in table.group(1).split(";") if row.strip())
 
 
-def _state_holding_udps(texts: list[str]) -> set[str]:
-    """Names of the state-holding ``primitive``s across every supplied file,
-    first definition winning (ASAP7 re-declares each UDP under a second
-    ``ifdef`` branch, the way sky130 re-declares each module)."""
-    seen: set[str] = set()
-    stateful: set[str] = set()
+def _udp_declarations(texts: list[str]) -> dict[str, bool]:
+    """Every ``primitive`` declared across the supplied files -> whether it
+    holds state, the first declaration winning (ASAP7 re-declares each UDP
+    under a second ``ifdef`` branch, the way sky130 re-declares each module).
+    A combinational declaration is recorded too, so it is never mistaken for
+    an undeclared type."""
+    udps: dict[str, bool] = {}
     for text in texts:
         for match in _PRIMITIVE_RE.finditer(text):
             name = match.group(1).lstrip("\\")
-            if name in seen:
-                continue
-            seen.add(name)
-            if _holds_state(match.group(3)):
-                stateful.add(name)
-    return stateful
+            if name not in udps:
+                udps[name] = _holds_state(match.group(2), match.group(3))
+    return udps
 
 
 def load_cell_models(paths: list[str]) -> dict[str, _CellModel]:
@@ -208,15 +218,18 @@ def load_cell_models(paths: list[str]) -> dict[str, _CellModel]:
 
     A cell model is *sequential* when its body instantiates a state-holding
     UDP -- any ``primitive`` declared across the supplied files whose output
-    is a register and whose table rows read ``inputs : current : next`` --
-    with or without an instance name (ASAP7's ``altos_dff*``/``altos_latch*``
-    family is unnamed), or a ``udp_dff*``/``udp_dlatch*`` primitive by name
-    (the sky130 fallback for cell wrappers supplied without the primitive
-    declarations). The primitives are indexed across every file before any
-    module is classified, so a UDP declared in a different file is
-    recognised regardless of source order."""
+    is a register (declared in the body or the header) and whose table rows
+    read ``inputs : current : next`` -- with or without an instance name
+    (ASAP7's ``altos_dff*``/``altos_latch*`` family is unnamed), or a
+    ``udp_dff*``/``udp_dlatch*`` primitive by name (the sky130 fallback for
+    cell wrappers supplied without the primitive declarations -- used only
+    when no supplied file declares the primitive, so a declared
+    combinational UDP stays combinational whatever it is called). The
+    primitives are indexed across every file before any module is
+    classified, so a UDP declared in a different file is recognised
+    regardless of source order."""
     texts = [_COMMENT_RE.sub("", _read(path, "cell-model file")) for path in paths]
-    state_udps = _state_holding_udps(texts)
+    udps = _udp_declarations(texts)
     models: dict[str, _CellModel] = {}
     for text in texts:
         for match in _MODULE_RE.finditer(text):
@@ -233,7 +246,7 @@ def load_cell_models(paths: list[str]) -> dict[str, _CellModel]:
                     )
                     + body
                 )
-            model = _build_model(name, body, state_udps)
+            model = _build_model(name, body, udps)
             if not model.inputs and not model.outputs:
                 model.inputs = header_ports
             models[name] = model
