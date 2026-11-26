@@ -14,7 +14,6 @@ import os
 import re
 from typing import Any
 
-from . import place_and_route_clock as _vclk
 from ._dont_use import effective_patterns
 from ._openroad_engine import _timing_violation_report_lines
 from ._sta_multicycle import multicycle_lines
@@ -41,6 +40,9 @@ from .place_and_route_cell_libraries import (
     _ROW_RAIL_STRAP,
     _TAPCELL_CELLS,
 )
+from .place_and_route_clock import ClockConstraints
+from .place_and_route_clock import _clock_lines as _clock_lines
+from .place_and_route_clock import _io_delay_lines as _io_delay_lines
 from .place_and_route_fences import placement_fence_lines
 from .place_and_route_groups import fixed_group_commands
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
@@ -68,22 +70,6 @@ def _write_script(script_path: str, lines: list[str]) -> None:
         raise PlaceAndRouteError(
             f"could not write place-and-route script '{script_path}': {exc}"
         ) from exc
-
-
-# Pins command units to ns / pF so the unit-less constraint numbers below and
-# the metric procs read back are Liberty-``time_unit``-independent (#4089).
-_UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
-
-
-def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[str]:
-    """Create a clock after link_design/read_db resolves [get_ports] (#425)."""
-    if clock_port is None:
-        return _vclk.virtual_clock_lines(clock_period_ns, _UNIT_PIN_LINE)  # issue #4913
-    return [
-        _UNIT_PIN_LINE,
-        f"create_clock -name {_tcl_literal(clock_port)} "
-        f"-period {clock_period_ns} [get_ports {_tcl_literal(clock_port)}]",
-    ]
 
 
 def _design_rule_constraint_lines(
@@ -129,62 +115,6 @@ def _pdn_instances_arg(instance: str) -> str:
     """
     glob_escaped = re.sub(r"([\\\[\]*?])", r"\\\1", instance)
     return glob_escaped.replace("\\", "\\\\")
-
-
-def _io_delay_lines(
-    clock_port: str | None,
-    input_delay_ns: float | None,
-    output_delay_ns: float | None,
-) -> list[str]:
-    """``set_input_delay``/``set_output_delay`` -- issue #1865's
-    ``request.constraints.input_delay_ns``/``.output_delay_ns``.
-
-    Without these, a design whose only timing paths run *input port ->
-    register* and *register -> output port* (a pipeline stage, a registered
-    interface adapter, an IO/boundary block, the first slice of any design
-    built bottom-up) has no constrained startpoint or endpoint at all: every
-    slack field in this command's response degrades to OpenSTA's own
-    unconstrained sentinel (``1e+39``), which is a *positive* number and so
-    reads to a naive pass/fail gate as "timing closed with enormous margin"
-    on a design that was never timed. ``create_clock`` alone -- the only
-    constraint surface this command had before #1865 -- is enough only for a
-    design whose paths are all register-to-register.
-
-    A scalar applies to *every* port on that side of the design, which is
-    the overwhelmingly common case for a boundary block (per-port maps are
-    deliberately out of scope here -- see the issue). The non-clock input
-    set is computed with the same plain-Tcl ``lsearch`` idiom
-    OpenROAD-flow-scripts' own ``constraint.sdc`` templates use, rather than
-    a ``remove_from_collection`` this repo has not verified against the
-    OpenSTA builds it targets: ``all_inputs`` includes the clock port
-    itself, and an arrival time on the clock port is not what a caller
-    asking for "input delay" means.
-
-    Mirrors :func:`_clock_lines`/:func:`_design_rule_constraint_lines`'s
-    shape exactly: threaded through the same call sites, emitted
-    immediately after them, and each field emits its own line(s) only when
-    given -- a request with neither field set produces Tcl byte-identical
-    to before this function existed. ``clock_port`` is never ``None`` when
-    either delay is set (:func:`_validate_constraints` rejects that
-    combination); with no port, the delays use the virtual clock (#4913).
-    """
-    if clock_port is None:
-        return _vclk.virtual_io_delay_lines(input_delay_ns, output_delay_ns)
-    lines: list[str] = []
-    if input_delay_ns is not None:
-        lines += [
-            f"set klt_clock_port [get_ports {_tcl_literal(clock_port)}]",
-            "set klt_non_clock_inputs "
-            "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
-            f"set_input_delay {input_delay_ns} "
-            f"-clock {_tcl_literal(clock_port)} $klt_non_clock_inputs",
-        ]
-    if output_delay_ns is not None:
-        lines.append(
-            f"set_output_delay {output_delay_ns} "
-            f"-clock {_tcl_literal(clock_port)} [all_outputs]"
-        )
-    return lines
 
 
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
@@ -943,8 +873,9 @@ def _stage_script_lines(
     io_spec: dict[str, Any] | None,
     macros: list[dict[str, Any]],
     power: dict[str, Any] | None,
-    clock_port: str | None,
-    clock_period_ns: float | None,
+    clock_port: str | None = None,
+    clock_period_ns: float | None = None,
+    clocks: ClockConstraints | None = None,
     max_transition_ns: float | None,
     max_capacitance_pf: float | None,
     max_fanout: float | None,
@@ -965,6 +896,8 @@ def _stage_script_lines(
     multicycle: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     from ._power_activity import power_activity_lines
+
+    clocks = clocks or ClockConstraints(clock_port, clock_period_ns)
 
     # Issue #2635: `request.macros[].lib`, resolved to this run's own
     # corner. Read immediately after the standard-cell `read_liberty` in
@@ -995,11 +928,11 @@ def _stage_script_lines(
             f"read_verilog {_tcl_literal(netlist_path)}",
             f"link_design {_tcl_literal(hdl_toplevel)}",
         ]
-        lines += _clock_lines(clock_port, clock_period_ns)
+        lines += clocks.declaration_lines()
         lines += _design_rule_constraint_lines(
             max_transition_ns, max_capacitance_pf, max_fanout
         )
-        lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+        lines += clocks.delay_lines(input_delay_ns, output_delay_ns)
         lines += multicycle_lines(multicycle, mode="validate")
         lines += _floorplan_init_lines(floorplan)
         # Fix the caller's macro locations after linking and floorplan initialization.
@@ -1021,6 +954,7 @@ def _stage_script_lines(
         if power is not None:
             lines += _power_delivery_lines(power, cell_library, library, macros)
         lines += placement_fence_lines(instance_groups)
+        lines += clocks.inventory_lines()
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {_tcl_literal(checkpoint_out)}"]
         return lines
@@ -1035,13 +969,13 @@ def _stage_script_lines(
     # Issue #2378: `set_dont_use` must come after liberty is loaded and before
     # the first resizer-driven step, and is re-emitted in each OpenROAD process.
     lines += _dont_use_lines(cell_library, library)
-    lines += _clock_lines(clock_port, clock_period_ns)
+    lines += clocks.declaration_lines()
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
-    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += clocks.delay_lines(input_delay_ns, output_delay_ns)
     lines += multicycle_lines(multicycle, mode="apply")
-    unconstrained = run_is_unconstrained(clock_port, clock_period_ns)
+    unconstrained = run_is_unconstrained(clocks.port, clocks.period_ns)
 
     declarations, place_fixed, check_fixed = fixed_group_commands(instance_groups or [])
     lines += declarations
@@ -1066,18 +1000,13 @@ def _stage_script_lines(
     elif stage == "cts":
         assert io_spec is not None
         wire_rc = _wire_rc_lines(io_spec, library)
-        # Request validation guarantees clock_port or clock_period_ns here
-        # whenever `unconstrained` is false; the `route` branch below already
-        # resolves per-PDK tables on clockless runs, so `buf_cell`/`cts_clock`
-        # are safe to resolve eagerly (both unused when unconstrained).
         buf_cell = (
             library["cts_buffer"]
             if library is not None and "cts_buffer" in library
             else _CTS_BUFFER_CELLS[cell_library]
         )
-        cts_clock = clock_port if clock_port is not None else _vclk.VIRTUAL_CLOCK_NAME
         lines += cts_stage_lines(
-            unconstrained, buf_cell, cts_clock, wire_rc, output_dir, hdl_toplevel
+            unconstrained, buf_cell, clocks.ports, wire_rc, output_dir, hdl_toplevel
         )
     else:  # stage == "route"
         routing_range = (
@@ -1216,6 +1145,7 @@ def _stage_script_lines(
         # tree (#783).
         include_clock_skew=stage in ("cts", "route"),
     )
+    lines += clocks.inventory_lines()
     lines += _violation_count_lines()
 
     if stage == "route":
