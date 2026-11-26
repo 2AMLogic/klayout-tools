@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
 from klayout_tools.signoff import build_tier_report
@@ -331,14 +330,15 @@ def test_tracked_include_lookup_denied_is_unreadable(tmp_path, monkeypatch):
     report = _sim_report(repo)
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "Track the divider inputs")
-    real_stat = os.stat
+    denied = repo / "sub.spice"
+    real_stat = Path.stat
 
     def deny_lookup(path, *args, **kwargs):
-        if os.fspath(path) == str(repo / "sub.spice"):
+        if path == denied:
             raise PermissionError("Permission denied")
         return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "stat", deny_lookup)
+    monkeypatch.setattr(Path, "stat", deny_lookup)
     citation = _cited(_grade(report, repo))
     assert citation["sim_closure"]["unverifiable"] == [
         {"path": "sub.spice", "reason": "unreadable"}
