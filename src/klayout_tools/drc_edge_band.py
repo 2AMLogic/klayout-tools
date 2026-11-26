@@ -40,6 +40,7 @@ foundry expressions on their selected edges.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import floor
 from typing import Any
 
 #: ``EdgeBandSpec`` metric names -> the ``klayout.db.Region`` constants.
@@ -149,6 +150,11 @@ def edge_band_fields(rule: Any, nominal_dbu_um: float) -> dict[str, Any]:
     }
 
 
+def _foundry_dbu(distance_um: float, layout_dbu: float) -> int:
+    """KLayout DRC rounds signed distances to nearest, with ties toward +infinity."""
+    return floor(0.5 + distance_um / layout_dbu)
+
+
 def run_edge_band_check(
     cell: Any, setup: Any, rule: Any, region: Any, other_region: Any
 ) -> tuple[Any, Any | None]:
@@ -169,12 +175,15 @@ def run_edge_band_check(
     context = _joined_region(cell, layout, spec.context_layers)
     exclude = _joined_region(cell, layout, spec.exclude_layers)
     pure = context.not_interacting(exclude)
-    width_dbu = round(spec.band_width_um / layout.dbu)
+    inset_dbu = _foundry_dbu(-spec.band_width_um, layout.dbu)
     # A stream too coarse to resolve the band cannot place any edge in it:
     # relax nothing, rather than call the whole well "interior".
-    inner = pure.sized(-width_dbu) if width_dbu > 0 else kdb.Region()
+    inner = pure.sized(inset_dbu) if inset_dbu < 0 else kdb.Region()
     excluded, eligible = region.split_interacting(exclude)
-    at_well, away_from_well = eligible.split_interacting(pure)
+    # The foundry selects whole taps with area inside any well, then their
+    # perimeter segments in pure wells. External contact alone selects no tap.
+    outside_wells, overlapping = eligible.split_outside(context)
+    at_well, away_from_pure = overlapping.split_interacting(pure)
     well_edges = at_well.edges()
     band_edges = well_edges & (pure - inner)
     interior_edges = well_edges & inner
@@ -185,7 +194,7 @@ def run_edge_band_check(
         (band_edges, rule.threshold_dbu, spec.band_metrics),
         (interior_edges, spec.inner_threshold_dbu, spec.inner_metrics),
     ):
-        distance = round(threshold_dbu * setup.dbu_scale)
+        distance = _foundry_dbu(threshold_dbu * setup.nominal_dbu_um, layout.dbu)
         edge_pairs.insert(
             edges.enclosed_check(
                 well_implant_edges,
@@ -195,7 +204,7 @@ def run_edge_band_check(
         )
 
     distance = round(rule.threshold_dbu * setup.dbu_scale)
-    strict = excluded + away_from_well
+    strict = excluded + outside_wells + away_from_pure
     edge_pairs.insert(strict.enclosed_check(other_region, distance))
     crossing = at_well.not_inside(pure)
     edge_pairs.insert(_strict_parts(crossing, other_region, pure, distance))
