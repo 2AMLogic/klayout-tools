@@ -353,7 +353,7 @@ def compute_settled(
             ),
         )
     windows: list[dict[str, float]] = []
-    for k in range(total):
+    for k in range(max(0, total - MAX_REPORTED_WINDOWS), total):
         t_start, t_end = edges[k * cycles], edges[(k + 1) * cycles]
         windows.append(
             {
@@ -373,7 +373,7 @@ def compute_settled(
         mean_delta_pct=mean_delta,
         peak_delta_pct=peak_delta,
         windows_total=total,
-        windows=windows[-MAX_REPORTED_WINDOWS:],
+        windows=windows,
     )
 
 
