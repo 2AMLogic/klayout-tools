@@ -848,8 +848,8 @@ class DrcRule:
     # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
     runset_note: dict[str, Any] | None = None
     text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
-    band_spec: Any = None  # `drc_edge_band.EdgeBandSpec` -- thresholds by depth (#7955)
     approximations: list[dict[str, str]] | None = None
+    band_spec: Any = None  # `drc_edge_band.EdgeBandSpec` -- thresholds by depth (#7955)
 
 
 class UnknownDeckError(Exception):

@@ -13,8 +13,8 @@ from __future__ import annotations
 import klayout.db as kdb
 import pytest
 
-from klayout_tools.decks import TapDistanceSpec
-from klayout_tools.drc import run_drc
+from klayout_tools.decks import DrcRule, TapDistanceSpec, get_deck
+from klayout_tools.drc import list_deck_rules, run_drc
 
 NWELL_RULE = "comp.tap_distance.nwell.lv.1"
 PSUB_RULE = "comp.tap_distance.psub.lv.1"
@@ -217,6 +217,50 @@ def _approximations_for(report, rule):
         for entry in report["coverage"].get("approximated_rules", [])
         if entry["rule"] == rule
     ]
+
+
+def test_drc_rule_preserves_positional_approximations(tmp_path, monkeypatch):
+    rule = next(rule for rule in get_deck("gf180mcu") if rule.id == NWELL_RULE)
+    # Call the public constructor in its order before band_spec was added.
+    positional = DrcRule(
+        rule.id,
+        rule.description,
+        rule.layer,
+        rule.check,
+        rule.threshold_dbu,
+        rule.other_layer,
+        rule.derived_layer,
+        rule.scope,
+        rule.provenance,
+        rule.area_min_dbu2,
+        rule.area_max_dbu2,
+        rule.density_window_um,
+        rule.density_min,
+        rule.density_max,
+        rule.antenna_ratio_max,
+        rule.grid_um,
+        rule.angle_limit_deg,
+        rule.threshold_max_dbu,
+        rule.voltage_independent,
+        rule.requires_any_layer,
+        rule.require_containment,
+        rule.other_layer_selection,
+        rule.layer_selection,
+        rule.region_spec,
+        rule.net_spec,
+        rule.report_escapes,
+        rule.runset_note,
+        rule.text_exempt,
+        rule.approximations,
+    )
+    assert positional == rule
+    monkeypatch.setattr("klayout_tools.drc.get_deck", lambda name: [positional])
+    (listed,) = list_deck_rules("gf180mcu")["rules"]
+    assert "edge_band" not in listed
+    report = _run(tmp_path, _nwell_layout(10000))
+    assert {entry["class"] for entry in _approximations_for(report, NWELL_RULE)} == (
+        APPROX_CLASSES
+    )
 
 
 @pytest.mark.parametrize("rule,build", LAYOUTS)
