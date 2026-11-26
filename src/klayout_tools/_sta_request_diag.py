@@ -9,6 +9,10 @@ alongside the connectivity test shared by both SPEF correlation loops.
 
 from __future__ import annotations
 
+from typing import Literal
+
+from .post_route_sta_errors import PostRouteStaError
+
 #: Top-level keys ``run_sta`` reads (``schema`` is always allowed). Anything
 #: else is rejected (issue #5065) rather than silently dropped.
 KNOWN_REQUEST_FIELDS = (
@@ -109,3 +113,42 @@ def parse_spef_missing_nets(stdout: str) -> list[str]:
     if block is None:
         return []
     return [line.strip() for line in block.splitlines() if line.strip()]
+
+
+def validate_name_list(
+    constraints: dict[str, object],
+    key: str,
+    *,
+    list_kind: Literal["port", "input port", "instance"] = "port",
+    clock_port: str | None = None,
+    clock_reason: str = "",
+) -> list[str] | None:
+    """Validate literal STA names in request order and return a fresh list."""
+    field = f"request.constraints.{key}"
+    value = constraints.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise PostRouteStaError(f"{field} must be a list of {list_kind} names")
+    name_kind, repeat_noun = (
+        ("instance", "an instance") if list_kind == "instance" else ("port", "a port")
+    )
+    seen: set[str] = set()
+    for name in value:
+        if not isinstance(name, str) or not name or name != name.strip():
+            raise PostRouteStaError(
+                f"{field} entries must be non-empty {name_kind}-name strings "
+                f"without leading/trailing whitespace (got {name!r})"
+            )
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+            raise PostRouteStaError(
+                f"{field} entry {name!r} contains a control character"
+            )
+        if name == clock_port:
+            raise PostRouteStaError(
+                f"{field} must not name the clock port {name!r} -- {clock_reason}"
+            )
+        if name in seen:
+            raise PostRouteStaError(f"{field} must not repeat {repeat_noun} ({name!r})")
+        seen.add(name)
+    return list(value) or None
