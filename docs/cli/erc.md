@@ -1484,16 +1484,17 @@ corroborates the region at all. Three consequences follow, all deliberate:
   connectivity roll-up reports `erc_status: "clean_partial"`, exactly as it
   does for a degenerate tap declaration.
 
-**Why the whole-extent form has to be rejected.** `erc.missing_tie` loops
-over each merged polygon of the well region and asks "does this one contain
-a tap that reaches the declared net?". One die-sized polygon reduces that to
-"does *any* contact anywhere reach the declared net?" — satisfied by every
-PMOS source sitting on the rail, tap or not. That is the same unfalsifiable
-pass issue #2199 rejected on the tap side, one level up, and it is the
-reason the two obvious alternatives (an implicit "the whole top cell is the
-substrate" region, or a derived `substrate = extent − nwell` boolean) are
-not implemented: both land in that shape by construction, the latter
-whenever the n-wells are small relative to the block.
+**How the source of the substrate region affects coverage.** For each merged
+well polygon, `erc.missing_tie` looks for a tap that reaches the declared
+net. A manually supplied `well_boxes` region that covers the whole die to
+within 1% can pass on a single contact anywhere in the block. The checker
+records that assertion as skipped (`degenerate_well_assertion`).
+
+With `well_complement_of`, the checker subtracts the named layers’ drawn
+geometry from the top-cell extent. A drawn n-well occupying less than 1% of
+the extent still defines a physical boundary, so the checker tests the
+remaining substrate for a connected tap. It skips this tie when the named
+layers draw nothing or their union covers the entire extent.
 
 The corollary is that **evidence value grows with how finely the assertion
 partitions the block**: each merged asserted polygon must independently hold
