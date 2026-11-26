@@ -9,9 +9,9 @@ in it still describe the job instance rather than the host that asked:
   collected, so that path never exists locally and a kept deck cannot be
   re-run. :func:`rewrite_job_input_includes` points it at the netlist the run
   was submitted from -- the same file a ``--backend local`` deck includes.
-* A corner whose engine log did not come back reports ``artifacts.log: null``,
-  indistinguishable from a run that never kept logs.
-  :func:`note_unretained_logs` says so explicitly, per corner.
+* A worker can report a log path even when collection omits the log.
+  :func:`note_unretained_logs` checks each corner against the files copied
+  from this job.
 
 Neither changes an existing JSON field: the rewrite touches file contents
 only, and the note is one additive ``info`` diagnostic (``info`` never changes
@@ -196,24 +196,28 @@ def _never_ran(corner: dict[str, Any]) -> bool:
 
 
 def note_unretained_logs(
-    corners: list[dict[str, Any]], *, job_id: str | None = None
+    corners: list[dict[str, Any]],
+    installed: dict[Path, Path],
+    *,
+    remote_root: str | None,
+    job_id: str | None = None,
 ) -> int:
-    """Append one ``engine_log_not_retained`` ``info`` diagnostic to every
-    corner of a kept batch run whose engine log is not on disk after the
-    install; return how many were noted.
+    """Flag and count corners whose reported log is absent from this collection.
 
-    "Not on disk" covers a report that names no log (``artifacts.log: null``)
-    and one whose path is not a file locally (the ``artifacts/`` tree did not
-    come back, so the reported path is still the job's own). ``job_id`` names
-    the job (one per shard on a split run) whose ``outputs/`` prefix to
-    inspect; the report never carries the bucket.
+    Match worker paths before the installer localizes the report. An earlier
+    job may already have placed a log at the same destination.
     """
     noted = 0
     for corner in corners:
         if _never_ran(corner):
             continue
         log = (corner.get("artifacts") or {}).get("log")
-        if isinstance(log, str) and os.path.isfile(log):
+        if (
+            remote_root is not None
+            and isinstance(log, str)
+            and posixpath.isabs(log)
+            and Path(posixpath.relpath(log, remote_root)) in installed
+        ):
             continue
         diagnostics = corner.get("diagnostics")
         if not isinstance(diagnostics, list):

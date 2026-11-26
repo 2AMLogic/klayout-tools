@@ -3291,9 +3291,10 @@ the submitting host ([#7905](https://github.com/2AMLogic/klayout-tools/issues/79
   `netlist.expanded.cir` beside it. Portable records keep their
   `$REQUEST_DIR` and `$CORNER_DIR` tokens.
 
-- **A missing engine log is stated.** A corner whose log did not come back
-  (`artifacts.log: null`, or a reported path that is not a file locally)
-  carries one `info` diagnostic, `engine_log_not_retained`, with the
+- **A missing engine log is stated.** If a corner reports no log, or its
+  reported log was absent from this job's collected files, it carries one
+  `info` diagnostic, `engine_log_not_retained`. A file left at the same
+  path by an earlier job does not count. The diagnostic includes the
   `job_id` to inspect (`s3://<bucket>/<jobs prefix>/<job_id>/outputs/`; the
   report never prints the bucket). It is additive: no existing field
   changes, an `info` note never regrades the corner, and a unit that never
@@ -10732,7 +10733,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
 | `margin_ambiguous` | **Emitted, never selectable.** A third route to `status: "inconclusive"` (issue #3088): a `measurements[].transfer` margin metric met its limit but the AC band cannot support a pass (`ambiguity[]` in the entry's `transfer.margins`); see "Margins at every crossing". `severity: "warning"`, never `"error"`. |
-| `engine_log_not_retained` | **Emitted, never selectable.** `--backend batch` with `options.keep_artifacts`: the corner's engine log (`ngspice.log` / `xyce.log`) did not come back from the job, so `artifacts.log` is `null` (or names a path that is not a file locally) ([#7905](https://github.com/2AMLogic/klayout-tools/issues/7905)). Added by the client after collection, so it never reaches `options.fail_on_diagnostic` matching. `severity: "info"`, never regrades the corner; additive `job_id` names the job (one per shard) whose `outputs/` prefix to inspect. Not emitted for a unit that never started an engine. See "Getting the per-corner deck and ngspice log through klt". |
+| `engine_log_not_retained` | **Emitted, never selectable.** With `--backend batch` and `options.keep_artifacts`, the corner reported no log or its reported log was absent from this job's collected files ([#7905](https://github.com/2AMLogic/klayout-tools/issues/7905)). Added by the client after collection, so it never reaches `options.fail_on_diagnostic` matching. `severity: "info"`, never regrades the corner; additive `job_id` names the job (one per shard) whose `outputs/` prefix to inspect. Not emitted for a unit that never started an engine. See "Getting the per-corner deck and ngspice log through klt". |
 
 **The `measurement` code's lookup is case-insensitive** (issue #2546): a
 `.meas`/`.measure` card's own name is folded to lower-case by both engines

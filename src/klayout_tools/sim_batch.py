@@ -1723,20 +1723,20 @@ def _install_batch_artifacts(
     """Install kept worker files and localize their report and deck paths (#7905)."""
     kept = sim_batch_kept_artifacts
     source = os.path.join(collected_dir, BATCH_ARTIFACTS_DIRNAME)
+    installed = {}
+    root = None
     if os.path.isdir(source):
         installed = kept.copy_collected_tree(source, artifacts_dir)
         root = kept.recover_remote_root(corners, f"/{BATCH_ARTIFACTS_DIRNAME}/")
-        if root is not None:
-            # Match worker paths against the files just installed before
-            # translating the report into paths for the submitting host.
-            if client_netlist is not None:
-                kept.rewrite_job_input_includes(
-                    corners, client_netlist, installed, remote_root=root
-                )
-            _rewrite_remote_artifact_paths(
-                corners, remote_root=root, local_root=artifacts_dir
+    kept.note_unretained_logs(corners, installed, remote_root=root, job_id=job_id)
+    if root is not None:
+        if client_netlist is not None:
+            kept.rewrite_job_input_includes(
+                corners, client_netlist, installed, remote_root=root
             )
-    kept.note_unretained_logs(corners, job_id=job_id)
+        _rewrite_remote_artifact_paths(
+            corners, remote_root=root, local_root=artifacts_dir
+        )
 
 
 # --------------------------------------------------------------------------- #

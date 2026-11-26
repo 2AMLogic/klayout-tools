@@ -288,34 +288,51 @@ def test_a_retained_log_is_installed_pointed_at_and_not_flagged(tmp_path):
     assert corners[0]["diagnostics"] == []
 
 
-def test_an_xyce_log_counts_as_retained(tmp_path):
-    corner = _corner()
-    corner["artifacts"]["log"] = f"{REMOTE}/tt_27C/xyce.log"
-    _install(
-        tmp_path,
-        [corner],
-        {"tt_27C/corner.cir": _deck(), "tt_27C/xyce.log": "xyce output"},
-        job_id="job-1",
+@pytest.mark.parametrize("log_name", ["ngspice.log", "xyce.log"])
+def test_a_previous_jobs_log_does_not_count_as_retained(tmp_path, log_name):
+    local = tmp_path / "local"
+    relative_log = f"tt_27C/{log_name}"
+
+    def install(job_id, files):
+        corner = _corner()
+        corner["artifacts"]["log"] = f"{REMOTE}/{relative_log}"
+        sb._install_batch_artifacts(
+            [corner],
+            collected_dir=str(_collected(tmp_path / job_id, files)),
+            artifacts_dir=str(local),
+            job_id=job_id,
+        )
+        return corner
+
+    first = install("job-1", {relative_log: "job 1 output"})
+    assert first["diagnostics"] == []
+    second = install("job-2", {"tt_27C/corner.cir": _deck()})
+    assert (
+        second["artifacts"]["log"]
+        == first["artifacts"]["log"]
+        == str(local / relative_log)
     )
-    assert corner["diagnostics"] == []
+    assert (local / relative_log).read_text() == "job 1 output"
+    (note,) = _noted(second)
+    assert note["job_id"] == "job-2"
 
 
-def test_an_unreported_log_is_said_not_to_be_retained(tmp_path):
-    corner = _corner(log=False)
-    _install(tmp_path, [corner], {"tt_27C/corner.cir": _deck()}, job_id="job-9")
+@pytest.mark.parametrize("reported", [False, True], ids=["null-log", "reported-path"])
+def test_a_missing_log_is_said_not_to_be_retained(tmp_path, reported):
+    corner = _corner(log=reported)
+    local = _install(tmp_path, [corner], {"tt_27C/corner.cir": _deck()}, job_id="job-9")
 
     (note,) = _noted(corner)
     assert note["severity"] == "info" and note["job_id"] == "job-9"
-    assert note["message"].startswith("engine log not retained: batch job job-9")
-    assert "artifacts.log is null" in note["message"]
-    assert corner["artifacts"]["log"] is None  # existing fields unchanged
+    assert note["message"] == (
+        "engine log not retained: batch job job-9 returned no matching engine log "
+        "for this corner. Inspect the job's outputs/ prefix or re-run the corner "
+        "with --backend local."
+    )
+    assert corner["artifacts"]["log"] == (
+        str(local / "tt_27C/ngspice.log") if reported else None
+    )
     assert corner["status"] == "pass"  # an `info` note never regrades
-
-
-def test_a_reported_but_absent_log_is_flagged_too(tmp_path):
-    corner = _corner()  # reports a log the collected tree does not hold
-    _install(tmp_path, [corner], {"tt_27C/corner.cir": _deck()}, job_id="job-1")
-    assert len(_noted(corner)) == 1
 
 
 def test_a_tree_that_did_not_come_back_flags_every_corner(tmp_path):
@@ -336,13 +353,15 @@ def test_a_unit_that_never_started_an_engine_is_not_flagged(tmp_path):
     corner["diagnostics"] = [
         {"severity": "error", "code": "budget_exceeded", "message": "no budget"}
     ]
-    assert kept.note_unretained_logs([corner], job_id="job-1") == 0
+    assert (
+        kept.note_unretained_logs([corner], {}, remote_root=None, job_id="job-1") == 0
+    )
     assert _noted(corner) == []
 
 
 def test_a_corner_with_no_diagnostics_list_gets_one(tmp_path):
     corner = {"artifacts": {"log": None}, "diagnostics": None}
-    assert kept.note_unretained_logs([corner]) == 1
+    assert kept.note_unretained_logs([corner], {}, remote_root=None) == 1
     (note,) = corner["diagnostics"]
     assert note["message"].startswith("engine log not retained: the batch job returned")
     assert "job_id" not in note

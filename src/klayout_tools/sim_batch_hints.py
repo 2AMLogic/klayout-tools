@@ -253,18 +253,15 @@ ENGINE_LOG_NOT_RETAINED_CODE = "engine_log_not_retained"
 
 
 def engine_log_not_retained(job_id: str | None) -> dict[str, Any]:
-    """The per-corner ``info`` diagnostic saying ``artifacts.log: null`` means
-    "not retained", not "never kept". ``job_id`` names the job (one per shard)
-    whose ``outputs/`` prefix to inspect; the report never carries the bucket."""
+    """Point to the batch job whose collected artifacts lack a matching log."""
     where = f"batch job {job_id}" if job_id else "the batch job"
     diagnostic: dict[str, Any] = {
         "severity": "info",
         "code": ENGINE_LOG_NOT_RETAINED_CODE,
         "message": (
-            f"engine log not retained: {where} returned no ngspice.log/xyce.log "
-            "for this corner, so artifacts.log is null and the solver output "
-            "cannot be read here; inspect the job's outputs/ prefix, or re-run "
-            "the corner with --backend local"
+            f"engine log not retained: {where} returned no matching engine log "
+            "for this corner. Inspect the job's outputs/ prefix or re-run the corner "
+            "with --backend local."
         ),
     }
     if job_id:
