@@ -75,7 +75,9 @@ def cts_stage_lines(
             "detailed_placement",
             f"write_def {os.path.join(output_dir, f'{hdl_toplevel}.cts.def')}",
         ]
-    net_filter = " -clk_nets $klt_cts_nets" if len(ports) > 1 else ""
+    # TritonCTS tokenizes a space-separated string. Tcl list quoting adds literal
+    # braces around bus-bit names such as clk[1], which OpenDB cannot find.
+    net_filter = ' -clk_nets [join $klt_cts_nets " "]' if len(ports) > 1 else ""
     return [
         *wire_rc_lines,
         "estimate_parasitics -placement",

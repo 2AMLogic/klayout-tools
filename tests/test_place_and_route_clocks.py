@@ -174,6 +174,33 @@ def test_live_pair_routes_both_domains(pair, groups):
     assert report["stages"][2]["clock_roots"] == expected
 
 
+def test_live_cts_distributes_a_bus_bit_root(pair):
+    # OpenSTA accepts the literal bus pin. TritonCTS must also resolve its DB net.
+    (pair / "pair.v").write_text(
+        """module pair(input clk_a, input [1:0] clk_bus, input da, db,
+                       output qa, qb, qa2, qb2);
+          gf180mcu_fd_sc_mcu7t5v0__dffq_1 a(.CLK(clk_a), .D(da), .Q(qa));
+          gf180mcu_fd_sc_mcu7t5v0__dffq_1 a2(.CLK(clk_a), .D(qa), .Q(qa2));
+          gf180mcu_fd_sc_mcu7t5v0__dffq_1 b(.CLK(clk_bus[1]), .D(db), .Q(qb));
+          gf180mcu_fd_sc_mcu7t5v0__dffq_1 b2(.CLK(clk_bus[1]), .D(qb), .Q(qb2));
+        endmodule
+        """
+    )
+    clocks = [CLOCKS[0], {**CLOCKS[1], "port": "clk_bus[1]"}]
+    report = run_place_and_route(_pair_request(pair, {"clocks": clocks}, "cts"))
+    assert report["clock_roots"] == [
+        {**clock, "clocked_registers": 2} for clock in clocks
+    ]
+    stage = next(
+        log for log in report["engine_logs"] if log["script_name"].endswith("_cts.tcl")
+    )
+    log = (
+        pair / "out" / "openroad-logs" / stage["invocation_id"] / "stdout.log"
+    ).read_text()
+    for clock in clocks:
+        assert f'Clock net "{clock["port"]}" has 2 sinks' in log
+
+
 def test_live_pair_missing_port(pair):
     clocks = [CLOCKS[0], {**CLOCKS[1], "port": "missing_clk"}]
     with pytest.raises(PlaceAndRouteError, match="missing_clk"):
