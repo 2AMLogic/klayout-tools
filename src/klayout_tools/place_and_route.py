@@ -1061,8 +1061,7 @@ def _run_single_corner(
         macros,
         groups,
         power,
-        clock_port,
-        clock_period_ns,
+        clocks,
         max_transition_ns,
         max_capacitance_pf,
         max_fanout,
@@ -1124,12 +1123,12 @@ def _run_single_corner(
         stage_index=stage_index,
         target_stage=target_stage,
         cell_library=cell_library,
-        clock_port=clock_port,
+        clock_port=clocks.port,
         io_spec=io_spec,
         power=power,
         library=library,
         tech_lef=tech_lef,
-        clock_period_ns=clock_period_ns,
+        clock_period_ns=clocks.period_ns,
     )
 
     output_dir = _stage_root(request_dir, request)
@@ -1172,8 +1171,7 @@ def _run_single_corner(
             io_spec=io_spec,
             macros=macros,
             power=power,
-            clock_port=clock_port,
-            clock_period_ns=clock_period_ns,
+            clocks=clocks,
             max_transition_ns=max_transition_ns,
             max_capacitance_pf=max_capacitance_pf,
             max_fanout=max_fanout,
@@ -1221,6 +1219,7 @@ def _run_single_corner(
         if record is not None:
             stages.append(record["stage_entry"])
             stages[-1].setdefault("threads", 1)
+            stages[-1].setdefault("clock_roots", [])
             engine_logs.extend(record["engine_logs"])
             # Issue #7411: a resumed stage never runs here, so its own
             # Liberty read survives only in its retained logs.
@@ -1266,6 +1265,7 @@ def _run_single_corner(
 
             actual_threads = observed_threads(completed.stdout, threads)
             metrics = _read_metrics(metrics_path, stage)
+            clock_roots = clocks.inventory(metrics)
         # Issue #7411: this stage's own Liberty read (every stage script
         # runs one) -- deduped against the stages already run.
         liberty_warning_lines = _pnr_warnings.liberty_warning_lines_after_stage(
@@ -1341,8 +1341,7 @@ def _run_single_corner(
                 checkpoint_in=next_checkpoint,
                 corners=corners,
                 io_spec=io_spec,
-                clock_port=clock_port,
-                clock_period_ns=clock_period_ns,
+                clocks=clocks,
                 max_transition_ns=max_transition_ns,
                 max_capacitance_pf=max_capacitance_pf,
                 max_fanout=max_fanout,
@@ -1379,6 +1378,7 @@ def _run_single_corner(
             )
         )
         stages[-1]["threads"] = actual_threads
+        stages[-1]["clock_roots"] = clock_roots
         checkpoint_path = next_checkpoint
         previous_hash = stage_hash
         _resume.write_commit(
@@ -1444,8 +1444,7 @@ def _run_single_corner(
                     def_path=def_path,
                     cell_library=cell_library,
                     liberty_path=liberty_path,
-                    clock_port=clock_port,
-                    clock_period_ns=clock_period_ns,
+                    clocks=clocks,
                     max_transition_ns=max_transition_ns,
                     max_capacitance_pf=max_capacitance_pf,
                     max_fanout=max_fanout,
@@ -1651,7 +1650,7 @@ def _run_single_corner(
         row_rail_layer=row_rail_info["layer"],
     )
     warnings.extend(_antenna_repair_warnings(target_stage, library))
-    warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
+    warnings.extend(unconstrained_warnings(target_stage, clocks.port, clocks.period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
     warnings.extend(deck_warnings(cell_library, power, power_info))
     # Additive producer (issue #7411): one entry when any stage's Liberty
@@ -1683,6 +1682,7 @@ def _run_single_corner(
     )
 
     response: dict[str, Any] = {
+        "clock_roots": last_stage["clock_roots"],
         **exclusions,
         **_multicycle.response_fields(multicycle),
         "schema_version": SCHEMA_VERSION,
