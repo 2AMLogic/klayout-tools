@@ -29,6 +29,7 @@ from .gen import GenError
 from .gen_compose_base import GenComposeError
 from .gen_compose_pad_notch import _pad_introduced_notches_dbu
 from .gen_compose_routing import (
+    _BACKBONE_OFF_METALS_REASON,
     _pdk_family,
     _resolve_route_layer,
     _resolve_via_drop_layer,
@@ -338,6 +339,15 @@ def _search_landing(
     ``GenComposeError`` listing per-category rejections when none exists."""
     up_to_layer = _resolve_route_layer(variant, access["up_to"])
     ladder, ladder_error = _resolve_via_drop_layer(nets.deck, up_to_layer, net_layer)
+    if ladder_error == _BACKBONE_OFF_METALS_REASON:
+        # That reason is worded for a routing leg; this search takes its layer
+        # from access.up_to alone, so no routing field recovers it (#7957).
+        ladder_error = (
+            f"access.up_to '{access['up_to']}' resolves to {up_to_layer}, outside "
+            f"the PDK's metals stack, with no contact to this label's metal "
+            f"{net_layer}. Set ports_from_labels.access.up_to (or this name's "
+            "ports_from_labels.names[].access.up_to) to a metal role (issue #7957)"
+        )
     if ladder_error is not None:
         raise GenComposeError(f"ports_from_labels: port '{name}': {ladder_error}")
     dbu = nets.dbu

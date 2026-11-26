@@ -28,6 +28,7 @@ from klayout_tools.gen_compose_routing import (
 )
 from test_gen_compose import _gen_block
 from test_gen_compose import pdk_root as pdk_root
+from test_gen_compose_port_derivation import _spec, _two_strip_macro
 
 _LI1 = (67, 20)
 _POLY = (66, 20)
@@ -257,6 +258,65 @@ def test_the_same_net_still_routes_on_a_metal_role(tmp_path, pdk_root):
     # And the two terminals really are one conductor -- the same oracle the
     # pre-#7957 poly route failed while reporting `routed: true`.
     assert _blocks_joined_on(top, _LI1)
+
+
+# --------------------------------------------------------------------------- #
+# The port landing search: its layer is access.up_to, not a routing field
+# --------------------------------------------------------------------------- #
+
+
+def _label_access_request(tmp_path, pdk_root, up_to, routing, per_name):
+    """A placement-only request (no connectivity): one macro whose met1 label
+    ``A`` is landed up to ``up_to``, set shared or on the name itself."""
+    access = {"up_to": up_to}
+    names = [{"name": "A", "access": access}] if per_name else ["A"]
+    request = {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {
+                "id": "m",
+                "cell": {
+                    "gds_path": _two_strip_macro(tmp_path),
+                    "cell_name": "macro",
+                    "ports_from_labels": _spec(names, None if per_name else access),
+                },
+            }
+        ],
+        "placement": {"strategy": "row", "order": ["m"], "spacing_um": 1.0},
+        "options": {"output": str(tmp_path / "labels.gds")},
+    }
+    if routing is not None:
+        request["routing"] = routing
+    return request
+
+
+@pytest.mark.parametrize(
+    "routing", [None, {"layer_role": "metal"}], ids=["no-routing", "metal-routing"]
+)
+@pytest.mark.parametrize("per_name", [False, True], ids=["shared", "per-name"])
+def test_label_landing_above_the_stack_names_access_up_to(
+    tmp_path, pdk_root, per_name, routing
+):
+    # The landing search reads access.up_to alone (the shared field or the
+    # name's own), so a routing/connectivity field is no recovery for it --
+    # whatever routing.layer_role says, or whether routing is present at all.
+    request = _label_access_request(tmp_path, pdk_root, "poly", routing, per_name)
+    with pytest.raises(GenComposeError) as excinfo:
+        compose(request)
+    message = str(excinfo.value)
+    assert message.startswith("ports_from_labels: port 'A': ")
+    assert "access.up_to 'poly' resolves to (66, 20)" in message
+    assert "(68, 20)" in message  # the label's own metal
+    assert "ports_from_labels.access.up_to" in message
+    assert "ports_from_labels.names[].access.up_to" in message
+    assert "issue #7957" in message
+    for routing_field in ("routing.layer_role", "connectivity[]", "legs[]"):
+        assert routing_field not in message
+
+    # Control: only access.up_to differs, and the same label lands with one via.
+    request = _label_access_request(tmp_path, pdk_root, "metal3", routing, per_name)
+    landing = compose(request)["blocks"][0]["derived_ports"][0]["landing"]
+    assert landing["via_count"] == 1
 
 
 def test_a_poly_backbone_still_lands_on_bare_poly_gates(tmp_path, pdk_root):

@@ -3302,7 +3302,12 @@ snapped to the manufacturing grid; points are enumerated per net polygon, so lon
 nets are fine, and a polygon the grid misses still gets one fallback point near its centre) and `max_candidates` (default 20000; a hit
 cap adds a `warnings[]` entry and `truncated: true`). When no point is legal
 the request fails (exit 1) with the per-category rejection counts and example
-candidates.
+candidates. An `up_to` role outside the metals stack (`"poly"`, `"tap"`) is
+rejected too, since no via ladder reaches the label's metal from it (issue
+#7957); the error names the effective `access.up_to` and tells you to set
+`ports_from_labels.access.up_to`, or the name's own `access.up_to`, to a metal
+role. `routing.layer_role` and `connectivity[]` overrides do not affect this
+search.
 
 **Cut arrays (`via_array`).** `[rows, cols]` makes every hop of the ladder a
 rows x cols cut array centred on the landing point, at a pitch of the cut side

@@ -7,7 +7,10 @@
   promoting the route's own label as a named pin. The net is now reported
   unroutable. The reason identifies the effective backbone layer and explains
   how to change or clear a leg or net override, change an inherited default,
-  or select a port on the backbone's own layer. Same-layer landings (a
+  or select a port on the backbone's own layer. A `ports_from_labels`
+  `access.up_to` outside the stack is rejected the same way, and its error
+  names `access.up_to` (shared or per-name) rather than a routing field.
+  Same-layer landings (a
   poly route to a bare-poly gate) and pins on layers outside both the stack
   and the poly/diffusion roles are unchanged. No JSON field is added or
   renamed, and `schema_version` is unaffected.
