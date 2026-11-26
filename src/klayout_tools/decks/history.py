@@ -1092,11 +1092,11 @@ def _rule_layers(rule: DrcRule, layer_names: dict[tuple[int, int], str]) -> list
 
 
 def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
-    """The ``(layer, datatype)`` pair(s) a rule reads, in ``layer``/
-    ``other_layer`` order."""
+    """Rule layer pairs in operand order, followed by masks and spec inputs."""
     pairs = [rule.layer]
     if rule.other_layer is not None:
         pairs.append(rule.other_layer)
+    pairs.extend(rule.other_layer_subtract)
     if rule.region_spec is not None:
         pairs.extend(rule.region_spec.layers())
     if rule.net_spec is not None:
