@@ -31,11 +31,9 @@ Trust model (the one :mod:`klayout_tools.signoff_generator_batch` settled for
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import posixpath
-import re
 import shlex
 import shutil
 import subprocess
@@ -47,7 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from . import _batch_common, _provenance, netlist_batch, sim_batch
+from . import _batch_approvals, _batch_common, _provenance, netlist_batch, sim_batch
 from ._jsonnum import is_number
 from .sim_errors import SimError, request_options
 
@@ -58,7 +56,7 @@ COMMANDS_MODE = "commands"
 #: Operator-side location of the approvals file, used when
 #: ``--command-approvals`` is not given. Never read from a request.
 APPROVALS_ENV = "KLT_SIM_COMMAND_APPROVALS"
-APPROVALS_SCHEMA_VERSION = 1
+APPROVALS_SCHEMA_VERSION = _batch_approvals.APPROVALS_SCHEMA_VERSION
 
 #: Unit-relative files the runner writes; no input or output may claim them.
 STDOUT_FILENAME = "stdout.bin"
@@ -84,9 +82,6 @@ _TAIL_BYTES = 4096
 _KILL_AFTER_S = 10
 _TIMEOUT_EXIT_CODE = 124
 
-_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_INTERPRETER_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
-_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _APPROVAL_KEYS = frozenset({"id", "interpreter", "allowed_arguments", "bound_inputs"})
 
 NOT_CHECKED = (
@@ -114,66 +109,38 @@ class CommandApproval:
 
 def _relative_name(value: Any, where: str, code: str | None = None) -> str:
     """A unit-relative POSIX path that stays inside the unit directory."""
-    if not isinstance(value, str) or not value.strip() or "\0" in value:
-        raise _error(f"{where} must be a non-empty string", code)
-    normal = posixpath.normpath(value.replace("\\", "/"))
-    if (
-        value.startswith(("/", "\\"))
-        or os.path.isabs(value)
-        or normal in (".", "")
-        or normal == ".."
-        or normal.startswith("../")
-    ):
-        raise _error(
-            f"{where} must be relative and stay inside the unit ({value!r})", code
-        )
+    normal = _batch_approvals.validate_relative_posix(
+        value, where, scope="unit", make_error=lambda message: _error(message, code)
+    )
     if normal.split("/")[0] in _RESERVED_NAMES:
         raise _error(f"{where} ({value!r}) names a runner-owned file", code)
     return normal
 
 
+def _invalid_approval(message: str) -> SimError:
+    return SimError(message, code=CODE_APPROVALS_INVALID)
+
+
 def _parse_approval(index: int, raw: Any) -> CommandApproval:
-    label = f"approvals[{index}]"
-    if not isinstance(raw, Mapping):
-        raise _error(f"{label} must be an object", CODE_APPROVALS_INVALID)
-    unknown = sorted(set(raw) - _APPROVAL_KEYS)
-    if unknown:
-        raise _error(
-            f"{label} has unknown keys: {', '.join(unknown)}", CODE_APPROVALS_INVALID
-        )
-    ident = raw.get("id")
-    if not isinstance(ident, str) or not _ID_RE.match(ident):
-        raise _error(f"{label}.id must match [A-Za-z0-9._-]+", CODE_APPROVALS_INVALID)
-    interpreter = raw.get("interpreter")
-    if not isinstance(interpreter, str) or not _INTERPRETER_RE.match(interpreter):
-        raise _error(
-            f"{label}.interpreter must be a bare command name or path without "
-            "whitespace or shell metacharacters",
-            CODE_APPROVALS_INVALID,
-        )
-    allowed = raw.get("allowed_arguments", [[]])
-    if not isinstance(allowed, list) or not all(
-        isinstance(item, list) and all(isinstance(arg, str) for arg in item)
-        for item in allowed
-    ):
-        raise _error(
-            f"{label}.allowed_arguments must be a list of string lists",
-            CODE_APPROVALS_INVALID,
-        )
+    label, ident, interpreter = _batch_approvals.parse_approval_header(
+        index, raw, allowed_keys=_APPROVAL_KEYS, make_error=_invalid_approval
+    )
+    allowed = _batch_approvals.parse_allowed_arguments(raw, label, _invalid_approval)
     bound = raw.get("bound_inputs", {})
     if not isinstance(bound, Mapping) or not all(
-        isinstance(name, str) and isinstance(digest, str) and _SHA256_RE.match(digest)
+        isinstance(name, str)
+        and isinstance(digest, str)
+        and _batch_approvals.SHA256_RE.match(digest)
         for name, digest in bound.items()
     ):
-        raise _error(
+        raise _invalid_approval(
             f"{label}.bound_inputs must map unit input names to "
-            "sha256:<64 lowercase hex>",
-            CODE_APPROVALS_INVALID,
+            "sha256:<64 lowercase hex>"
         )
     return CommandApproval(
         id=ident,
         interpreter=interpreter,
-        allowed_arguments=tuple(tuple(item) for item in allowed),
+        allowed_arguments=allowed,
         bound_inputs=tuple(
             (
                 _relative_name(name, f"{label}.bound_inputs", CODE_APPROVALS_INVALID),
@@ -186,39 +153,9 @@ def _parse_approval(index: int, raw: Any) -> CommandApproval:
 
 def load_approvals(path: str) -> tuple[CommandApproval, ...]:
     """Read and strictly validate the trusted approvals file."""
-    try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-    except OSError as exc:
-        raise _error(
-            f"cannot read command approvals file {path}: {exc}", CODE_APPROVALS_INVALID
-        ) from exc
-    except ValueError as exc:
-        raise _error(
-            f"command approvals file {path} is not valid JSON: {exc}",
-            CODE_APPROVALS_INVALID,
-        ) from exc
-    if (
-        not isinstance(document, Mapping)
-        or document.get("schema_version") != APPROVALS_SCHEMA_VERSION
-        or not isinstance(document.get("approvals"), list)
-        or set(document) - {"schema_version", "approvals"}
-    ):
-        raise _error(
-            f"command approvals file {path} must be an object "
-            f'{{"schema_version": {APPROVALS_SCHEMA_VERSION}, "approvals": [...]}}',
-            CODE_APPROVALS_INVALID,
-        )
-    approvals = tuple(
-        _parse_approval(index, raw) for index, raw in enumerate(document["approvals"])
+    return _batch_approvals.load_approvals_file(
+        path, kind="command", parse_entry=_parse_approval, make_error=_invalid_approval
     )
-    ids = [approval.id for approval in approvals]
-    if len(set(ids)) != len(ids):
-        raise _error(
-            f"command approvals file {path} repeats an approval id",
-            CODE_APPROVALS_INVALID,
-        )
-    return approvals
 
 
 def resolve_approvals(approvals_path: str | None) -> tuple[CommandApproval, ...]:
@@ -365,7 +302,7 @@ def _plan_unit(
     unit_id = entry.get("id")
     if (
         not isinstance(unit_id, str)
-        or not _ID_RE.match(unit_id)
+        or not _batch_approvals.ID_RE.match(unit_id)
         or unit_id.startswith(".")
     ):
         raise _error(f"{where}.id must match [A-Za-z0-9._-]+ and not start with '.'")
