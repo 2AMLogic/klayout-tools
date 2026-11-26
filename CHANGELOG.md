@@ -3930,6 +3930,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   Self-heating reports Picard iteration exhaustion and runaway as errors.
   These modes require a Geode CLI that includes geode-fem#1806.
 
+- **OpenROAD stages clean up their Docker container when interrupted** (#5726,
+  2026-11-19). A SIGTERM or SIGHUP to the `klt` driver now reaches the isolated
+  engine through the driver's cleanup handler. The generated wrapper also kills
+  its container when signalled directly. Regenerate installed wrappers with
+  `scripts/install-openroad-docker.sh` to pick up this behavior.
+  `openroad-logs/<id>/invocation.json` records a running stage at launch and
+  names the container once its ID is known, including for diagnosis after SIGKILL.
+
+- **`klt signoff --manifest` re-hashes a `klt sim` citation's recorded `.include` closure** — a changed included file under an unchanged top deck now sets the citation's `input_verified` to `false` and is named in a new `citation.sim_closure` block (the item stays `met`: `input_verified` remains disclosure-only), instead of reading as fresh. Reports without a closure, or with host-resolved includes, keep top-deck-only behaviour and say so (`not_recorded` / `partial`). No `klt sim` report field changes (#7860).
+
+- `klt pex` now attributes an ngspice measurement window miss to the row’s own
+  measurement when its diagnostic is available. A completed analysis can report
+  a window miss after issuing singular-matrix or stepping warnings. An aborted
+  analysis retains its first error diagnostic (#7904).
+
+- **`klt sim` grades an opted-in window miss `not_reached` beside stepping narration** (#7906).
+  A corner whose log carries gmin/source-stepping narration but no
+  `simulation(s) aborted` trailer no longer refuses `on_unreached: "null"`
+  (scalar and `analysis_steps[]` measurements alike). The narration then
+  downgrades to `warning` as before, and any other error diagnostic, the abort
+  trailer, or a second value-less measurement still grades the corner `error`.
+
+- **Item 1 design-source attestations can bind a file in a separate Git repository by full commit ID, path and raw SHA-256.** Minting and grading read the pinned blob from a local checkout or bare repository (#7919).
+
 ## 0.9.2 (2026-11-14)
 
 - **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
