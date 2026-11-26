@@ -113,6 +113,85 @@ def test_normalization_change_named(tree):
     assert "normalization" in result["note"]
 
 
+@pytest.mark.parametrize("sibling_changed", [False, True])
+def test_identity_input_disappears_after_raw_hash(tree, monkeypatch, sibling_changed):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    if sibling_changed:
+        top.write_text(".include models_a.spice\nr1 n1 0 2k\n")
+
+    read_text = sim_report_check._read_text
+
+    def read_after_removal(path):
+        if path == str(inc):
+            inc.unlink()
+        return read_text(path)
+
+    monkeypatch.setattr(sim_report_check, "_read_text", read_after_removal)
+    result = check_sim_report(report, root=str(tmp))
+    assert (result["status"], result["diagnosis"]) == ("drifted", "indeterminate")
+    sibling, removed, identity = result["checks"]
+    assert sibling["match"] is (not sibling_changed)
+    assert sibling["actual"] == _raw(top)
+    assert removed["match"] and removed["actual"] == removed["expected"]
+    assert identity["actual"] is None
+    assert str(inc) in identity["error"]
+    assert "cannot read netlist file" in identity["error"]
+    assert "note" not in result
+
+
+def test_identity_read_error_keeps_recorded_identity_error(tree, monkeypatch):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc, netlist_identity=None, netlist_identity_error="boom")
+
+    read_text = sim_report_check._read_text
+
+    def read_after_removal(path):
+        if path == str(inc):
+            inc.unlink()
+        return read_text(path)
+
+    monkeypatch.setattr(sim_report_check, "_read_text", read_after_removal)
+    result = check_sim_report(report, root=str(tmp))
+    identity = result["checks"][-1]
+    assert identity["actual"] is None
+    assert identity["error"].startswith("boom")
+    assert "cannot read netlist file" in identity["error"]
+    assert result["diagnosis"] == "indeterminate"
+
+
+def test_cli_check_identity_read_failure_text_and_recovery(tree, capsys, monkeypatch):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    read_text = sim_report_check._read_text
+    armed = True
+
+    def read_after_removal(path):
+        if armed and path == str(inc):
+            inc.unlink()
+        return read_text(path)
+
+    monkeypatch.setattr(sim_report_check, "_read_text", read_after_removal)
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert "diagnosis: indeterminate" in out
+    assert "cannot read netlist file" in out
+    assert str(inc) in out
+    assert "normalization" not in out
+
+    armed = False
+    inc.write_text(".model d d\n")
+    assert main(["sim", "--check", report, "--format", "json"]) == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert (envelope["status"], envelope["diagnosis"]) == ("match", "intact")
+
+
 def test_identity_error_never_matches(tree):
     tmp, top, inc = tree
     report = _write(tmp, top, inc, netlist_identity=None, netlist_identity_error="boom")
