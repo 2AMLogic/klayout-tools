@@ -24,6 +24,7 @@ import re
 from typing import Any
 
 from .sim_measurement_grading import SAVE_MODE_NETLIST_NO_VALUE_HINT
+from .sim_stepping_narration import blocks_not_reached
 
 #: ``echo`` marker emitted around each step's analysis: ``klt_step_begin 0
 #: unknown1`` / ``klt_step_end 0 op1``.
@@ -161,18 +162,21 @@ def is_step_unreached(
     *,
     unreached_locals: set[str],
     engine_diagnostics: list[dict[str, Any]] | None,
+    log_text: str,
 ) -> bool:
     """True when a value-less step-scoped ``.meas`` measurement opted into
     ``on_unreached: "null"``, its own step's region confirmed its local
     card name unreached (both ngspice evidence lines), and the corner
-    carries no error-severity engine diagnostic (diverged solve, timeout,
-    ...) -- the step-spec twin of ``sim._is_unreached``, over the flattened
-    spec's ``meas_card``/``local_name`` instead of ``spice``/``name``."""
+    carries no blocking error-severity engine diagnostic (diverged solve,
+    timeout, ...) -- the step-spec twin of ``sim._is_unreached``, over the
+    flattened spec's ``meas_card``/``local_name`` instead of
+    ``spice``/``name``, with the same stepping-narration allowance (issue
+    #7906)."""
     if spec.get("on_unreached") != "null" or spec.get("meas_card") is None:
         return False
     if str(spec["local_name"]).lower() not in unreached_locals:
         return False
-    return not any(d["severity"] == "error" for d in (engine_diagnostics or []))
+    return not blocks_not_reached(engine_diagnostics or [], log_text)
 
 
 def not_reached_result(
@@ -180,6 +184,7 @@ def not_reached_result(
     *,
     unreached_locals: set[str],
     engine_diagnostics: list[dict[str, Any]] | None,
+    log_text: str,
 ) -> tuple[dict[str, Any], list[dict[str, str]]] | None:
     """The ``not_reached`` result and ``measurement_not_reached`` info
     diagnostic for a value-less step-scoped ``.meas`` measurement (issue
@@ -192,7 +197,10 @@ def not_reached_result(
     from .sim_steps import measurement_provenance
 
     if not is_step_unreached(
-        spec, unreached_locals=unreached_locals, engine_diagnostics=engine_diagnostics
+        spec,
+        unreached_locals=unreached_locals,
+        engine_diagnostics=engine_diagnostics,
+        log_text=log_text,
     ):
         return None
     return (

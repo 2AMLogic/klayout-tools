@@ -1173,6 +1173,7 @@
         "klayout_tools.sim_step_grading",
         "klayout_tools.sim_step_resolution",
         "klayout_tools.sim_step_shadow",
+        "klayout_tools.sim_stepping_narration",
         "klayout_tools.sim_steps",
         "klayout_tools.sim_stimulus",
         "klayout_tools.sim_stress",
