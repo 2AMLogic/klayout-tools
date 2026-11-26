@@ -489,3 +489,10 @@ def test_portable_paths_runset_has_no_absolute_paths(tmp_path, fake_klayout):
 def test_portable_paths_runset_rejects_non_boolean(tmp_path, fake_klayout):
     with pytest.raises(LvsError):
         run_lvs(_request(tmp_path, 1, portable_paths="yes"))
+
+
+@pytest.mark.skipif(shutil.which("klayout") is None, reason="klayout binary absent")
+def test_real_binary_aligns_xschem_wrapper_and_implicit_top(tmp_path):
+    import test_lvs_klayout_runset_xschem_top as xschem_top
+
+    xschem_top.run_real_align_suite(tmp_path)
