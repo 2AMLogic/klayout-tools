@@ -1250,9 +1250,9 @@ def _side_error(
     code: str | None = None,
     measurement: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Describe why a delta row errored (#3062). Read the corner's first
-    error diagnostic, falling back to its first diagnostic. A caller-supplied
-    failure can supply the message and code directly. Include the side's
+    """Describe why a delta row errored (#3062). Select the diagnostic
+    explaining the row's failure, including a confirmed measurement window miss.
+    A caller can supply the message and code directly. Include the side's
     remote job metadata when available. A measurement-harness message alone
     is an execute-stage error (#4555)."""
     remote = None
@@ -1262,10 +1262,8 @@ def _side_error(
             for corner in sim_report.get("corners", []):
                 if corner.get("corner_id") != corner_id:
                     continue
-                diagnostics = corner.get("diagnostics") or []
-                chosen = next(
-                    (d for d in diagnostics if d.get("severity") == "error"),
-                    diagnostics[0] if diagnostics else None,
+                chosen = pex_sim_evidence.explaining_diagnostic(
+                    corner.get("diagnostics") or [], measurement
                 )
                 if chosen is not None:
                     message = chosen.get("message") or chosen.get("code")

@@ -21,6 +21,7 @@ import math
 from typing import Any
 
 from ._jsonnum import is_finite_number
+from ._spice_number import parse as parse_spice_number
 from .sim_errors import SimError
 
 #: Slack, as a fraction of the analysis window, when checking that a requested
@@ -69,8 +70,6 @@ def window_bound(
     on every axis -- SPICE suffixes are multipliers, so ``"1m"`` is 0.001:
     1 mV on a voltage sweep, 1 ms on time.
     """
-    from .sim import _parse_spice_seconds
-
     raw = body.get(key)
     if raw is None:
         return None
@@ -78,13 +77,34 @@ def window_bound(
     if is_finite_number(raw):
         seconds = float(raw)
     elif isinstance(raw, str):
-        seconds = _parse_spice_seconds(raw)
+        seconds = parse_spice_number(raw)
     if seconds is None or not math.isfinite(seconds):
         raise SimError(
             f"measurement '{name}': {form}.{field or key} must be "
             f"{_AXIS_REQUIREMENTS[axis]} (got {raw!r})"
         )
     return seconds
+
+
+def parse_tran_window(
+    analysis: dict[str, Any],
+) -> tuple[str, str, float, float] | None:
+    """Return the original step and stop tokens and their durations in seconds.
+
+    Eye validation and simulation preflight use the first two positive time
+    values of a transient analysis. Return None for other analysis kinds or
+    an invalid step or stop.
+    """
+    if analysis.get("kind") != "tran":
+        return None
+    tokens = (analysis.get("args") or "").split()
+    if len(tokens) < 2:
+        return None
+    step_s = parse_spice_number(tokens[0])
+    window_s = parse_spice_number(tokens[1])
+    if step_s is None or window_s is None or step_s <= 0 or window_s <= 0:
+        return None
+    return tokens[0], tokens[1], step_s, window_s
 
 
 def validate_window_inside_tran(
@@ -97,11 +117,9 @@ def validate_window_inside_tran(
     under ``spec[form]``. A no-op when ``analysis.args`` does not yield both
     tokens -- an unparseable sweep is diagnosed where it is emitted, not here.
     """
-    from .sim import _parse_spice_seconds
-
     tokens = str(analysis.get("args") or "").split()
-    tstop = _parse_spice_seconds(tokens[1]) if len(tokens) > 1 else None
-    tstart = _parse_spice_seconds(tokens[2]) if len(tokens) > 2 else 0.0
+    tstop = parse_spice_number(tokens[1]) if len(tokens) > 1 else None
+    tstart = parse_spice_number(tokens[2]) if len(tokens) > 2 else 0.0
     if tstop is None or tstart is None:
         return
     for spec in declared:

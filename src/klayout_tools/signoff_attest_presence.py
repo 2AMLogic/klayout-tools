@@ -40,6 +40,7 @@ from . import signoff_attest_canonical_yaml as canonical_yaml
 from ._provenance import sha256_file
 from .signoff_attest_glob import is_glob_entry
 from .signoff_base import AttestationError
+from .signoff_git_source import GitPath, git_entry
 
 #: The mapping-entry keys a path-list entry accepts.
 ENTRY_KEYS = frozenset({"path", "attest", "select"})
@@ -129,7 +130,11 @@ def split_entries(
             continue
         paths: list[Any] = []
         for index, entry in enumerate(entries):
-            if not isinstance(entry, Mapping) or is_glob_entry(entry):
+            if (
+                not isinstance(entry, Mapping)
+                or is_glob_entry(entry)
+                or (item == 1 and git_entry(entry))
+            ):
                 # Not a presence candidate: a non-mapping entry is left for
                 # the generic path-list validator, and a ``{"glob": ...}``
                 # member passes through untouched so the glob-aware
@@ -243,3 +248,25 @@ def path_checks(
         )
         for path in sorted(normalized[field])
     ]
+
+
+def git_source_checks(
+    sources: Mapping[GitPath, str], hashes: Mapping[GitPath, str | None]
+) -> list[dict[str, Any]]:
+    """Compare each declared SHA-256 to the pinned blob read for this attestation."""
+    checks = []
+    for location, expected in sorted(sources.items()):
+        actual = hashes[location]
+        check = {
+            "check": "present",
+            "role": "source",
+            "path": location.binding(),
+            "passed": actual == expected,
+            "content_hash": f"sha256:{expected}",
+        }
+        if actual != expected:
+            check["actual_content_hash"] = (
+                f"sha256:{actual}" if actual is not None else None
+            )
+        checks.append(check)
+    return checks

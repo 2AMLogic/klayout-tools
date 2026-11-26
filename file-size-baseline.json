@@ -77,7 +77,7 @@
     },
     {
       "path": "native/wave/src/build.rs",
-      "lines": 655
+      "lines": 545
     },
     {
       "path": "native/wave/src/fst.rs",
@@ -477,7 +477,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3604
+      "lines": 3580
     },
     {
       "path": "src/klayout_tools/place_and_route.py",

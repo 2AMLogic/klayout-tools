@@ -12,8 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
-from klayout_tools import post_route_sta
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools._tcl import tcl_literal
 from klayout_tools.cli import main
 from test_post_route_sta import (
@@ -76,7 +75,7 @@ def test_cli_error_openroad_rejects_truncated_liberty(tmp_path, monkeypatch, cap
             ),
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     exit_code = main(["sta", request_path, "--format", "json"])
 

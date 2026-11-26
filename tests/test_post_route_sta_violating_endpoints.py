@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import patch_openroad_run
 from klayout_tools import post_route_sta
 from klayout_tools.post_route_sta import run_sta
 from klayout_tools.post_route_sta_errors import PostRouteStaError
@@ -85,7 +86,7 @@ def _stub_openroad_block(
             stdout_lines.append(chosen)
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines) + "\n")
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 

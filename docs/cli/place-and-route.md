@@ -87,19 +87,73 @@ docker run --rm --platform linux/amd64 openroad/orfs:latest \
 ```
 
 The simplest way to get a plain `openroad` on the **host's** `$PATH` is a
-one-line wrapper script that runs the container per invocation:
+one-line wrapper script that runs the container per invocation. Keep the
+three container-lifetime pieces below intact (`--cidfile`, the `trap`
+handlers, and the backgrounded client instead of `exec`): `klt
+place-and-route` stages can run for hours, and if the `klt` process is
+killed while one runs, a wrapper without them leaks the container — the
+docker client dies with `klt` but OpenROAD keeps routing to completion and
+writes `*.def`/`*.odb`/`*_route_drc.rpt` into your repository hours later,
+with no `klt` process and no `invocation.json` to attribute them to
+(issue #5726). `exec docker run` cannot host the trap — `exec` replaces the
+shell with the docker client, so no handler survives to run — which is why
+the client is backgrounded and `wait`ed instead:
 
 ```bash
 cat > /usr/local/bin/openroad <<'WRAPPER'
 #!/usr/bin/env bash
-exec docker run --rm -i \
+set -euo pipefail
+CID_DIR=
+if [[ -n "${KLT_OPENROAD_CIDFILE:-}" && -n "${KLT_OPENROAD_INVOCATION_ID:-}" ]]; then
+    CID_FILE="$KLT_OPENROAD_CIDFILE"
+    OWNER="$KLT_OPENROAD_INVOCATION_ID"
+else
+    CID_DIR="$(mktemp -d "${TMPDIR:-/tmp}/klt-openroad-cid.XXXXXXXXXXXX")"
+    CID_FILE="$CID_DIR/container.cid"
+    OWNER="${CID_DIR##*/}"
+fi
+CLIENT_PID=
+FINISHED=0
+cleanup() {
+    if [[ "$FINISHED" == 0 ]]; then
+        CID="$(head -c 65 "$CID_FILE" 2>/dev/null || true)"
+        if [[ "$CID" =~ ^[0-9a-f]{64}$ ]]; then
+            # Verify the immutable label before stopping this invocation's container.
+            (
+                recorded=$(docker container inspect --format '{{ index .Config.Labels "org.klayout-tools.openroad-invocation" }}' "$CID" 2>/dev/null) &&
+                    [[ "$recorded" == "$OWNER" ]] && docker kill "$CID"
+            ) >/dev/null 2>&1 &
+        fi
+        if [[ -n "$CLIENT_PID" ]]; then
+            kill "$CLIENT_PID" >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -n "$CID_DIR" ]]; then
+        rm -f "$CID_FILE"
+        rmdir "$CID_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+docker run --rm -i \
   --platform linux/amd64 \
+  --label "org.klayout-tools.openroad-invocation=$OWNER" \
+  --cidfile "$CID_FILE" \
   -v "$PWD":"$PWD" -w "$PWD" \
   openroad/orfs:latest \
-  /OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad "$@"
+  /OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad "$@" 0<&0 &
+CLIENT_PID=$!
+STATUS=0
+wait "$CLIENT_PID" || STATUS=$?
+FINISHED=1
+exit "$STATUS"
 WRAPPER
 chmod +x /usr/local/bin/openroad
 ```
+
+Docker writes the container ID to the invocation’s dedicated cidfile. On interruption, the wrapper checks the container’s invocation label with Docker before stopping it. The driver signals only the engine’s process group and performs the same ownership check during fallback cleanup. SIGKILL bypasses signal handlers. The running snapshot and its adjacent `container.cid` identify a surviving writer. Regenerate older installed wrappers to enable the ownership record.
 
 `-v "$PWD":"$PWD" -w "$PWD"` mounts and enters the caller's current
 directory inside the container **at the identical path** — `klt
@@ -535,6 +589,23 @@ LEF, liberty, and any macro LEF/liberty. A stage killed mid-run has no record
 (it is written last, and any stale one is deleted before the stage re-runs),
 so a partial `.odb` is never reused. A reused stage retains the thread count
 that produced it. See [OpenROAD threads](#openroad-threads).
+
+**Hazard: a killed stage may still have a live writer.** The "never reused"
+guarantee is about reading a stage's artifacts; it does not cover *writing*
+into the directory. `klt` cannot always prevent the OpenROAD container from
+outliving the `klt` process that started it — an uncatchable SIGKILL to
+`klt` defeats the wrapper's own cleanup handler, and a wrapper installed
+before the container-lifetime fix (issue #5726) has no handler at all. The
+per-invocation record is written when the stage **launches**, not only when
+it completes: a stage's `openroad-logs/<id>/invocation.json` whose
+`"outcome"` is still `"running"` (and whose `container_id` names a
+container) means the stage's output files may still be growing. `--resume`
+re-runs such a stage while the orphan writes the **same filenames
+concurrently**, and nothing in the resume machinery detects that race.
+Before resuming after a kill, check the newest
+`openroad-logs/*/invocation.json` under the output directory: a non-final
+`outcome` with a `container_id` identifies the live writer, and
+`docker kill <id>` reaps it precisely.
 
 * `--resume` lifts the populated-`outputs.dir` refusal (like `--rerun`). On an
   empty or missing directory it behaves as a normal run.
@@ -4083,11 +4154,13 @@ created before `openroad` launches and the engine streams into them, so
 `tail -f .klt/place-and-route/openroad-logs/<invocation_id>/stdout.log` shows
 progress during a long stage, and an interrupted run keeps whatever OpenROAD
 had flushed. OpenROAD may block-buffer stdout when it is not on a TTY, so
-lines can lag the engine; this has not been measured. `invocation.json` is
-written when the process ends. As a single anecdotal sizing hint (not a
-model): a ~44k-instance IHP SG13G2 design took roughly 2 h+ in the `route`
-stage versus about 3 min for the other stages combined (klt 0.8.1.dev442,
-OpenROAD 26Q3-1510).
+lines can lag the engine; this has not been measured. At launch, `klt` writes
+`invocation.json` with `"outcome": "running"`. When the invocation finishes,
+`klt` atomically replaces that snapshot with the final record.
+
+As a single anecdotal sizing hint (not a model): a ~44k-instance IHP SG13G2
+design took roughly 2 h+ in the `route` stage versus about 3 min for the
+other stages combined (klt 0.8.1.dev442, OpenROAD 26Q3-1510).
 
 Use retained logs for local debugging and determine stage success from the
 OpenROAD exit status and the stage's required outputs.
@@ -4102,6 +4175,7 @@ Each entry contains:
 | `script_path`, `metrics_path` | Normalized locations of the invoked script and requested metrics output; these files can be replaced by a later run. |
 | `directory`, `stdout_path`, `stderr_path`, `metadata_path` | Normalized retained-log locations. |
 | `outcome`, `returncode` | `exited` with the actual process code, or `launch_failed`, `timed_out`, or `interrupted` with a null code. |
+| `container_id` | The 64-digit hexadecimal container ID from Docker's dedicated cidfile for this invocation, or `null` if no ID was recorded (for example, with native OpenROAD or an older wrapper). |
 | `retention_errors` | Secondary write failures, each with `artifact` and `error`; empty when all logs were written. |
 
 New path fields use the shared `{path, scope}` convention: `repo` paths are

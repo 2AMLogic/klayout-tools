@@ -9,6 +9,11 @@ name itself.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from klayout_tools import (
@@ -172,3 +177,24 @@ def test_value_at_interpolates_and_clamps():
     assert sim_window.value_at(scale, values, 99.0) == 20.0
     # A repeated timepoint takes the later sample rather than dividing by zero.
     assert sim_window.value_at([0.0, 1.0, 1.0], [0.0, 5.0, 7.0], 1.0) == 5.0
+
+
+def test_window_and_eye_validation_leave_sim_runner_unloaded():
+    code = """
+import sys
+from klayout_tools import sim_eye, sim_window
+
+assert sim_window.window_bound("m", {"from": "10n"}, "from", form="energy") == 1e-8
+assert "klayout_tools.sim" not in sys.modules
+sim_eye.validate_eye_context([], {})
+assert "klayout_tools.sim" not in sys.modules
+eye = {"name": "e", "eye": {"signal": "v(out)", "ui": "1n", "uis": 4}}
+sim_eye.validate_eye_context([eye], {"kind": "tran", "args": "10p 8n"})
+assert "klayout_tools.sim" not in sys.modules
+"""
+    source = Path(__file__).resolve().parents[1] / "src"
+    subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONPATH": str(source)},
+        check=True,
+    )
