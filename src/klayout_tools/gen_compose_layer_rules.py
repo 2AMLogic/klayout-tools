@@ -1,14 +1,6 @@
-"""Per-PDK layer-rule resolution for ``klt gen-compose`` routing (#5426).
+"""Resolve per-PDK routing roles, width and landing-pad floors (#5426).
 
-Relocated verbatim out of ``gen_compose_routing.py``, which sat exactly at
-its per-file size ratchet ceiling with no headroom for routing work. This
-cluster is a pure leaf: it resolves ``routing.layer_role`` to a
-``(layer, datatype)`` pair and looks up the width / area / enclosure floors
-and landing-pad sizes that pair implies, all out of the resolved PDK
-family's own curated deck -- it calls nothing else in
-``gen_compose_routing``, and five functions there call into it.
-
-The router and composition API re-export these rule lookups for existing callers.
+The router and composition API re-export these lookups.
 """
 
 from __future__ import annotations
@@ -29,20 +21,18 @@ from .decks import (
 )
 from .decks.plain_rules import largest_plain_rule_um
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
-from .gen_compose_base import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM, GenComposeError
+from .gen_compose_base import (
+    _VIA_DROP_SIZE_UM,
+    _VIA_LANDING_SIZE_UM,
+    GenComposeError,
+    LayerRuleError,
+)
 
 
 def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
-    """Resolve ``routing.layer_role`` to a ``(layer, datatype)`` pair.
+    """Resolve a role using the generator's own PDK layer map.
 
-    Routing goes through the *same* per-PDK-family role-layer table every
-    ``klt gen`` generator already uses (:data:`klayout_tools.gen._PDK_ROLE_LAYERS`)
-    -- never a raw ``{layer, datatype}`` pair from the request, and never a
-    second, private layer map (spike section 2, ``routing.layer_role``).
-
-    Raises :class:`GenComposeError` when the variant is unsupported, the role
-    is not a known role, or the resolved family's curated deck has no layer
-    for the role (``None`` entry).
+    Unknown variants, unsupported roles and roles without a layer are errors.
     """
     try:
         family = _pdk_family(variant)
@@ -65,22 +55,32 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     return pair
 
 
+def _variant_planes(
+    deck: ExtractionDeck, variant: str | None
+) -> tuple[tuple[int, int], ...]:
+    # The GF180 family deck describes C/D; A and B have fewer routing metals.
+    limit = {"gf180mcuA": 3, "gf180mcuB": 4}.get(variant or "")
+    return deck.metals[:limit]
+
+
 def routing_planes_above(
     deck: ExtractionDeck | None, primary: tuple[int, int] | None, variant: str | None
 ) -> tuple[tuple[int, int], ...]:
     """Available routing planes above primary, in the variant's stack order."""
     if deck is None or primary is None or primary not in deck.metals:
         return ()
-    # The GF180 family deck describes C/D; A and B have fewer routing metals.
-    limit = {"gf180mcuA": 3, "gf180mcuB": 4}.get(variant or "")
-    return deck.metals[deck.metals.index(primary) + 1 : limit]
+    return _variant_planes(deck, variant)[deck.metals.index(primary) + 1 :]
 
 
-def routing_roles_above(variant: str, primary_role: str) -> tuple[str, ...]:
-    """Name the higher planes a caller can select in connectivity[].layer_role."""
+def alternative_routing_roles(variant: str, primary_role: str) -> tuple[str, ...]:
+    """List higher planes in ascending order, then lower planes in descending order."""
     primary = _resolve_route_layer(variant, primary_role)
     family = _pdk_family(variant)
-    planes = routing_planes_above(get_extraction_deck(family), primary, variant)
+    planes = _variant_planes(get_extraction_deck(family), variant)
+    if primary not in planes:
+        return ()
+    index = planes.index(primary)
+    alternatives = (*planes[index + 1 :], *reversed(planes[:index]))
     by_plane: dict[tuple[int, int], str] = {}
     for role, layer in _PDK_ROLE_LAYERS[family].items():
         if layer is None:
@@ -89,7 +89,7 @@ def routing_roles_above(variant: str, primary_role: str) -> tuple[str, ...]:
             by_plane[layer] = role
         elif role == "top_metal":
             by_plane.setdefault(layer, role)
-    return tuple(by_plane[plane] for plane in planes if plane in by_plane)
+    return tuple(by_plane[plane] for plane in alternatives if plane in by_plane)
 
 
 # Native GF180 metaltop.rb selects the 9K/11K MT.1 and MT.2a rules on
@@ -427,7 +427,7 @@ def _landing_pad_side_um_for_pair(
             )
             else "resolved PDK deck"
         )
-        raise GenComposeError(
+        raise LayerRuleError(
             f"request.routing.landing_pad_size_um ({override_um:.4g}um) "
             f"is below the {source} floor for layer {pad_layer} over "
             f"via layer {via_layer}. '{rule_id}' requires "

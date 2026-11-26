@@ -17,7 +17,7 @@ rejections that name no net.
 
 import pytest
 
-from klayout_tools.gen_compose import compose
+from klayout_tools.gen_compose import GenComposeError, compose
 from test_gen_compose import _crossing_routes_fixture, _gen_block, _make_install
 
 
@@ -289,3 +289,24 @@ def test_blocking_net_omitted_on_geometry_only_rejections(tmp_path, pdk_root):
     assert rejected  # the rejected legs fail against b1's own geometry alone
     assert all(leg["reason"] is not None for leg in rejected)
     assert all("blocking_net" not in leg for leg in rejected)
+
+
+def test_suggestion_rejects_ambiguous_replay_names(tmp_path, pdk_root):
+    output = tmp_path / "repeated.gds"
+    request, _ = _three_net_crossing_request(tmp_path, pdk_root, output)
+    h, _, v2 = request["connectivity"]
+    h["net"] = v2["net"]
+    request["routing"]["suggest_layers"] = True
+    with pytest.raises(GenComposeError, match="unique.*repeated net: 'NET_V2'"):
+        compose(request)
+    assert not output.exists()
+
+
+def test_disabled_suggestions_preserve_declare_only(tmp_path, pdk_root):
+    request, _ = _three_net_crossing_request(
+        tmp_path, pdk_root, tmp_path / "declare.gds"
+    )
+    del request["routing"]
+    original = compose(request)
+    request["routing"] = {"suggest_layers": False}
+    assert compose(request) == original

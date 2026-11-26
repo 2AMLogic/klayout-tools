@@ -441,3 +441,49 @@ def test_already_routing_request_returns_the_empty_mapping(tmp_path, pdk_root):
     assert suggestions["assignments"] == {}
     assert suggestions["candidates_evaluated"] == 1
     assert "routes every net as written" in suggestions["note"]
+
+
+def test_failed_suggestion_preserves_existing_layout(tmp_path, pdk_root, capsys):
+    output = tmp_path / "last_good.gds"
+    request, reports = _three_net_crossing_request(tmp_path, pdk_root, output)
+    h, v1, v2 = request["connectivity"]
+    h["layer_role"], v1["layer_role"], v2["layer_role"] = "metal", "metal2", "metal3"
+    good = compose(request)
+    joined, shorts = _walk_connectivity(good, reports, request)
+    assert all(joined.values()) and not shorts
+    before = output.read_bytes()
+    v2["layer_role"] = "metal2"
+    request["routing"]["suggest_layers"] = True
+    path = tmp_path / "pinned.json"
+    path.write_text(json.dumps(request))
+    assert main(["gen-compose", str(path), "--format", "json"]) == 1
+    capture = capsys.readouterr()
+    assert "nothing to search" in capture.out + capture.err
+    assert output.read_bytes() == before
+
+
+def test_candidate_landing_pad_floor_does_not_abort_search(tmp_path, pdk_root):
+    request, _ = _three_net_crossing_request(tmp_path, pdk_root, tmp_path / "pad.gds")
+    request["routing"].update(width_um=0.5, landing_pad_size_um=0.3)
+    for net in request["connectivity"][1:]:
+        net["layer_role"] = "metal2"
+    assert compose(request)["unrouted_nets"] == ["NET_V2"]
+    result = _compose_with_mode(request)["layer_suggestions"]
+    assert result["status"] == "conflict"
+    assert result["candidates_evaluated"] == result["candidate_space"]
+
+
+def test_search_can_resolve_on_a_lower_plane(tmp_path, pdk_root):
+    request, reports = _three_net_crossing_request(
+        tmp_path, pdk_root, tmp_path / "down.gds"
+    )
+    request["connectivity"].pop()
+    request["routing"]["layer_role"] = "metal3"
+    request["routing"].pop("cross_block_layer_role")
+    request["connectivity"][0]["layer_role"] = "metal3"
+    result = _compose_with_mode(request)
+    suggestion = result["layer_suggestions"]
+    assert suggestion["status"] == "resolved"
+    assert suggestion["assignments"] == {"NET_V1": "metal2"}
+    joined, shorts = _walk_connectivity(result, reports, request)
+    assert joined == {"NET_H": True, "NET_V1": True} and not shorts

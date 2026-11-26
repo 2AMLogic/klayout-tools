@@ -27,10 +27,10 @@ the caller left unpinned:
 * **Caller pins are honoured.** A net that already names ``layer_role`` is
   never touched, and the search only ever adds ``layer_role`` keys: pins,
   ``waypoints_um``, placement and widths pass through verbatim.
-* **Ordered by total climb.** Candidates are enumerated with every net left
+* **Ordered by total rank.** Candidates are enumerated with every net left
   as-is first (the baseline, i.e. exactly today's behaviour), then
-  assignments that move nets up the resolved PDK's routing-metals stack,
-  lowest total climb first, ties broken in ``connectivity[]`` declaration
+  assignments ranked by layer preference (higher planes first, then lower
+  planes). The lowest total rank goes first, with ties broken in declaration
   order -- so earlier-declared nets stay low, matching the router's own
   first-routed-net-wins order. The first assignment that routes every net
   wins; the enumeration order is fixed, so the mapping is deterministic.
@@ -38,8 +38,8 @@ the caller left unpinned:
   compose runs (default :data:`DEFAULT_SUGGESTION_BUDGET`, baseline
   included). Stopping at the budget reports ``budget_exhausted``; covering
   the entire candidate space without a winner reports ``conflict`` --
-  the distinction the issue asks for. A winning assignment is re-run once
-  at the caller's own ``options.output`` (not counted against the budget),
+  the distinction the issue asks for. The selected assignment or original
+  request is run once at the caller's output (outside the search budget),
   so the response and the written GDS are exactly what replaying the
   suggestion through the ordinary command produces.
 """
@@ -54,8 +54,8 @@ from collections.abc import Iterator
 from typing import Any, NamedTuple
 
 from ._jsonnum import is_int
-from .gen_compose_base import GenComposeError, LayerWidthError
-from .gen_compose_layer_rules import routing_roles_above
+from .gen_compose_base import GenComposeError, LayerRuleError
+from .gen_compose_layer_rules import alternative_routing_roles
 
 #: Compose runs (baseline included) one suggestion request may spend before
 #: the search stops and reports ``budget_exhausted``. Each unit is one full
@@ -92,12 +92,14 @@ def compose_with_layer_suggestions(
         request["routing"].get("suggest_layers_budget", DEFAULT_SUGGESTION_BUDGET)
     )
 
-    # Candidate 0 is the request exactly as the caller wrote it (mode keys
-    # stripped): today's behaviour, at the caller's own output path. Its
-    # application errors are the caller's own and propagate; its unrouted
-    # nets are the problem the search exists to fix. compose() works on
-    # parsed copies, so no evaluation ever mutates the request document.
-    baseline = compose(_assignment_request(request, (), (), ()), request_dir)
+    # Trials never open the caller's layout. Only a completed search publishes
+    # a result, using ordinary compose so output format and errors are preserved.
+    plain = _assignment_request(request, (), (), ())
+    with tempfile.TemporaryDirectory(prefix="klt-gen-compose-baseline-") as scratch:
+        staged = _assignment_request(
+            request, (), (), (), os.path.join(scratch, "baseline.gds")
+        )
+        baseline = compose(staged, request_dir)
     searchable = tuple(
         index
         for index, entry in enumerate(connectivity)
@@ -107,7 +109,7 @@ def compose_with_layer_suggestions(
         # Nothing to fix: the request already routes every net exactly as
         # written, so the answer is the empty mapping -- never a search.
         return _with_suggestions(
-            baseline,
+            compose(plain, request_dir),
             {
                 "status": _STATUS_RESOLVED,
                 "assignments": {},
@@ -121,13 +123,13 @@ def compose_with_layer_suggestions(
             "request.routing.suggest_layers: every connectivity[] net already "
             "names its own layer_role -- there is nothing to search"
         )
-    roles = routing_roles_above(
+    roles = alternative_routing_roles(
         baseline["pdk"]["variant"], request["routing"]["layer_role"]
     )
     if not roles:
         raise GenComposeError(
             "request.routing.suggest_layers: routing.layer_role resolves to no "
-            "higher plane in this PDK variant's own routing-metals stack -- "
+            "alternative plane in this PDK variant's routing-metals stack -- "
             "no layer assignment to search"
         )
     labels = [connectivity[index]["net"] for index in searchable]
@@ -174,7 +176,7 @@ def compose_with_layer_suggestions(
         "connectivity[].layer_role values by hand"
     )
     return _with_suggestions(
-        baseline,
+        compose(plain, request_dir),
         {
             "status": _STATUS_CONFLICT
             if search.covered_space
@@ -185,6 +187,15 @@ def compose_with_layer_suggestions(
             **common,
         },
     )
+
+
+def ordinary_routing(routing: dict[str, Any]) -> dict[str, Any]:
+    """Return the routing specification passed to an ordinary compose call."""
+    return {
+        key: value
+        for key, value in routing.items()
+        if key not in ("suggest_layers", "suggest_layers_budget")
+    }
 
 
 def suggestions_enabled(routing: dict[str, Any]) -> bool:
@@ -219,6 +230,16 @@ def _validated_connectivity(request: dict[str, Any]) -> list[dict[str, Any]]:
         )
     if not all(isinstance(entry, dict) for entry in connectivity):
         raise GenComposeError("request.connectivity must be an array of objects")
+    names: set[str] = set()
+    for entry in connectivity:
+        name = entry.get("net")
+        if isinstance(name, str):
+            if name in names:
+                raise GenComposeError(
+                    "request.routing.suggest_layers requires unique connectivity[].net "
+                    f"names to replay assignments; repeated net: {name!r}"
+                )
+            names.add(name)
     return connectivity
 
 
@@ -270,7 +291,7 @@ def _search_for_assignment(
             evaluated += 1
             try:
                 report = compose(candidate, request_dir)
-            except LayerWidthError:
+            except LayerRuleError:
                 continue
             unrouted = list(report.get("unrouted_nets") or [])
             if not unrouted:
@@ -322,12 +343,12 @@ def _assignment_request(
     and the winning re-run use.
     """
     clone = copy.deepcopy(request)
-    routing = dict(clone.get("routing") or {})
-    routing.pop("suggest_layers", None)
-    routing.pop("suggest_layers_budget", None)
-    clone["routing"] = routing
+    clone["routing"] = ordinary_routing(clone.get("routing") or {})
     if output is not None:
-        options = dict(clone.get("options") or {})
+        raw_options = clone.get("options") or {}
+        if not isinstance(raw_options, dict):
+            raise GenComposeError("request.options must be a JSON object")
+        options = dict(raw_options)
         options["output"] = output
         clone["options"] = options
     for index, climb in zip(searchable, climbs, strict=True):

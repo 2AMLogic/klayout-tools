@@ -2216,12 +2216,13 @@ request array with an internal merge) was rejected, is recorded in
 
 ## Layer suggestion mode (`routing.suggest_layers`, #1962)
 
-Set `routing.suggest_layers` to `true` to have the router try higher metal layers
+Set `routing.suggest_layers` to `true` to have the router try alternative metal layers
 for nets with no explicit `layer_role`. Each trial uses the ordinary compose
 checks, including via landings, spacing and width floors. The search keeps
 the placement, net order, pins, widths, waypoints and caller-pinned roles.
 It starts with the original request, then tries assignments in increasing
-total layer climb. At the same total climb it keeps earlier nets lower first.
+total layer rank. At the same total rank it favors the original layers of
+earlier nets.
 
 For example, the sky130A three-net crossing routes two nets in its original
 order. On the fifth trial the router finds `{"NET_V2": "metal3"}`, which
@@ -2259,9 +2260,12 @@ On either incomplete result the CLI exits with code 3. Top-level
 trial. Different trials may connect different subsets of the nets.
 
 The positive integer `routing.suggest_layers_budget` defaults to 32 and
-includes the baseline. A winning assignment is run once more at the requested
-output path. When search takes place, `roles` names the higher planes available
-in the PDK variant, `candidate_space` gives the number of combinations, and
+includes the baseline. Trials use temporary layouts. After the search, the
+chosen assignment or original request is written to the requested output path.
+Net names must be unique in suggestion mode so the assignment can be replayed.
+The `roles` list starts with higher planes, ascending from the primary layer,
+then lists lower planes in descending order. The variant's available routing
+planes determine `candidate_space`, the number of combinations, and
 `candidates_evaluated` counts the trials used. If the original layout has an
 open net and all nets are already pinned, the command reports an input error.
 

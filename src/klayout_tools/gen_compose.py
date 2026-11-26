@@ -2975,9 +2975,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError("request.routing must be a JSON object")
     if _layer_suggest.suggestions_enabled(routing):
         return _layer_suggest.compose_with_layer_suggestions(request, request_dir)
+    routing = _layer_suggest.ordinary_routing(routing)
     landing_pad_override_um = None
-    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
-    # sizing; True sizes a ladder's intermediate hop pads at their own
+    # A minimal ladder sizes its intermediate hop pads at their own
     # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
     # sizes). The two fields select competing pad-sizing policies and are
     # rejected together before label-derived landings are searched.
