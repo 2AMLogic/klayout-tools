@@ -8,7 +8,35 @@ from __future__ import annotations
 
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import sim, sim_cause
+
+
+def test_window_miss_is_recognised_from_the_message_the_suffix_builds():
+    """Issue #7904: `reports_window_miss` is the consumer half of
+    `_cause_suffix`, so a `klt pex` row can tell ngspice's "out of interval"
+    (the analysis completed) from any other `.meas` failure reason."""
+    base = "measurement 'tcross' produced no value"
+    assert sim_cause.reports_window_miss(
+        base + sim_cause._cause_suffix("out of interval")
+    )
+    assert not sim_cause.reports_window_miss(base)
+    assert not sim_cause.reports_window_miss(
+        base + sim_cause._cause_suffix("Expressions like 0.5*1.62 are not supported.")
+    )
+    assert not sim_cause.reports_window_miss("")
+
+
+def test_window_miss_is_recognised_from_a_real_unreached_corner():
+    """The corner's own `measurement` diagnostic, as `_no_value_measurement`
+    builds it from ngspice's log, satisfies the predicate."""
+    spec = {"name": "tcross", "spice": ".meas tran tcross WHEN v(mid)=5 CROSS=1"}
+    _, diagnostic, _ = sim._no_value_measurement(
+        spec, {"tcross": "out of interval"}, save_mode="all"
+    )
+    assert diagnostic["code"] == "measurement"
+    assert sim_cause.reports_window_miss(diagnostic["message"])
+    _, other, _ = sim._no_value_measurement(spec, {}, save_mode="all")
+    assert not sim_cause.reports_window_miss(other["message"])
 
 
 def test_error_on_line_message_carries_model_binding_causes():
