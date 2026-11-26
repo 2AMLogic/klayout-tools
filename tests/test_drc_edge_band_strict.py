@@ -145,3 +145,34 @@ def test_strict_part_of_a_sloped_edge_starts_at_its_well_crossing(tmp_path):
         [(711, 996), (810, 963), (810, 1120), (810, 1132)],
         [(711, 996), (810, 1120), (819, 960), (845, 1120)],
     ]
+
+
+def test_dnwell_cut_in_implant_sets_band_enclosure(tmp_path):
+    shapes = [
+        (COMP, kdb.Box(0, 0, 1000, 1000)),
+        (NPLUS, kdb.Box(-200, -200, 1200, 1200)),
+        (NWELL, kdb.Box(-1200, -1200, 1050, 2200)),
+    ]
+    assert _marker_vertices(tmp_path / "drawn.gds", shapes) == []
+
+    # The well and tap are clear of DNWELL. Only the implant is cut.
+    shapes.append((DNWELL, kdb.Box(1100, -2500, 3500, 3500)))
+    assert _marker_vertices(tmp_path / "cut.gds", shapes) == [
+        [(1000, 0), (1000, 1000), (1100, 0), (1100, 1000)]
+    ]
+
+
+@pytest.mark.parametrize("interior_well", [False, True])
+def test_strict_corner_is_reported_once(tmp_path, interior_well):
+    shapes = [
+        {"layer": list(COMP), "box": [0, 0, 1000, 1000]},
+        # Two rectangles form an implant with a notch at (1025, 1158).
+        {"layer": list(NPLUS), "box": [-500, -500, 1500, 1158]},
+        {"layer": list(NPLUS), "box": [-500, 1158, 1025, 1500]},
+    ]
+    if interior_well:
+        shapes.append({"layer": list(NWELL), "box": [300, 300, 500, 500]})
+
+    assert [m["bbox"] for m in _markers(_run(tmp_path, shapes))] == [
+        {"left": 1000, "bottom": 1000, "right": 1025, "top": 1158}
+    ]

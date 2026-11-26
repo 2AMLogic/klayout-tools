@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from golden_deck.manifest import write_layout
+from golden_deck.manifest import build_layout, write_layout
 from klayout_tools.decks import DrcRule, get_deck
 from klayout_tools.drc import DrcError, list_deck_rules, run_drc
 from klayout_tools.drc_edge_band import EdgeBandSpec
@@ -408,8 +408,8 @@ def _segment(points):
 
 def _foundry_np5d_segments(layout):
     """The NCOMP-side stretches ``NP.5di``/``NP.5dii`` report, transcribed
-    from the pinned ``rule_decks/nplus.drc`` -- the deck's own selection
-    (boolean pure well, ``not_outside``/``outside``, the band as
+    from the pinned ``main.drc`` and ``nplus.drc`` -- the deck's own selection
+    (whole wells clear of DNWELL, ``not_outside``/``outside``, the band as
     ``nwell_n_dn - sized_in``) and the ``Nplus``-side ``enclosing`` checks.
     Unlike the engine's band split this never partitions the tap's edges
     itself, so agreement is not built in. No ``Pplus`` is drawn, so the
@@ -417,11 +417,12 @@ def _foundry_np5d_segments(layout):
     import klayout.db as kdb
 
     nwell, nplus = _region(layout, NWELL).merged(), _region(layout, NPLUS).merged()
-    nwell_n_dn = nwell - _region(layout, DNWELL)
+    dnwell = _region(layout, DNWELL)
+    nwell_n_dn = nwell.not_interacting(dnwell)
     sized_in = nwell_n_dn.sized(-429)
-    background = (nplus - _region(layout, DNWELL)).not_outside(nwell).edges()
+    background = (nplus - dnwell).not_outside(nwell).edges()
     foreground = (
-        (_region(layout, COMP) & nplus).not_outside(nwell).outside(kdb.Region()).edges()
+        (_region(layout, COMP) & nplus).not_outside(nwell).outside(dnwell).edges()
     )
     found = set()
     for edges, distance, metrics in (
@@ -437,6 +438,13 @@ def _foundry_np5d_segments(layout):
                 )
             )
     return found
+
+
+def test_foundry_np5d_excludes_the_whole_well_on_distant_dnwell_overlap():
+    shapes = _tap_shapes(10, 1000)
+    assert len(_foundry_np5d_segments(build_layout(shapes))) == 4
+    shapes.append({"layer": list(DNWELL), "box": [1900, -1000, 2500, 2000]})
+    assert _foundry_np5d_segments(build_layout(shapes)) == set()
 
 
 def _curated_ncomp_segments(report, layout):

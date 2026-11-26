@@ -21,12 +21,11 @@ A 1 um NCOMP square with 80 nm of Nplus on every side is entirely in the
 second class: the foundry deck reports nothing, a flat 0.16 um rule reports
 all four edges. That false positive is what this module removes.
 
-The foundry deck's own ``nwell_n_dn = nwell.not(dnwell)`` is a boolean
-difference, so for the foundry a well that merely overlaps a ``DNWELL``
-elsewhere is still pure away from the overlap. :class:`EdgeBandSpec` reads
-"pure" whole-polygon -- such a well is no context at all and its taps keep
-the flat threshold -- the stricter reading, and the one the gf180mcu deck
-declares.
+The foundry's ``nwell.not_interacting(dnwell)`` selects whole well polygons.
+Even a distant contact with DNWELL excludes the entire well from NP.5d.
+Both well-depth checks measure to the edges of
+``nplus.not(dnwell).not_outside(nwell)``. A DNWELL cut in the implant can
+therefore set the enclosure of a tap inside a pure well.
 
 The whole-polygon ``DerivedLayer.context`` split (issue #3484) cannot express
 it. One tap can carry edges in both classes -- near the well's boundary on
@@ -65,8 +64,10 @@ class EdgeBandSpec:
       ``threshold_dbu`` with the engine's default ``euclidian`` metric,
       exactly as the rule behaved without a ``band_spec``.
 
-    A context or exclude layer absent from the stream is an empty region: the
-    rule is neither skipped nor relaxed, every edge is "everything else".
+    An absent layer contributes an empty region. Without context every edge
+    keeps the flat threshold. Without exclusions all context polygons qualify.
+    Both well-depth classes measure to the edges of enclosing polygons left
+    after subtracting the exclusion and selecting those overlapping context.
     Both selections are whole-polygon and err strict -- a context polygon that
     merely touches an excluded polygon is no context at all, and a checked
     polygon that merely touches one keeps the strict threshold on every edge.
@@ -165,7 +166,6 @@ def run_edge_band_check(
     layout = setup.layout
     region = region.merged()
     other_region = other_region.merged()
-    other_edges = other_region.edges()
     context = _joined_region(cell, layout, spec.context_layers)
     exclude = _joined_region(cell, layout, spec.exclude_layers)
     pure = context.not_interacting(exclude)
@@ -178,6 +178,7 @@ def run_edge_band_check(
     well_edges = at_well.edges()
     band_edges = well_edges & (pure - inner)
     interior_edges = well_edges & inner
+    well_implant_edges = (other_region - exclude).not_outside(context).edges()
 
     edge_pairs = kdb.EdgePairs()
     for edges, threshold_dbu, metrics in (
@@ -187,7 +188,9 @@ def run_edge_band_check(
         distance = round(threshold_dbu * setup.dbu_scale)
         edge_pairs.insert(
             edges.enclosed_check(
-                other_edges, distance, metrics=getattr(kdb.Region, _METRICS[metrics])
+                well_implant_edges,
+                distance,
+                metrics=getattr(kdb.Region, _METRICS[metrics]),
             )
         )
 
@@ -228,7 +231,9 @@ def _strict_parts(crossing: Any, implant: Any, wells: Any, distance: int) -> Any
         for marker in tap_edge.enclosed_check(partner, distance).each():
             if marker in shielded:
                 result.insert(_clip_strict_marker(pair, marker, well_index, distance))
-    return result
+    # Adjacent source edges can reproduce the same corner pair. Deduplicate
+    # after clipping so distinct strict portions of a marker are preserved.
+    return kdb.EdgePairs(list(dict.fromkeys(result.each())))
 
 
 def _clip_strict_marker(

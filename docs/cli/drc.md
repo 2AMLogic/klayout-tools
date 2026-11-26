@@ -2668,16 +2668,18 @@ three markers: the full left edge and the leftmost 179 nm of the top and
 bottom edges, the stretch of them inside the band. `--list-rules` shows the
 band under the rule's `edge_band` key.
 
-What the split still leaves approximated: butted edges are checked (the
-foundry deck drops them into `NP.6`); the `NP.5c` `DNWELL`/`LVPWELL` split is
-unexpressed, so a tap touching a `DNWELL` keeps 0.16 µm; outside the band the
-measure is `euclidian` where the official rule is `projection` (the
-conservative direction); and "pure well" is read whole-polygon -- the
-foundry's `nwell.not(dnwell)` is a boolean difference, so for the foundry a
-well that merely overlaps a `DNWELL` elsewhere is still pure away from the
-overlap, where here such a well is no context at all and its taps keep
-0.16 µm. The `PCOMP` side is deliberately not given a band: its own foundry
-rules differ. A `PCOMP` inside an `Nwell` is always within reach of the
+Both well-depth checks follow the foundry's `nwell.not_interacting(dnwell)`.
+Contact with `DNWELL` anywhere on a well excludes that whole polygon from
+`NP.5d`. For a qualifying well, the enclosure is measured to the edges of
+`nplus.not(dnwell).not_outside(nwell)`. A nearby `DNWELL` can therefore cut
+the implant short even when both the tap and its well are clear of `DNWELL`.
+
+The strict fallback measures to the drawn implant with the `euclidian`
+metric, a conservative approximation where the foundry specifies `projection`.
+It keeps the 0.16 µm limit for taps touching `DNWELL`, where the foundry has
+a separate `NP.5c` split for `DNWELL`/`LVPWELL`. Butted edges are checked
+here and handled under `NP.6` in the foundry deck.
+A `PCOMP` inside an `Nwell` is always within reach of the
 oversized well, so `pplus.enclosing.comp.1` holds it to 0.16 µm however deep
 it sits -- which is also what the foundry deck requires there, since `PP.5b`
 measures against the `Pplus` edges *inside* the well and only `PP.5d`
