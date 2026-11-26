@@ -311,7 +311,11 @@ def prepare_annotations(
     hints_by_signal: dict[str, dict[str, Any]] = {}
     signals_by_name: dict[str, str | None] = {}
     for spec in measurements_spec:
-        hints = _measurement_diagnostic_hints(spec.get("spice", ""))
+        spice = spec.get("spice")
+        if not spice:
+            signals_by_name[spec["name"]] = None
+            continue
+        hints = _measurement_diagnostic_hints(spice)
         signals_by_name[spec["name"]] = hints["signal"]
         if hints["signal"] is None or sim_derive.is_derive(spec):
             continue

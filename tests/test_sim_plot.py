@@ -222,11 +222,22 @@ def test_measurement_plot_path_requires_signal_at_worst_corner(worst_case, signa
     assert measurement_plot_path({"worst_case": worst_case}, signal, plots) is None
 
 
+@pytest.mark.usefixtures("bare_name_ngspice_resolution")
 def test_plot_annotations_are_parsed_once_for_all_corners(tmp_path, monkeypatch):
     cards = [
         {"name": "avgout", "spice": ".meas tran avgout AVG v(out) FROM=1n TO=2n"},
         {"name": "cross", "spice": ".meas tran cross WHEN v(out)=0.5 RISE=1"},
     ]
+    derived = {
+        "name": "spread",
+        "spice": None,
+        "derive": {
+            "from": "avgout",
+            "axis": "params.vdd",
+            "reduce": "range",
+            "group_by": [],
+        },
+    }
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,
@@ -234,10 +245,14 @@ def test_plot_annotations_are_parsed_once_for_all_corners(tmp_path, monkeypatch)
             "netlist": "body.spice",
             "analysis": {"kind": "tran", "args": "1n 1u"},
             "corners": {"params": {"vdd": [0.8, 1.0, 1.2]}},
-            "measurements": cards,
+            "measurements": [*cards, derived],
         },
     )
-    _stub_subprocess_run_with_waveform(monkeypatch, points=[(0.0, 0.0), (3e-9, 1.0)])
+    _stub_subprocess_run_with_waveform(
+        monkeypatch,
+        points=[(0.0, 0.0), (3e-9, 1.0)],
+        log_text="avgout = 0.5\ncross = 1.5e-9\n",
+    )
     parse = Mock(wraps=sim._measurement_diagnostic_hints)
     monkeypatch.setattr(
         f"{sim._measurement_diagnostic_hints.__module__}._measurement_diagnostic_hints",
@@ -251,6 +266,11 @@ def test_plot_annotations_are_parsed_once_for_all_corners(tmp_path, monkeypatch)
     assert [call.args[0] for call in parse.call_args_list] == [
         card["spice"] for card in cards
     ]
+    assert report["status"] == "pass"
+    spread = next(
+        entry for entry in report["measurements"] if entry["name"] == "spread"
+    )
+    assert spread["plot"] is None
     assert len(report["plots"]) == 3
     for plot in report["plots"]:
         svg = Path(plot["path"]).read_text()
