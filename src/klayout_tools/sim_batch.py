@@ -1093,12 +1093,12 @@ def _run_checked(
     timeout_s: float,
     label: str,
     *,
-    classify: Callable[[str], str | None] | None = None,
+    classify: Callable[[str, int], str | None] | None = None,
     redact: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one transport command; any non-zero exit becomes a
     :class:`BatchError`. ``classify``, when given, maps the failed command's
-    stderr to the error's machine-readable ``code`` (``None`` = unclassified).
+    stderr and exit status to an optional machine-readable error code.
     ``redact`` (the bucket name) is replaced by ``<bucket>`` in the error
     message -- after classification, so ``classify`` sees the raw stderr --
     because the message can reach committed reports (issue #3890).
@@ -1111,7 +1111,7 @@ def _run_checked(
         raise BatchError(f"{label} could not be spawned: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
-        code = classify(detail) if classify is not None else None
+        code = classify(detail, result.returncode) if classify is not None else None
         if redact:
             detail = detail.replace(redact, "<bucket>")
         raise BatchError(
@@ -1145,26 +1145,17 @@ _RETRYABLE_LAUNCH_CODES = frozenset(
 )
 
 
-def _classify_launch_failure(stderr: str) -> str | None:
-    """:data:`BATCH_NO_CAPACITY_CODE` when a failed ``launch``'s stderr is
-    the provisioner's Spot capacity refusal or its shared vCPU-budget
-    refusal, :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
-    concurrency-cap refusal, else ``None``.
+def _classify_launch_failure(stderr: str, returncode: int) -> str | None:
+    """Classify launch refusals across old and current fleet provisioners.
 
-    **Coupling:** this is a text match against 2am's
-    ``infra/aws/batch-fleet-provision.sh`` (``cmd_launch``'s final
-    ``fail "no capacity in any of the ..."``), because that script exits ``1``
-    for *every* refusal -- the diversification floors, the concurrency cap,
-    a missing ``job.json``, an IAM denial, and a capacity shortfall alike --
-    and exposes no distinct exit code. Kept in this one helper so a change on
-    the 2am side is a one-line fix here. Every other launch failure stays
-    unclassified, so it is never mistaken for something worth retrying.
+    A named concurrency cap keeps its specific code. Exit 75 covers temporary
+    capacity ceilings even when the provisioner changes its diagnostic.
     """
     if _CAPACITY_REFUSAL_MARKER in stderr:
         return BATCH_NO_CAPACITY_CODE
     if _CONCURRENCY_CAP_MARKER in stderr:
         return BATCH_CONCURRENCY_CAP_CODE
-    if _VCPU_BUDGET_MARKER in stderr:
+    if _VCPU_BUDGET_MARKER in stderr or returncode == 75:
         return BATCH_NO_CAPACITY_CODE
     return None
 
@@ -1279,7 +1270,7 @@ def launch_job(
     regression.
 
     **Capacity wait (issues #2721, #2917).** A launch the provisioner refuses
-    for lack of Spot capacity, or because the shared fleet is at
+    for lack of Spot capacity, a vCPU ceiling, or because the fleet is at
     ``BATCH_MAX_CONCURRENT_INSTANCES``, raises :class:`BatchError` with
     ``code == "batch_no_capacity"`` / ``"batch_concurrency_cap"``
     (:func:`_classify_launch_failure`). With

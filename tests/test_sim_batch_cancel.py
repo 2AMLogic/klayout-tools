@@ -182,13 +182,16 @@ def test_cancel_nothing_to_cancel_is_a_distinct_code(tmp_path, monkeypatch, caps
     assert "nothing to cancel" in error["message"]
 
 
-def test_cancel_other_failure_surfaces_redacted_stderr(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("status", [1, 75])
+def test_cancel_other_failure_surfaces_redacted_stderr(
+    tmp_path, monkeypatch, capsys, status
+):
     runner = _FakeRunner()
     runner.queue(
         "cancel",
         fake_completed(
             "",
-            returncode=1,
+            returncode=status,
             stderr=(
                 "error: aws cli failed: user is not authorized to perform "
                 f"ec2:TerminateInstances on {FAKE_BUCKET}\n"

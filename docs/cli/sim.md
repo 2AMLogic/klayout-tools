@@ -1264,7 +1264,7 @@ fails before the simulator writes a report, inspect the per-corner
 | `batch.poll_timeout_s` | number ≥ 0 | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack -- or, when `batch.job_timeout_s` states the whole-job wall bound ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)), to that stated bound plus the same 1800s; `0` is accepted (give up on the first poll). On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). A negative, non-finite, non-numeric or `bool` value is rejected before any S3 write with `error.code: "batch_poll_knob_invalid"` ([#7543](https://github.com/2AMLogic/klayout-tools/issues/7543)). |
 | `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`, which also harvests the retained shard map; for the non-blocking form, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the batch image pointer's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
-| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot capacity, vCPU budget, or fleet concurrency-cap refusal ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.image_profile` | `"sim"` or `"simlong"` | Selects the fleet profile for this simulation. Omitting it or selecting `"sim"` preserves default job selection. With `"simlong"`, the fleet runs the sim image with its longer whole-job ceiling. The client requires `BATCH_SIMLONG_MAX_JOB_SECONDS` in the provision script’s adjacent `batch-fleet.env` and sends `image_profile` in every job. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then the selected profile’s fleet setting (`BATCH_SIMLONG_MAX_JOB_SECONDS` for `simlong`, otherwise `BATCH_MAX_JOB_SECONDS`) in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). A split reports `environment.remote` as a `fleet[]` array (one block per job, even with `remote.hosts: 1`) plus the top-level `job_ids` / `runner_compatibility` roll-ups, so per-job fields must be read from `fleet[]` -- see "Fleet sharding" below. Any other value is rejected before any S3 write. |
@@ -1593,24 +1593,17 @@ under `--format json`, an error envelope carrying a stable
 }
 ```
 
-A capacity refusal is a fleet-wide condition that usually clears within
-minutes, so the code marks it as **retryable**, unlike a request error.
-The same code also covers the provisioner's shared vCPU-budget refusal
-(`N vCPU already running + ... exceeds BATCH_MAX_VCPU=M ... the spot quota is
-shared with ci-spot`, [#4103](https://github.com/2AMLogic/klayout-tools/issues/4103)),
-so `--capacity-retries` and `batch.capacity_wait_s` wait it out too.
-The shared-fleet concurrency-cap refusal (`N instance(s) already running + 1
-requested exceeds BATCH_MAX_CONCURRENT_INSTANCES=M`,
-[#2917](https://github.com/2AMLogic/klayout-tools/issues/2917)) is the other
-transient case; it carries its own **`error.code: "batch_concurrency_cap"`**,
-so a caller can tell slot contention from a Spot shortage, and is retryable
-the same way. Every other launch failure (the diversification floors, a
-missing `job.json`, an IAM denial) carries no `error.code` and is never
-retried. The classification is a match on the provisioner's
-refusal text, because the script exits `1` for every refusal and exposes no
-distinct exit code; it lives in one helper
-(`sim_batch._classify_launch_failure`) so a wording change on the 2am side is
-a one-line fix here.
+A full [shared vCPU budget](https://github.com/2AMLogic/klayout-tools/issues/4103)
+(`BATCH_MAX_VCPU`) or a full profile slice such as `BATCH_SIMLONG_MAX_VCPU`
+produces provisioner exit `75` and client code `batch_no_capacity`. A refusal
+naming the [fleet instance cap](https://github.com/2AMLogic/klayout-tools/issues/2917)
+(`BATCH_MAX_CONCURRENT_INSTANCES`) keeps its own code, `batch_concurrency_cap`.
+Other exit-`75` launch refusals receive `batch_no_capacity` even if their
+wording changes. Both codes support the same retry options.
+
+The client also recognizes the Spot pool shortage message shown above and
+the older exit-`1` vCPU and concurrency refusal messages. Unrecognized
+exit-`1` failures stop immediately.
 
 `batch.capacity_wait_s` opts into waiting instead of failing. With a positive
 budget, a `batch_no_capacity` or `batch_concurrency_cap` refusal re-invokes `launch` for the **same
