@@ -16,6 +16,10 @@ aws CLI, no S3, no network).
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -38,6 +42,26 @@ pytestmark = pytest.mark.usefixtures(
 # --------------------------------------------------------------------------- #
 # Declaration and argument-splice validation
 # --------------------------------------------------------------------------- #
+
+
+def test_validate_tightened_rerun_does_not_load_sim_runner():
+    code = """
+import sys
+from klayout_tools.sim_regrade import validate_tightened_rerun
+
+assert validate_tightened_rerun(None) is None
+assert "klayout_tools.sim" not in sys.modules
+assert validate_tightened_rerun({"reltol": 1e-4}) == {
+    "tmax": None, "ngspice_options": {"reltol": 1e-4}
+}
+assert "klayout_tools.sim" not in sys.modules
+"""
+    source = Path(__file__).resolve().parents[1] / "src"
+    subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONPATH": str(source)},
+        check=True,
+    )
 
 
 @pytest.mark.parametrize(

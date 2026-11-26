@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from helpers.subprocess_fakes import patch_openroad_run
 from klayout_tools import _openroad_engine as engine
 from klayout_tools.em import run_em
 from klayout_tools.place_and_route import run_place_and_route
@@ -207,7 +208,7 @@ def _invoke_openroad(proj: Path, monkeypatch, *, repo_root: Any, exit_code: int 
             **kwargs,
         )
 
-    monkeypatch.setattr(engine.subprocess, "run", local_process)
+    patch_openroad_run(monkeypatch, local_process)
     return engine._run_openroad(
         str(script),
         str(proj / "metrics.json"),
@@ -302,9 +303,9 @@ def test_launch_failure_diagnostic_embeds_the_anchored_record(tmp_path, monkeypa
     def missing(*args, **kwargs):
         raise FileNotFoundError("engine missing")
 
-    monkeypatch.setattr(engine.subprocess, "run", missing)
+    patch_openroad_run(monkeypatch, missing)
     monkeypatch.chdir(_checkout(tmp_path / "checkout-b"))
-    with pytest.raises(EngineError) as exc:
+    with pytest.raises(EngineError, match="engine missing") as exc:
         engine._run_openroad(
             str(proj / "run.tcl"),
             "metrics",

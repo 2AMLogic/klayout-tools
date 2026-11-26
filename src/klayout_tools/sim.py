@@ -173,7 +173,7 @@ from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
 from . import sim_stepping_narration as sim_stepping_narration
 from . import sim_transient_noise as sim_tn
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -262,6 +262,7 @@ from .sim_corner_axes import CORNER_OPTION_NAMES as CORNER_OPTION_NAMES
 from .sim_corner_axes import NGSPICE_SOLVER_OPTIONS as NGSPICE_SOLVER_OPTIONS
 from .sim_corner_axes import _matches_exclude as _matches_exclude
 from .sim_corner_axes import _parse_process_entry as _parse_process_entry
+from .sim_corner_axes import _validate_ngspice_options
 from .sim_corner_keys import unknown_key_warnings
 from .sim_corner_point import (
     CornerPoint,
@@ -2129,49 +2130,6 @@ def _required_save_vectors(
                         if vector not in vectors:
                             vectors.append(vector)
     return vectors
-
-
-#: A string option value lands verbatim in a deck card, so it is limited to
-#: a bare token (``method=gear``) -- no whitespace, quotes or newlines.
-_NGSPICE_OPTION_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
-
-
-def _validate_ngspice_options(value: Any) -> dict[str, Any]:
-    """Validate ``options.ngspice_options`` (issue #3111).
-
-    Returns the declared map unchanged (``{}`` when omitted or ``null``).
-    Keys must come from :data:`NGSPICE_SOLVER_OPTIONS`; values must be a
-    finite number, a bool or a bare-token string.
-    """
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise SimError(
-            "options.ngspice_options must be an object mapping ngspice "
-            f".options names to scalar values (got {json.dumps(value, default=repr)})"
-        )
-    for name, item in value.items():
-        if name not in NGSPICE_SOLVER_OPTIONS:
-            raise SimError(
-                f"options.ngspice_options key {json.dumps(name)} is not a "
-                "supported solver option; supported: "
-                + ", ".join(NGSPICE_SOLVER_OPTIONS)
-            )
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, (int, float)):
-            if not is_finite_number(item):
-                raise SimError(
-                    f"options.ngspice_options.{name} must be finite (got {item!r})"
-                )
-            continue
-        if isinstance(item, str) and _NGSPICE_OPTION_TOKEN.fullmatch(item):
-            continue
-        raise SimError(
-            f"options.ngspice_options.{name} must be a number, a boolean or "
-            f"a bare-token string (got {json.dumps(item, default=repr)})"
-        )
-    return dict(value)
 
 
 def _ngspice_options_card(ngspice_options: dict[str, Any] | None) -> str | None:
