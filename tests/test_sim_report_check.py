@@ -174,6 +174,32 @@ def test_missing_file_drifts(tree):
     assert "not found" in result["checks"][1]["error"]
 
 
+def test_unreadable_include_reports_drift_and_checks_other_files(
+    tree, monkeypatch, capsys
+):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    original = sim_report_check.sha256_file
+
+    def read_digest(path):
+        if os.path.samefile(path, inc):
+            raise PermissionError("permission denied")
+        return original(path)
+
+    monkeypatch.setattr(sim_report_check, "sha256_file", read_digest)
+    assert main(["sim", "--check", report, "--format", "json"]) == 3
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "drifted"
+    assert result["diagnosis"] == "indeterminate"
+    first, failed, identity = result["checks"]
+    assert first["match"] is True
+    assert failed["match"] is False and failed["actual"] is None
+    assert inc.name in failed["error"] and "permission denied" in failed["error"]
+    assert identity["match"] is False and identity["actual"] is None
+
+
 def test_root_reanchors(tree, tmp_path_factory):
     tmp, top, inc = tree
     report = _write(tmp, top, inc)

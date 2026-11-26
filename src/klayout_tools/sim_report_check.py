@@ -129,7 +129,14 @@ def check_sim_report(report_path: str, *, root: str | None = None) -> dict[str, 
             )
             complete = False
             continue
-        actual = sha256_file(path)
+        try:
+            actual = sha256_file(path)
+        except OSError as exc:
+            check = hash_check(field, entry["sha256"], None)
+            check["error"] = f"could not read closure file {path}: {exc}"
+            checks.append(check)
+            raw_ok = complete = False
+            continue
         check = hash_check(field, entry["sha256"], actual)
         if actual is None:
             check["error"] = f"closure file not found: {path}"
