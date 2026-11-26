@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
-from klayout_tools import sim, sim_remote
+from klayout_tools import sim, sim_remote, sim_xyce_refusals
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -425,7 +425,7 @@ def test_temperature_and_mc_seed_cards_stay_at_file_scope(tmp_path):
 
 def test_xyce_refuses_a_parameter_axis():
     with pytest.raises(sim.SimError, match="corners.params"):
-        sim._enforce_xyce_support_boundary(
+        sim_xyce_refusals.enforce_support_boundary(
             engine="xyce",
             backend="local",
             corners_spec={"params": {"r": [1]}},
@@ -882,4 +882,4 @@ def test_temperature_param_is_a_target_the_netlist_must_declare(tmp_path):
 
 def test_xyce_refuses_temperature_param():
     with pytest.raises(sim.SimError, match="temperature_param"):
-        sim._refuse_xyce_params_axis({"temperature_param": "temp_c"})
+        sim_xyce_refusals._refuse_params_axis({"temperature_param": "temp_c"})
