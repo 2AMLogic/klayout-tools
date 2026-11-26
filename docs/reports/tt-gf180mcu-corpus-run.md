@@ -21,10 +21,11 @@ layout. None is a claim about a design.
 All 108 slots have a record for both stages, 216 in all. Of the 82 eligible
 designs, DRC passed on 55, reported findings on 8 and hit the 300-second
 limit on 19. Extraction passed on 39 and hit the limit on 43. The other 26
-slots are explicit skips. The DRC markers fall on seven implant and contact
-rules. Checked against the foundry rule decks on five designs, they trace to
-differences between those decks and the curated one. Each difference has its
-own issue.
+slots are explicit skips. The original campaign traced 57,509 DRC markers on
+five designs to differences between the curated and foundry decks. A
+post-campaign comparison covered the other three designs. The curated deck
+reported 501 implant markers there, while the foundry Nplus and Pplus tables
+reported zero on each design.
 
 Seven paid Spot launches produced the result: five on November 25, 2026 and
 two replacements on November 26, after Spot reclaimed two shards before they
@@ -48,7 +49,7 @@ wrote output.
 | Job limits | 7200 s per job, 300 s per stage, one paid launch per job |
 
 The klt on the worker is the image's, not this repository's current `main`.
-Every number here describes `klt 0.9.0`.
+The campaign outcomes below describe `klt 0.9.0`.
 
 `scripts/tt_corpus_batch.py` split the catalogue into five logical shards by
 taking every fifth slot of each shuttle. Each shard ran as one job: one
@@ -134,12 +135,10 @@ findings share seven rules:
 | `nplus.space.pcomp.1` | 60 | 4 |
 | **Total** | **58,010** | 8 |
 
-The operator compared the counts for five of these designs with the foundry
-GF180MCU D rule decks on the same pinned layouts. That comparison is recorded
-in the
-[campaign ledger](https://github.com/2AMLogic/klayout-tools/issues/5084#issuecomment-7156986590)
-and was not repeated for this report. It accounts for all 57,509 markers on
-those five:
+During the original campaign, the operator compared five of the eight designs
+with the foundry GF180MCU D rule decks on the same pinned layouts. The table
+accounts for the 57,509 curated markers on those five designs.
+[Campaign ledger](https://github.com/2AMLogic/klayout-tools/issues/5084#issuecomment-7156986590)
 
 | Curated rule | Markers | Difference from the foundry deck | Issue |
 | --- | ---: | --- | --- |
@@ -154,11 +153,24 @@ those five:
 | `nplus.space.pcomp.1` | 11 | Same butted-polygon difference. | #7970 |
 | **Total** | **57,509** | | |
 
-The other 501 markers are on three `ttgf0p3` designs in logical shard `1/5`,
-whose original launch Spot reclaimed: `tt_um_74hct00` (96),
-`tt_um_algofoogle_gf_analog` (385) and `tt_um_cw_testbuffer` (20). They fall
-on six of the same seven rules. They were not compared with the foundry
-decks, so this report does not attribute them.
+**November 26, 2026 follow-up.** After the seven paid launches, the operator
+checked the three remaining `ttgf0p3` layouts from shard `1/5` against their
+catalogue SHA-256 hashes. The campaign's curated deck (`5dbbad05f`) reported
+96 implant markers on `tt_um_74hct00`, 385 on `tt_um_algofoogle_gf_analog`
+and 20 on `tt_um_cw_testbuffer`, for 501 markers across six rules. On the same
+top cells, the complete GF180MCU D Nplus and Pplus tables each reported zero
+markers on every layout in KLayout 0.30.12. All six runs recorded the 25
+expected categories for their table.
+[Operator’s foundry comparison](https://github.com/2AMLogic/klayout-tools/pull/7971#issuecomment-7196758851)
+
+For `nplus.enclosing.comp.1`, a separate geometry comparison reproduced all
+184 marker bounds on main (`221bfd748`). Correcting the deep-well threshold
+from 160 to 20 nm in #7964 left 90 bounds. The operator reproduced 45 under
+NP.5b by retaining PCOMP-coincident Nplus edges and using Euclidean distance,
+and 45 under NP.5dii by retaining Pplus-coincident edges. For the other 317
+markers, the full-table runs establish a deck discrepancy. Individual causes
+would require comparable geometry evidence.
+[Nplus geometry comparison](https://github.com/2AMLogic/klayout-tools/issues/7970#issuecomment-7196832832)
 
 Two of the 43 extraction timeouts have separate before-and-after measurements
 on `ttgf0p2`. The fix for #5893 reduced extraction on
@@ -385,7 +397,7 @@ python3 scripts/tt_corpus_batch.py collect --commit "$commit" --count 5 \
 
 - The deck is klayout-tools' curated `gf180mcu` deck. It is not the foundry
   signoff runset, and a pass here is not a signoff claim.
-- Every measurement is of `klt 0.9.0` on KLayout `0.30.13`. Current `main`
+- The Spot workers ran `klt 0.9.0` on KLayout `0.30.13`. Current `main`
   has changed since, including the extraction performance fix in #6081.
 - The campaign cost bound combines observed instance lifetimes for the five
   original launches with reserved lifetimes for the two replacements.
