@@ -194,11 +194,11 @@ _ViaDropHop = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 
 #: Rejection for a backbone outside ``deck.metals`` whose pin is on it (#7957).
 _BACKBONE_OFF_METALS_REASON = (
-    "the backbone is drawn outside the resolved PDK's metals stack, and "
-    "gen_compose draws no contact from it down to this pin's own metal "
-    "pad -- the route would end as an uncontacted overlap rather than a "
-    "connection. Route this net with routing.layer_role set to a metal "
-    "role, or pin it to a port on the backbone's own layer (issue #7957)"
+    "the backbone is outside the PDK's metals stack and has no contact to the "
+    "pin's metal pad. Set the applicable connectivity[].legs[].layer_role or "
+    "connectivity[].layer_role to a metal role, or clear the override to inherit "
+    "a metal role. If the leg inherits routing.layer_role, set that default to a "
+    "metal role. Alternatively, use a port on the backbone's own layer (issue #7957)"
 )
 
 
@@ -331,7 +331,7 @@ def _resolve_via_drop_layer(
                         "the resolved PDK's extraction deck declares no via "
                         f"connecting deck metals[{via_index}] and "
                         f"metals[{via_index + 1}] -- needed for a via-drop "
-                        "ladder between routing.layer_role's metal (deck "
+                        "ladder between the backbone metal (deck "
                         f"metals[{route_idx}]) and this pin's own diffusion "
                         "layer (reached via deck.contact)"
                     )
@@ -356,7 +356,7 @@ def _resolve_via_drop_layer(
                 "the resolved PDK's extraction deck declares no via "
                 f"connecting deck metals[{via_index}] and "
                 f"metals[{via_index + 1}] -- needed for a via-drop ladder "
-                f"between routing.layer_role's metal (deck "
+                f"between the backbone metal (deck "
                 f"metals[{route_idx}]) and this pin's own layer (deck "
                 f"metals[{port_idx}])"
             )
@@ -3179,7 +3179,7 @@ def _resolve_via_drops(
             if drop_error is not None:
                 return via_drops, (
                     f"pin '{pin['port']}' on block '{pin['block']}' is drawn "
-                    f"on layer {port_layer}, which routing.layer_role's "
+                    f"on layer {port_layer}, which the effective backbone layer "
                     f"{effective_route_layer} cannot reach: {drop_error}"
                 )
             if ladder is not None:

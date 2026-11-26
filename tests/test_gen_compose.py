@@ -2952,33 +2952,18 @@ def test_compose_labels_jogged_route_exactly_once_not_per_segment(tmp_path, pdk_
 def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
     tmp_path, pdk_root
 ):
-    # "tap" is a valid routable role but is neither a `metals[]` entry nor the deck's
-    # `poly` layer, so `_resolve_label_layer` finds no label convention for it: the
-    # stripe is still drawn, unlabelled, with a note saying why (poly got a
-    # `poly_label` in #210; `tap` still has none). Since #7957 a `tap` backbone
-    # lands only on a same-layer port, so both terminals are re-reported on `tap`.
-    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
-    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
-    for port in r1["ports"] + r2["ports"]:  # onto tap.drawing (65/44)
-        port["layer"] = {"layer": 65, "datatype": 44, "name": None}
+    import klayout.db as kdb
+
+    # Only tap geometry can make a direct landing on the unlabelled tap stripe.
+    bjt = _gen_block(tmp_path, pdk_root, "bjt_array", "bjt", add_collector_ring=True)
+    pins = [{"block": "b1", "port": "COLL_E"}, {"block": "b2", "port": "COLL_W"}]
     output = tmp_path / "unlabelled.gds"
     report = compose(
         {
             "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "blocks": [
-                {"id": "b1", "generator_report": r1},
-                {"id": "b2", "generator_report": r2},
-            ],
+            "blocks": [{"id": pin["block"], "generator_report": bjt} for pin in pins],
             "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 1.0},
-            "connectivity": [
-                {
-                    "net": "N1",
-                    "pins": [
-                        {"block": "b1", "port": "P2"},
-                        {"block": "b2", "port": "P1"},
-                    ],
-                }
-            ],
+            "connectivity": [{"net": "N1", "pins": pins}],
             "routing": {"layer_role": "tap", "width_um": 0.17},
             "options": {"cell_name": "unlabelled_0", "output": str(output)},
         }
@@ -2988,13 +2973,22 @@ def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
         "no PDK label-layer convention" in note for note in report["drc_hints"]["notes"]
     )
 
-    import klayout.db as kdb
-
     layout = kdb.Layout()
     layout.read(str(output))
     top = layout.cell("unlabelled_0")
-    paths = [s for s in top.shapes(layout.layer(65, 44)).each() if s.is_path()]
-    assert len(paths) == 1  # the tap stripe is still drawn
+    tap = layout.layer(65, 44)
+    (path,) = [s for s in top.shapes(tap).each() if s.is_path()]
+    stripe = kdb.Region(path.polygon)
+    # Check positive-area overlap with each placed ring at its reported port.
+    instances = sorted(top.each_inst(), key=lambda inst: inst.trans.disp.x)
+    for inst, pin in zip(instances, pins, strict=True):
+        port = next(p for p in bjt["ports"] if p["name"] == pin["port"])
+        assert (port["layer"]["layer"], port["layer"]["datatype"]) == (65, 44)
+        local = kdb.DPoint(port["x_um"], port["y_um"]).to_itype(layout.dbu)
+        point = inst.trans * local
+        landing = kdb.Region(kdb.Box(point, point).enlarged(1))
+        ring = kdb.Region(inst.cell.begin_shapes_rec(tap)).transformed(inst.trans)
+        assert not (stripe & ring & landing).is_empty()
     assert list(top.shapes(layout.layer(67, 5)).each()) == []  # but no li1.pin label
 
 

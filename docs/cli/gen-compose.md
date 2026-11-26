@@ -1566,17 +1566,17 @@ rather than drawing something that does not connect:
   and the two ways forward — re-run the block's generator with
   `params.gate_contact: true` so the gate reports a contacted `"metal"`-role
   pad, or name the gate with `pins[]` (below) instead of routing to it.
-- A backbone on a layer *outside* the metals stack — a `routing.layer_role`
-  (or a net's own `connectivity[].layer_role`) resolving to `"poly"`,
-  `"tap"`, or another non-metal role — whose pin *is* on
-  `ExtractionDeck.metals` (issue #7957): the bare-poly case above, mirrored
-  onto the backbone side. No via joins a non-metal backbone to a metal pad,
-  so before #7957 the leg was drawn as an uncontacted stripe *over* the pad
-  and reported `"routed": true` with `unrouted_nets: []`, while `klt extract`
+- A backbone on a layer *outside* the metals stack, such as `"poly"` or
+  `"tap"`, whose pin *is* on `ExtractionDeck.metals` (issue #7957).
+  No via joins a non-metal backbone to a metal pad, so before #7957 the leg
+  was drawn as an uncontacted stripe *over* the pad and reported `"routed": true` with `unrouted_nets: []`, while `klt extract`
   recovered the two terminals as separate clusters. The rejection's `reason`
-  names the fix — route the net on a metal role, or pin it to a port on the
-  backbone's own layer. A genuine same-layer landing (a `"poly"` route to a
-  bare-poly gate) still routes directly. Regression:
+  identifies the effective backbone layer and the pin layer. Set the applicable
+  `connectivity[].legs[].layer_role` or `connectivity[].layer_role` override
+  to a metal role, or clear it to inherit a metal role. If the leg inherits
+  `routing.layer_role`, change that default to a metal role. Alternatively,
+  select a port on the backbone's own layer. A genuine same-layer landing
+  (a `"poly"` route to a bare-poly gate) still routes directly. Regression:
   `tests/test_gen_compose_poly_route_access.py`.
 
   A third check (#469) generalizes both checks above from *reported*
