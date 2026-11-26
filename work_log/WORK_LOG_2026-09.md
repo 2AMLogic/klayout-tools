@@ -2,6 +2,37 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-26
+
+- **PR #2539**: fix(sim): validate models.pdk on the batch backend before any S3 write
+- **PR #2538**: feat(sim): per-section model libraries in a corners.process bundle
+- **PR #2536**: fix(sim): default save all so a netlist's own .save can't starve measurements
+- **PR #2535**: refactor(synthesize): move arithmetic candidate selection into synthesize_arithmetic
+- **PR #2534**: feat(sim): first-class OSDI (Verilog-A) model preload via options.osdi_preload
+- **PR #2530**: fix(sim): anchor ngspice's cwd to the corner dir, add options.ngspice_init
+- **PR #2529**: docs(tiers): remove item 11's stale #2255 native-substrate "Known gap"
+- **PR #2528**: feat(characterize): power/leakage extraction, batch mode, and vendor-.lib accuracy harness
+- **PR #2525**: feat(erc): measure a declared net's unlabelled remainder on the roles it owns (#2510)
+- **PR #2519**: fix(yield): exclude klt sim's inconclusive draws from the yield population
+- **PR #2516**: feat(characterize): single-cell combinational NLDM extraction and .lib emission
+- **PR #2509**: feat(erc): report the matched island count behind every declared net
+- **PR #2504**: fix(signoff): name which half of item 11 a failing LVS citation leaves unproven
+- **Issue #2532** (closed): Split synthesize.py's arithmetic-candidate-selection subsystem (~719 lines) into synthesize_arithmetic
+- **Issue #2523** (closed): klt sim: batch backend never validates PDK against the fleet's published AMI images before submission
+- **Issue #2522** (closed): klt sim: corners.process bundle form is bound to one models.lib file — cannot mix per-device-family corner libraries
+- **Issue #2521** (closed): klt sim: no save-policy control — netlist-body .save cards silently starve measurements
+- **Issue #2520** (closed): klt sim: ngspice corner runs inherit the caller's cwd, so .spiceinit compatibility mode is unreproducible
+- **Issue #2518** (closed): Sandbox: 2am-bot-issues broker verification (closed on purpose, not work)
+- **Issue #2514** (closed): docs: T1 item 11 contradicts itself on native-substrate ties — #2255's well_layer: null form is documented as both available and nonexistent
+- **Issue #2513** (closed): klt sim has no hook for an OSDI/Verilog-A model preload, so a generated deck must carry its own .control block
+- **Issue #2511** (closed): klt sim: cannot express an OSDI (Verilog-A) device, an ngspice compatibility mode, a save policy, or a multi-library corner axis
+- **Issue #2510** (closed): klt erc: measure the declared net's conductor geometry not reachable from any label (option 2 from #2497)
+- **Issue #2507** (closed): yield: exclude implausible_solution samples from klt yield's population (the #2493 filter, one verb over)
+- **Issue #2503** (closed): klt characterize: power extraction, multi-cell batch mode, and vendor-.lib accuracy validation
+- **Issue #2502** (closed): klt characterize: single-cell combinational NLDM extraction and .lib emission (core mechanism)
+- **Issue #2497** (closed): klt erc: erc.unconnected_net counts only islands carrying the declared label, so a rail split into a labelled piece and an unlabelled orphan grades clean
+- **Issue #2495** (closed): Friction: T1 item 11's analog LVS half is a restatement of the overall LVS verdict, so a structural supply claim is gated on an unrelated device-parameter defect
+
 ### 2026-09-25
 
 - **PR #2508**: fix(signoff): verify item 11's re-read ERC spec against its own content_hash
