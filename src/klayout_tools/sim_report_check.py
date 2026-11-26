@@ -58,6 +58,19 @@ def entry_path(
     return resolve_committed_path(entry, report_path=report_path)
 
 
+def _closure_file_digest(path: str) -> str | None:
+    """Return the raw digest, preserving lookup errors for the report."""
+    try:
+        digest = sha256_file(path)
+        if digest is None:
+            # sha256_file's isfile probe suppresses stat errors. On a miss,
+            # distinguish a missing path from a directory we cannot search.
+            os.stat(path)
+        return digest
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return None
+
+
 def _recomputed_identity(paths: list[str]) -> str:
     digest = hashlib.sha256()
     for path in paths:
@@ -129,7 +142,14 @@ def check_sim_report(report_path: str, *, root: str | None = None) -> dict[str, 
             )
             complete = False
             continue
-        actual = sha256_file(path)
+        try:
+            actual = _closure_file_digest(path)
+        except OSError as exc:
+            check = hash_check(field, entry["sha256"], None)
+            check["error"] = f"could not read closure file {path}: {exc}"
+            checks.append(check)
+            raw_ok = complete = False
+            continue
         check = hash_check(field, entry["sha256"], actual)
         if actual is None:
             check["error"] = f"closure file not found: {path}"

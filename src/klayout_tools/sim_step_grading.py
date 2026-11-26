@@ -75,6 +75,7 @@ def grade_step_measurements(
             eye=(eyes or {}).get(position),
             unreached_locals=unreached.get(spec.get("step") or "", set()),
             engine_diagnostics=engine_diagnostics,
+            log_text=log_text,
         )
         by_name[spec["name"]] = result
         results.append(result)
@@ -159,6 +160,7 @@ def _grade_one(
     eye: EyeOutcome | None,
     unreached_locals: set[str],
     engine_diagnostics: list[dict[str, Any]] | None,
+    log_text: str,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     base = {"name": spec["name"], "value": None, "unit": spec.get("unit")}
     errored = {
@@ -203,6 +205,7 @@ def _grade_one(
             spec,
             unreached_locals=unreached_locals,
             engine_diagnostics=engine_diagnostics,
+            log_text=log_text,
         )
         if unreached is not None:
             return unreached

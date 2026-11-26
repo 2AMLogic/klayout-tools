@@ -171,8 +171,9 @@ from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
+from . import sim_stepping_narration as sim_stepping_narration
 from . import sim_transient_noise as sim_tn
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -261,6 +262,7 @@ from .sim_corner_axes import CORNER_OPTION_NAMES as CORNER_OPTION_NAMES
 from .sim_corner_axes import NGSPICE_SOLVER_OPTIONS as NGSPICE_SOLVER_OPTIONS
 from .sim_corner_axes import _matches_exclude as _matches_exclude
 from .sim_corner_axes import _parse_process_entry as _parse_process_entry
+from .sim_corner_axes import _validate_ngspice_options
 from .sim_corner_keys import unknown_key_warnings
 from .sim_corner_point import (
     CornerPoint,
@@ -2128,49 +2130,6 @@ def _required_save_vectors(
                         if vector not in vectors:
                             vectors.append(vector)
     return vectors
-
-
-#: A string option value lands verbatim in a deck card, so it is limited to
-#: a bare token (``method=gear``) -- no whitespace, quotes or newlines.
-_NGSPICE_OPTION_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
-
-
-def _validate_ngspice_options(value: Any) -> dict[str, Any]:
-    """Validate ``options.ngspice_options`` (issue #3111).
-
-    Returns the declared map unchanged (``{}`` when omitted or ``null``).
-    Keys must come from :data:`NGSPICE_SOLVER_OPTIONS`; values must be a
-    finite number, a bool or a bare-token string.
-    """
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise SimError(
-            "options.ngspice_options must be an object mapping ngspice "
-            f".options names to scalar values (got {json.dumps(value, default=repr)})"
-        )
-    for name, item in value.items():
-        if name not in NGSPICE_SOLVER_OPTIONS:
-            raise SimError(
-                f"options.ngspice_options key {json.dumps(name)} is not a "
-                "supported solver option; supported: "
-                + ", ".join(NGSPICE_SOLVER_OPTIONS)
-            )
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, (int, float)):
-            if not is_finite_number(item):
-                raise SimError(
-                    f"options.ngspice_options.{name} must be finite (got {item!r})"
-                )
-            continue
-        if isinstance(item, str) and _NGSPICE_OPTION_TOKEN.fullmatch(item):
-            continue
-        raise SimError(
-            f"options.ngspice_options.{name} must be a number, a boolean or "
-            f"a bare-token string (got {json.dumps(item, default=repr)})"
-        )
-    return dict(value)
 
 
 def _ngspice_options_card(ngspice_options: dict[str, Any] | None) -> str | None:
@@ -7984,16 +7943,17 @@ def _is_unreached(
     *,
     unreached_names: set[str],
     diagnostics: list[dict[str, Any]],
+    log_text: str,
 ) -> bool:
     """True when this value-less ``spice`` measurement opted into
     ``on_unreached: "null"``, ngspice reported exactly "out of interval" for
-    it, and the corner carries no error-severity diagnostic (solver
-    divergence, timeout, ...) -- i.e. the analysis itself completed."""
+    it, and no blocking error-severity diagnostic (solver divergence, timeout,
+    ...; not unaborted stepping narration, #7906) -- the analysis completed."""
     if spec.get("on_unreached") != "null" or spec.get("spice") is None:
         return False
     if str(spec["name"]).lower() not in unreached_names:
         return False
-    return not any(d["severity"] == "error" for d in diagnostics)
+    return not sim_stepping_narration.blocks_not_reached(diagnostics, log_text)
 
 
 def _harvest_measurement_value(
@@ -9483,12 +9443,9 @@ def _diagnose_modelname_error(netlist_path: str) -> str | None:
     return sim_bin_range.message(culprit, _MODEL_WIDTH_CEILING_UM)
 
 
-#: ngspice's own terminal trailer when an analysis never actually completed
-#: (e.g. ``tran simulation(s) aborted``) -- verified against ngspice 46's
-#: output for a genuinely unrecoverable singular matrix/nonconvergence (see
-#: issue #205). Its presence always means "no trustworthy result", regardless
-#: of what measurement values happen to be parseable.
-_SIMULATION_ABORTED_RE = re.compile(r"simulation\(s\)\s+aborted", re.IGNORECASE)
+#: ngspice's own "analysis never completed" trailer (issue #205); the one
+#: definition lives with the stepping-code pair it qualifies (issue #7906).
+_SIMULATION_ABORTED_RE = sim_stepping_narration.SIMULATION_ABORTED_RE
 
 
 def _recovered_from_stepping(
@@ -9585,7 +9542,7 @@ def _capture_only_waveform_complete(
         measurements_spec
         or raw_path is None
         or not any(
-            d["code"] in ("singular_matrix", "nonconvergence") for d in diagnostics
+            d["code"] in sim_stepping_narration.STEPPING_CODES for d in diagnostics
         )
         or not os.path.isfile(raw_path)
     ):
@@ -9605,7 +9562,7 @@ def _downgrade_stepping_diagnostics(
     """Downgrade recovered ``singular_matrix``/``nonconvergence`` diagnostics
     to warnings; a capture-only corner also gets the reason appended."""
     for diagnostic in diagnostics:
-        if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
+        if diagnostic["code"] in sim_stepping_narration.STEPPING_CODES:
             diagnostic["severity"] = "warning"
             if not has_measurements:
                 reached = (

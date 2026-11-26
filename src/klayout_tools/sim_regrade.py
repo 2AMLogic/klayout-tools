@@ -122,31 +122,31 @@ def validate_tightened_rerun(
     """Validate ``options.tightened_rerun``; ``None`` when the request did
     not declare it (today's behaviour exactly).
 
-    Keys: ``tmax`` plus any name from ``sim.NGSPICE_SOLVER_OPTIONS`` (the
+    Keys: ``tmax`` plus any name from ``NGSPICE_SOLVER_OPTIONS`` (the
     same allowlist ``options.ngspice_options`` uses, so a typo is a named
     error rather than a silently ignored ngspice option). At least one key
     must be declared. Solver options are refused for ``engine: "xyce"``
     (they render as an ngspice ``.options`` card), mirroring
     ``options.retry_on_convergence_error``.
     """
-    from . import sim
-
     if value is None:
         return None
+    from .sim_corner_axes import NGSPICE_SOLVER_OPTIONS, _validate_ngspice_options
+
     if not isinstance(value, dict) or not value:
         raise SimError(
             f"options.{TIGHTENED_RERUN_OPTION} must be a non-empty object declaring "
             'the second pass\'s tightened settings, e.g. {"tmax": "25p", '
             '"reltol": 1e-4} (tmax plus any of: '
-            + ", ".join(sim.NGSPICE_SOLVER_OPTIONS)
+            + ", ".join(NGSPICE_SOLVER_OPTIONS)
             + ")"
         )
-    unknown = sorted(set(value) - ({"tmax"} | set(sim.NGSPICE_SOLVER_OPTIONS)))
+    unknown = sorted(set(value) - ({"tmax"} | set(NGSPICE_SOLVER_OPTIONS)))
     if unknown:
         raise SimError(
             f"options.{TIGHTENED_RERUN_OPTION} has unknown key(s): "
             f"{', '.join(unknown)} (known: tmax, "
-            + ", ".join(sim.NGSPICE_SOLVER_OPTIONS)
+            + ", ".join(NGSPICE_SOLVER_OPTIONS)
             + ")"
         )
     tmax = (
@@ -154,9 +154,7 @@ def validate_tightened_rerun(
         if "tmax" in value
         else None
     )
-    solver = sim._validate_ngspice_options(
-        {k: v for k, v in value.items() if k != "tmax"}
-    )
+    solver = _validate_ngspice_options({k: v for k, v in value.items() if k != "tmax"})
     if solver and engine == "xyce":
         raise SimError(
             f"options.{TIGHTENED_RERUN_OPTION} solver options are not supported "

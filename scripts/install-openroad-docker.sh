@@ -96,6 +96,27 @@
 # host-path `PLATFORM_DIR` only resolves in the container if it lies under a
 # mounted path ($PWD, $PDK_ROOT, $TMPDIR, plus /tmp itself when $TMPDIR
 # differs from it -- issue #5878 -- or the klt cache root).
+#
+# Container lifetime (issue #5726): the container is started with `--cidfile`
+# and is killed by the wrapper's own EXIT/INT/TERM/HUP handler whenever the
+# wrapper is signalled before the `docker run` client completes. Without
+# this, a caller that kills `klt` (its timeout, or a harness reaping its
+# agent) kills the docker client but NOT the container: OpenROAD keeps
+# routing for hours and writes `*.def`/`*.odb`/`*_route_drc.rpt` into the
+# caller's repository with no `klt` process and no `invocation.json` to
+# attribute them to. Two things make that window close or at least
+# attributable:
+#
+# 1. The client is backgrounded and `wait`ed instead of `exec`ed. `exec`
+#    replaces the wrapper's shell with the docker client, so no shell
+#    survives to run a `trap`; a signalled client dies with default signal
+#    disposition and the container outlives it.
+# 2. Docker writes its ID directly to the invocation's dedicated cidfile.
+#    The engine records the ID and checks Docker's ownership label before cleanup.
+#
+# The trap deliberately does NOT `docker kill` after a normal (unsignalled)
+# completion: the client was reaped, `--rm` already removed the container,
+# and the handler only cleans up the cid file.
 
 set -euo pipefail
 
@@ -162,6 +183,15 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # mounts are owned by the caller on Linux (a root-owned directory there blocks
 # worktree/scratch cleanup -- issue #3151). \$HOME is pointed at \$TMPDIR
 # because that uid usually has no passwd entry (hence no home) in the image.
+#
+# The container is RECORDED and KILLED when this wrapper dies before the
+# client completes (issue #5726): \`--cidfile\` names it, and the EXIT/INT/
+# TERM/HUP handler below \`docker kill\`s only the container carrying this invocation’s label.
+# The client is backgrounded and waited (not exec'd) precisely so this
+# shell survives to run the handler. After a normal completion the handler
+# only removes the cid file: the client was reaped and \`--rm\` already
+# removed the container. A SIGKILL to this wrapper is uncatchable -- the
+# dedicated cidfile and launch record identify any surviving container.
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
 MOUNTED_PATHS=("\$PWD")
@@ -243,14 +273,55 @@ fi
 while IFS= read -r v; do
     [[ -n "\$v" ]] && ENV_ARGS+=(-e "\$v")
 done < <(compgen -e OPENROAD_ || true)
-exec docker run --rm -i \\
+CID_DIR=
+if [[ -n "\${KLT_OPENROAD_CIDFILE:-}" && -n "\${KLT_OPENROAD_INVOCATION_ID:-}" ]]; then
+    CID_FILE="\$KLT_OPENROAD_CIDFILE"
+    OWNER="\$KLT_OPENROAD_INVOCATION_ID"
+else
+    CID_DIR="\$(mktemp -d "\${TMPDIR:-/tmp}/klt-openroad-cid.XXXXXXXXXXXX")"
+    CID_FILE="\$CID_DIR/container.cid"
+    OWNER="\${CID_DIR##*/}"
+fi
+CLIENT_PID=
+FINISHED=0
+cleanup() {
+    if [[ "\$FINISHED" == 0 ]]; then
+        CID="\$(head -c 65 "\$CID_FILE" 2>/dev/null || true)"
+        if [[ "\$CID" =~ ^[0-9a-f]{64}\$ ]]; then
+            # Verify the immutable label before stopping this invocation's container.
+            (
+                recorded=\$(docker container inspect --format '{{ index .Config.Labels "org.klayout-tools.openroad-invocation" }}' "\$CID" 2>/dev/null) &&
+                    [[ "\$recorded" == "\$OWNER" ]] && docker kill "\$CID"
+            ) >/dev/null 2>&1 &
+        fi
+        if [[ -n "\$CLIENT_PID" ]]; then
+            kill "\$CLIENT_PID" >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -n "\$CID_DIR" ]]; then
+        rm -f "\$CID_FILE"
+        rmdir "\$CID_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+docker run --rm -i \\
     --platform linux/amd64 \\
+    --label "org.klayout-tools.openroad-invocation=\$OWNER" \\
+    --cidfile "\$CID_FILE" \\
     --user "\$(id -u):\$(id -g)" \\
     -e HOME="\${TMPDIR:-/tmp}" \\
     \${ENV_ARGS[@]+"\${ENV_ARGS[@]}"} \\
     "\${MOUNTS[@]}" \\
     $IMAGE \\
-    $IN_IMAGE_BINARY "\$@"
+    $IN_IMAGE_BINARY "\$@" 0<&0 &
+CLIENT_PID=\$!
+STATUS=0
+wait "\$CLIENT_PID" || STATUS=\$?
+FINISHED=1
+exit "\$STATUS"
 WRAPPER_EOF
 chmod +x "$WRAPPER"
 

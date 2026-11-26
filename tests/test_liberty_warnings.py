@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import (
     _liberty_warnings,
     place_and_route,
@@ -247,7 +247,7 @@ def _stub_sta_openroad(
             stderr="\n".join(liberty_stderr or []),
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def _stub_sta_multi_corner(
@@ -276,7 +276,7 @@ def _stub_sta_multi_corner(
             ),
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def _violation_blocks() -> list[str]:

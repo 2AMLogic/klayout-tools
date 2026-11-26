@@ -9,11 +9,7 @@ Every slow external tool invocation (Yosys, OpenROAD, cocotb/Icarus) is
 stubbed, mirroring the exact monkeypatch conventions each verb's own test
 file already establishes:
 
-- ``subprocess.run`` (the single stdlib module both ``synthesize.py`` and
-  ``place_and_route.py`` import -- one dispatcher, keyed on ``cmd[0]``,
-  patched once; see ``_stub_engines``) is stubbed the same way
-  ``tests/test_synthesize.py``'s ``_stub_yosys_success`` /
-  ``tests/test_place_and_route.py``'s ``_stub_openroad_success`` each do: a
+- One dispatcher handles Yosys and OpenROAD probes and stage runs. It provides a
   fake ``yosys -s``/``-V`` invocation that writes the real, live-captured GCD
   ``stat -liberty ... -json`` numbers from
   ``docs/design/yosys-synthesis-spike.md`` section 4, and a fake
@@ -46,10 +42,10 @@ import klayout.db as kdb
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
-from helpers.subprocess_fakes import _patch_yosys_run, fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import functional_verification as fv
 from klayout_tools import pdk as pdk_module
-from klayout_tools import place_and_route, synthesize
+from klayout_tools import place_and_route
 from klayout_tools.eval import run_eval
 from klayout_tools.trajectory import (
     append_record,
@@ -357,11 +353,7 @@ def _fake_openroad_run(cmd, **kwargs) -> subprocess.CompletedProcess:
 
 
 def _stub_engines(monkeypatch, *, engines: tuple[str, ...]) -> None:
-    """Stub the shared stdlib ``subprocess`` module's ``run`` -- both
-    ``synthesize.subprocess`` and ``place_and_route.subprocess`` are the
-    *same* module object (each just does ``import subprocess``), so
-    monkeypatching one in isolation would silently clobber the other's
-    stub. One dispatcher, keyed on ``cmd[0]``, patched once."""
+    """Dispatch blocking engine probes and OpenROAD stage launches to the same fake."""
 
     def fake_run(cmd, **kwargs):
         if "yosys" in engines and cmd[0] == "yosys":
@@ -370,8 +362,7 @@ def _stub_engines(monkeypatch, *, engines: tuple[str, ...]) -> None:
             return _fake_openroad_run(cmd, **kwargs)
         raise AssertionError(f"unexpected subprocess invocation: {cmd!r}")
 
-    assert synthesize.subprocess is place_and_route.subprocess
-    _patch_yosys_run(monkeypatch, fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def _make_layout(clean: bool) -> kdb.Layout:

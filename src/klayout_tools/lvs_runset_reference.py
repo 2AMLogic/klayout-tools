@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING, Any
 
 from .lvs_base import LvsError
 from .lvs_runset_sg13g2_cards import PASSIVE_CARD_SHAPES, sg13g2_model_name
+from .lvs_runset_top import (
+    prepare_reference_top,
+    rename_top_subckt,
+    resolve_relative_includes,
+)
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -99,21 +104,6 @@ def _drop_capacitor_placeholder(text: str, placeholder_classes: dict[str, str]) 
             line = " ".join(tokens[:3] + tokens[4:])
         lines.append(line)
     return "\n".join(lines)
-
-
-_SUBCKT_RE = re.compile(r"^(\s*\.(?:subckt|ends)\s+)(\S+)", re.I)
-
-
-def rename_top_subckt(text: str, old: str, new: str) -> str:
-    """Rename the ``.subckt old`` header (and its ``.ends old``) to ``new``;
-    only the exact, case-insensitive top name matches (issue #5402)."""
-    out = []
-    for line in text.split("\n"):
-        m = _SUBCKT_RE.match(line)
-        if m and m.group(2).lower() == old.lower():
-            line = m.group(1) + new + line[m.end() :]
-        out.append(line)
-    return "\n".join(out)
 
 
 _SG13G2_RF_CARDS = {"INDUCTOR", "SG13_HV_SVARICAP"}
@@ -218,38 +208,33 @@ def _protect_passthrough_calls(
     return "\n".join(lines), saved
 
 
-def convert_reference(
+def prepare_reference(
     reference: str, request: dict[str, Any], work_dir: str, deck_file: str
-) -> str:
-    """Write the ``subckt-call`` conversion of ``reference`` into ``work_dir``
-    and return its path (``reference`` itself for any other form).
-
-    Reuses the ``"klayout"`` engine's conversion, so the schematic MIM call
-    ``X.. <pdk>__cap_mim_m3_1 W= L=`` becomes the plain card the runset's own
-    extraction pairs with (``C.. a b <pdk>__model__cap_mim A= P=``)."""
+) -> tuple[str, str | None, str | None]:
+    """Prepare ``reference`` in ``work_dir``; return ``(path, scan_top, ref_top)``."""
     from .lvs_runset import _deck_device_list
-    from .netlist_normalize import (
-        NormalizeError,
-        convert_reference_netlist,
-        quote_spice_includes,
-    )
+    from .netlist_normalize import NormalizeError, convert_reference_netlist
 
     ref_spec = request["reference"]
     layout_top = request["layout"].get("top")
     ref_top = ref_spec.get("top")
-    rename = bool(layout_top and ref_top and layout_top != ref_top)
     subckt_call = ref_spec.get("form", "plain-element") == "subckt-call"
-    if not subckt_call and not rename:
-        return reference
     try:
         with open(reference, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
+            raw_text = handle.read()
     except OSError as exc:
         raise LvsError(
             f"could not read reference netlist '{reference}': {exc}"
         ) from exc
+    text, effective_top, source_top, top_changed = prepare_reference_top(
+        raw_text, layout_top=layout_top, ref_top=ref_top
+    )
+    rename = bool(layout_top and effective_top and layout_top != effective_top)
+    scan_top = source_top and (layout_top or effective_top)
+    if not subckt_call and not rename and not top_changed:
+        return reference, scan_top, source_top
     # The converted copy lives in work_dir: keep relative .include paths valid.
-    text = quote_spice_includes(text, os.path.dirname(os.path.abspath(reference)))
+    text = resolve_relative_includes(text, os.path.dirname(os.path.abspath(reference)))
     converted = text
     if subckt_call:
         deck, device_map = ref_spec.get("deck"), ref_spec.get("device_map")
@@ -273,12 +258,21 @@ def convert_reference(
                 f"plain-element form: {exc}"
             ) from exc
     if rename:
+        assert effective_top is not None and layout_top is not None
         # The runset pairs tops by name: give the reference top the layout's.
-        converted = rename_top_subckt(converted, ref_top, layout_top)
+        converted = rename_top_subckt(converted, effective_top, layout_top)
     out = os.path.join(work_dir, "reference_converted.sp")
     with open(out, "w", encoding="utf-8") as handle:
         handle.write(converted)
-    return out
+    return out, scan_top, source_top
+
+
+def convert_reference(
+    reference: str, request: dict[str, Any], work_dir: str, deck_file: str
+) -> str:
+    """Write the prepared/converted ``reference`` into ``work_dir`` when needed
+    and return its path (``reference`` itself when unchanged)."""
+    return prepare_reference(reference, request, work_dir, deck_file)[0]
 
 
 def is_sg13g2_runset(deck_file: str) -> bool:
