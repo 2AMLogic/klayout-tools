@@ -1,4 +1,4 @@
-"""Compare batch dry-run errors with submit preflight for the eight request
+"""Compare batch dry-run errors with submit preflight for the request
 settings in ``KNOB_ROWS`` (issue #6437), including on hosts without fleet
 configuration. The polling fields ``poll_interval_s`` and ``poll_timeout_s``
 are parsed separately, after the provision script and bucket resolve.
@@ -97,6 +97,7 @@ def _configless_batch_request(tmp_path: Path, batch: dict) -> str:
 
 KNOB_ROWS = [
     ("job_ceiling_check", "bogus"),
+    ("max_launch_attempts", None),
     ("max_concurrent_jobs", -1),
     ("runner_version_check", "x"),
     ("max_job_seconds", 0),

@@ -1053,6 +1053,7 @@
         "klayout_tools.sim_model_bins",
         "klayout_tools.sim_model_digests",
         "klayout_tools.sim_batch_async",
+        "klayout_tools.sim_batch_transport",
         "klayout_tools.sim_batch_cancel",
         "klayout_tools.sim_batch_capacity_retry",
         "klayout_tools.sim_batch_capacity_watch",

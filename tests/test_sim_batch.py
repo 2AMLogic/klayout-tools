@@ -796,7 +796,7 @@ def _queue_refusals(runner: _FakeRunner, count: int) -> None:
 
 
 def test_classify_launch_failure_only_matches_the_capacity_refusal():
-    assert sb._classify_launch_failure(_CAPACITY_REFUSAL) == "batch_no_capacity"
+    assert sb._classify_launch_failure(_CAPACITY_REFUSAL, 1) == "batch_no_capacity"
     assert sb.BATCH_NO_CAPACITY_CODE == "batch_no_capacity"
     for other in (
         "error: only 2 instance type(s) configured, floor is 3",
@@ -804,7 +804,7 @@ def test_classify_launch_failure_only_matches_the_capacity_refusal():
         "error: no job spec at s3://bucket/jobs/x/job.json",
         "",
     ):
-        assert sb._classify_launch_failure(other) is None
+        assert sb._classify_launch_failure(other, 1) is None
 
 
 #: Verbatim shape of 2am's concurrency-cap refusal (issue #2917).
@@ -823,20 +823,20 @@ _VCPU_REFUSAL = (
 
 
 def test_classify_launch_failure_matches_the_vcpu_budget_refusal():
-    assert sb._classify_launch_failure(_VCPU_REFUSAL) == "batch_no_capacity"
+    assert sb._classify_launch_failure(_VCPU_REFUSAL, 1) == "batch_no_capacity"
     both = f"{_CAP_REFUSAL}; {_VCPU_REFUSAL}"
-    assert sb._classify_launch_failure(both) == "batch_concurrency_cap"
-    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}") == (
+    assert sb._classify_launch_failure(both, 1) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}", 1) == (
         "batch_no_capacity"
     )
 
 
 def test_classify_launch_failure_matches_the_concurrency_cap_refusal():
-    assert sb._classify_launch_failure(_CAP_REFUSAL) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(_CAP_REFUSAL, 1) == "batch_concurrency_cap"
     assert sb.BATCH_CONCURRENCY_CAP_CODE == "batch_concurrency_cap"
     # Both markers present: the Spot refusal wins (checked first).
     both = f"{_CAPACITY_REFUSAL}; {_CAP_REFUSAL}"
-    assert sb._classify_launch_failure(both) == "batch_no_capacity"
+    assert sb._classify_launch_failure(both, 1) == "batch_no_capacity"
 
 
 def test_concurrency_cap_without_wait_is_one_attempt_with_a_code(tmp_path):
@@ -2574,7 +2574,7 @@ def test_run_checked_classifies_on_the_unredacted_stderr():
             ["aws"],
             1.0,
             "step",
-            classify=lambda detail: "seen" if FAKE_BUCKET in detail else None,
+            classify=lambda detail, _rc: "seen" if FAKE_BUCKET in detail else None,
             redact=FAKE_BUCKET,
         )
 
