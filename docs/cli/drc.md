@@ -2758,23 +2758,20 @@ where the pinned tables report none. They now carry the foundry selections:
   keep 0.16 µm everywhere else. The rule keeps its id and its 0.16 µm
   `threshold_dbu` and declares the split with `DrcRule.band_spec`, as
   `nplus.enclosing.comp.1` does -- but cut by *area*, as the pinned deck
-  cuts it (`ncomp.and(nwell_n_dn_sized_in)` and its complement), and
-  measured by `Region.separation_check`. A shape crossing the 0.429 µm
-  boundary is therefore held to 0.16 µm on the part within reach of the
-  well edge and to 0.08 µm on the deep part. `strict_layers` names
-  `LVPWELL`: `PP.3a` keeps 0.16 µm on an NCOMP inside it however deep it
-  sits. With Nwell from (−2000, −2000) to (5000, 5000), COMP from (0, 0) to
+  cuts it. Both well-depth checks clip Pplus to the pure Nwell. `PP.3a`
+  separately measures NCOMP outside that well or under `LVPWELL`
+  (`strict_layers`) against the full selected Pplus at 0.16 µm. When NCOMP
+  crosses the well boundary, each statement contributes its own markers. With Nwell from (−2000, −2000) to (5000, 5000), COMP from (0, 0) to
   (1000, 1000), Nplus from (−200, −200) to (1200, 1200) and Pplus 60, 80,
   100, 160 and 200 nm from the COMP's right edge, the rule reports 1, 0, 0,
   0 and 0 markers; with no well, or with the well edge within 0.429 µm, the
   100 nm gap is still reported.
 - **Enclosure**: `DrcRule.butted_spec`
   (`drc_butted_diffusion.ButtedEdgeSpec`) names, segment by segment, the
-  edges of one operand that coincide with an edge of a mask. It is applied
-  to the pairs of the rule's shielded `Region.enclosed_check`: a pair whose
-  masked side is butted throughout is not reported, and what remains of the
-  others is measured again with the `projection` metric of the DRC
-  `edges.enclosed` the foundry statements compile to. The shielding stays,
+  edges of one operand that coincide with an edge of a mask. The rule identifies visible edge pairs with a shielded
+  `Region.enclosed_check` using the declared metric. It cuts coincident
+  stretches from their original edges and measures the remaining segments
+  by `projection`. The shielding stays,
   so an implant behind the one enclosing a tap still adds no marker (issue
   #7955). `NP.5b` masks the enclosing `Nplus` edges with `PCOMP`; `PP.5di`
   the checked `PCOMP` edges with `Nplus`. In the ordinary butted pair each

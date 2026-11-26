@@ -316,10 +316,10 @@ are always the real, unmodified DRM values:
   ``nplus.space.pcomp.far.1`` (``NP.3cii``, 0.08um) the exact complement,
   selected whole-polygon with ``DerivedLayer.context``. On the ``NCOMP``
   side (issue #7970) ``pplus.space.ncomp.1`` follows the pinned deck's own
-  boolean selection through ``band_spec``: an NCOMP part at least 0.429um
-  inside a pure ``Nwell`` and under no ``LVPWELL`` is held to ``PP.3ci``'s
-  0.08um, everything else to 0.16um. The ``DNWELL``/``LVPWELL`` branches of
-  both tables (``NP.3bii``, ``PP.3b``) stay strict. All three rules measure
+  boolean selection through ``band_spec``. In a pure Nwell only Pplus inside
+  the well is measured, at 0.08um in the interior and 0.16um in the band.
+  PP.3a measures the full implant for NCOMP outside pure wells or under LVPWELL.
+  The DNWELL branches (``NP.3bii``, ``PP.3b``) stay strict. All three rules measure
   against the implant polygons the foundry rules do
   (``other_layer_selection="not_butted"``, issue #7970): the implant of a
   butted NCOMP/PCOMP pair (``ncomp_butted``, ``pcomp_butted``; zero-space
@@ -1816,10 +1816,10 @@ DECK: list[DrcRule] = [
         # PP.3c order their sub-cases the other way round from NP.3b/NP.3c,
         # which is why each side is transcribed from its own DRM table.
         # `PP.3ci` holds an NCOMP part at least 0.429um inside a pure `Nwell`
-        # to 0.08 (`band_spec`, issue #7970); everything else -- outside the
-        # well, within 0.429um of its edge, under an `LVPWELL` (`PP.3a`) or a
-        # `Dnwell` (`PP.3b`, unexpressed) -- keeps this 0.16. The implant
-        # measured is `pplus.not_interacting(pcomp_butted)`. Threshold unmodified.
+        # to 0.08; PP.3cii measures the outer band at 0.16. Both clip the
+        # selected Pplus to the pure well. PP.3a measures the full selected
+        # implant against NCOMP under LVPWELL or outside pure wells at 0.16.
+        # The separate DNWELL statements (PP.3b) remain unexpressed.
         other_layer_selection="not_butted",
         band_spec=EdgeBandSpec(
             context_layers=((21, 0),),  # Nwell

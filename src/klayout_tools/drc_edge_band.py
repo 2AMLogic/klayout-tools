@@ -37,16 +37,12 @@ checked region instead. The two well-depth classes use the foundry
 expressions on their selected edges. Everything else keeps the shielded
 pairs of the ``Region.enclosed_check`` the rule ran before it had a band.
 
-The ``separation`` flavour is gf180mcu's ``PP.3``. There the pinned deck
-(``rule_decks/pplus.drc``) selects by *area*, with a boolean clip: an NCOMP
-part at least 0.43 um inside a pure Nwell (``ncomp.and(
-nwell_n_dn_sized_in)``) needs 0.08 um from Pplus (``PP.3ci``), the rest
-0.16 um (``PP.3a``, ``PP.3cii``). The cut leaves an artificial edge inside
-the original shape, which an enclosure check would measure as a
-zero-extension side; a separation check only pairs it with ``other_layer``
-geometry overlapping the checked shape there. So the band is cut here
-exactly as the foundry cuts it, and each part is measured by
-``Region.separation_check`` -- shielded, like the deck's own ``separation``.
+The separation rule for GF180's PP.3 measures three areas independently.
+Inside a pure Nwell, PP.3ci measures deep NCOMP at 0.08 um and PP.3cii
+measures the outer band at 0.16 um. Both clip Pplus to the pure well.
+PP.3a measures NCOMP outside the pure wells or under LVPWELL against
+the full selected Pplus at 0.16 um. Each statement contributes its own
+shielded separation markers, including where the statements overlap.
 """
 
 from __future__ import annotations
@@ -60,6 +56,7 @@ from .drc_butted_diffusion import (
     butted_edge_selection,
     rest_pairs,
     run_butted_edge_check,
+    visible_enclosure_sources,
 )
 
 #: ``EdgeBandSpec`` metric names -> the ``klayout.db.Region`` constants.
@@ -91,16 +88,16 @@ class EdgeBandSpec:
 
     For ``"enclosed"`` the classes are *edges* of the unclipped checked
     region; for ``"separation"`` they are *areas*, the checked region clipped
-    by the interior and its complement (see the module docstring).
+    separately by the interior, band and area outside qualifying context.
+    The band and interior also clip ``other_layer`` to qualifying context.
 
-    ``strict_layers`` (``"separation"`` only) names layers whose area is
-    never interior, however deep it sits: the part of the interior they
-    cover is measured with the band and the rest. gf180mcu names ``LVPWELL``
-    there -- ``PP.3a`` keeps 0.16 um on an NCOMP inside it whatever the well.
+    ``strict_layers`` (separation only) adds checked area to the outside
+    measurement. GF180 uses it for PP.3a under LVPWELL. The band and
+    interior measurements still apply where their areas overlap it.
 
     An absent layer contributes an empty region. Without context every edge
     keeps the flat threshold. Without exclusions all context polygons qualify.
-    Both well-depth classes measure to the edges of enclosing polygons left
+    For enclosure, both well-depth classes measure to the edges of polygons left
     after subtracting the exclusion and selecting those overlapping context.
     Both selections are whole-polygon and err strict -- a context polygon that
     merely touches an excluded polygon is no context at all, and a checked
@@ -224,9 +221,13 @@ def run_edge_band_check(
     import klayout.db as kdb
 
     spec = rule.band_spec
-    if spec is None:
-        return run_butted_edge_check(cell, setup, rule, region, other_region)
     layout = setup.layout
+    distance = _foundry_dbu(rule.threshold_dbu * setup.nominal_dbu_um, layout.dbu)
+    if spec is None:
+        return run_butted_edge_check(cell, layout, rule, region, other_region, distance)
+    inner_distance = _foundry_dbu(
+        spec.inner_threshold_dbu * setup.nominal_dbu_um, layout.dbu
+    )
     region = region.merged()
     other_region = other_region.merged()
     context = _joined_region(cell, layout, spec.context_layers)
@@ -237,8 +238,10 @@ def run_edge_band_check(
     # relax nothing, rather than call the whole well "interior".
     inner = pure.sized(inset_dbu) if inset_dbu < 0 else kdb.Region()
     if rule.check == "separation":
-        return _separation_pairs(cell, setup, rule, region, other_region, inner), None
-
+        strict = _joined_region(cell, layout, spec.strict_layers)
+        return _separation_pairs(
+            region, other_region, pure, inner, strict, spec, distance, inner_distance
+        ), None
 
     excluded, eligible = region.split_interacting(exclude)
     # The foundry selects whole taps with area inside any well, then their
@@ -251,20 +254,18 @@ def run_edge_band_check(
     well_implant_edges = (other_region - exclude).not_outside(context).edges()
 
     edge_pairs = kdb.EdgePairs()
-    for edges, threshold_dbu, metrics in (
-        (band_edges, rule.threshold_dbu, spec.band_metrics),
-        (interior_edges, spec.inner_threshold_dbu, spec.inner_metrics),
+    for edges, limit, metrics in (
+        (band_edges, distance, spec.band_metrics),
+        (interior_edges, inner_distance, spec.inner_metrics),
     ):
-        distance = _foundry_dbu(threshold_dbu * setup.nominal_dbu_um, layout.dbu)
         edge_pairs.insert(
             edges.enclosed_check(
                 well_implant_edges,
-                distance,
+                limit,
                 metrics=getattr(kdb.Region, _METRICS[metrics]),
             )
         )
 
-    distance = round(rule.threshold_dbu * setup.dbu_scale)
     selection = butted_edge_selection(rule, cell, layout)
     strict = excluded + outside_wells + away_from_pure
     edge_pairs.insert(rest_pairs(strict, other_region, distance, selection))
@@ -288,26 +289,14 @@ def _strict_parts(
     import klayout.db as kdb
 
     result = kdb.EdgePairs()
-    shielded = set(rest_pairs(crossing, implant, distance, selection).each())
-    if not shielded:
-        return result
-
-    # A marker's endpoints are rounded to the layout grid. On a slope the
-    # marker need not be collinear with its source edge. Recover its two
-    # source edges by reproducing the marker, then cut the original tap edge
-    # at the well boundary. Whole-edge shielding would test a different
-    # span, so use the ordinary region check above to select visible pairs.
-    candidates = crossing.enclosed_check(
-        implant, distance, whole_edges=True, shielded=False
-    )
     well_index = kdb.Shapes()
     well_index.insert(wells)
-    for pair in candidates.each():
+    options = selection.options if selection else {}
+    for pair in visible_enclosure_sources(crossing, implant, distance, options):
         for marker in _marker(pair.first, pair, distance, selection).each():
-            if marker in shielded:
-                result.insert(
-                    _clip_strict_marker(pair, marker, well_index, distance, selection)
-                )
+            result.insert(
+                _clip_strict_marker(pair, marker, well_index, distance, selection)
+            )
     # Adjacent source edges can reproduce the same corner pair. Deduplicate
     # after clipping so distinct strict portions of a marker are preserved.
     return kdb.EdgePairs(list(dict.fromkeys(result.each())))
@@ -351,27 +340,36 @@ def _marker(
 
 
 def _separation_pairs(
-    cell: Any, setup: Any, rule: Any, region: Any, other_region: Any, inner: Any
+    region: Any,
+    implant: Any,
+    pure: Any,
+    inner: Any,
+    strict: Any,
+    spec: EdgeBandSpec,
+    distance: int,
+    inner_distance: int,
 ) -> Any:
-    """The ``separation`` flavour: the interior as an area, minus whatever
-    ``strict_layers`` covers, and its complement in the checked region, each
-    measured against ``other_region`` by ``Region.separation_check``."""
+    """Measure the three PP.3 statements independently, retaining their markers."""
     import klayout.db as kdb
 
-    spec = rule.band_spec
-    deep = inner - _joined_region(cell, setup.layout, spec.strict_layers)
-    edge_pairs = kdb.EdgePairs()
-    for checked, threshold_dbu, metrics in (
-        (region & deep, spec.inner_threshold_dbu, spec.inner_metrics),
-        (region - deep, rule.threshold_dbu, spec.band_metrics),
+    well_implant = implant & pure
+    pairs = kdb.EdgePairs()
+    for other, checked, limit, metric in (
+        (well_implant, region & inner, inner_distance, spec.inner_metrics),  # PP.3ci
+        (well_implant, region & (pure - inner), distance, spec.band_metrics),  # PP.3cii
+        (
+            implant,
+            (region & strict) + (region - pure),
+            distance,
+            spec.band_metrics,
+        ),  # PP.3a
     ):
-        distance = round(threshold_dbu * setup.dbu_scale)
-        edge_pairs.insert(
+        pairs.insert(
             checked.separation_check(
-                other_region, distance, metrics=getattr(kdb.Region, _METRICS[metrics])
+                other, limit, metrics=getattr(kdb.Region, _METRICS[metric])
             )
         )
-    return edge_pairs
+    return pairs
 
 
 def _joined_region(cell: Any, layout: Any, layers: tuple[tuple[int, int], ...]) -> Any:

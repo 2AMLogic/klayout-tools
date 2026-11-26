@@ -22,11 +22,9 @@ diffusion, and the foundry deck deliberately does not measure it there:
   with :class:`ButtedEdgeSpec`.
 
 Spacing is measured with the primitive the foundry statement itself compiles
-to, ``Region.separation_check`` (shielded). Enclosure keeps the rule's own
-shielded ``Region.enclosed_check`` -- the operand the curated engine has
-always read for these rules -- and applies the selection to its pairs: one
-whose masked side is butted throughout is not measured, the rest is measured
-again on what remains, by the declared metric (:class:`ButtedEdgeSelection`).
+to, ``Region.separation_check`` (shielded). Enclosure identifies visible pairs
+using the declared metric. It removes coincident stretches from their original
+edges and measures the remaining segments with the same metric.
 
 Split out of :mod:`klayout_tools.drc` to respect its per-file size ratchet,
 following :mod:`klayout_tools.drc_edge_band` (#7955), whose rest class goes
@@ -36,6 +34,7 @@ through :func:`rest_pairs` for the one class of edges the foundry deck's
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -171,11 +170,6 @@ class ButtedEdgeSelection:
 
         return {"metrics": getattr(kdb.Edges, _METRICS[self.spec.metrics])}
 
-    def crosses(self, pair: Any) -> bool:
-        """Whether a mask edge touches the pair's masked side."""
-        masked = pair.second if self.spec.side == "other" else pair.first
-        return not self._touching(masked).is_empty()
-
     def measure(self, checked: Any, pair: Any, distance: int) -> Any:
         """``checked`` -- the pair's checked edge, or a stretch of it --
         measured against the pair's other edge by the spec's metric, with
@@ -189,24 +183,6 @@ class ButtedEdgeSelection:
         else:
             checked = kdb.Edges(checked) - self._touching(checked)
         return checked.enclosed_check(outer, distance, **self.options)
-
-    def pairs(self, pairs: Any, distance: int) -> Any:
-        """``pairs`` -- a shielded ``Region.enclosed_check`` result -- with
-        the butted segments dropped from the masked side of each pair. A
-        pair whose masked side is butted throughout is not measured; what
-        remains of it is measured again, by the spec's metric. At the
-        engine's default ``euclidian`` a pair no mask edge touches is passed
-        through as it is."""
-        import klayout.db as kdb
-
-        kept = kdb.EdgePairs()
-        default_metric = self.spec.metrics == "euclidian"
-        for pair in pairs.each():
-            if default_metric and not self.crosses(pair):
-                kept.insert(pair)
-            else:
-                kept.insert(self.measure(pair.first, pair, distance))
-        return kept
 
     def _touching(self, edge: Any) -> Any:
         """The mask edges touching ``edge``'s bounding box."""
@@ -235,20 +211,50 @@ def butted_edge_selection(
     return ButtedEdgeSelection(spec, index)
 
 
+def visible_enclosure_sources(
+    region: Any, implant: Any, distance: int, options: dict[str, Any]
+) -> Iterator[Any]:
+    """Original edge pairs whose violation is visible under region shielding."""
+    import klayout.db as kdb
+
+    visible = set(region.enclosed_check(implant, distance, **options).each())
+    if not visible:
+        return
+    # Whole-edge shielding tests a different span. Identify each source by
+    # its ordinary marker, then apply cuts to its original, unrounded edges.
+    sources = region.enclosed_check(
+        implant, distance, whole_edges=True, shielded=False, **options
+    )
+    for source in sources.each():
+        markers = kdb.Edges(source.first).enclosed_check(
+            kdb.Edges(source.second), distance, **options
+        )
+        if any(marker in visible for marker in markers.each()):
+            yield source
+
+
 def rest_pairs(
     region: Any, other_region: Any, distance: int, selection: ButtedEdgeSelection | None
 ) -> Any:
     """The enclosure pairs of the class no ``band_spec`` relaxes: the
     shielded ``Region.enclosed_check`` the rule ran before it had a band or
     a butted selection, through ``selection`` when the rule carries one."""
-    pairs = region.enclosed_check(other_region, distance)
+    import klayout.db as kdb
+
     if selection is None:
-        return pairs
-    return selection.pairs(pairs, distance)
+        return region.enclosed_check(other_region, distance)
+    if selection.index.is_empty():
+        return region.enclosed_check(other_region, distance, **selection.options)
+    pairs = kdb.EdgePairs()
+    for source in visible_enclosure_sources(
+        region, other_region, distance, selection.options
+    ):
+        pairs.insert(selection.measure(source.first, source, distance))
+    return pairs
 
 
 def run_butted_edge_check(
-    cell: Any, setup: Any, rule: Any, region: Any, other_region: Any
+    cell: Any, layout: Any, rule: Any, region: Any, other_region: Any, distance: int
 ) -> tuple[Any, Any | None]:
     """``(edge_pairs, outside_region)`` for an ``"enclosed"`` rule that
     carries ``butted_spec`` but no ``band_spec``: one class, every edge of
@@ -256,8 +262,7 @@ def run_butted_edge_check(
     (issue #318) is the one ``drc._run_check`` reports."""
     region = region.merged()
     other_region = other_region.merged()
-    distance = round(rule.threshold_dbu * setup.dbu_scale)
-    selection = butted_edge_selection(rule, cell, setup.layout)
+    selection = butted_edge_selection(rule, cell, layout)
     edge_pairs = rest_pairs(region, other_region, distance, selection)
 
     outside_region = None

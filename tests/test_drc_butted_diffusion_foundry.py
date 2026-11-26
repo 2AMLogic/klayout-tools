@@ -8,8 +8,8 @@ primitives their DRC uses; each curated helper reads the same stretches off
 selects its operands its own way (``other_layer_selection``, ``butted_spec``,
 ``band_spec``) and reports hull polygons, not edge pairs.
 
-No fixture draws ``DNWELL`` or ``LVPWELL``, whose sub-cases the curated deck
-does not express.
+The coarse-grid and sloped-edge controls record results from the native
+GF180 tables at revision 10ee7fc7, run with KLayout 0.30.12.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from test_drc_butted_diffusion import (
     COMP,
     DNWELL,
     FAR,
+    LVPWELL,
     NEAR,
     NP_ENC,
     NPLUS,
@@ -180,14 +181,15 @@ def _foundry(layout, rule):
     # PP.3a, PP.3ci, PP.3cii: the boolean well-depth split of NCOMP.
     measured = pplus.not_interacting(pcomp.interacting(ncomp))
     pure = _region(layout, NWELL).not_interacting(_region(layout, DNWELL))
-    inner = pure.sized(-round(0.429 / layout.dbu))
+    inner = pure.sized(-429)  # These side-by-side fixtures use a 1 nm grid.
+    in_well = measured & pure
     sides = Counter()
-    for checked, distance in (
-        (ncomp - pure, 160),  # PP.3a: outside the pure well
-        (ncomp & (pure - inner), 160),  # PP.3cii
-        (ncomp & inner, 80),  # PP.3ci
+    for implant, checked, distance in (
+        (measured, (ncomp & _region(layout, LVPWELL)) + (ncomp - pure), 160),  # PP.3a
+        (in_well, ncomp & (pure - inner), 160),  # PP.3cii
+        (in_well, ncomp & inner, 80),  # PP.3ci
     ):
-        sides.update(_sides(measured.separation_check(checked, distance), "second"))
+        sides.update(_sides(implant.separation_check(checked, distance), "second"))
     return sides
 
 
@@ -246,3 +248,121 @@ def test_the_well_depth_split_survives_a_coarser_grid(tmp_path, dbu, gap, expect
     report = run_drc(path, "gf180mcu", rules=[PP_SPACE])
 
     assert report["rule_counts"].get(PP_SPACE, 0) == expected, report["violations"]
+
+
+@pytest.mark.parametrize(("well_right", "expected"), [(1050, 0), (1100, 0), (1200, 1)])
+def test_pp3cii_clips_the_implant_to_the_well(tmp_path, well_right, expected):
+    shapes = _deep_ncomp(100)
+    shapes[0] = (NWELL, (-2000, -2000, well_right, 3000))
+    path, layout = _fixture(tmp_path, shapes)
+    sides = _foundry(layout, PP_SPACE)
+    assert sum(sides.values()) == expected
+    assert _curated(path, PP_SPACE, layout) == sides
+
+
+def test_pp3a_and_pp3cii_keep_adjoining_markers(tmp_path):
+    shapes = [
+        (COMP, (-400, 0, 400, 1000)),
+        (NPLUS, (-600, -200, 600, 1200)),
+        (PPLUS, (-300, 1100, 300, 1500)),
+        (NWELL, (0, -2000, 2500, 3000)),
+    ]
+    path, layout = _fixture(tmp_path, shapes)
+    sides = Counter([((-400, 1000), (0, 1000)), ((0, 1000), (400, 1000))])
+    assert _curated(path, PP_SPACE, layout) == _foundry(layout, PP_SPACE) == sides
+
+
+def test_overlapping_lvpwell_and_deep_well_keep_both_statements(tmp_path):
+    shapes = [*_deep_ncomp(60), (LVPWELL, (-500, -500, 1500, 1500))]
+    path, layout = _fixture(tmp_path, shapes)
+    sides = Counter({((1000, 0), (1000, 1000)): 2})
+    assert _curated(path, PP_SPACE, layout) == _foundry(layout, PP_SPACE) == sides
+
+
+@pytest.mark.parametrize(("well_left", "expected"), [(-420, 1), (-426, 0), (-432, 0)])
+def test_pp3ci_snaps_the_signed_well_inset(tmp_path, well_left, expected):
+    shapes = [
+        (COMP, (0, 0, 1008, 1008)),
+        (NPLUS, (-180, -180, 1188, 1188)),
+        (PPLUS, (0, 1110, 600, 1512)),
+        (NWELL, (well_left, -1800, 4200, 4200)),
+    ]
+    path = _write(shapes, tmp_path / "inset.gds", dbu=0.006)
+    assert len(run_drc(path, "gf180mcu", rules=[PP_SPACE])["violations"]) == expected
+
+
+@pytest.mark.parametrize(
+    ("rule", "grid", "in_well", "expected"),
+    [
+        (PP_SPACE, 32, True, 1),
+        (PP_SPACE, 64, False, 1),
+        (PP_ENC_FAR, 8, False, 4),
+        (NP_ENC, 64, False, 4),
+    ],
+)
+@pytest.mark.parametrize("units", [2, 3])
+def test_half_grid_limit_is_three_layout_units(
+    tmp_path, rule, grid, in_well, expected, units
+):
+    margin = units * grid
+    shapes = [(COMP, (0, 0, 1024, 1024))]
+    if rule == PP_SPACE:
+        shapes += [
+            (NPLUS, (-192, -192, 1216, 1216)),
+            (PPLUS, (1024 + margin, 0, 2048 + margin, 1024)),
+        ]
+        if in_well:
+            shapes.append((NWELL, (-2048, -2048, 4096, 4096)))
+    else:
+        implant = NPLUS if rule == NP_ENC else PPLUS
+        shapes.append((implant, (-margin, -margin, 1024 + margin, 1024 + margin)))
+    path = _write(shapes, tmp_path / "half-grid.gds", dbu=grid / 1000)
+    assert len(run_drc(path, "gf180mcu", rules=[rule])["violations"]) == (
+        expected if units == 2 else 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("rule", "implant", "x", "y", "expected"),
+    [
+        (
+            NP_ENC,
+            NPLUS,
+            867,
+            996,
+            [
+                [(707, 996), (708, 996), (867, 1095), (867, 996)],
+                [(867, 917), (1000, 850), (867, 996), (1066, 996)],
+            ],
+        ),
+        (
+            PP_ENC_FAR,
+            PPLUS,
+            735,
+            992,
+            [
+                [(715, 992), (716, 992), (735, 1005), (735, 992)],
+                [(735, 983), (756, 972), (735, 992), (761, 992)],
+            ],
+        ),
+    ],
+)
+@pytest.mark.parametrize("remote_mask", [False, True])
+def test_projection_retains_both_notch_markers(
+    tmp_path, rule, implant, x, y, expected, remote_mask
+):
+    shapes = [
+        (COMP, [(0, 0), (0, 1000), (700, 1000), (1000, 850), (1000, 0)]),
+        (
+            implant,
+            [(-400, -400), (-400, 1500), (x, 1500), (x, y), (1600, y), (1600, -400)],
+        ),
+    ]
+    if remote_mask:
+        remote = (3000, 0, 3100, 100)
+        shapes += [(COMP, remote), (PPLUS if implant == NPLUS else NPLUS, remote)]
+    path = _write(shapes, tmp_path / "notch.gds")
+    markers = run_drc(path, "gf180mcu", rules=[rule])["violations"]
+    assert sorted(sorted(map(tuple, m["polygon"])) for m in markers) == sorted(
+        sorted(points) for points in expected
+    )
