@@ -1,0 +1,1 @@
+- **ERC checks substrate ties when sparse drawn wells occupy a small fraction of the layout** (#7942, 2026-11-26).
