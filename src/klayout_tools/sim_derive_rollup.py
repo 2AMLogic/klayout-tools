@@ -97,7 +97,8 @@ def _reduce_group(
         "margin": None,
         "reason": None,
     }
-    missing = [value for value in expected if value not in {p for _, p in points}]
+    observed = {p for _, p in points}
+    missing = [value for value in expected if value not in observed]
     if missing:
         return {
             **record,
