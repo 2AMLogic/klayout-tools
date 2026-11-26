@@ -1456,12 +1456,12 @@ provides the well-side coordinates. The stream supplies the tap geometry.
   `checked`, parallel to but separate from `tap_boxes`' own
   `checked_by_assertion`. A tie can appear in both (an asserted substrate
   region whose tap is also caller-named), in either, or in neither. They are
-  not merged because they are different claims: one says *which drawn
-  geometry is the tap*, the other says the **well side** of this verdict rested
-  on caller-named coordinates. Since issue #2540 that second list has two
-  members: this form, and a drawn well whose *class selection* was named in
-  boxes (`well_requires_boxes`/`well_excludes_boxes`) — see "A two-class tub
-  with no marker layer to separate them" below.
+  separate because they describe two choices. One identifies the tap geometry.
+  The other identifies how the caller specified the well region or its bias
+  class. For a substrate complement the caller names the layers to subtract.
+  The GDS supplies the boundary and layer geometry. A drawn well selected with
+  boxes also belongs in this list (see “A two-class tub with no marker layer
+  to separate them” below).
 - **It has its own falsifiability test**, and it is not `tap_narrowed`.
   That test measures what an assertion removes from a drawn baseline; here
   there is no baseline to remove from. The equivalent bar is
@@ -1706,17 +1706,18 @@ that combined answer rather than on either key read alone.
 question is "did the well side of this verdict rest on the caller's word?", and
 here it did — not about where the well *is* (the layer draws that, and it is
 still what gets measured), but about which of its shapes this entry's bias class
-owns. Three strengths of the same claim, and the envelope distinguishes them:
+owns. The coverage list records these cases.
 
 | Well side declared by | In `checked_by_well_assertion`? | Why |
 |---|---|---|
 | `well_layer` alone, or with `well_requires`/`well_excludes` | No | the stream draws both the well and the partition |
 | `well_layer` + `well_requires_boxes`/`well_excludes_boxes` | Yes | the well is drawn and measured; the partition is the caller's |
-| `well_layer: null` + `well_boxes` | Yes | nothing in the stream corroborates the region at all |
+| `well_layer: null` + `well_boxes` | Yes | the caller supplies the substrate coordinates |
+| `well_layer: null` + `well_complement_of` | Yes | the caller names the layers to subtract from the drawn extent |
 
-The list does not say *which* of the two asserted forms was used. It answers the
-one question above; a reader needing the finer distinction has the spec
-document, which is the artifact that records the claim.
+The spec records which source the caller selected. Literal `well_boxes` also
+produce a `well_assertion_coverage` entry that compares their area to the layout
+extent. A substrate complement has no such entry.
 
 **The falsifiability test is unchanged and shared**, reusing
 `degenerate_well_selection` rather than adding a token: a declared box selection
@@ -3277,17 +3278,13 @@ any other checked, non-degenerate tie:
   caller assertion (`ties[].tap_boxes`) rather than pure PDK-marker
   narrowing.
 - `checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) — the
-  work identities whose **well side** rested on caller-named coordinates, in
-  a substrate region (`ties[].well_layer: null` with either `ties[].well_boxes`
-  or `ties[].well_complement_of`), or a
-  drawn well whose *class selection* was named in boxes
-  (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`, because no drawn
-  layer separates the tub's two bias classes). Deliberately a separate list
-  rather than more entries in the first: asserting which drawn geometry counts
-  as the tap and naming the well side in coordinates are different claims, and
-  the second is the weaker one. A tie may appear in both. The list does not
-  distinguish its own two forms — it answers "did the well side rest on the
-  caller's word?", and the spec document records which way it was said.
+  work identities whose **well side** depends on a region or bias-class
+  selection declared by the caller. For `ties[].well_layer: null`, the caller
+  either supplies coordinates in `ties[].well_boxes` or names the drawn layers
+  in `ties[].well_complement_of`. For a drawn well, the caller can select the
+  bias class with `ties[].well_requires_boxes` or `ties[].well_excludes_boxes`.
+  The spec identifies which form was used. A tie can also appear in
+  `checked_by_assertion` when its tap was caller-named.
 
 `erc_coverage` carries one further key that is not a work-item list at all:
 
