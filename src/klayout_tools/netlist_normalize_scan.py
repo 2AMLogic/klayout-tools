@@ -40,7 +40,8 @@ def _include_path(base_dir: str, target: str) -> str:
 
 def _unquote(target: str) -> str:
     if len(target) >= 2 and target[0] == target[-1] and target[0] in "\"'":
-        return target[1:-1]
+        # A relocated SPICE include escapes literal backslashes and quotes.
+        return re.sub(r"""\\([\\'"])""", r"\1", target[1:-1])
     return target
 
 
@@ -102,9 +103,7 @@ def _scan_recovery_file(
         elif match := _SUBCKT_RE.match(line):
             names.add(match.group(1).upper())
         elif match := _INCLUDE_LINE_RE.match(line):
-            target = match.group(2)
-            if target[0] == target[-1] and target[0] in "\"'":
-                target = target[1:-1]
+            target = _unquote(match.group(2))
             children.append((_include_path(base_dir, target), None))
         elif arguments is not None and len(arguments) == 2:
             # The two-argument form selects a section of another file.
