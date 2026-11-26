@@ -166,8 +166,7 @@ class DerivedLayer:
     but omitting ``.join(X)`` shrinks the enclosing region itself, so
     geometry the official rule passes is reported as under-enclosed (an
     unsound false positive in the PDK's own PCells, which the caller cannot
-    edit). Transcribe ``join`` terms with this mode rather than dropping
-    them.
+    edit). Transcribe ``join`` terms with this mode rather than dropping them.
 
     Because the two inputs are alternatives rather than a scope, a
     ``"union"`` rule is skipped only when **both** ``base`` and
@@ -850,6 +849,7 @@ class DrcRule:
     text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
     approximations: list[dict[str, str]] | None = None
     other_layer_subtract: tuple[tuple[int, int], ...] = ()
+    band_spec: Any = None  # `drc_edge_band.EdgeBandSpec` -- thresholds by depth (#7955)
 
 
 class UnknownDeckError(Exception):
