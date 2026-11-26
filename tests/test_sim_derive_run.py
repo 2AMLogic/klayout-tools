@@ -14,13 +14,14 @@ import json
 import re
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
-from klayout_tools import evidence_lint, sim, sim_derive, sim_remote
+from klayout_tools import evidence_lint, sim, sim_derive, sim_derive_rollup, sim_remote
 from klayout_tools.cli import main
 from klayout_tools.coverage import work_id
 from klayout_tools.sim_errors import SimError
@@ -201,7 +202,11 @@ def test_expected_axis_values_come_from_the_grid_before_exclude():
 def test_a_derived_limit_fails_the_envelope_with_unbounded_sources(
     tmp_path, monkeypatch, capsys
 ):
-    code, report = _run(tmp_path, monkeypatch, capsys, [SOURCE, DERIVE])
+    with patch.object(
+        sim_derive_rollup, "_reduce_group", wraps=sim_derive_rollup._reduce_group
+    ) as reduce_group:
+        code, report = _run(tmp_path, monkeypatch, capsys, [SOURCE, DERIVE])
+    assert reduce_group.call_count == 2  # One reduction per supply group.
     assert code == 3
     assert report["status"] == "fail"
     assert (report["passed"], report["failed"], report["errored"]) == (6, 0, 0)

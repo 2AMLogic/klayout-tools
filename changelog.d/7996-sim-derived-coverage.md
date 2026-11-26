@@ -1,0 +1,1 @@
+- Simulation coverage reuses the graded groups for each derived measurement, removing a second reduction over the same corners (#7996).
