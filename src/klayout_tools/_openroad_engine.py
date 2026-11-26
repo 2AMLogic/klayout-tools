@@ -28,11 +28,17 @@ import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from subprocess import Popen
 from typing import Any
 
 from ._artifact_envelope import ANCHOR_CWD, RepoRoot
-from ._artifact_envelope import path_envelope as _log_path
+from ._openroad_logs import (
+    _CONTAINER_ID_WAIT_S,
+    _captured_text,
+    _LiveLogs,
+    _track_container_id,
+)
+from ._openroad_process import _kill_openroad_run, _termination_signals
 from ._provenance import sha256_file
 from ._tcl import tcl_literal as _tcl_literal
 
@@ -144,12 +150,12 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
     Every OpenROAD-driving ``klt`` verb shells out to a bare ``openroad``
     argv, which -- per this repo's own documented, CI-used install path
     (``scripts/install-openroad-docker.sh``) -- is very often actually a
-    wrapper script whose last line is ``exec docker run --rm -i ... $IMAGE
-    ...``. Because ``exec`` replaces the wrapper process, whatever ``docker``
-    itself prints when it cannot reach its daemon becomes the captured
-    ``stderr`` of the run *unchanged*: there is no wrapper-added text to
-    strip, and no distinct exit code to key off (``docker`` exits ``1``, the
-    same as a genuine OpenROAD/Tcl failure).
+    wrapper script around ``docker run --rm -i ... $IMAGE ...``. The wrapper
+    forwards the client's stdout, stderr and exit status, so whatever
+    Docker prints when it cannot reach its daemon becomes the
+    captured ``stderr`` of the run essentially *unchanged*: there is no
+    wrapper-added text to strip, and no distinct exit code to key off
+    (``docker`` exits ``1``, the same as a genuine OpenROAD/Tcl failure).
 
     Read alone, that is indistinguishable from "the engine ran and the design
     failed analysis" -- yet the two call for opposite responses. A design or
@@ -300,149 +306,13 @@ def _log_error_context(message: str, record: dict[str, Any]) -> str:
     return f"{message} -- openroad invocation: {json.dumps(record, sort_keys=True)}"
 
 
-def _captured_text(value: str | bytes | None) -> str:
-    """Decode only for diagnostics/parsing; retained files keep original bytes."""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value or ""
-
-
-def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> None:
-    # str(exc) can include an absolute filename; keep the new diagnostic
-    # paths subject to the same privacy rule as successful artifact paths.
-    record["retention_errors"].append(
-        {"artifact": artifact, "error": f"{type(exc).__name__}: {exc.strerror}"}
-    )
-
-
-def _write_log_artifact(
-    directory: Path, name: str, content: str | bytes | None, record: dict[str, Any]
-) -> Path | None:
-    path = directory / name
-    data = content.encode("utf-8") if isinstance(content, str) else content or b""
-    try:
-        with path.open("xb") as handle:
-            handle.write(data)
-    except OSError as exc:
-        _retention_error(record, name, exc)
-        return None
-    return path
-
-
-class _LiveLogs:
-    """Retained-log directory created *before* launch so the transcripts grow
-    on disk while OpenROAD runs. Never overwrites: the directory and both
-    stream files are created exclusively. A stream whose file cannot be
-    opened falls back to an in-memory pipe (``None`` handle) and the failure
-    is recorded in ``retention_errors``; the engine run itself proceeds."""
-
-    _STREAMS = ("stdout", "stderr")
-
-    def __init__(
-        self,
-        script_path: str,
-        metrics_path: str,
-        *,
-        invocation_id: str,
-        script_hash: str | None,
-        repo_root: RepoRoot = ANCHOR_CWD,
-    ) -> None:
-        self.repo_root = repo_root
-        self.directory = (
-            Path(script_path).absolute().parent / "openroad-logs" / invocation_id
-        )
-        self.record: dict[str, Any] = {
-            "invocation_id": invocation_id,
-            "script_name": Path(script_path).name,
-            "script_path": _log_path(Path(script_path), repo_root=repo_root),
-            "script_sha256": script_hash,
-            "metrics_path": _log_path(Path(metrics_path), repo_root=repo_root),
-            "outcome": None,
-            "returncode": None,
-            "directory": _log_path(None, repo_root=repo_root),
-            "stdout_path": _log_path(None, repo_root=repo_root),
-            "stderr_path": _log_path(None, repo_root=repo_root),
-            "metadata_path": _log_path(None, repo_root=repo_root),
-            "retention_errors": [],
-        }
-        self.handles: dict[str, Any] = dict.fromkeys(self._STREAMS)
-        try:
-            self.directory.mkdir(parents=True, exist_ok=False)
-        except OSError as exc:
-            _retention_error(self.record, "directory", exc)
-            self.directory = None  # type: ignore[assignment]
-            return
-        self.record["directory"] = _log_path(self.directory, repo_root=self.repo_root)
-        for stream in self._STREAMS:
-            try:
-                # Unbuffered: the child writes through the shared descriptor.
-                self.handles[stream] = (self.directory / f"{stream}.log").open(
-                    "xb", buffering=0
-                )
-            except OSError as exc:
-                _retention_error(self.record, f"{stream}.log", exc)
-
-    def popen_streams(self) -> dict[str, Any]:
-        return {
-            s: h if h is not None else subprocess.PIPE for s, h in self.handles.items()
-        }
-
-    def finish(
-        self,
-        outcome: str,
-        returncode: int | None,
-        captured: dict[str, str | bytes | None],
-    ) -> tuple[dict[str, bytes], dict[str, Any]]:
-        """Close the files, then return ``(stream bytes, final record)``.
-
-        ``captured`` holds data that did not arrive through the files (a pipe
-        fallback, or a runner that supplies partial output on timeout); it is
-        written into a still-empty log file so the retained bytes match."""
-        data: dict[str, bytes] = {}
-        for stream in self._STREAMS:
-            extra = captured.get(stream)
-            extra_bytes = (
-                extra.encode("utf-8") if isinstance(extra, str) else extra or b""
-            )
-            handle = self.handles[stream]
-            if handle is None:
-                data[stream] = extra_bytes
-                continue
-            try:
-                if extra_bytes and os.fstat(handle.fileno()).st_size == 0:
-                    handle.write(extra_bytes)
-            except OSError as exc:
-                _retention_error(self.record, f"{stream}.log", exc)
-            finally:
-                handle.close()
-            path = self.directory / f"{stream}.log"
-            self.record[f"{stream}_path"] = _log_path(path, repo_root=self.repo_root)
-            try:
-                data[stream] = path.read_bytes()
-            except OSError as exc:
-                _retention_error(self.record, f"{stream}.log", exc)
-                data[stream] = extra_bytes
-        self.record["outcome"] = outcome
-        self.record["returncode"] = returncode
-        if self.directory is not None:
-            metadata = self.directory / "invocation.json"
-            self.record["metadata_path"] = _log_path(metadata, repo_root=self.repo_root)
-            written = _write_log_artifact(
-                self.directory,
-                "invocation.json",
-                json.dumps(self.record, indent=2) + "\n",
-                self.record,
-            )
-            self.record["metadata_path"] = _log_path(written, repo_root=self.repo_root)
-        return data, self.record
-
-
 def _run_openroad(
     script_path: str,
     metrics_path: str,
     *,
     error_cls: type[Exception],
     engine_logs: list[dict[str, Any]] | None = None,
+    container_id_wait_s: float = _CONTAINER_ID_WAIT_S,
     threads: int | None = None,
     repo_root: RepoRoot = ANCHOR_CWD,
 ) -> _OpenRoadResult:
@@ -466,47 +336,66 @@ def _run_openroad(
             engine_logs.append(record)
         return data, record
 
+    def stop(proc):
+        # A cold pull may populate the cidfile after the launch-time poll.
+        container_id = logs.record["container_id"] or logs.read_container_id()
+        _kill_openroad_run(proc, container_id, invocation_id)
+
     thread_args = [] if threads is None else ["-threads", str(threads)]
-    try:
-        completed = subprocess.run(
-            [
-                "openroad",
-                "-no_init",
-                "-exit",
-                *thread_args,
-                "-metrics",
-                metrics_path,
-                script_path,
-            ],
-            **logs.popen_streams(),
-        )
-    except OSError as exc:
-        _, record = retain("launch_failed", None, None, None)
-        raise error_cls(
-            _log_error_context(
-                f"could not launch openroad: {exc}{_launch_failure_hint(exc)}",
-                record,
+    argv = [
+        "openroad",
+        "-no_init",
+        "-exit",
+        *thread_args,
+        "-metrics",
+        metrics_path,
+        script_path,
+    ]
+    with _termination_signals() as arm_signals:
+        try:
+            proc = Popen(
+                argv,
+                start_new_session=True,
+                env=logs.wrapper_environment(),
+                **logs.popen_streams(),
             )
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        _, record = retain("timed_out", None, exc.stdout, exc.stderr)
-        raise error_cls(
-            _log_error_context(f"openroad timed out: {exc}", record)
-        ) from exc
-    except KeyboardInterrupt as exc:
-        _, record = retain(
-            "interrupted",
-            None,
-            getattr(exc, "stdout", None),
-            getattr(exc, "stderr", None),
-        )
-        exc.args = (*exc.args, _log_error_context("openroad interrupted", record))
-        raise
-    data, record = retain(
-        "exited", completed.returncode, completed.stdout, completed.stderr
-    )
+        except OSError as exc:
+            _, record = retain("launch_failed", None, None, None)
+            raise error_cls(
+                _log_error_context(
+                    f"could not launch openroad: {exc}{_launch_failure_hint(exc)}",
+                    record,
+                )
+            ) from exc
+
+        try:
+            arm_signals()
+            logs.write_launch_snapshot()
+            with _track_container_id(logs, proc, container_id_wait_s):
+                stdout, stderr = proc.communicate()
+        except subprocess.TimeoutExpired as exc:
+            stop(proc)
+            _, record = retain("timed_out", None, exc.stdout, exc.stderr)
+            raise error_cls(
+                _log_error_context(f"openroad timed out: {exc}", record)
+            ) from exc
+        except BaseException as exc:
+            stop(proc)
+            _, record = retain(
+                "interrupted",
+                None,
+                getattr(exc, "stdout", None),
+                getattr(exc, "stderr", None),
+            )
+            if isinstance(exc, KeyboardInterrupt):
+                exc.args = (
+                    *exc.args,
+                    _log_error_context("openroad interrupted", record),
+                )
+            raise
+    data, record = retain("exited", proc.returncode, stdout, stderr)
     return _OpenRoadResult(
-        completed.returncode,
+        proc.returncode,
         _captured_text(data["stdout"]),
         _captured_text(data["stderr"]),
         record,

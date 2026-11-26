@@ -171,8 +171,9 @@ from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
+from . import sim_stepping_narration as sim_stepping_narration
 from . import sim_transient_noise as sim_tn
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -261,6 +262,7 @@ from .sim_corner_axes import CORNER_OPTION_NAMES as CORNER_OPTION_NAMES
 from .sim_corner_axes import NGSPICE_SOLVER_OPTIONS as NGSPICE_SOLVER_OPTIONS
 from .sim_corner_axes import _matches_exclude as _matches_exclude
 from .sim_corner_axes import _parse_process_entry as _parse_process_entry
+from .sim_corner_axes import _validate_ngspice_options
 from .sim_corner_keys import unknown_key_warnings
 from .sim_corner_point import (
     CornerPoint,
@@ -493,6 +495,7 @@ from .sim_validate import _validate_noise_measurement as _validate_noise_measure
 from .sim_validate import _validate_on_unreached as _validate_on_unreached
 from .sim_validate import _validate_optional_flag as _validate_optional_flag
 from .sim_validate import _validate_rawfile_form as _validate_rawfile_form
+from .sim_window import parse_tran_window as _parse_tran_window
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -2127,49 +2130,6 @@ def _required_save_vectors(
                         if vector not in vectors:
                             vectors.append(vector)
     return vectors
-
-
-#: A string option value lands verbatim in a deck card, so it is limited to
-#: a bare token (``method=gear``) -- no whitespace, quotes or newlines.
-_NGSPICE_OPTION_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
-
-
-def _validate_ngspice_options(value: Any) -> dict[str, Any]:
-    """Validate ``options.ngspice_options`` (issue #3111).
-
-    Returns the declared map unchanged (``{}`` when omitted or ``null``).
-    Keys must come from :data:`NGSPICE_SOLVER_OPTIONS`; values must be a
-    finite number, a bool or a bare-token string.
-    """
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise SimError(
-            "options.ngspice_options must be an object mapping ngspice "
-            f".options names to scalar values (got {json.dumps(value, default=repr)})"
-        )
-    for name, item in value.items():
-        if name not in NGSPICE_SOLVER_OPTIONS:
-            raise SimError(
-                f"options.ngspice_options key {json.dumps(name)} is not a "
-                "supported solver option; supported: "
-                + ", ".join(NGSPICE_SOLVER_OPTIONS)
-            )
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, (int, float)):
-            if not is_finite_number(item):
-                raise SimError(
-                    f"options.ngspice_options.{name} must be finite (got {item!r})"
-                )
-            continue
-        if isinstance(item, str) and _NGSPICE_OPTION_TOKEN.fullmatch(item):
-            continue
-        raise SimError(
-            f"options.ngspice_options.{name} must be a number, a boolean or "
-            f"a bare-token string (got {json.dumps(item, default=repr)})"
-        )
-    return dict(value)
 
 
 def _ngspice_options_card(ngspice_options: dict[str, Any] | None) -> str | None:
@@ -6384,61 +6344,40 @@ def _param_only_targets(netlist_path: str, targets: list[str]) -> dict[str, list
             decl = _netlist_declarations(handle.read())
     except (OSError, UnicodeDecodeError):
         return {}
-    candidates = [
-        t
-        for t in targets
-        if t.strip().lower() in decl.params and t.strip().lower() not in decl.elements
-    ]
-    if not candidates:
+    if (decl.params - decl.elements).isdisjoint(t.strip().lower() for t in targets):
         return {}
-    if decl.includes:
-        included = _included_elements(netlist_path, decl.includes)
-        if included is None:
-            return {}
-        candidates = [t for t in candidates if t.strip().lower() not in included]
-    found: dict[str, list[str]] = {}
-    for target in candidates:
-        name = re.escape(target.strip().lower())
-        pattern = re.compile(rf"(?<![a-z0-9_]){name}(?![a-z0-9_])")
-        found[target] = sorted(
-            source
-            for source, spec in decl.voltage_specs.items()
-            if pattern.search(spec)
-        )
-    return found
+    param_only, _ = _classify_supply_targets(netlist_path, decl, targets)
+    return param_only
 
 
-def _unresolved_supply_targets(netlist_path: str, targets: list[str]) -> list[str]:
-    """The ``supply_v`` keys that name no element and no ``.param`` anywhere
-    in a fully resolved netlist closure (#2894), so ``alter <key>=<value>``
-    would silently address nothing.
+def _classify_supply_targets(
+    netlist_path: str, decl: _NetlistDeclarations, targets: list[str]
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Return parameter-only targets with source hints, and unknown supply names.
 
-    Same conclusiveness rule as :func:`_param_only_targets`: the top-level
-    file must be readable and every ``.include``/``.lib`` reference must
-    resolve, otherwise nothing is reported (the name may live in the part
-    the scan cannot see). Matching is case-insensitive. Hierarchical keys
-    (``x1.vdd``) address elements inside subcircuit instances, which the
-    top-level scan does not model, so they are never reported. ``.param``
-    names are left to :func:`_param_only_targets`."""
-    try:
-        with open(netlist_path, encoding="utf-8") as handle:
-            decl = _netlist_declarations(handle.read())
-    except (OSError, UnicodeDecodeError):
-        return []
-    included: set[str] = set()
-    if decl.includes:
-        resolved = _included_elements(netlist_path, decl.includes)
-        if resolved is None:
-            return []
-        included = resolved
-    return [
-        t
-        for t in targets
-        if "." not in t
-        and t.strip().lower() not in decl.elements
-        and t.strip().lower() not in decl.params
-        and t.strip().lower() not in included
-    ]
+    An incomplete include closure cannot establish that an element is absent.
+    Hierarchical names can address elements outside the top-level scan.
+    """
+    included = _included_elements(netlist_path, decl.includes)
+    if included is None:
+        return {}, []
+    elements = decl.elements | included
+    param_only: dict[str, list[str]] = {}
+    unknown: list[str] = []
+    for target in targets:
+        name = target.strip().lower()
+        if name in elements:
+            continue
+        if name in decl.params:
+            pattern = re.compile(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])")
+            param_only[target] = sorted(
+                source
+                for source, spec in decl.voltage_specs.items()
+                if pattern.search(spec)
+            )
+        elif "." not in name:
+            unknown.append(target)
+    return param_only, unknown
 
 
 def _param_target_hint(param: str, sources: list[str]) -> str:
@@ -6560,7 +6499,10 @@ def _validate_supply_override_targets(
                 "source as a plain DC value, or remove it from "
                 "corners.supply_v" + hint
             )
-    for target, sources in _param_only_targets(netlist_path, targets).items():
+    param_only, unknown = _classify_supply_targets(
+        netlist_path, _netlist_declarations(text), targets
+    )
+    for target, sources in param_only.items():
         raise SimError(
             f"corners.supply_v key {target!r} names a .param, not a source: "
             f"the netlist declares `.param {target}=...` and no element "
@@ -6570,7 +6512,7 @@ def _validate_supply_override_targets(
             "corner would silently simulate the nominal value). "
             + _param_target_hint(target, sources)
         )
-    for target in _unresolved_supply_targets(netlist_path, targets):
+    for target in unknown:
         raise SimError(
             f"corners.supply_v key {target!r} names no element and no .param "
             "in the netlist (including every .include/.lib it pulls in): "
@@ -6590,7 +6532,7 @@ def _validate_param_targets(
     ngspice's ``alterparam`` of an unknown name only logs ``parameter ... not
     found`` and carries on, which would let every corner simulate the
     nominal value and pass. Lexical, with the same conclusiveness rule as
-    :func:`_unresolved_supply_targets`: the scan covers the top-level file
+    :func:`_classify_supply_targets`: the scan covers the top-level file
     and its resolved ``.include``/``.lib`` closure, and when any reference
     cannot be read nothing is reported here -- :func:`_run_corner` still
     fails the corner if the engine itself rejects the target. A name only
@@ -7823,16 +7765,17 @@ def _is_unreached(
     *,
     unreached_names: set[str],
     diagnostics: list[dict[str, Any]],
+    log_text: str,
 ) -> bool:
     """True when this value-less ``spice`` measurement opted into
     ``on_unreached: "null"``, ngspice reported exactly "out of interval" for
-    it, and the corner carries no error-severity diagnostic (solver
-    divergence, timeout, ...) -- i.e. the analysis itself completed."""
+    it, and no blocking error-severity diagnostic (solver divergence, timeout,
+    ...; not unaborted stepping narration, #7906) -- the analysis completed."""
     if spec.get("on_unreached") != "null" or spec.get("spice") is None:
         return False
     if str(spec["name"]).lower() not in unreached_names:
         return False
-    return not any(d["severity"] == "error" for d in diagnostics)
+    return not sim_stepping_narration.blocks_not_reached(diagnostics, log_text)
 
 
 def _harvest_measurement_value(
@@ -8708,32 +8651,6 @@ def _parse_spice_seconds(raw: str) -> float | None:
 _PREFLIGHT_MIN_TIMEPOINTS_PER_S = 50.0
 
 
-def _parse_tran_window(
-    analysis: dict[str, Any],
-) -> tuple[str, str, float, float] | None:
-    """Parse a ``tran`` analysis's own ``step``/``window`` tokens (the first
-    two space-separated tokens of ``analysis['args']``), shared by
-    :func:`_preflight_timeout_warning` (issue #1686) and
-    :func:`_run_fail_fast_probe` (issue #1694) -- both need the same "is
-    this a `tran` analysis with parseable timing tokens" gate.
-
-    Returns ``(step_token, window_token, step_s, window_s)`` (the original
-    token strings, for messages, alongside their parsed seconds), or
-    ``None`` when ``analysis['kind']`` isn't ``"tran"`` or the tokens can't
-    be parsed as positive SPICE time literals.
-    """
-    if analysis.get("kind") != "tran":
-        return None
-    tokens = (analysis.get("args") or "").split()
-    if len(tokens) < 2:
-        return None
-    step_s = _parse_spice_seconds(tokens[0])
-    window_s = _parse_spice_seconds(tokens[1])
-    if step_s is None or window_s is None or step_s <= 0 or window_s <= 0:
-        return None
-    return tokens[0], tokens[1], step_s, window_s
-
-
 def _preflight_timeout_warning(
     *, analysis: dict[str, Any], timeout_s: float
 ) -> str | None:
@@ -9348,12 +9265,9 @@ def _diagnose_modelname_error(netlist_path: str) -> str | None:
     return sim_bin_range.message(culprit, _MODEL_WIDTH_CEILING_UM)
 
 
-#: ngspice's own terminal trailer when an analysis never actually completed
-#: (e.g. ``tran simulation(s) aborted``) -- verified against ngspice 46's
-#: output for a genuinely unrecoverable singular matrix/nonconvergence (see
-#: issue #205). Its presence always means "no trustworthy result", regardless
-#: of what measurement values happen to be parseable.
-_SIMULATION_ABORTED_RE = re.compile(r"simulation\(s\)\s+aborted", re.IGNORECASE)
+#: ngspice's own "analysis never completed" trailer (issue #205); the one
+#: definition lives with the stepping-code pair it qualifies (issue #7906).
+_SIMULATION_ABORTED_RE = sim_stepping_narration.SIMULATION_ABORTED_RE
 
 
 def _recovered_from_stepping(
@@ -9450,7 +9364,7 @@ def _capture_only_waveform_complete(
         measurements_spec
         or raw_path is None
         or not any(
-            d["code"] in ("singular_matrix", "nonconvergence") for d in diagnostics
+            d["code"] in sim_stepping_narration.STEPPING_CODES for d in diagnostics
         )
         or not os.path.isfile(raw_path)
     ):
@@ -9470,7 +9384,7 @@ def _downgrade_stepping_diagnostics(
     """Downgrade recovered ``singular_matrix``/``nonconvergence`` diagnostics
     to warnings; a capture-only corner also gets the reason appended."""
     for diagnostic in diagnostics:
-        if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
+        if diagnostic["code"] in sim_stepping_narration.STEPPING_CODES:
             diagnostic["severity"] = "warning"
             if not has_measurements:
                 reached = (

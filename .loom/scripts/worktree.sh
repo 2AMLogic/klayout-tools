@@ -1111,8 +1111,18 @@ Project-Specific Hooks:
 
   The hook receives three arguments:
     \$1 - Absolute path to the new worktree
-    \$2 - Branch name (e.g., feature/issue-42)
-    \$3 - Issue number
+    \$2 - Branch name (e.g., feature/issue-42); may be HEAD for a detached
+          PR checkout, and may be a custom name for a Builder checkout
+    \$3 - Issue number (worktree.sh) or PR number (pr-worktree.sh)
+
+  Both worktree.sh (issue checkouts, \$1 ends in issue-<N>) and pr-worktree.sh
+  (Judge/Doctor PR checkouts, \$1 ends in pr-<N>) run this hook. Issues and PRs
+  share one number space, so \$3 alone cannot tell them apart; neither can \$2
+  (both may use the same branch). Use the last component of \$1 instead:
+    case "\$(basename "\$1")" in
+      issue-*) ;;  # \$3 is an issue number
+      pr-*)    ;;  # \$3 is a PR number
+    esac
 
   Example hook (.loom/hooks/post-worktree.sh):
     #!/bin/bash

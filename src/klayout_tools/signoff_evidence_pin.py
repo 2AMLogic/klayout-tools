@@ -9,6 +9,7 @@ from typing import Any
 
 from ._jsonnum import is_int
 from ._provenance import sha256_file
+from .signoff_git_source import git_scoped
 
 #: ``citation.content_hash_basis`` when the live hash is the grader's own
 #: re-hash of the cited evidence file (``functional-verification``).
@@ -318,7 +319,7 @@ def attested_present_members(envelope: Mapping[str, Any]) -> list[Mapping[str, A
         for check in checks
         if isinstance(check, Mapping)
         and check.get("check") == "present"
-        and isinstance(check.get("path"), str)
+        and (isinstance(check.get("path"), str) or git_scoped(check.get("path")))
         and check["path"]
     ]
 

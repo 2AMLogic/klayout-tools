@@ -231,7 +231,59 @@ that reads the rule, then files from a template that never mentions it.
 | `1` | **ERROR** — usage/precondition failure. **Fails closed**: treat as `10`, never as `0` |
 
 Stdout is `KEY=VALUE` lines: `SCOPE`, `TRIGGER`, `RECORD`, `VERDICT`, plus
-`REASON` on `12` and `SUMMARY` when a record parsed.
+`REASON` on `12` and `SUMMARY` when a record parsed. For a deliberate reversal
+routed to the operator it also prints `RESOLUTION=` (`approved`, `pending`,
+`stale`, `conflict`, `malformed`, `unreadable`, `unavailable`, `rejected`,
+`deferred` or `rescope`) with `RESOLUTION-REASON=`, and
+`RESOLUTION-OPTION=` when one verified.
+
+## After the operator chooses: the verified resolution (#14399)
+
+`deliberate=yes reversal=yes verdict=operator-decision` exits `11` until the
+operator's explicit choice is on the issue **and verifies**. The record is never
+rewritten; the gate reads the resolution beside it:
+
+```bash
+loom-daemon operator-decision resolve <N> --option <id> --release   # attended; see operator-decision.md
+./.loom/scripts/premise-check.sh --issue <N>                         # 0, RESOLUTION=approved
+```
+
+When a ruling replaced the block with an "Operator ruling" section, both
+`resolve` and the gate recover the newest published block from the issue's
+edit history, binding to that exact text (#15108); see
+`defaults/docs/operator-decision.md`. Because the digests then bind to the
+recovered snapshot plus the issue's current title, a post-ruling rewrite of the
+body does not stale the resolution (see `operator-decision.md` → "A ruled
+issue's scope stays pinned to the ruling").
+
+A verified `proceed` resolution of the *current* decision and proposal (for a
+history-recovered decision, the recovered snapshot) returns
+`0`, the same proceed result as any clear premise. Everything else leaves the
+reversal pending at `11`, with `RESOLUTION-REASON=` naming why:
+
+- no resolution, a **stale** one (decision, option text, proposal or issue
+  changed; for a history-recovered decision only the title moves the scope
+  digest, not a later body rewrite), **conflicting** ones, or an operator comment that does not parse;
+- a `reject`, `defer` or `rescope` choice: no proceed approval for this text;
+- the decision unreadable from the authoritative body;
+- no authoritative forge read: `--body-file` / `--record-file` reproductions
+  are offline, a pasted approval is only text, and they always stay at `11`
+  (`RESOLUTION=unavailable`). An unreadable comment listing is exit `1`.
+
+Only an **operator** author counts (non-App user, `OWNER`/`MEMBER`/
+`COLLABORATOR` or fleet admin). A recommending agent, a fleet App, a shared
+trusted-commenter entry, an ordinary comment, a copied marker, an un-park
+(`loom:operator` removal) or a hold-label change attests nothing. The
+resolution is consulted only after the premise record itself validates, so
+exit `12` and `13` are unchanged, a direct rewrite to `verdict=clear` is still
+`12`, and the `hermit.reversalNeedsOperator` exception behaves exactly as
+configured.
+
+**Curator and Champion use this one gate.** Curator runs it before enriching
+(exit `11` with `RESOLUTION=pending|stale|…` means routing, not enrichment).
+Champion runs it at the promotion boundary for a deliberate reversal and
+promotes only on `0`. Each keeps its own claim, review checks and promotion
+rules; the gate result is an input, not a promotion.
 
 ## What to do with each code
 
@@ -242,7 +294,10 @@ Stdout is `KEY=VALUE` lines: `SCOPE`, `TRIGGER`, `RECORD`, `VERDICT`, plus
    The `EVIDENCE-CANDIDATE=` lines the gate prints are the starting list.
 3. Post the record as a comment. Re-run the gate.
 
-**`11` — route it, do not enrich.**
+**`11` — route it, do not enrich.** First read `RESOLUTION=`: `pending` means
+route it as below; `stale` or `conflict` means the operator's choice no longer
+matches the text (a ruled issue's body rewrite does not cause this, see above), so the decision is re-asked (or the stale comment deleted) with
+the original decision and record preserved, not requested twice for the same text.
 
 ```bash
 loom-daemon operator-decision apply <N> --input d.json   # writes the decision block, adds loom:operator
@@ -276,7 +331,7 @@ of which are structural.
 
 **Option 1 — a new shared script, invoked at the top of the pass.** Mechanical,
 unit-testable, and shared so the roles cannot drift apart. But
-[shell-language-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/shell-language-policy.md)
+[shell-language-policy.md](https://github.com/2AMLogic/loom/blob/main/.loom/docs/shell-language-policy.md)
 (#7762, ADR-0018) has since closed the
 literal form: new executable logic is a `loom-daemon` subcommand, and `contract`
 is baseline-only. **Adopted in substance, in its current form** — a Rust
@@ -330,7 +385,7 @@ wires into it. (Verified against `origin/main`, 2026-09-20.)
 
 ## Measured behaviour
 
-Run over the 60 most recent issues in `rjwalters/loom` on 2026-09-20, the gate
+Run over the 60 most recent issues in `2AMLogic/loom` on 2026-09-20, the gate
 fired on 7 and passed 53 through untouched:
 
 | Fired | Why |
@@ -364,6 +419,6 @@ enrichment pass is spent.
   #8310 — the predecessor closed for a stale citation. #8269 — the parent.
 - `defaults/docs/label-state-machine.md` § "Routing to a human" — the
   route this takes, unchanged.
-- [shell-language-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/shell-language-policy.md) —
+- [shell-language-policy.md](https://github.com/2AMLogic/loom/blob/main/.loom/docs/shell-language-policy.md) —
   why the implementation is Rust behind a stub.
 - #7979 — why the enforcement is structural rather than text-matching.

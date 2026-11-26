@@ -1,12 +1,19 @@
-"""Argv test for the wrapper `scripts/install-openroad-docker.sh` writes (#3151)."""
+"""Argv test for the wrapper `scripts/install-openroad-docker.sh` writes (#3151),
+plus the container-lifetime contract (#5726): no `exec`, a recorded
+`--cidfile`, a signal trap that kills the recorded container, and an
+unchanged exit code for a normal run."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import signal
 import stat
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -15,19 +22,20 @@ SCRIPT = (
     Path(__file__).resolve().parent.parent / "scripts" / "install-openroad-docker.sh"
 )
 
-STUB = """#!/usr/bin/env bash
-if [[ "$1" == "run" ]]; then
-    printf '%s\\n' "$@" >"$DOCKER_ARGV_LOG"
-fi
-exit 0
-"""
+#: The container id the stub writes into the `--cidfile` (simulating the
+#: runtime) -- 64 hex, the full ID Docker writes.
+STUB_CID = "a1c" + "0" * 58 + "fe1"
+assert len(STUB_CID) == 64
+
+STUB = (Path(__file__).parent / "fixtures/openroad_wrapper/docker_stub.sh").read_text()
+STUB = STUB.replace("STUB_CID_STRING", STUB_CID)
 
 
 def _install(
     tmp_path: Path, extra_env: dict[str, str | None], *, klt_stub: str | None = None
 ) -> list[str]:
     stub_dir = tmp_path / "stub"
-    stub_dir.mkdir()
+    stub_dir.mkdir(exist_ok=True)
     docker = stub_dir / "docker"
     docker.write_text(STUB)
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
@@ -60,6 +68,10 @@ def _install(
         capture_output=True,
     )
     return log.read_text().splitlines()
+
+
+def _wrapper_text(tmp_path: Path) -> str:
+    return (tmp_path / "dest" / "openroad").read_text()
 
 
 def test_wrapper_runs_as_caller_uid(tmp_path: Path) -> None:
@@ -95,6 +107,191 @@ def test_wrapper_forwards_platform_dir_and_openroad_vars(tmp_path: Path) -> None
 def test_wrapper_forwards_nothing_extra_when_unset(tmp_path: Path) -> None:
     argv = _install(tmp_path, {"TMPDIR": str(tmp_path)})
     assert _env_flags(argv) == [f"HOME={tmp_path}"]
+
+
+def test_wrapper_has_no_exec_and_records_container_identity(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path)})
+    text = _wrapper_text(tmp_path)
+    # `exec` replaced the wrapper's shell with the docker client, so no
+    # shell survived to run the trap (issue #5726): it must be gone.
+    assert "exec docker run" not in text
+    assert "--cidfile" in text
+    assert "trap cleanup EXIT" in text
+    for sig in ("INT", "TERM", "HUP"):
+        assert re.search(rf"^trap 'exit \d+' {sig}$", text, re.MULTILINE)
+    # The runtime sees the recorded identity on the actual invocation.
+    assert "--cidfile" in argv
+    cid_path = argv[argv.index("--cidfile") + 1]
+    assert cid_path.startswith(str(tmp_path))
+    assert "--rm" in argv  # unchanged: one container per invocation
+
+
+def test_wrapper_forwards_client_exit_code_without_kill(tmp_path: Path) -> None:
+    # The installer ends with `"$WRAPPER" -version` under `set -e`, so a
+    # failing client aborts the installer with the client's own code: the
+    # background-and-wait shape must forward it unchanged.
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _install(tmp_path, {"TMPDIR": str(tmp_path), "DOCKER_EXIT_CODE": "17"})
+    assert exc_info.value.returncode == 17
+    # Normal completion: the client was reaped and --rm removed the
+    # container, so the trap must not fire a `docker kill`.
+    argv = (tmp_path / "argv.log").read_text().splitlines()
+    assert "kill" not in argv
+
+
+def test_wrapper_forwards_stdin_to_the_container_client(tmp_path: Path) -> None:
+    """The client is backgrounded, and bash gives an asynchronous command
+    /dev/null for stdin: without the explicit `0<&0` a script piped into the
+    drop-in `openroad` reaches the container as an immediate EOF."""
+    _install(tmp_path, {"TMPDIR": str(tmp_path)})
+    sink = tmp_path / "stdin.sink"
+    env = _wrapper_env(
+        tmp_path, {"DOCKER_STDIN_SINK": str(sink), "DOCKER_EXIT_CODE": "7"}
+    )
+    completed = subprocess.run(
+        [str(tmp_path / "dest" / "openroad"), "-no_init"],
+        input=b"puts hello-stdin\n",
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    assert sink.read_bytes() == b"puts hello-stdin\n"
+    assert completed.returncode == 7  # the client's exit code is still forwarded
+
+
+def _wrapper_env(tmp_path: Path, extra: dict[str, str]) -> dict[str, str]:
+    """A runtime env whose `docker` is the stub, like the install itself."""
+    stub_dir = tmp_path / "stub"
+    return {
+        "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "TMPDIR": str(tmp_path),
+        "DOCKER_ARGV_LOG": str(tmp_path / "run-argv.log"),
+        **extra,
+    }
+
+
+def test_wrapper_group_sigterm_kills_recorded_container(tmp_path: Path) -> None:
+    """A process-group SIGTERM to a caller driving the wrapper kills the
+    recorded container (issue #5726) -- the failure mode the live probe in
+    the issue measured against the old `exec` wrapper, asserted here
+    against a stub runtime: the trap's `docker kill <cid>` must run."""
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path)})
+    assert "--cidfile" in argv
+    wrapper = tmp_path / "dest" / "openroad"
+    run_log = tmp_path / "run-argv.log"
+    env = _wrapper_env(tmp_path, {"DOCKER_HOLD_S": "30"})
+    proc = subprocess.Popen(
+        [str(wrapper), "-version"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            lines = run_log.read_text().splitlines() if run_log.exists() else []
+            if "run" in lines:
+                break  # stub has logged the invocation and written the cid
+            assert time.monotonic() < deadline, "wrapper never started the client"
+            time.sleep(0.05)
+        time.sleep(0.2)  # let the wrapper reach its `wait`
+        os.killpg(proc.pid, signal.SIGTERM)
+        assert proc.wait(timeout=30) == 143
+        lines = run_log.read_text().splitlines()
+        # The trap killed the recorded container, not just the client. The
+        # kill is issued asynchronously by the trap, so allow a moment for
+        # the stub to log it before the assertion.
+        deadline = time.monotonic() + 5
+        while "kill" not in lines and time.monotonic() < deadline:
+            time.sleep(0.05)
+            lines = run_log.read_text().splitlines()
+        assert "kill" in lines
+        assert STUB_CID in lines
+        assert lines.index("kill") > lines.index("run")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize(
+    ("sig", "poll_s"), [(signal.SIGTERM, 2.0), (signal.SIGHUP, 0.0)]
+)
+def test_driver_group_signal_reaps_wrapper_container(
+    tmp_path: Path, sig, poll_s
+) -> None:
+    _install(tmp_path, {})
+    running = tmp_path / "container.running"
+    env = _wrapper_env(tmp_path, {"STUB_RUNNING": str(running), "DOCKER_HOLD_S": "30"})
+    env["PATH"] = str(tmp_path / "dest") + os.pathsep + env["PATH"]
+    env["PYTHONPATH"] = str(SCRIPT.parents[1] / "src")
+    (tmp_path / "stage.tcl").write_text("exit")
+    driver = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from klayout_tools._openroad_engine import _run_openroad; "
+            "_run_openroad('stage.tcl', 'metrics.json', error_cls=RuntimeError, "
+            f"container_id_wait_s={poll_s})",
+        ],
+        env=env,
+        cwd=tmp_path,
+        start_new_session=True,
+    )
+    wrapper_pid = None
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            # Cover a recorded launch ID and one emitted after the poll expired.
+            if running.exists():
+                wrapper_pid = int(running.read_text())
+                if any(
+                    STUB_CID in p.read_text()
+                    for p in tmp_path.glob(
+                        "openroad-logs/*/"
+                        + ("invocation.json" if poll_s else "container.cid")
+                    )
+                ):
+                    break
+            assert time.monotonic() < deadline, "wrapper never reported the container"
+            time.sleep(0.02)
+        assert os.getpgid(wrapper_pid) != driver.pid
+        os.killpg(driver.pid, sig)
+        assert driver.wait(timeout=10) == -sig
+        assert not running.exists(), "the container survived the driver"
+        record = json.loads(
+            next(tmp_path.glob("openroad-logs/*/invocation.json")).read_text()
+        )
+        assert record["outcome"] == "interrupted"
+        assert record["container_id"] == STUB_CID
+    finally:
+        if wrapper_pid and running.exists():
+            try:
+                os.killpg(wrapper_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        driver.kill()
+        driver.wait(timeout=5)
+
+
+def test_wrapper_uses_the_invocations_cidfile_and_label(tmp_path: Path) -> None:
+    cidfile = tmp_path / "container.cid"
+    argv = _install(
+        tmp_path,
+        {
+            "TMPDIR": str(tmp_path),
+            "KLT_OPENROAD_CIDFILE": str(cidfile),
+            "KLT_OPENROAD_INVOCATION_ID": "this-invocation",
+        },
+    )
+    assert argv[argv.index("--cidfile") + 1] == str(cidfile)
+    assert (
+        argv[argv.index("--label") + 1]
+        == "org.klayout-tools.openroad-invocation=this-invocation"
+    )
+    assert cidfile.read_text() == STUB_CID
 
 
 def _mounts(argv: list[str]) -> list[str]:

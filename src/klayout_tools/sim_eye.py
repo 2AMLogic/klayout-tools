@@ -157,8 +157,6 @@ def validate_eye_context(
     """An eye is a transient-time quantity: refuse any other ``analysis.kind``
     by name, and -- when the transient's stop time is readable from
     ``analysis.args`` -- a window that runs past it, up front."""
-    from .sim import _parse_tran_window
-
     declared = eye_measurements(measurements_spec)
     if not declared:
         return
@@ -169,7 +167,7 @@ def validate_eye_context(
         required="tran",
         explanation="folds a transient signal onto a unit interval",
     )
-    parsed = _parse_tran_window(analysis)
+    parsed = sim_window.parse_tran_window(analysis)
     if parsed is None:
         return
     stop = parsed[3]

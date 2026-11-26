@@ -22,6 +22,10 @@ def input_verified_statement(citation: dict) -> str | None:
     verified = citation.get("input_verified")
     if verified is None and citation.get("content_hash") is None:
         return None
+    closure = citation.get("sim_closure") or {}
+    if closure.get("status") == "stale":
+        paths = ", ".join(row.get("path") or "(unnamed)" for row in closure["stale"])
+        return f"CHANGED -- recorded hashes differ for simulation includes {paths}"
     basis = citation.get("content_hash_basis")
     if basis == CONTENT_HASH_BASIS_ARTIFACT_MANIFEST:
         return (

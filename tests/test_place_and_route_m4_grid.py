@@ -25,6 +25,7 @@ import shutil
 import klayout.db as kdb
 import pytest
 
+from klayout_tools._layout import write_layout
 from klayout_tools.decks.asap7_rules import DECK_PATH
 from klayout_tools.drc import run_drc_klayout_engine
 from klayout_tools.place_and_route_m4_grid import (
@@ -240,12 +241,12 @@ def test_non_asap7_pdk_is_a_byte_identical_no_op(tmp_path):
     b = _Builder()
     b.reporter_shapes()
     before = tmp_path / "before.gds"
-    b.layout.write(str(before))
+    write_layout(b.layout, str(before), RuntimeError)
     report = b.run(variant="sky130A")
     assert report["status"] == "skipped"
     assert "not ASAP7" in report["reason"]
     after = tmp_path / "after.gds"
-    b.layout.write(str(after))
+    write_layout(b.layout, str(after), RuntimeError)
     assert before.read_bytes() == after.read_bytes()
 
 
@@ -272,7 +273,7 @@ def test_rerun_is_deterministic(tmp_path):
         b.reporter_shapes()
         assert b.run()["status"] == "repaired"
         path = tmp_path / f"run{i}.gds"
-        b.layout.write(str(path))
+        write_layout(b.layout, str(path), RuntimeError)
         outs.append(path.read_bytes())
     assert outs[0] == outs[1]
 

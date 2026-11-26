@@ -58,20 +58,6 @@ loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr worktree-primary" \
     "merge-pr worktree-branch-for" "merge-pr worktree-find-by-branch"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-YELLOW='\033[0;33m'   # retired() below
-
-# An assertion that CANNOT survive the port to Rust, retired under the
-# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
-# deleted: a reader must be able to see what was removed, why it could not
-# survive, and what proves the property now. Counted as run so the totals stay
-# honest.
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
 
 # assert_single_line <label> <expected> <actual>
 # Asserts $actual equals $expected AND contains no embedded newline (i.e. the

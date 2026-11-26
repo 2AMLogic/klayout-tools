@@ -495,7 +495,11 @@ Every host is configured the same way. There is no per-host pinning:
   `github-app-token.sh`, so with it set credential delivery, agent writes and
   `merge-pr.sh` use that one App for every owner, while `forge token` (lease
   posting) ignores the env and follows `writers[]`. `forge identities` warns
-  when both are present.
+  when both are present. `forge may-write --repo acme/x` agrees with
+  `forge token --repo acme/x` (#13929): the probe mints the listed owner's
+  writer credential the same way before answering, so a writer-covered owner
+  reads as writable when the mint works, and a failed mint is refused with
+  the mint failure named (never a guess).
 
   Each withdrawal is exported as a `forge.reader.withdrawn` span
   ([`telemetry-schema.md`](telemetry-schema.md)), and `loom-daemon status`
@@ -646,6 +650,31 @@ to unset it.
 the writer), `direct` (writes and unclassified calls) or `none` (shed).
 The writer's read share is `route = direct_read` on the writer's `account`
 over all reads. A rise means a classifier gap, not an outage.
+
+**`direct_read` from a read that is gateway-first.** A `direct_read` row
+does not mean the read is exempt or was never offered the gateway.
+`pr_planning` (the open-PR list, `pulls/{n}` mergeability, comment and CI
+reads of the role queues) and `stage_occupancy` (one issue listing per stage
+label) are both offered the gateway first, and neither is exempt (#15103).
+Their `direct_read` rows are a fallback, and the daemon log says which kind:
+
+- **Withdrawn.** The gateway was withdrawn when the read was routed, so a
+  reader App served it. The daemon log has `forge_identity: reader app
+  gateway withdrawn from <owner> <scope> for <n>s` or `forge_gateway: the
+  gateway did not answer (<caller>)` at the start of the window. A
+  withdrawal is not scoped to the caller that caused it: one caller's
+  refused request takes the gateway away from every read of that owner
+  until the window ends (#15134).
+- **Rerun.** The gateway's own attempt faulted: a `route=gateway` row with
+  `o=error` just before, then the read on a reader.
+- **No profile.** The process adopted none (a CLI run without
+  `LOOM_GH_GATEWAY_DIR`), the owner has no `keyRefs` entry, or the repo is
+  unresolved and the writer is the only credential.
+
+Correlate the rows with those log lines before reading a `direct_read` share
+as a classifier gap. On one gateway host on 2026-11-23, 99.98% of these two
+callers' `direct_read` rows fell inside a logged withdrawal window; outside
+one, all but one row per caller were `gateway` (#15134).
 
 Discovery listings can also skip GitHub, and the gateway, entirely: with a
 state mirror configured (`forge.mirror`), the work finder
@@ -915,6 +944,12 @@ issues with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create`.
 Full recipe, the atomic create+label requirement, the scripted
 `forge_gh_create_issue_rl_safe` equivalent, and why `loom-daemon forge issue
 create` is NOT a fallback: [`gh-issue-create-rest-fallback.md`](gh-issue-create-rest-fallback.md).
+
+**Exception (#13978): a foreign public repo the App is not installed on.** There
+`create-issue.sh` and `forge create-issue` are refused (`NOT_IN_INSTALLATION`, the
+#9548 guard, unchanged) and a raw `gh issue create -R <repo>` is the sanctioned
+interim route; do not park the report for an operator. When and how:
+[`gh-issue-create-rest-fallback.md`](gh-issue-create-rest-fallback.md#foreign-public-repo-not_in_installation---raw-gh-issue-create--r-interim-13978).
 
 ### The duplicate backstop, and what makes it refuse (exit 3)
 

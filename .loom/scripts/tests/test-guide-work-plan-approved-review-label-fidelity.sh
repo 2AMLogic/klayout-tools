@@ -74,6 +74,9 @@ fi
 # closing `}` is the first line starting at column 0 after the opening line
 # (its nested `section()`/`count()` helpers are indented).
 RPB_BODY="$(awk '/^render_plan_body\(\) \{/{flag=1} flag{print} /^\}/{if(flag){exit}}' "$GUIDE_MD")"
+# #14785: render_plan_body() calls the shared open-PR linkage helpers, so
+# they ride along in every eval of the extracted body.
+HELPERS_BODY="$(awk '/^open_pr_linkage_rows\(\) \{/{f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD"; awk '/^open_pr_annotation\(\) \{/{f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD")"
 
 if [[ -z "$RPB_BODY" ]]; then
     fail "could not extract render_plan_body() body from guide.md"
@@ -95,10 +98,15 @@ else
     fail "expected review= to query --label \"loom:review-requested\""
 fi
 
-if grep -q 'approved_json=\$("\$GH_READ" pr list --label "loom:pr"' <<<"$RPB_BODY"; then
-    pass "approved_json= queries --label \"loom:pr\""
+# #14785: approved_json is now a jq FILTER of the one open-PR inventory
+# (selecting the loom:pr label), not its own labelled query — the distinct
+# label separation this suite guards moves into the derivation.
+if grep -qF 'pr list --state open --limit 200' <<<"$RPB_BODY" \
+   && grep -qF 'approved_json=$(printf '"'"'%s'"'"' "$pr_inventory" | jq -c' <<<"$RPB_BODY" \
+   && grep -A2 'approved_json=$(printf' <<<"$RPB_BODY" | grep -qF 'select(any(.labels[]?.name; . == "loom:pr"))'; then
+    pass "approved_json= filters the open-PR inventory on the loom:pr label"
 else
-    fail "expected approved_json= to query --label \"loom:pr\""
+    fail "expected approved_json= to derive from the inventory with a loom:pr label filter"
 fi
 
 PR_REVIEW_QUERY_COUNT="$(grep -c 'pr list --label "loom:review-requested"' <<<"$RPB_BODY" || true)"
@@ -108,11 +116,13 @@ else
     fail "expected exactly one 'pr list --label \"loom:review-requested\"' query, found $PR_REVIEW_QUERY_COUNT"
 fi
 
-PR_LOOM_PR_QUERY_COUNT="$(grep -c 'pr list --label "loom:pr"' <<<"$RPB_BODY" || true)"
-if [[ "$PR_LOOM_PR_QUERY_COUNT" -eq 1 ]]; then
-    pass "exactly one 'pr list --label \"loom:pr\"' query in render_plan_body() (no second query added)"
+# Count executable queries only (`$GH_READ" pr list …`): the #14785 comment
+# block quotes the retired labelled fetch in prose, and prose is not a query.
+PR_LOOM_PR_QUERY_COUNT="$(grep -cF '"$GH_READ" pr list --label "loom:pr"' <<<"$RPB_BODY" || true)"
+if [[ "$PR_LOOM_PR_QUERY_COUNT" -eq 0 ]]; then
+    pass "no executable 'pr list --label \"loom:pr\"' query left in render_plan_body() (derived, not queried)"
 else
-    fail "expected exactly one 'pr list --label \"loom:pr\"' query, found $PR_LOOM_PR_QUERY_COUNT"
+    fail "expected zero executable 'pr list --label \"loom:pr\"' queries, found $PR_LOOM_PR_QUERY_COUNT"
 fi
 
 if grep -q '^  held=\$(printf .%s. "\$approved_json"' <<<"$RPB_BODY"; then
@@ -163,14 +173,15 @@ chmod +x "$GH_STUB"
 mkdir -p "$TMPROOT/fixtures"
 FIX="$TMPROOT/fixtures"
 
-# `loom:pr` fixture: #9001 (no operator hold) and #9002 (loom:operator hold).
-# Neither number appears in the loom:review-requested fixture below — the
-# two sets are deliberately disjoint so any cross-contamination is
-# unambiguous.
-cat > "$FIX/pr-loom_pr.json" <<'JSON'
+# #14785 open-PR inventory fixture (the unlabelled `pr list --state open`
+# fetch that approved_json now filters): #9001 (no operator hold) and #9002
+# (loom:operator hold). Neither number appears in the loom:review-requested
+# fixture below — the two sets are deliberately disjoint so any
+# cross-contamination is unambiguous.
+cat > "$FIX/pr-.json" <<'JSON'
 [
-  {"number":9001,"title":"Approved, no operator hold","labels":[{"name":"loom:pr"}],"closingIssuesReferences":[]},
-  {"number":9002,"title":"Approved, under operator hold","labels":[{"name":"loom:pr"},{"name":"loom:operator"}],"closingIssuesReferences":[]}
+  {"number":9001,"title":"Approved, no operator hold","state":"open","labels":[{"name":"loom:pr"}],"closingIssuesReferences":[],"body":""},
+  {"number":9002,"title":"Approved, under operator hold","state":"open","labels":[{"name":"loom:pr"},{"name":"loom:operator"}],"closingIssuesReferences":[],"body":""}
 ]
 JSON
 
@@ -184,7 +195,7 @@ cat > "$FIX/pr-loom_review-requested.json" <<'JSON'
 ]
 JSON
 
-RENDER="$(LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+RENDER="$(LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
 
 if [[ -z "$RENDER" ]]; then
     fail "render_plan_body() produced no output against the fixtures (harness broken)"

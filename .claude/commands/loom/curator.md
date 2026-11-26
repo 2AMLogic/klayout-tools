@@ -311,8 +311,10 @@ Builder reads first. Guard against this structurally, not by remembering to
 be careful:
 
 1. **The `## Verified corrections` section is append-only.** If the current
-   body already has a `## Verified corrections` heading (case-insensitive),
-   treat every entry under it as **read-only** for editing purposes — never
+   body already has a `Verified corrections` heading (case-insensitive, at
+   any heading depth ≥ 2 — `##`, `###`, … including one nested under a
+   `## Curator Enhancement` parent), treat every entry under it as
+   **read-only** for editing purposes — never
    delete or rewrite an existing entry, even to "clean it up" or fold it into
    prose elsewhere. **Only append** new entries, at the end of the section,
    in date order. If the section doesn't exist yet and you make a claim you
@@ -370,8 +372,13 @@ be careful:
    `$ENHANCED` verbatim (append-only still applies) before posting the
    rewrite. `check-verified-corrections-preserved.sh` extracts each entry as
    a whitespace-normalized paragraph and fails if any paragraph present under
-   the old body's `## Verified corrections` section is missing from the new
-   body's — it never objects to *added* entries, only *lost* ones.
+   the old body's `Verified corrections` section is missing from the new
+   body's — it never objects to *added* entries, only *lost* ones. The
+   heading is recognised at any depth ≥ 2 and the section extends to the
+   next heading of the same or shallower depth; a level-1
+   `# Verified corrections` heading is deliberately ignored but named in a
+   `WARN` on stderr — if you see that WARN, the entries under the h1 heading
+   are **not** being checked, so retitle the heading to `##` or deeper.
 
 5. **General bias: append over regenerate.** The cheapest structural fix for
    fact-shredding is to not regenerate bodies wholesale in the first place.
@@ -545,7 +552,8 @@ this reclaim comment:
 
 ```bash
 gh api -X DELETE repos/{owner}/{repo}/issues/$N/labels/loom%3Acurating
-./.loom/scripts/post-comment.sh $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT stand-down passes, no curation progress for ${LOOM_STALE_CURATING_MINUTES:-45}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+./.loom/scripts/post-comment.sh $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT stand-down passes, no curation progress for ${LOOM_STALE_CURATING_MINUTES:-45}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock.
+<!-- loom:reclaim claim=$CLAIMED_AT -->"
 gh api repos/{owner}/{repo}/issues/$N/labels -f 'labels[]=loom:curating'
 # Continue with normal curation
 ```
@@ -555,10 +563,18 @@ pass the pool gate first, else stand down):
 
 ```bash
 gh api -X DELETE repos/{owner}/{repo}/issues/$N/labels/loom%3Acurating
-./.loom/scripts/post-comment.sh $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-45}m, no claimant activity) — the prior sweep likely died mid-enhancement."
+./.loom/scripts/post-comment.sh $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-45}m, no claimant activity) — the prior sweep likely died mid-enhancement.
+<!-- loom:reclaim claim=$CLAIMED_AT -->"
 gh api repos/{owner}/{repo}/issues/$N/labels -f 'labels[]=loom:curating'
 # Continue with normal curation
 ```
+
+**Both reclaim comments end with the `loom:reclaim` claim marker
+keyed to `$CLAIMED_AT` (#15044)**: the forge timeline can lag the label remove + re-add above,
+and `claim-staleness.sh` then matches this marker against the stale verdict it
+computed from the pre-reclaim timestamp — so your replacement claim reads
+`fresh` while you are active and is not reclaimed in turn (and `unknown`, never
+stale, once you go idle).
 
 **If `.loom/scripts/claim-staleness.sh` is missing** (an older install that has
 not been resynced yet): fall back to the **age-only** rule — read the latest
@@ -597,7 +613,7 @@ Fail closed: `1` (the gate could not run) is handled as `10`, never as `0`.
 | Exit | Instead of enriching |
 |---|---|
 | `10`/`12` | Do the premise check now and post the record its `REASON=`/`EVIDENCE-CANDIDATE=` lines point at; re-run. |
-| `11` | Route it as a ranked decision via `loom-daemon operator-decision apply` per "Routing to a human" below. |
+| `11` | Read `RESOLUTION=`. `pending`: route it as a ranked decision via `loom-daemon operator-decision apply` per "Routing to a human" below. `stale`/`conflict`/`malformed`: the operator's recorded choice no longer matches the text; re-ask with the original premise record kept (never rewrite it to `verdict=clear`). `unreadable`: read `RESOLUTION-REASON=` — a block replaced by an operator ruling is recovered from the body's edit history automatically (#15108); when the reason names a missing block with no recoverable history, the fix is re-publishing the decision with `operator-decision apply` (never ask the operator to run `resolve`: without a readable block it cannot succeed); a block that fails the contract goes through the `loom:decision-malformed` repair. `rejected`/`deferred`/`rescope`: not an approval to proceed. Never treat an un-park or an approval-sounding comment as the choice: only exit `0` with `RESOLUTION=approved` (a verified `loom-daemon operator-decision resolve`, #14399) lets a deliberate reversal be enriched. |
 | `13` | Premise false — close or rescope per "Issues Are Suggestions" above. |
 
 Record format, scoped population, and why the gate sits one stage before you:
@@ -681,7 +697,7 @@ If, during curation, you determine an issue is too large to be a single Builder 
 1. **Create each sub-issue with `create-issue.sh --parent <N> --label loom:triage`** (priority is not inherited). Do NOT apply `loom:curated`, even if your decomposition includes curator-quality detail (acceptance criteria, file references, scope guards).
 2. **Do NOT apply `loom:issue` at creation** (see "Who promotes `loom:curated` → `loom:issue`" above).
 3. **Skip the prose list** — `--parent` links the children.
-4. **Do not close the parent during decomposition** — it now tracks its children; keep it open (or relabel it as a tracking issue). Closing here would orphan the sub-issues. (Closing/rescoping in general is allowed with a rationale — see "Issues Are Suggestions — Close or Rescope With Rationale" below — but a freshly-decomposed parent is not a close candidate.)
+4. **Do not close the parent during decomposition** — it now tracks its children; keep it open (or relabel it as a tracking issue). Closing here would orphan the sub-issues. (Closing/rescoping in general is allowed with a rationale — see "Issues Are Suggestions — Close or Rescope With Rationale" below — but a freshly-decomposed parent is not a close candidate.) **If the parent body carries `<!-- loom:split-rescoped -->` alone on a line, remove that line in the same edit that files the children or parks the parent (#15256)**: the marker describes a revision these children supersede, and a stale one makes `forge parent split-state` print `NOT_SPLIT` after they close, re-opening the #13635 re-dispatch loop.
 5. **Do not self-curate your own sub-issues in the same session.** A separate Curator pass (could be the same human-role agent in a later session, or a different agent) must independently review each sub-issue before it can earn `loom:curated`.
 6. **Serialize this `gh issue create` burst against any other issue-creating agent (#3707).** Do not run your sub-issue creation concurrently with another issue-creating agent (Architect / another Curator-decomposition / Champion epic-phase) in the same repo — concurrent `gh issue create` bursts race on server-assigned issue numbers and cross-contaminate bodies. One filer finishes its full burst before the next starts. See `sweep.md` → "Execution Model → Only Builders parallelize" for the invariant.
 7. **File each sub-issue with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).** `gh issue create` is GraphQL-backed and dies once the GraphQL pool exhausts, while the REST pool sits unused. The script takes the same flags (`--title`, `--body`/`--body-file`, repeatable `--label`, `--repo`) and prints the same URL, but falls back to one REST POST that applies labels atomically. Recipe: `.loom/docs/gh-issue-create-rest-fallback.md`. (`loom-daemon forge issue create` is a `gh` passthrough, NOT a fallback.)
@@ -1631,11 +1647,22 @@ Unanswered: skip the premise gate. Claim it (`loom:curating`), read that trusted
 
 - **Revise** (the normal case). Edit the body, never only comment (an unchanged body is a failed round). Fix each finding
   (verify against `origin/main`) or refute it with evidence, then append a
-  dated `## Revision` section answering each by name. Then, in one edit, remove `loom:triage` and `loom:curating` and add `loom:curated`.
+  dated `## Revision` section answering each by name. If the issue is a split
+  parent (it has children, all closed) and the revision adds work the
+  children do not cover, also add `<!-- loom:split-rescoped -->` alone on its
+  own line in the body, outside any code fence (#15242): without it
+  `forge parent split-state` reads `SPLIT_ALL_CLOSED` and the Builder refuses
+  the parent. Never add it to a pure tracker. Then, in one edit, remove `loom:triage` and `loom:curating` and add `loom:curated`.
 - **Split** an oversized issue per "Decomposing Oversized Issues", then park
   the parent on its children:
   `loom-daemon park-record apply --issue <N> --blocked-by <children> --by
-  curator --remove-label loom:triage --remove-label loom:curating`.
+  curator --remove-label loom:triage --remove-label loom:curating`. If the
+  parent body carries `<!-- loom:split-rescoped -->` alone on a line, remove
+  that line in the same edit that parks it (#15256; removing it is not the
+  content edit a `champion:revision-disposition` round forbids): the marker describes a
+  revision the new children supersede, and a stale one makes `forge parent
+  split-state` print `NOT_SPLIT` once the new children close, so the Builder
+  is re-dispatched onto an empty parent (the #13635 loop).
 - **Close** an obsolete, duplicate or wrong-approach one.
 - **A PO-level call**: `loom-daemon operator-decision apply` with 2-4 ranked
   options (`.loom/docs/operator-decision.md`), then remove `loom:triage`.

@@ -18,8 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
-from klayout_tools import post_route_sta
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
 from test_post_route_sta import (
     _LIVE_ONLY,
@@ -77,7 +76,7 @@ def _stub_openroad_multicycle(monkeypatch, blocks: dict) -> list[str]:
             )
         return fake_completed(returncode=0, stdout=stdout)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -270,7 +269,7 @@ def test_run_sta_without_run_failure_surfaces(tmp_path, monkeypatch):
             stdout=_mcp_block("MCP\t0\tmax\t1.0\tff_fb/D", "MCP\t0\tmin\t0.5\tff_fb/D"),
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     with pytest.raises(PostRouteStaError, match="openroad"):
         run_sta(request_path)
 

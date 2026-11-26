@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+from helpers.subprocess_fakes import patch_openroad_run
 from klayout_tools import place_and_route
 from klayout_tools.place_and_route import PlaceAndRouteError, run_place_and_route
 from test_place_and_route import (
@@ -44,7 +45,7 @@ def _record_stage_runs(monkeypatch) -> list[str]:
                     ran.append(stage)
         return base(cmd, **kwargs)
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return ran
 
 
