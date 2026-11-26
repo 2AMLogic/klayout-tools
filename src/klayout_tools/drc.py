@@ -94,6 +94,7 @@ from .drc_check_kinds import (
     rule_threshold_fields,
 )
 from .drc_layer_selection import (
+    cell_other_region,
     cell_primary_region,
     select_other_region,
     selection_empties_every_top_cell,
@@ -1382,7 +1383,7 @@ def _deck_layer_tuples(deck: Any) -> set[tuple[int, int]]:
         deck_layer_tuples.add(rule.layer)
         if rule.other_layer is not None:
             deck_layer_tuples.add(rule.other_layer)
-        deck_layer_tuples.update(_spec_layers(rule))
+        deck_layer_tuples.update(_spec_layers(rule) | set(rule.other_layer_subtract))
         if rule.derived_layer is not None:
             # `rule.layer` is only the derived rule's *reporting* identity
             # (see DerivedLayer's docstring) -- the layer(s) actually read
@@ -1625,7 +1626,7 @@ def _cell_check_regions(
     else:
         region = cell_primary_region(rule, cell, layer_index)
     other_region = (
-        select_other_region(rule, kdb.Region(cell.begin_shapes_rec(other_index)))
+        select_other_region(rule, cell_other_region(rule, cell, layout, other_index))
         if other_index is not None
         else (kdb.Region() if rule.require_containment else None)
     )
@@ -2924,16 +2925,15 @@ def _run_enclosing_adjacent_check(
 
 
 def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
-    """The ``(layer, datatype)`` pairs whose *shapes* ``rule`` actually reads.
+    """The ``(layer, datatype)`` pairs whose *shapes* ``rule`` actually
+    reads: its checked region, ``other_layer`` and any ``other_layer_subtract``.
 
-    Distinct from ``run_drc``'s own ``deck_layer_tuples`` (which also carries
-    every rule's ``layer`` unconditionally, since that is the rule's
-    reporting identity in ``violations[].layer``/``coverage`` even when the
-    checked region is derived from two other drawn layers): a
-    ``derived_layer`` rule reads ``derived_layer.base``/``intersect_with``,
-    *not* ``layer``. Used by the ``coverage.voltage_domain_warnings`` gate
-    (issue #1110), which must reason about which geometry a rule really
-    applied a threshold to.
+    Distinct from ``run_drc``'s own ``deck_layer_tuples``, which also carries
+    every rule's ``layer`` unconditionally (its reporting identity in
+    ``violations[].layer``/``coverage``): a ``derived_layer`` rule reads
+    ``derived_layer.base``/``intersect_with``, *not* ``layer``. Used by the
+    ``coverage.voltage_domain_warnings`` gate (issue #1110), which must
+    reason about which geometry a rule really applied a threshold to.
     """
     layers = set()
     if rule.derived_layer is not None:
@@ -2944,7 +2944,7 @@ def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
         layers.add(rule.layer)
     if rule.other_layer is not None:
         layers.add(rule.other_layer)
-    return layers
+    return layers | set(rule.other_layer_subtract)
 
 
 def _validate_require_containment(rule: DrcRule) -> None:
@@ -3038,24 +3038,24 @@ def _validate_derived_layer(rule: DrcRule) -> None:
 
 def _validate_other_layer_selection(rule: DrcRule) -> None:
     """Reject a :class:`~klayout_tools.decks.DrcRule` whose
-    ``other_layer_selection`` this engine cannot apply (issue #2688): an
-    unknown value, or one set on a rule with no ``other_layer`` to select
-    from. Same "fail loudly with the rule id" contract as
-    :func:`_validate_derived_layer` (which owns the ``"union"``-needs-
-    ``intersect_with`` check alongside the other ``derived_layer`` mode
-    validation).
+    ``other_layer_selection`` or ``other_layer_subtract`` this engine cannot
+    apply (issues #2688, #7954): an unknown selection value, or either
+    modifier on a rule with no ``other_layer``. Same "fail loudly with the
+    rule id" contract as :func:`_validate_derived_layer`, which owns the
+    ``"union"``-needs-``intersect_with`` check among the ``derived_layer`` checks.
     """
     selection = rule.other_layer_selection
-    if selection is not None:
-        if selection not in _OTHER_LAYER_SELECTIONS:
-            raise DrcError(
-                f"rule '{rule.id}': unknown other_layer_selection "
-                f"'{selection}' (known: {', '.join(sorted(_OTHER_LAYER_SELECTIONS))})"
-            )
-        if rule.other_layer is None:
-            raise DrcError(
-                f"rule '{rule.id}': other_layer_selection requires other_layer"
-            )
+    if selection is not None and selection not in _OTHER_LAYER_SELECTIONS:
+        raise DrcError(
+            f"rule '{rule.id}': unknown other_layer_selection '{selection}' "
+            f"(known: {', '.join(sorted(_OTHER_LAYER_SELECTIONS))})"
+        )
+    for name, value in (
+        ("other_layer_selection", selection),
+        ("other_layer_subtract", rule.other_layer_subtract),
+    ):
+        if value and rule.other_layer is None:
+            raise DrcError(f"rule '{rule.id}': {name} requires other_layer")
 
 
 def _validate_layer_selection(rule: DrcRule) -> None:
