@@ -104,13 +104,7 @@ def _current_pins(
         options, engine, request_dir, require_include_dirs=False
     )
     fv._check_verilog_top_sdf(verilog_tb, sdf, doc.get("parameters"))
-    initial_state = fv._resolve_initial_state(
-        options, engine, request_dir, require_netlist=False
-    )
-    if initial_state is not None and sdf is not None:
-        raise fv.FunctionalVerificationError(
-            "options.initial_state cannot be combined with options.sdf"
-        )
+    fv._resolve_initial_state(options, engine, request_dir, require_netlist=False)
     fv._resolve_parameters(doc.get("parameters"))
     fv._resolve_env(doc.get("env"), verilog_top=verilog_tb is not None)
     fv._requires_tool_entries(doc.get("requires_tools"))

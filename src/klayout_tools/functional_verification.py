@@ -985,12 +985,10 @@ def _write_initial_state_shim(
     sources: list[str],
     hdl_toplevel: str,
     output_dir: str,
+    scope: str,
+    renamed: list[dict[str, str]],
 ) -> tuple[str, dict[str, Any]]:
-    """Derive the state elements of ``hdl_toplevel`` from the netlist and
-    write the generated ``klt_initial_state`` shim; returns ``(path, info)``
-    with ``info = {"state_elements", "d_nets", "clock"}``. A sequential cell
-    or hard macro the force-D drive cannot reach is a request error naming it
-    (the issue's "all flops" contract), never a silent skip."""
+    """Find flops in the original netlist and drive their elaborated names."""
     try:
         elements, unsupported = sequential_elements(
             initial_state["netlist"], sources, hdl_toplevel
@@ -1011,14 +1009,19 @@ def _write_initial_state_shim(
             "sequential cell (per request.sources' cell models)"
         )
     clock = _choose_initial_state_clock(elements, initial_state["clock"])
+    aliases = {entry["from"]: entry["to"] for entry in renamed}
+    if aliases:
+        for element in elements:
+            instance = element["instance"]
+            element["instance"] = aliases.get(instance, instance)
     path = os.path.join(output_dir, f"{INITIAL_STATE_MODULE}.v")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(
             build_initial_state_verilog(
                 mode=initial_state["mode"],
                 elements=elements,
-                scope=hdl_toplevel,
-                clock=clock,
+                scope=scope,
+                clock=aliases.get(clock, clock),
             )
         )
     info = {
@@ -2085,12 +2088,6 @@ def run_functional_verification(
     initial_state = _resolve_initial_state(
         request_doc.get("options"), engine, request_dir
     )
-    if initial_state is not None and sdf is not None:
-        raise FunctionalVerificationError(
-            "options.initial_state cannot currently be combined with "
-            "options.sdf -- not yet designed (the SDF build elaborates a "
-            "generated wrapper as the root and scans a single transcript)"
-        )
     parameters = _resolve_parameters(request_doc.get("parameters"))
     env = _resolve_env(request_doc.get("env"), verilog_top=verilog_tb is not None)
     tools = _resolve_requires_tools(request_doc.get("requires_tools"), env)
@@ -2380,9 +2377,11 @@ def run_functional_verification(
     if initial_state is not None:
         shim_path, initial_state_info = _write_initial_state_shim(
             initial_state,
-            sources=sources,
+            sources=run_inputs.source_paths,
             hdl_toplevel=hdl_toplevel,
             output_dir=output_dir,
+            scope=_sdf_annotate_scope(None) if sdf is not None else hdl_toplevel,
+            renamed=sdf_renamed,
         )
         sources = [*sources, shim_path]
         build_args += ["-s", INITIAL_STATE_MODULE]
@@ -2460,18 +2459,18 @@ def run_functional_verification(
             waves=trace_requested,
         )
     results_xml = run_specs[0]["results_xml"]
+    test_log = run_specs[0]["test_log"]
 
     sdf_dropped_counts: dict[str, int] = {}
     if sdf is not None:
-        # The hard gate (spike §3.3): every SDF failure mode -- unopenable
-        # file, unmatched instance, unmatched IOPATH, INTERCONNECT without
-        # `-ginterconnect` -- is *non-fatal*. Icarus prints a line, drops
-        # that annotation, and `vvp` exits 0; the regression then reports a
-        # perfectly clean PASS derived from a zero-delay run. Scanning both
-        # transcripts is the only signal there is, and it runs before the
-        # verdict is parsed so an annotation failure is reported as one
-        # rather than as a (misleadingly green) result.
+        # Icarus exits successfully even when annotation fails. Check every
+        # transcript before accepting the test verdict.
         diagnostics, scanned_dropped_counts = _scan_sdf_diagnostics(build_log, test_log)
+        # Each seed annotates the same build. Count benign drops once and
+        # retain actionable diagnostics from every seed.
+        for spec in run_specs[1:]:
+            extra, _ = _scan_sdf_diagnostics(spec["test_log"])
+            diagnostics.extend(extra)
         # The two dropped-class sources are disjoint by construction: the
         # transcript scan counts diagnostic *lines* Icarus emitted, while
         # `sdf_pre_dropped_counts` counts SDF *entries* removed before the
