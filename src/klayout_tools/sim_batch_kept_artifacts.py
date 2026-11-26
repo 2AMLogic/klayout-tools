@@ -4,11 +4,9 @@
 ``artifacts/`` tree home (``sim_batch._install_batch_artifacts``). Two things
 in it still describe the job instance rather than the host that asked:
 
-* Every corner deck ``.include``s the job's own copy of the netlist
-  (``/var/tmp/eda-job-<id>/inputs/netlist.cir``). Only ``outputs/`` is
-  collected, so that path never exists locally and a kept deck cannot be
-  re-run. :func:`rewrite_job_input_includes` points it at the netlist the run
-  was submitted from -- the same file a ``--backend local`` deck includes.
+* A corner deck can include the staged input netlist or a copy generated
+  for that corner. Local replay needs the submitted netlist or the collected
+  copy, with staged includes in the copy pointing to their original files.
 * A worker can report a log path even when collection omits the log.
   :func:`note_unretained_logs` checks each corner against the files copied
   from this job.
@@ -24,21 +22,24 @@ import os
 import posixpath
 import re
 import shutil
-from functools import partial
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .sim_batch_contract import BATCH_NETLIST_FILENAME, BatchError
+from .sim_batch_contract import (
+    BATCH_ARTIFACTS_DIRNAME,
+    BATCH_NETLIST_FILENAME,
+    BatchError,
+)
 from .sim_batch_hints import engine_log_not_retained
+from .sim_remote import _rewrite_remote_artifact_paths
 
-#: Files beside ``corner.cir`` that can name the job's netlist path.
-_SIBLING_FILES = ("netlist.expanded.cir", ".spiceinit")
+_GENERATED_NETLISTS = ("netlist.expanded.cir", "netlist.supply_waveforms.cir")
 
-#: An absolute ``.include``/``.inc`` line, bare or quoted, as the deck writers
-#: emit it (``.include {netlist_path}``). Job-side paths are POSIX.
-_INCLUDE_LINE = re.compile(
-    r"^[ \t]*\.(?:include|inc)[ \t]+(?P<quote>[\"']?)(?P<path>/[^\s\"']+)"
-    r"(?P=quote)[ \t]*\r?$",
+# Match only the directive and its argument, preserving trailing SPICE comments.
+_INCLUDE = re.compile(
+    r"""^(?P<lead>[ \t]*\.inc(?:lude)?[ \t]+)"""
+    r"""(?P<arg>"[^"\r\n]*"|'[^'\r\n]*'|[^\s;]+)""",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -94,23 +95,23 @@ def _read(path: Path) -> str | None:
         return None
 
 
-def _job_netlist_path(deck_text: str, expanded_path: str | None) -> str | None:
-    """The job-side netlist path ``deck_text`` includes: the first absolute
-    ``.include`` whose file is the staged netlist (``netlist.cir``). A token
-    path (``$REQUEST_DIR/...`` from ``options.portable_artifacts``) is not
-    absolute, so a portable record is left exactly as written."""
-    for match in _INCLUDE_LINE.finditer(deck_text):
-        if (
-            match["path"] == expanded_path
-            or posixpath.basename(match["path"]) == BATCH_NETLIST_FILENAME
+def _include_path(match: re.Match[str]) -> str:
+    arg = match["arg"]
+    return arg[1:-1] if arg[0] in "\"'" else arg
+
+
+def _job_netlist_path(deck: str, generated: dict[str, Path]) -> str | None:
+    for match in _INCLUDE.finditer(deck):
+        path = _include_path(match)
+        if path in generated or (
+            posixpath.isabs(path) and posixpath.basename(path) == BATCH_NETLIST_FILENAME
         ):
-            return match["path"]
+            return path
     return None
 
 
-def _quote_target(target: str, match: re.Match[str]) -> str:
+def _quote_target(target: str, original_quote: str) -> str:
     """Preserve the source delimiter when possible and protect spaces and comments."""
-    original_quote = match["quote"]
     if original_quote and original_quote not in target:
         return f"{original_quote}{target}{original_quote}"
     if not any(c.isspace() or c == ";" for c in target):
@@ -119,68 +120,99 @@ def _quote_target(target: str, match: re.Match[str]) -> str:
     return f"{quote}{target}{quote}"
 
 
+def _localize_staged_includes(
+    text: str, remote_inputs: str, sources: Callable[[], dict[str, str]]
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        arg = match["arg"]
+        directory, name = posixpath.split(_include_path(match))
+        if directory != remote_inputs:
+            return match[0]
+        original = sources().get(name)
+        if original is None:
+            return match[0]
+        quote = arg[0] if arg[0] in "\"'" else ""
+        return match["lead"] + _quote_target(original, quote)
+
+    return _INCLUDE.sub(replace, text)
+
+
+def _rewrite_corner(
+    deck: Path,
+    reported: str,
+    companions: dict[str, Path],
+    client_netlist: str,
+    remote_inputs: str,
+    include_sources: Callable[[], dict[str, str]] | None,
+) -> int:
+    deck_text = _read(deck)
+    if deck_text is None:
+        return 0
+    generated = {
+        posixpath.join(posixpath.dirname(reported), name): companions[name]
+        for name in _GENERATED_NETLISTS
+        if name in companions
+    }
+    job_path = _job_netlist_path(deck_text, generated)
+    if job_path is None:
+        return 0  # Includes portable token decks and absent generated siblings.
+    target = str(generated[job_path]) if job_path in generated else client_netlist
+    exact = re.compile(
+        r"""(?P<quote>["']?)""" + re.escape(job_path) + r"(?P=quote)(?![\w./-])"
+    )
+
+    rewritten = 0
+    for path in (deck, *companions.values()):
+        text = deck_text if path == deck else _read(path)
+        if text is None:
+            continue
+        updated = exact.sub(lambda m: _quote_target(target, m["quote"]), text)
+        if path.name in _GENERATED_NETLISTS and include_sources is not None:
+            updated = _localize_staged_includes(updated, remote_inputs, include_sources)
+        if updated != text:
+            with open(
+                path, "w", encoding="utf-8", errors="surrogateescape", newline=""
+            ) as fh:
+                fh.write(updated)
+            rewritten += 1
+    return rewritten
+
+
 def rewrite_job_input_includes(
     corners: list[dict[str, Any]],
     client_netlist: str,
     installed: dict[Path, Path],
     *,
     remote_root: str,
+    include_sources: Callable[[], dict[str, str]] | None = None,
 ) -> int:
-    """Point each installed corner deck's job-side netlist ``.include`` at
-    ``client_netlist``; return how many files were rewritten.
-
-    The job-side path is learned from the corner's own ``corner.cir`` (the
-    one generated, ``klt``-written deck), then replaced -- as an exact path,
-    never a pattern -- in that deck and in the ``netlist.expanded.cir`` /
-    ``.spiceinit`` beside it when they carry the same path. Decks are located
-    through ``artifacts.deck``. Each deck and sibling must be a file copied
-    from this collection. A corner with no deck, an unreadable deck, or no job-side
-    include is skipped. A worker-side reference to the retained expanded deck
-    is localized to that corner’s installed sibling. Model-library directives still
-    name the worker's PDK root.
-    """
-    client = os.path.abspath(client_netlist)
+    """Localize kept inputs using only files copied from this collection."""
+    # The batch harness stages flat inputs beside outputs/artifacts.
+    remote_inputs = posixpath.join(
+        posixpath.dirname(posixpath.dirname(remote_root)), "inputs"
+    )
     rewritten = 0
     for corner in corners:
         reported = (corner.get("artifacts") or {}).get("deck")
         if not isinstance(reported, str) or not posixpath.isabs(reported):
             continue
-        # The report supplies only a lookup key. All filesystem paths come
-        # from the current copy, including optional files beside the deck.
         relative = Path(posixpath.relpath(reported, remote_root))
         deck = installed.get(relative)
         if deck is None:
             continue
-        deck_text = _read(deck)
-        if deck_text is None:
-            continue
-        expanded = installed.get(relative.with_name("netlist.expanded.cir"))
-        remote_expanded = posixpath.join(
-            posixpath.dirname(reported), "netlist.expanded.cir"
+        companions = {
+            name: path
+            for name in (*_GENERATED_NETLISTS, ".spiceinit")
+            if (path := installed.get(relative.with_name(name))) is not None
+        }
+        rewritten += _rewrite_corner(
+            deck,
+            reported,
+            companions,
+            os.path.abspath(client_netlist),
+            remote_inputs,
+            include_sources,
         )
-        job_path = _job_netlist_path(deck_text, remote_expanded if expanded else None)
-        if job_path is None:
-            continue
-        target = str(expanded) if expanded and job_path == remote_expanded else client
-        exact = re.compile(
-            r"""(?P<quote>["']?)""" + re.escape(job_path) + r"(?P=quote)(?![\w./-])"
-        )
-        quote_target = partial(_quote_target, target)
-        siblings = (installed.get(relative.with_name(name)) for name in _SIBLING_FILES)
-        for path in (deck, *siblings):
-            if path is None:
-                continue
-            text = deck_text if path == deck else _read(path)
-            if text is None:
-                continue
-            updated = exact.sub(quote_target, text)
-            if updated == text:
-                continue
-            with open(
-                path, "w", encoding="utf-8", errors="surrogateescape", newline=""
-            ) as fh:
-                fh.write(updated)
-            rewritten += 1
     return rewritten
 
 
@@ -225,3 +257,34 @@ def note_unretained_logs(
         diagnostics.append(engine_log_not_retained(job_id))
         noted += 1
     return noted
+
+
+def install_batch_artifacts(
+    corners: list[dict[str, Any]],
+    *,
+    collected_dir: str,
+    artifacts_dir: str,
+    client_netlist: str | None = None,
+    include_sources: Callable[[], dict[str, str]] | None = None,
+    job_id: str | None = None,
+) -> None:
+    """Install kept worker files and localize their report and deck paths (#7905)."""
+    source = os.path.join(collected_dir, BATCH_ARTIFACTS_DIRNAME)
+    installed = {}
+    root = None
+    if os.path.isdir(source):
+        installed = copy_collected_tree(source, artifacts_dir)
+        root = recover_remote_root(corners, f"/{BATCH_ARTIFACTS_DIRNAME}/")
+    note_unretained_logs(corners, installed, remote_root=root, job_id=job_id)
+    if root is not None:
+        if client_netlist is not None:
+            rewrite_job_input_includes(
+                corners,
+                client_netlist,
+                installed,
+                remote_root=root,
+                include_sources=include_sources,
+            )
+        _rewrite_remote_artifact_paths(
+            corners, remote_root=root, local_root=artifacts_dir
+        )

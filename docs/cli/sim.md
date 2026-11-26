@@ -3276,19 +3276,17 @@ including failed corners and exit-3/4 jobs.
 
 What comes back for a kept corner, per corner directory: `corner.cir`, the
 engine log (`ngspice.log` / `xyce.log`) and, when the request needs them,
-`.spiceinit`, `netlist.expanded.cir` and the waveform files. Two things are made usable on
+`.spiceinit`, a generated netlist and the waveform files. Two things are made usable on
 the submitting host ([#7905](https://github.com/2AMLogic/klayout-tools/issues/7905)):
 
-- **The deck's netlist include.** The job-side `corner.cir` `.include`s the
-  job's own copy of the netlist (`/var/tmp/eda-job-<id>/inputs/netlist.cir`),
-  which is never collected. klt rewrites that one path, in the installed
-  `corner.cir` and in the `netlist.expanded.cir` / `.spiceinit` beside it
-  when they name it, to the netlist the run was submitted from (the file a
-  `--backend local` deck includes), so the include resolves locally. Only the
-  netlist include moves: `.lib` lines still name the worker's PDK root, so a
-  deck re-runs on a host whose PDK sits at the same path. When the worker
-  produced an expanded netlist, the deck points to the installed
-  `netlist.expanded.cir` beside it. Portable records keep their
+- **The deck's netlist include.** A kept `corner.cir` points to the submitted
+  netlist, or to the installed `netlist.expanded.cir` or
+  `netlist.supply_waveforms.cir` when the worker generated that copy for the
+  corner. These copies preserve the worker's include expansion and the
+  corner's swept supply levels. Includes of staged DUT files point back to
+  their original files on the submitting host, even when staging renamed
+  two files with the same basename. Replay still requires any worker-resolved
+  model libraries at their recorded paths. Portable records keep their
   `$REQUEST_DIR` and `$CORNER_DIR` tokens.
 
 - **A missing engine log is stated.** If a corner reports no log, or its

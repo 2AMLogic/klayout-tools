@@ -139,7 +139,11 @@ def test_rewrite_leaves_tokens_missing_expansions_and_foreign_decks_alone(tmp_pa
     foreign = tmp_path / "other" / "corner.cir"
     foreign.parent.mkdir()
     foreign.write_text(_deck())  # another job's tree: not in `corners`
+    stale = tmp_path / "local/scaled/netlist.supply_waveforms.cir"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("previous job")
     decks = {
+        "scaled": _deck(f"{REMOTE}/scaled/{stale.name}"),
         "portable": _deck("$REQUEST_DIR/netlist.cir"),  # a token, not a job path
         "retained": _deck(f"{REMOTE}/tt_27C/netlist.expanded.cir"),  # kept copy
         "other_file": _deck("/var/tmp/eda-job-1/inputs/models.spice"),
@@ -154,6 +158,7 @@ def test_rewrite_leaves_tokens_missing_expansions_and_foreign_decks_alone(tmp_pa
 
     for name, text in files.items():
         assert (local / name).read_text() == text
+    assert stale.read_text() == "previous job"
     assert foreign.read_text() == _deck()
 
 
