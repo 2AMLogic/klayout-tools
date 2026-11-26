@@ -1460,12 +1460,13 @@ PDK deck's `contact.not(sramcore)`.
 The subtraction is geometric — a cut straddling the marker keeps its
 unmasked part, which is still measured — and each marker is read through
 the hierarchy the way `other_layer` itself is. An absent marker layer is an
-empty region: nothing is subtracted and the rule is never skipped. The
-markers count as layers the rule reads (`coverage.deck_layers`, and the
-rule's input layers for `coverage.voltage_domain_warnings`) but never as its
-reporting layer, so the rule id, `violations[].layer` and the threshold are
-unchanged. A rule that subtracts without naming an `other_layer` is a
-`DrcError` that names the rule.
+empty region: nothing is subtracted and the rule is never skipped.
+`coverage.deck_layers` and the rule's `klt deck rules` entry both list the
+subtraction layers. A `Dualgate` shape overlapping only `SramCore` produces
+no CO.4 voltage-domain warning. Overlap with the checked `Comp` or `Contact`
+layers can still trigger the warning. CO.4 reports violations on `Comp` at
+its 0.07 µm enclosure threshold. A rule that subtracts without naming an
+`other_layer` raises a `DrcError` that names the rule.
 
 This exists because an *unscoped* version of some rules would be actively
 wrong, not merely conservative: gf180mcu's `mim.enclosing.via4.1`

@@ -1983,7 +1983,7 @@ def _voltage_domain_warnings(
         for rule in setup.deck:
             if _rule_outside_voltage_gate(rule, marker, skipped_rule_ids):
                 continue
-            unscoped_layers |= _rule_input_layers(rule)
+            unscoped_layers |= _voltage_warning_layers(rule)
         unscoped_layers &= stream_layer_tuples
         unscoped_layers.discard(marker)
         if any(
@@ -2924,16 +2924,12 @@ def _run_enclosing_adjacent_check(
     return kdb.EdgePairs(), bad_cuts
 
 
-def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
-    """The ``(layer, datatype)`` pairs whose *shapes* ``rule`` actually
-    reads: its checked region, ``other_layer`` and any ``other_layer_subtract``.
+def _voltage_warning_layers(rule: DrcRule) -> set[tuple[int, int]]:
+    """Layers whose overlap with a voltage marker can trigger a warning (#1110).
 
-    Distinct from ``run_drc``'s own ``deck_layer_tuples``, which also carries
-    every rule's ``layer`` unconditionally (its reporting identity in
-    ``violations[].layer``/``coverage``): a ``derived_layer`` rule reads
-    ``derived_layer.base``/``intersect_with``, *not* ``layer``. Used by the
-    ``coverage.voltage_domain_warnings`` gate (issue #1110), which must
-    reason about which geometry a rule really applied a threshold to.
+    A derived rule contributes its source layers. Subtraction masks only
+    select geometry on the other operand, so their shapes alone cannot
+    trigger the warning.
     """
     layers = set()
     if rule.derived_layer is not None:
@@ -2944,7 +2940,7 @@ def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
         layers.add(rule.layer)
     if rule.other_layer is not None:
         layers.add(rule.other_layer)
-    return layers | set(rule.other_layer_subtract)
+    return layers
 
 
 def _validate_require_containment(rule: DrcRule) -> None:

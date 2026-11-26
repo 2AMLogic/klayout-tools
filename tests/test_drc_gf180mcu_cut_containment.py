@@ -380,6 +380,31 @@ def test_co4_reads_a_sramcore_drawn_in_a_child_cell(tmp_path):
     assert _hits(run_drc(masked, "gf180mcu"), _CO4) == []
 
 
+@pytest.mark.parametrize(
+    "draw_mask,dualgate_box,expected",
+    [
+        pytest.param(True, (5500, 5500, 5600, 5600), [], id="mask-only"),
+        pytest.param(False, (5500, 5500, 5600, 5600), [], id="empty-space"),
+        pytest.param(True, (450, 450, 550, 550), ["55/0"], id="contact"),
+    ],
+)
+def test_co4_voltage_warning_ignores_mask_only_overlap(
+    tmp_path, draw_mask, dualgate_box, expected
+):
+    shapes = [
+        (COMP, (0, 0, 1000, 1000)),
+        (CONTACT, (390, 390, 610, 610)),
+        ((55, 0), dualgate_box),
+    ]
+    if draw_mask:
+        shapes.append((SRAMCORE, (5000, 5000, 6000, 6000)))
+    path = _layout(tmp_path, "voltage.gds", shapes)
+    coverage = run_drc(path, "gf180mcu", rules=[_CO4])["coverage"]
+    assert _CO4 in coverage["rules_checked"]
+    assert "108/5" in coverage["deck_layers"]
+    assert [w["marker"] for w in coverage["voltage_domain_warnings"]] == expected
+
+
 def test_sramcore_is_a_named_input_of_co4(tmp_path):
     """SramCore is a layer the deck reads: it is named, listed in
     `deck_layers`, and never reported as "in the stream without rules"."""
