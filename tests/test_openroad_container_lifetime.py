@@ -143,8 +143,9 @@ def test_only_the_dedicated_cidfile_supplies_container_identity(tmp_path):
     assert record["container_id"] is None
 
 
-def test_finish_reads_a_late_container_id(tmp_path, monkeypatch):
-    """A delayed cidfile is still reflected in the final record."""
+@pytest.mark.parametrize("keep_running", [False, True])
+def test_delayed_container_id_is_retained(tmp_path, monkeypatch, keep_running):
+    """A late cidfile reaches the final record, and the live record on a long run."""
     script = tmp_path / "run.tcl"
     script.write_text("# invoked script\n", encoding="utf-8")
     late: dict[str, str | None] = {}
@@ -164,10 +165,19 @@ def test_finish_reads_a_late_container_id(tmp_path, monkeypatch):
             return self.returncode
 
         def communicate(self, timeout=None):
-            late["container_id"] = json.loads(
-                next(tmp_path.glob("openroad-logs/*/invocation.json")).read_text()
-            )["container_id"]
+            snapshot = self.cidfile.with_name("invocation.json")
+            late["container_id"] = json.loads(snapshot.read_text())["container_id"]
             self.cidfile.write_text(STUB_CID)
+            if keep_running:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    record = json.loads(snapshot.read_text())
+                    if record["container_id"] == STUB_CID:
+                        break
+                    time.sleep(0.02)
+                record = json.loads(snapshot.read_text())
+                late["during"] = record["container_id"]
+                late["outcome"] = record["outcome"]
             return None, None
 
     monkeypatch.setattr(engine, "Popen", _LateMarkerProc)
@@ -178,6 +188,9 @@ def test_finish_reads_a_late_container_id(tmp_path, monkeypatch):
         container_id_wait_s=0.0,
     )
     assert late["container_id"] is None
+    if keep_running:
+        assert late["during"] == STUB_CID
+        assert late["outcome"] == "running"
     assert result.engine_log["container_id"] == STUB_CID
     assert result.engine_log["outcome"] == "exited"
 
@@ -326,6 +339,63 @@ def test_termination_unwind_kills_and_retains_but_propagates_unchanged(
     )
     assert record["outcome"] == "interrupted"
     assert record["container_id"] == STUB_CID
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires SIGKILL")
+def test_driver_killed_after_late_cid_keeps_running_snapshot(tmp_path, monkeypatch):
+    import multiprocessing
+
+    script = tmp_path / "run.tcl"
+    script.write_text("# invoked script\n")
+    stop = tmp_path / "finish-worker"
+    stub = tmp_path / "openroad"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "cid = Path(os.environ['KLT_OPENROAD_CIDFILE'])\n"
+        "deadline = time.monotonic() + 20\n"
+        "while not cid.with_name('invocation.json').exists():\n"
+        "    if time.monotonic() >= deadline: raise SystemExit(1)\n"
+        "    time.sleep(0.02)\n"
+        "time.sleep(0.3)\n"
+        f"cid.write_text({STUB_CID!r})\n"
+        f"while not Path({str(stop)!r}).exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.02)\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("KLAYOUT_TOOLS_OPENROAD_BINARY", raising=False)
+    driver = multiprocessing.get_context("spawn").Process(
+        target=engine._run_openroad,
+        args=(str(script), str(tmp_path / "metrics.json")),
+        kwargs={"error_cls": RuntimeError, "container_id_wait_s": 0},
+    )
+    driver.start()
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            snapshot = next(tmp_path.glob("openroad-logs/*/invocation.json"), None)
+            if snapshot is not None:
+                record = json.loads(snapshot.read_text())
+                if record["container_id"] == STUB_CID:
+                    break
+            assert driver.is_alive()
+            time.sleep(0.03)
+        else:
+            pytest.fail("the running record never acquired the late container ID")
+
+        assert record["outcome"] == "running"
+        assert snapshot.with_name("container.cid").read_text() == STUB_CID
+        driver.kill()
+        driver.join(timeout=5)
+        assert driver.exitcode == -signal.SIGKILL
+        assert json.loads(snapshot.read_text()) == record
+    finally:
+        stop.touch()
+        if driver.is_alive():
+            driver.kill()
+        driver.join(timeout=5)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="os.getsid process groups")

@@ -36,7 +36,7 @@ from ._openroad_logs import (
     _CONTAINER_ID_WAIT_S,
     _captured_text,
     _LiveLogs,
-    _poll_container_id,
+    _track_container_id,
 )
 from ._openroad_process import _kill_openroad_run, _termination_signals
 from ._provenance import sha256_file
@@ -338,7 +338,7 @@ def _run_openroad(
 
     def stop(proc):
         # A cold pull may populate the cidfile after the launch-time poll.
-        container_id = logs.record["container_id"] or _poll_container_id(logs, proc, 0)
+        container_id = logs.record["container_id"] or logs.read_container_id()
         _kill_openroad_run(proc, container_id, invocation_id)
 
     thread_args = [] if threads is None else ["-threads", str(threads)]
@@ -371,11 +371,8 @@ def _run_openroad(
         try:
             arm_signals()
             logs.write_launch_snapshot()
-            container_id = _poll_container_id(logs, proc, container_id_wait_s)
-            if container_id:
-                logs.record["container_id"] = container_id
-                logs.write_launch_snapshot()
-            stdout, stderr = proc.communicate()
+            with _track_container_id(logs, proc, container_id_wait_s):
+                stdout, stderr = proc.communicate()
         except subprocess.TimeoutExpired as exc:
             stop(proc)
             _, record = retain("timed_out", None, exc.stdout, exc.stderr)

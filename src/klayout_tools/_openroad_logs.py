@@ -7,7 +7,10 @@ import os
 import re
 import stat
 import subprocess
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +45,43 @@ def _poll_container_id(
         ):
             return container_id
         time.sleep(_CONTAINER_ID_POLL_INTERVAL_S)
+
+
+@contextmanager
+def _track_container_id(
+    logs: _LiveLogs, proc: subprocess.Popen, initial_wait_s: float
+) -> Iterator[None]:
+    """Keep the running snapshot current while communicate drains both streams."""
+
+    def publish(container_id: str) -> None:
+        logs.record["container_id"] = container_id
+        logs.write_launch_snapshot()
+
+    first = _poll_container_id(logs, proc, initial_wait_s)
+    if first is not None:
+        publish(first)
+    if first is not None or logs.directory is None or proc.poll() is not None:
+        yield
+        return
+
+    stopped = threading.Event()
+
+    def watch_cidfile() -> None:
+        while not stopped.wait(0.2):
+            container_id = logs.read_container_id()
+            if container_id is not None:
+                publish(container_id)
+                return
+
+    watcher = threading.Thread(
+        target=watch_cidfile, name="openroad-cidfile", daemon=True
+    )
+    watcher.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        watcher.join()
 
 
 def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> None:
