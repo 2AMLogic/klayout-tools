@@ -6544,61 +6544,40 @@ def _param_only_targets(netlist_path: str, targets: list[str]) -> dict[str, list
             decl = _netlist_declarations(handle.read())
     except (OSError, UnicodeDecodeError):
         return {}
-    candidates = [
-        t
-        for t in targets
-        if t.strip().lower() in decl.params and t.strip().lower() not in decl.elements
-    ]
-    if not candidates:
+    if (decl.params - decl.elements).isdisjoint(t.strip().lower() for t in targets):
         return {}
-    if decl.includes:
-        included = _included_elements(netlist_path, decl.includes)
-        if included is None:
-            return {}
-        candidates = [t for t in candidates if t.strip().lower() not in included]
-    found: dict[str, list[str]] = {}
-    for target in candidates:
-        name = re.escape(target.strip().lower())
-        pattern = re.compile(rf"(?<![a-z0-9_]){name}(?![a-z0-9_])")
-        found[target] = sorted(
-            source
-            for source, spec in decl.voltage_specs.items()
-            if pattern.search(spec)
-        )
-    return found
+    param_only, _ = _classify_supply_targets(netlist_path, decl, targets)
+    return param_only
 
 
-def _unresolved_supply_targets(netlist_path: str, targets: list[str]) -> list[str]:
-    """The ``supply_v`` keys that name no element and no ``.param`` anywhere
-    in a fully resolved netlist closure (#2894), so ``alter <key>=<value>``
-    would silently address nothing.
+def _classify_supply_targets(
+    netlist_path: str, decl: _NetlistDeclarations, targets: list[str]
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Return parameter-only targets with source hints, and unknown supply names.
 
-    Same conclusiveness rule as :func:`_param_only_targets`: the top-level
-    file must be readable and every ``.include``/``.lib`` reference must
-    resolve, otherwise nothing is reported (the name may live in the part
-    the scan cannot see). Matching is case-insensitive. Hierarchical keys
-    (``x1.vdd``) address elements inside subcircuit instances, which the
-    top-level scan does not model, so they are never reported. ``.param``
-    names are left to :func:`_param_only_targets`."""
-    try:
-        with open(netlist_path, encoding="utf-8") as handle:
-            decl = _netlist_declarations(handle.read())
-    except (OSError, UnicodeDecodeError):
-        return []
-    included: set[str] = set()
-    if decl.includes:
-        resolved = _included_elements(netlist_path, decl.includes)
-        if resolved is None:
-            return []
-        included = resolved
-    return [
-        t
-        for t in targets
-        if "." not in t
-        and t.strip().lower() not in decl.elements
-        and t.strip().lower() not in decl.params
-        and t.strip().lower() not in included
-    ]
+    An incomplete include closure cannot establish that an element is absent.
+    Hierarchical names can address elements outside the top-level scan.
+    """
+    included = _included_elements(netlist_path, decl.includes)
+    if included is None:
+        return {}, []
+    elements = decl.elements | included
+    param_only: dict[str, list[str]] = {}
+    unknown: list[str] = []
+    for target in targets:
+        name = target.strip().lower()
+        if name in elements:
+            continue
+        if name in decl.params:
+            pattern = re.compile(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])")
+            param_only[target] = sorted(
+                source
+                for source, spec in decl.voltage_specs.items()
+                if pattern.search(spec)
+            )
+        elif "." not in name:
+            unknown.append(target)
+    return param_only, unknown
 
 
 def _param_target_hint(param: str, sources: list[str]) -> str:
@@ -6720,7 +6699,10 @@ def _validate_supply_override_targets(
                 "source as a plain DC value, or remove it from "
                 "corners.supply_v" + hint
             )
-    for target, sources in _param_only_targets(netlist_path, targets).items():
+    param_only, unknown = _classify_supply_targets(
+        netlist_path, _netlist_declarations(text), targets
+    )
+    for target, sources in param_only.items():
         raise SimError(
             f"corners.supply_v key {target!r} names a .param, not a source: "
             f"the netlist declares `.param {target}=...` and no element "
@@ -6730,7 +6712,7 @@ def _validate_supply_override_targets(
             "corner would silently simulate the nominal value). "
             + _param_target_hint(target, sources)
         )
-    for target in _unresolved_supply_targets(netlist_path, targets):
+    for target in unknown:
         raise SimError(
             f"corners.supply_v key {target!r} names no element and no .param "
             "in the netlist (including every .include/.lib it pulls in): "
@@ -6750,7 +6732,7 @@ def _validate_param_targets(
     ngspice's ``alterparam`` of an unknown name only logs ``parameter ... not
     found`` and carries on, which would let every corner simulate the
     nominal value and pass. Lexical, with the same conclusiveness rule as
-    :func:`_unresolved_supply_targets`: the scan covers the top-level file
+    :func:`_classify_supply_targets`: the scan covers the top-level file
     and its resolved ``.include``/``.lib`` closure, and when any reference
     cannot be read nothing is reported here -- :func:`_run_corner` still
     fails the corner if the engine itself rejects the target. A name only
