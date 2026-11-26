@@ -45,7 +45,7 @@ A lease record is an ordinary issue (or PR) **comment**, posted on the
 number a dispatch just claimed, at the moment `loom-daemon`'s dispatch path
 successfully flips that issue's label from `loom:issue` to `loom:building`.
 It follows the same HTML-comment-marker idiom already used elsewhere in this
-repo — `<!-- loom:standdown claim=… -->` (peer-claim standdown),
+repo — `<!-- loom:standdown claim=… -->` (standdown),
 `<!-- champion:hold-state head=… -->` (Champion's merge-risk hold) — so it
 is grep/dedup-detectable the same way those markers are, without needing a
 dedicated forge field.
@@ -81,7 +81,7 @@ The comment body's literal **first line** is the marker:
     derives the exact same value from the exact same salt, so "recognize my
     own claim" keeps working unchanged.
   - **It is NOT directly comparable** to the raw host identity used by
-    peer-claim advertisements (#4028) or cross-host collision-detection log
+    the safehouse completion ad or cross-host collision-detection log
     lines (#4085) — those are internal channels (the safehouse room, this
     daemon's own log file), not a public forge comment, so they are
     unaffected by #6322 and remain raw.
@@ -117,8 +117,8 @@ This is the load-bearing design decision, so it is worth stating plainly:
 `updated_at` timestamp — never from a timestamp written into the marker or
 prose text.**
 
-This differs deliberately from `peer_claims.rs`'s existing TTL approach,
-which timestamps a claim at local receipt and corrects for clock skew
+This differs deliberately from the TTL approach of the retired safehouse
+peer-claim channel (#13945), which timestamped a claim at local receipt and corrects for clock skew
 between hosts because there is no shared clock in that channel. A forge
 comment does not have that problem: every host reads the *same* `updated_at`
 value, assigned by the forge server itself, for the same comment. Using it
@@ -214,13 +214,19 @@ a *released* fleet sweep's lease (last renewed 12:14:54Z, claim dropped
 a fresh lease"), `lease ensure` stopped there, and no attended lease ever
 appeared; when the leftover aged out, another host's recovery correctly found
 only a stale lease and reclaimed at 12:35:51Z. Now an exit 4 or 2 spawns one
-detached **deferred publisher** per issue per checkout. It re-runs the same
-publish (same trusted format, same peer rules, so a live peer is never
-superseded) every 60 s, slowing to 300 s once the peer has outlived the TTL. It
-stops when a publish settles (then starts the normal renewer with the time left
-of the original cap), when the watched session dies, or at the cap. Every
-outcome is appended to `.loom/logs/lease-ensure/issue-<N>.log`. An attended
-lease's sweep id is stable per watched session
+detached **deferred publisher** per issue per checkout. It wakes every 60 s
+to retry the same publish (same trusted format and peer rules, so a live peer
+is never superseded), slowing to 300 s once the peer has outlived the TTL.
+Before an eligible retry, it checks for an open PR linked to the issue in the
+repository where it would publish. If it finds one, it logs the PR number and
+stops. If the probe cannot determine whether such a PR exists, it skips that
+wake without attempting a publish or starting a renewer. The publisher also
+stops when an attempt settles, the watched session ends, or the original age
+cap is reached. A renewer started after publication gets only the time
+remaining under that cap. Repeated indeterminate probes can exhaust the cap
+before any deferred publish attempt. Every outcome is appended to
+`.loom/logs/lease-ensure/issue-<N>.log`. An attended lease's sweep id is stable
+per watched session
 (`sweep-insession-s<pid>-<start-time>`), so a second `lease ensure` from the
 same session re-attaches to its own lease. Without that, the session's first
 lease would read as a live peer and block the second call. An in-session
@@ -434,8 +440,7 @@ lease comment on the issue via `gh api .../issues/N/comments`, and
 `id`s (never a locally-recorded timestamp) to decide whether *this*
 dispatcher's own comment is the earliest. A dispatcher that loses — a peer's
 lease comment has an earlier `id` — yields before spawning a builder or
-touching a worktree: it retracts its own peer-claim advertisement, releases
-its own claim lock, and posts a `<!-- loom:lease-yield ... -->` standdown
+touching a worktree: it releases its own claim lock, and posts a `<!-- loom:lease-yield ... -->` standdown
 annotation, but deliberately leaves the shared `loom:building` label alone
 (it is already correct — idempotent across both racing flips, and reverting
 it would destroy the winning claimant's only cross-host mutex out from under
@@ -500,11 +505,16 @@ the REST comments endpoint (NDJSON output across `--paginate` pages, the same
 #4637 workaround `SweepRegistry::read_lease_comments` uses), locally picks
 the one with the freshest `updated_at`, and confirms BOTH (a) that comment is
 still within `ttl_minutes` of now (default 15, same TTL Phase 2 uses) and (b)
-its `host=` field still names this sweep's own host. It is wired into the
+its `host=` field still names this sweep's own host (an optional
+`--sweep-id ID` — which the Builder recipe passes as `$LOOM_SWEEP_ID` when
+set, #15043 — additionally requires the lease's `sweep=` to equal `ID`, so
+same-host peer dispatches on a shared worker are told apart; callers
+omitting the flag keep host-only matching). It is wired into the
 Builder phase immediately before `git push` + opening the PR
 (`defaults/roles/builder-pr.md` § "Lease Fencing: Confirm You Still Own the
 Claim") — on either failure (expired AND owned by this sweep's own host,
-exit `3`; superseded by a *fresh* lease from a different host, exit `4`) the
+exit `3`; superseded by a *fresh* lease from a different host — or, with
+`--sweep-id`, a different dispatch on this same host — exit `4`) the
 Builder aborts before doing anything externally-visible, without touching
 the `loom:building` label or contesting the peer's claim. Absence of a
 matching lease comment, a malformed marker, a `gh` fetch failure, or an
@@ -743,6 +753,31 @@ the same lease semantics, **keyed by role**:
   unverifiable it marks its own lease released (one PATCH, no read) and exits
   5, which the engine records as `claim_unverified` and cools down for that
   item alone (#12252).
+- **A confirmed writer rate limit is named, not misreported (#13746).** Two
+  stand-downs used to read as something else when the writer credential was
+  rate-limited: an unverifiable write-scope probe answered "refusing to
+  write here", and a refused comment POST answered "could not post the lease
+  comment" — both `claim_unverified`, naming a read problem while the reads
+  were healthy. Now a confirmed primary rate limit at either writer call —
+  the permission probe or the POST — keeps exit 5 and writes nothing, but
+  says so: the final stderr line (and with it
+  `loom.dispatch.claim_stderr_tail`) names the stage
+  (`permission_probe`/`comment_post`), the HTTP status, the resource, the
+  safe credential ids (`app-<id>`, the installation id, when attributable)
+  and the UTC reset when one was confirmed from the scoped budget evidence
+  (the persisted bucket-book reading, else one free `rate_limit` probe of
+  the writer directory — never a poll per candidate). A secondary throttle,
+  a bare auth denial and an ordinary permission refusal keep their own
+  diagnostics. The claim also prints one bounded, typed handoff line on
+  stdout (`loom-claim-writer-limited <json>` — vendor output reaches only
+  stderr, so it cannot forge one); the daemon's preclaim parses that — and
+  nothing else — into the distinct `writer_rate_limited` refusal reason
+  (`loom.dispatch.reason`, the fleet worker-to-captain `refuse` token), which
+  cools no item down and arms a **route hold**: the work finder stops
+  drawing the held writer installation's candidates until the reset (rows
+  wait as `deferred_capacity`, naming the reason and reset), while healthy
+  other owners, read-only discovery and the global rate-limit breaker keep
+  their own behavior.
 - **Doctor activity guard (#12105).** The role key means a Doctor's `claim`
   sees only other Doctors. So before it posts, a Doctor also stands down
   (exit 7, nothing written) when another actor is working the PR: a live
@@ -788,11 +823,38 @@ the same lease semantics, **keyed by role**:
   earliest live lease, or if there is no evidence either way (an unreadable
   list, or a claimant on an older prompt that never leased). Exit 3 if its own
   lease is no longer live. Exit 4 if a peer's live lease is earliest.
-- **`release`** tombstones and signals the renewer, then rewrites the lease's
-  first line to `loom:pr-lease-released`. The claim frees at once, without
-  waiting out the TTL.
+- **`release`** tombstones and signals the renewer, then rewrites the lease
+  comment: its first line to `loom:pr-lease-released`, and its prose to the
+  released wording (#14807) — `reaped` when the role runner released it for a
+  claimant that ended without releasing — so a human reading the PR never sees
+  a live-looking claim behind a released marker. That lease stops blocking
+  immediately. Other live leases and any Judge no-verdict hold still apply.
 - **`check`** prints `PR_LEASE_STATE=free|held-self|held-peer|unknown`: the
   PR-phase shape of #11118's `claim_state(item)`.
+  This read-only command exits 0 for `free` or `held-self`, 4 for `held-peer`
+  (including the holder's host and sweep), and 5 for an unreadable lease list
+  (`unknown`). When a Judge has no live lease and the backstop holds the PR,
+  `check` exits 6 with `PR_LEASE_STATE=held-backstop` and
+  `PR_LEASE_BACKSTOP_UNTIL=<RFC3339>`. A gate-refusal
+  cooldown also includes `PR_LEASE_BACKSTOP_REFUSED=<token>`. A live lease
+  takes precedence. Other roles, a disabled backstop, and an unreadable PR
+  head report `free` when the lease is free.
+- **`backstop-clear` (the operator's release, #15096).** `loom-daemon lease pr
+  backstop-clear (--pr N | --all) --workspace <root>` releases Judge
+  no-verdict holds without a push or a label change: it rewrites each
+  **trusted** in-window no-verdict record on the PR at its current head from
+  `verdict=none` to `verdict=cleared` (a token no hold reader counts; the
+  rest of the marker — `head=`, `labels=`, `reaped=`, `refused=` — stays as
+  the audit trail). Records at another head, out of window, or from an
+  untrusted author are left alone. `--all` walks the open
+  `loom:review-requested` PRs `check` would answer `held-backstop` (an
+  active hold, no live Judge lease) and clears only those; a live lease or a
+  disabled backstop (`LOOM_JUDGE_BACKSTOP=0`) keeps it away. Exit 0 = done
+  (a `BACKSTOP_CLEAR pr=<n> cleared=<k>` line per PR); 1 = a read, the write
+  target or a rewrite failed. `loom-tools` refuses the verb — it is an
+  operator write verb of `loom-daemon`. The use case: after a runtime fault
+  that no-verdict-recorded many PRs at once is fixed, one command releases
+  them all instead of touching every PR.
 - **Judge no-verdict backstop (#11855).** A Judge `release` that finds the PR
   open, still `loom:review-requested` and carrying neither `loom:pr` nor
   `loom:changes-requested` appends `head=<sha> verdict=none labels=<digest>`
@@ -815,8 +877,9 @@ the same lease semantics, **keyed by role**:
   the first, four after the second, and after the third until the oldest of
   the last three is 24 h old, so an unchanged PR gets at most three Judge
   runs a day. A push, or a change to the `loom:*` label set, releases the
-  hold at once. Removing and re-adding the same label does not (the set is
-  unchanged); to force a re-review, push or run with
+  hold at once; so does `lease pr backstop-clear`, by rewriting the records
+  to `verdict=cleared`. Removing and re-adding the same label does not (the
+  set is unchanged); to force a re-review, push or run with
   `LOOM_JUDGE_BACKSTOP=0`, which turns the backstop off. An unreadable record
   list serves the PR. A pass a verdict gate refused (`post-verdict.sh` exit 7,
   e.g. the stale-read gate) releases with `--skip-reason gate-refused:<token>`
@@ -839,7 +902,20 @@ the same lease semantics, **keyed by role**:
   `reaped=timeout` appended, and with no CI exemption: a pass that burned the
   whole ceiling is the re-run the backstop exists to bound. Every host's next
   Judge is then held (1 h, 4 h, then the window), so a PR that keeps timing
-  out gets at most three Judge runs a day. Who runs next is still decided by
+  out gets at most three Judge runs a day. Not every reap reason records
+  (#14951): `seat_busy` (the seat refused the run),
+  `launch_rejected` (a typed `LOOM_LAUNCH_REJECTED` report, or an untyped
+  exit 78, a spawn script's preflight refusal, inside the fast-fail window
+  with no outcome line) and `provider_exhausted` (#13966: the run died on
+  the provider, not on the PR) each say the step never reached a review, so
+  its reap writes no no-verdict record at all and counts toward neither
+  the 1 h / 4 h ladder nor the window cap: the backstop bounds re-runs of
+  a Judge that ran and ended without a verdict (`exited`, `timeout`), not
+  a runtime fault unrelated to the PR. The skip goes further than the
+  release-side exemptions above: a gate-refused pass still writes a record
+  (`refused=<token>`) that holds the PR for only 15 minutes (#13135), and
+  a CI-exempt release skips the record only for a pass that ran — CI, not
+  a fault, is why it reached no verdict. Who runs next is still decided by
   the lease: concurrent reclaimers of the same stale claim each post a lease,
   and the earliest comment `id` is the only winner. Rules:
   `loom-daemon/src/pr_lease_reap.rs`.

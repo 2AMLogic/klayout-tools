@@ -118,16 +118,18 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 If no curated issues need promotion, check for well-formed proposals, with
 Priority 2's exclusions (see its note on why `loom:issue`/`loom:building` are
-required) and its REST listing. Also exclude `loom:curated`: a curated
-proposal is Priority 2's (a `--issue` step's under step dispatch), and the
-`--non-item` pass, which runs this query, must never evaluate one (#11922):
+required) and its REST listing. Also exclude `loom:curated` and `loom:triage`:
+a curated proposal is Priority 2's (a `--issue` step's under step dispatch),
+and the `--non-item` pass, which runs this query, must never evaluate one
+(#11922). A proposal Champion sent back to Curator (`loom:triage`) stays
+Curator's until it returns curated (#13906):
 
 ```bash
 # Architect proposals, Hermit proposals, Auditor bug reports
 HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen'); export HOLDS
 for P in architect hermit auditor; do
 gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:$P&state=open&per_page=100" \
-  | jq -rs --arg p "$P" '($ENV.HOLDS | split("\n")) as $h | add | map(select(.pull_request | not)) | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .created_at]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building","loom:curated") or IN($h[])) | not) |
+  | jq -rs --arg p "$P" '($ENV.HOLDS | split("\n")) as $h | add | map(select(.pull_request | not)) | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .created_at]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building","loom:curated","loom:triage") or IN($h[])) | not) |
   "#\(.number) \(.title) [\($p)]"'
 done
 ```
@@ -160,7 +162,7 @@ gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:blocked,loom:changes-
   | jq -rs 'add | .[] | select(.pull_request) | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
 ```
 
-Ignore any that also carry `loom:operator` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges or closes (Champion's only close authority is the proposal "premise-false close gate", `champion-issue-promo.md` Step 4, #7657 — never a PR).
+Ignore any that also carry `loom:operator` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges or closes (Champion's close authority is limited to the proposal "premise-false close gate", `champion-issue-promo.md` Step 4, #7657, and its own duplicate-digest issue reconcile, `champion-pr-merge.md` Per-PR Digest Step 0 — never a PR).
 
 ### Rollout Check Pass (every pass, max 3 items)
 

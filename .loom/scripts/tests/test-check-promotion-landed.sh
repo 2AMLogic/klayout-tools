@@ -190,6 +190,14 @@ if [[ "$1" == "forge" && "$2" == "promotion-author" ]]; then
   if [[ -f "$STUB_DIR_FROM_ENV/author-gate" ]]; then cat "$STUB_DIR_FROM_ENV/author-gate"; else echo TRUSTED; fi
   exit 0
 fi
+if [[ "$1" == "forge" && "$2" == "trusted-comments" && -f "$STUB_DIR_FROM_ENV/trust-corrupt" ]]; then
+  # #15253: the read "succeeds" (exit 0) but the payload is truncated JSON --
+  # exactly the shape the old `|| true` on the APPROVED_COMMENT lookup turned
+  # into a false "no verdict found" (DECISION=OK).
+  cat >/dev/null
+  printf '%s' '[{"user":{"login":"loom-fleet-dispatch[bot]","type":"Bot"},"author_association":"NONE","created_at":"2026-08-18T00:00:00Z","body":"**Champion Review: APPROVED**'
+  exit 0
+fi
 if [[ "$1" == "forge" && "$2" == "trusted-comments" && ! -f "$STUB_DIR_FROM_ENV/trust-verb-missing" ]]; then
   exec jq -c '[.[] | select(
       ((.author_association // "") | ascii_upcase | IN("OWNER","MEMBER","COLLABORATOR"))
@@ -270,12 +278,32 @@ reset_state() {
     rm -f "$STUB_DIR"/comment-fail-* "$STUB_DIR"/edit-fail-*
     rm -f "$STUB_DIR"/comment-writes.log "$STUB_DIR"/edit-writes.log
     rm -f "$STUB_DIR"/comments-fail-* "$STUB_DIR"/trust-verb-missing "$STUB_DIR"/author-gate "$STUB_DIR"/author-gate-fail
+    rm -f "$STUB_DIR"/trust-corrupt
 }
 
 run_sut() {
     OUT="$("$SUT" "$@" 2>"$STUB_DIR/stderr.log")"
     RC=$?
     ERR="$(cat "$STUB_DIR/stderr.log" 2>/dev/null || true)"
+    EDITS="$(cat "$STUB_DIR/edit-writes.log" 2>/dev/null || true)"
+    COMMENTS_POSTED="$(cat "$STUB_DIR/comment-writes.log" 2>/dev/null || true)"
+}
+
+# run_sut_ulimit0 <args...> -- run_sut under `ulimit -f 0` with SIGXFSZ
+# ignored (#15253): no process may write past byte 0 of any regular file,
+# which is what makes Bash fail the here-document temp-file materialization
+# it uses for >=64 KiB here-strings (the observed "cannot create temp file
+# for here-document: No space left on device", reproduced without root).
+# `ulimit` needs a subshell and a subshell loses run_sut's globals, so the
+# SUT's stdout and exit code are smuggled out through the subshell's own
+# stdout (any local file write would itself hit the limit); stderr goes to
+# /dev/null (a character device, immune to -f 0). ERR is set empty.
+run_sut_ulimit0() {
+    local captured
+    captured="$( ( trap '' XFSZ; ulimit -f 0; "$SUT" "$@" 2>/dev/null; printf '\n__RC=%s' "$?" ) )"
+    RC="${captured##*$'\n'__RC=}"
+    OUT="${captured%$'\n'__RC=*}"
+    ERR=""
     EDITS="$(cat "$STUB_DIR/edit-writes.log" 2>/dev/null || true)"
     COMMENTS_POSTED="$(cat "$STUB_DIR/comment-writes.log" 2>/dev/null || true)"
 }
@@ -655,6 +683,83 @@ run_sut --issue 503
 assert_eq "1" "$RC" "(t4) comment fetch failure -> exit 1"
 
 echo
+echo "--- #15253: a failed read is an environment error, never a false verdict ---"
+
+# (w1) The trusted-comment payload arrives TRUNCATED (the read itself exits 0,
+#      the JSON is unparseable) while a trusted APPROVED comment is present and
+#      loom:issue is absent: the APPROVED_COMMENT lookup's jq failure must exit
+#      1 with an ERROR diagnostic, never emit DECISION=OK, and under --apply
+#      issue no label edit and post no comment. Pre-#15253 the `|| true` on
+#      that lookup turned the failed parse into an empty result -> a false
+#      "no verdict found" (DECISION=OK, exit 0).
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated")" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance)")]" \
+  > "$STUB_DIR/issue-600.json"
+: > "$STUB_DIR/trust-corrupt"
+run_sut --issue 600 --apply
+assert_eq "1" "$RC" "(w1) truncated trusted-comments payload -> exit 1, not 0"
+assert_eq "" "$(get_field "$OUT" DECISION)" "(w1) no DECISION is emitted (never a false OK)"
+assert_contains "$ERR" "ERROR" "(w1) stderr carries the environment diagnostic"
+assert_eq "" "$EDITS" "(w1) --apply issues no label edit on a failed read"
+assert_eq "" "$COMMENTS_POSTED" "(w1) --apply posts no comment on a failed read"
+
+# (w2) Step 2's timeline payload arrives truncated while a trusted APPROVED
+#      comment is present and loom:issue is absent: the LATEST_LABELED_AT
+#      parse failure must exit 1, never fall through to a false MISMATCH (the
+#      unread timeline may well contain the `labeled loom:issue` event that
+#      would have proven the promotion landed) nor write anything.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated")" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance)")]" \
+  > "$STUB_DIR/issue-601.json"
+printf '%s' '[{"event":"labeled","created_at":"2026-08-18T00:05:00Z","label":{"name":"loom:issue"' > "$STUB_DIR/timeline-601.json"
+run_sut --issue 601 --apply
+assert_eq "1" "$RC" "(w2) truncated timeline payload -> exit 1, not 11"
+assert_eq "" "$(get_field "$OUT" DECISION)" "(w2) no DECISION is emitted (never a false MISMATCH)"
+assert_contains "$ERR" "ERROR" "(w2) stderr carries the environment diagnostic"
+assert_eq "" "$EDITS" "(w2) --apply issues no label edit on a failed timeline read"
+assert_eq "" "$COMMENTS_POSTED" "(w2) --apply posts no comment on a failed timeline read"
+
+# (w3) Temp-file write exhaustion with a >64 KiB trusted APPROVED comment
+#      present (#15253's live failure mode, reproduced without root): under
+#      `ulimit -f 0` with SIGXFSZ ignored, Bash cannot materialize a
+#      here-string >=64 KiB into its $TMPDIR temp file -- on the pre-#15253
+#      script that emptied APPROVED_COMMENT and reported DECISION=OK (exit 0)
+#      despite the trusted approval. Feeding jq over stdin pipes instead, the
+#      verdict is found and the ordinary MISMATCH (exit 11) is reported.
+reset_state
+BIG_PADDING="$(printf '%*s' 70000 '' )"; BIG_PADDING="${BIG_PADDING// /x}"
+issue_json "OPEN" "$(labels_json "loom:curated")" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "context: $BIG_PADDING")]" \
+  > "$STUB_DIR/issue-602.json"
+run_sut_ulimit0 --issue 602
+assert_eq "11" "$RC" "(w3) >64 KiB trusted APPROVED comment under ulimit -f 0 -> exit 11, never 0"
+assert_eq "MISMATCH" "$(get_field "$OUT" DECISION)" "(w3) DECISION=MISMATCH -- the approval is found, not falsely absent"
+assert_eq "" "$EDITS" "(w3) no label edit issued"
+assert_eq "" "$COMMENTS_POSTED" "(w3) no comment posted"
+
+# (w4) The healthy >64 KiB counterpart: a large comment thread with NO trusted
+#      APPROVED verdict still reports DECISION=OK / exit 0 -- the fail-closed
+#      guards must not turn a legitimate absence into an error.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated")" \
+  "[$(plain_comment "2026-08-18T00:00:00Z" "context: $BIG_PADDING")]" \
+  > "$STUB_DIR/issue-603.json"
+run_sut --issue 603
+assert_eq "0" "$RC" "(w4) >64 KiB comments with no APPROVED verdict -> exit 0"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(w4) DECISION=OK unchanged for the healthy no-match case"
+
+# (w5) mktemp itself fails (TMPDIR points at a nonexistent directory): an
+#      explicit environment error, exit 1 with an ERROR diagnostic -- not an
+#      opaque redirect failure later, and not any DECISION.
+reset_state
+TMPDIR="$STUB_DIR/no-such-tmpdir" run_sut --issue 604
+assert_eq "1" "$RC" "(w5) mktemp failure -> exit 1"
+assert_contains "$ERR" "ERROR" "(w5) stderr names the mktemp failure"
+assert_eq "" "$(get_field "$OUT" DECISION)" "(w5) no DECISION is emitted"
+
+echo
 echo "--- Doc pins: champion-issue-promo.md ships the reordered write-then-verify Step 3b and the Pass 0c reconciliation loop (#6862) ---"
 
 assert_doc_contains "$CHAMPION_MD" \
@@ -672,6 +777,22 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_contains "$CHAMPION_MD" \
     'in:comments "Champion Review: APPROVED" -label:loom:issue' \
     "Pass 0c's candidate search shortlists APPROVED-comment-without-loom:issue issues"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf '\''loom:blocked\nloom:operator\nloom:frozen'\''); export HOLDS  # Pass 0c' \
+    "Pass 0c resolves its hold list from the registry with Pass 0's HOLDS idiom and fallback (#13913)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'any(IN($h[])) or index("loom:building")' \
+    "Pass 0c's jq filter drops held and loom:building candidates before the rescan bound (#13913)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    '--limit 200 --json number,labels' \
+    "Pass 0c fetches labels so the jq filter can exclude permanent no-ops (#13913)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'The shortlist filter is a cost optimisation, not a guard' \
+    "Pass 0c states the filter is a cost optimisation and check-promotion-landed.sh keeps its checks (#13913)"
 
 assert_doc_contains "$CHAMPION_MD" \
     "#6862" \
