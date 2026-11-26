@@ -1,3 +1,6 @@
+---
+disable-model-invocation: true
+---
 # Sweep — Wave lifecycle (Modes A and B only — issue-set)
 
 > **Reference file for [`sweep.md`](sweep.md)**, the `/loom:sweep` dispatcher.
@@ -143,7 +146,7 @@ For each issue `N` in the wave, before any role skill is invoked:
      fi
      ```
    - **Step 1a — daemon self-claim check (#3823, flag added #4111). MANDATORY: evaluate this FIRST, for every issue in the wave, before the claim-CAS probe immediately below — not only when a `loom:building` label happens to be noticed on `N`.** Two equivalent signals, either sufficient on its own:
-     - `--claim-owned N` was present in this invocation's `$ARGUMENTS` (stripped during argument classification — see "Optional flags"), where `N` is the issue currently being pre-flighted; OR
+     - `--claim-owned N` was present in this invocation's arguments (stripped during argument classification — see "Optional flags"), where `N` is the issue currently being pre-flighted; OR
      - the env var `LOOM_SWEEP_CLAIM_OWNED` is set and equals `N`.
 
      If either is true for `N`: `SweepRegistry::dispatch` flipped `loom:issue → loom:building` on the forge *immediately before spawning THIS session* (for immediate external visibility of the claim), and told this session so directly through two independent channels — the flag is literally part of the prompt this session is reading, the env var is in this session's own process environment. The `loom:building` label on `N` is therefore **this session's OWN daemon claim**, full stop. **Do NOT skip (sole exception: the `loom:epic` skip above). Do NOT run the claim-CAS probe below for this issue.** Proceed straight to step 2 as if you had just claimed `N` yourself, and do **not** reason further about `loom:building` label timing, `loom-daemon status` output, PID tables, or worktree presence to "double-check" whether another worker owns it — issue #4111 is precisely a daemon-dispatched child that built a plausible, evidence-citing case that it was racing a competing worker using those exact signals, while the conclusive `--claim-owned`/`LOOM_SWEEP_CLAIM_OWNED` marker for its own issue sat unread the entire time. Once either signal names `N`, no other signal can override that ownership.
@@ -492,7 +495,14 @@ This section is the single home for the opt-in `--auto-stack` behavior. It is en
 # and EXCLUDES the `- [ ]` task-list form (not a stacking declaration).
 # Two-stage (#4508): select matching lines, tolerant of markdown emphasis/colon
 # before the first #N, then extract every #N on those lines.
-echo "$BODY" | grep -E '(Depends on|Requires)[*_:[:space:]]*#[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -u
+# The sed stage between them is the #14732/#14750 parent-reference rule, identical
+# to champion-common.md's extract_blocker_refs: a reference introduced by
+# `Part of` (case-insensitive, optionally followed by the one bounded word `Epic`)
+# names the issue's PARENT, not a stacking edge, and is masked before extraction —
+# keys off the introducing phrase, never the number, and admits no wider word run.
+echo "$BODY" | grep -E '(Depends on|Requires)[*_:[:space:]]*#[0-9]+' \
+  | sed -E 's/[Pp][Aa][Rr][Tt] [Oo][Ff][*_:.[:space:]]*([Ee][Pp][Ii][Cc][*_:.[:space:]]*)?([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+/ /g' \
+  | grep -oE '#[0-9]+' | tr -d '#' | sort -u
 ```
 
 A matched `#A` becomes a **stacking edge only when `#A` is also a member of this sweep invocation's own deduplicated candidate list.** A `Depends on #A` naming an issue **outside** the candidate set is left completely untouched — it is not an edge, it does not stack, and it flows through the existing `loom:blocked` handling exactly as today (this feature never touches out-of-set references). This "same-candidate-set only" restriction is load-bearing: it is what keeps auto-stack scoped to one sweep's own resolved set and prevents it from silently reaching out to arbitrary external issues.

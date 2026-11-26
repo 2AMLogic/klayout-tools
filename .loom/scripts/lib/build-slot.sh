@@ -115,27 +115,42 @@ _loom_build_slot_age_secs() {
 # Exit: 0 acquired, 1 all busy, 2 lock store unusable.
 _loom_build_slot_try_round() {
     local dir="$1" slots="$2" stale="$3"
-    local i path busy=0 err=0
+    local i path busy=0 err=0 vanished
     for (( i = 0; i < slots; i++ )); do
         path="$dir/slot-$i"
-        if mkdir "$path" 2>/dev/null; then
-            printf '%s\n' "$path"
-            return 0
-        fi
-        if [[ -d "$path" ]]; then
-            if (( $(_loom_build_slot_age_secs "$path") > stale )); then
-                rmdir "$path" 2>/dev/null || true
-                if mkdir "$path" 2>/dev/null; then
-                    printf '%s\n' "$path"
-                    return 0
-                fi
+        # #15157: `mkdir` losing to a peer and the follow-up `-d` test are two
+        # steps, so the peer's release (`rmdir`) can land between them. A path
+        # that is now ABSENT under a still-existing $dir means "released", not
+        # "unusable" — retry the mkdir. The bound lives here (not across rounds)
+        # because the caller runs this in a command substitution, so a counter
+        # cannot persist between rounds; a genuine permission failure exhausts
+        # it and still falls through to err=1 (degrade open, never a spin).
+        vanished=0
+        while :; do
+            if mkdir "$path" 2>/dev/null; then
+                printf '%s\n' "$path"
+                return 0
             fi
-            busy=$((busy + 1))
-        else
+            if [[ -d "$path" ]]; then
+                if (( $(_loom_build_slot_age_secs "$path") > stale )); then
+                    rmdir "$path" 2>/dev/null || true
+                    if mkdir "$path" 2>/dev/null; then
+                        printf '%s\n' "$path"
+                        return 0
+                    fi
+                fi
+                busy=$((busy + 1))
+                break
+            fi
+            if [[ ! -e "$path" && -d "$dir" ]] && (( vanished < 3 )); then
+                vanished=$((vanished + 1))
+                continue
+            fi
             # mkdir failed and the path is not a directory ⇒ the store itself is
             # unusable (no permission, missing parent, a FILE in the way).
             err=1
-        fi
+            break
+        done
     done
     if (( busy == 0 && err == 1 )); then
         return 2

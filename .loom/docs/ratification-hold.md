@@ -61,7 +61,10 @@ need no change), two deliberate differences:
 
 A release is scoped to a head. A later push that still declares ratification
 re-arms the hold: the text the operator released may not be the text now on the
-PR.
+PR. The re-arm is a fresh hold notice recording the new head (#14833) — the
+quiet `stands` answer is given only at the head the standing notice records —
+so the `champion:hold-state` marker that `merge-pr.sh --release-hold` reads
+never names a head the hold has moved off.
 
 ## Config
 

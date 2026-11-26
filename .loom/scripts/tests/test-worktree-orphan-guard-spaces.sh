@@ -60,19 +60,6 @@ source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-cleanup"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-YELLOW='\033[1;33m'
-
-# An assertion that CANNOT survive the port to Rust, retired under the
-# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
-# deleted: a reader must be able to see what was removed, why, and what proves
-# the property now. Counted as run so the totals stay honest.
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
 
 # run_cleanup <cwd> <issue>  — run the guard with cwd=<cwd>.
 # Echoes whatever the guard warns about, on stdout.
