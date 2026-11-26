@@ -1978,11 +1978,10 @@ def _read_worker_environment(
             ),
             "stamp_text": _bounded_str(pdk_in.get("stamp_text"), 1000),
             "models_staged": pdk_in.get("models_staged") is True,
-            # Issue #4020: ``stamp_*`` always describes the worker image's
-            # tree; under staged models that is not what the job executed.
-            "stamp_scope": "image"
-            if pdk_in.get("models_staged") is True
-            else "executed",
+            # Issue #4020/#7981: ``stamp_*`` always describes the worker
+            # image's tree, which staged models or a deck executing a
+            # declared input make differ from the model bytes that ran.
+            "stamp_scope": sim_batch_pdk.stamp_scope(pdk_in, request),
         }
         manifest_in = doc.get("image_manifest")
         manifest: dict[str, Any] | None = None
