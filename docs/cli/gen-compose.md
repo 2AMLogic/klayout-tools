@@ -2260,8 +2260,11 @@ On either incomplete result the CLI exits with code 3. Top-level
 trial. Different trials may connect different subsets of the nets.
 
 The positive integer `routing.suggest_layers_budget` defaults to 32 and
-includes the baseline. Trials use temporary layouts. After the search, the
-chosen assignment or original request is written to the requested output path.
+includes the baseline. A trial counts even when its layer violates a width
+or landing-pad floor or its route collides with a requested pin stub. Trials
+use temporary layouts. If the original request hits one of these errors, the
+search can still publish a complete assignment. If it finds none, the CLI
+exits with code 1, reports the original error and preserves any existing output.
 Net names must be unique in suggestion mode so the assignment can be replayed.
 The `roles` list starts with higher planes, ascending from the primary layer,
 then lists lower planes in descending order. The variant's available routing

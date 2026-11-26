@@ -71,7 +71,7 @@ _STATUS_BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 def compose_with_layer_suggestions(
-    request: dict[str, Any], request_dir: str | None = None
+    request: dict[str, Any], variant: str, request_dir: str | None = None
 ) -> dict[str, Any]:
     """Run ``request``'s composition as a per-net layer-role search (#1962).
 
@@ -80,11 +80,10 @@ def compose_with_layer_suggestions(
     docstring's. Raises :class:`GenComposeError` for a malformed mode
     request (non-boolean flag, non-positive budget, an empty
     ``connectivity[]``, a routing spec carrying nothing but the suggestion
-    keys, or nothing left to search); every other request error is the
-    ordinary router's own, raised by the baseline run before the search
-    starts. Returns the ordinary compose response plus one additive
-    ``layer_suggestions`` block (``status``/``assignments`` on success,
-    ``status``/``unresolved_nets``/``note`` on failure).
+    keys, or nothing left to search). A layer-dependent failure on the
+    baseline counts as a rejected trial. If no complete assignment is found,
+    the search raises the original baseline error. Otherwise it returns an
+    ordinary compose report with an additional ``layer_suggestions`` block.
     """
     from .gen_compose import compose  # deferred: gen_compose imports this module
 
@@ -100,13 +99,13 @@ def compose_with_layer_suggestions(
         staged = _assignment_request(
             request, (), (), (), os.path.join(scratch, "baseline.gds")
         )
-        baseline = compose(staged, request_dir)
+        baseline = _trial_unrouted(staged, request_dir)
     searchable = tuple(
         index
         for index, entry in enumerate(connectivity)
         if entry.get("layer_role") is None
     )
-    if not baseline.get("unrouted_nets"):
+    if baseline == []:
         # Nothing to fix: the request already routes every net exactly as
         # written, so the answer is the empty mapping -- never a search.
         return _with_suggestions(
@@ -119,31 +118,28 @@ def compose_with_layer_suggestions(
                 "note": "the request routes every net as written",
             },
         )
+    baseline_error = baseline if isinstance(baseline, GenComposeError) else None
     if not searchable:
-        raise GenComposeError(
+        raise baseline_error or GenComposeError(
             "request.routing.suggest_layers: every connectivity[] net already "
             "names its own layer_role -- there is nothing to search"
         )
-    roles = alternative_routing_roles(
-        baseline["pdk"]["variant"], request["routing"]["layer_role"]
-    )
+    roles = alternative_routing_roles(variant, request["routing"]["layer_role"])
     if not roles:
-        raise GenComposeError(
+        raise baseline_error or GenComposeError(
             "request.routing.suggest_layers: routing.layer_role resolves to no "
             "alternative plane in this PDK variant's routing-metals stack -- "
             "no layer assignment to search"
         )
-    labels = [connectivity[index]["net"] for index in searchable]
     space = (len(roles) + 1) ** len(searchable)
 
     search = _search_for_assignment(
-        compose,
         request,
         request_dir,
         searchable,
         roles,
         budget,
-        list(baseline["unrouted_nets"]),
+        baseline if isinstance(baseline, list) else [],
     )
     common = {
         "nets_searched": len(searchable),
@@ -152,6 +148,7 @@ def compose_with_layer_suggestions(
         "roles": list(roles),
     }
     if search.winner is not None:
+        labels = [connectivity[index]["net"] for index in searchable]
         # Re-run the winning assignment once at the caller's own output
         # path, so the returned report and the written GDS are exactly what
         # replaying the suggestion through the ordinary command produces.
@@ -167,6 +164,8 @@ def compose_with_layer_suggestions(
                 **common,
             },
         )
+    if baseline_error is not None:
+        raise baseline_error
     note = (
         "every candidate was evaluated and none routed every net. "
         "unresolved_nets lists the nets left open in the closest trial. "
@@ -244,6 +243,24 @@ def _validated_connectivity(request: dict[str, Any]) -> list[dict[str, Any]]:
     return connectivity
 
 
+def _trial_unrouted(
+    candidate: dict[str, Any], request_dir: str | None
+) -> list[str] | GenComposeError:
+    """Return the open nets or the layer-dependent reason this trial was rejected."""
+    from .gen_compose import compose
+
+    try:
+        return list(compose(candidate, request_dir)["unrouted_nets"])
+    except GenComposeError as exc:
+        obstacle = (exc.details or {}).get("conflicts_with", {})
+        if isinstance(exc, LayerRuleError) or (
+            exc.code == CODE_CONFLICT and "net" in obstacle
+        ):
+            # Keep the diagnostic without retaining the trial's layout in its traceback.
+            return exc.with_traceback(None)
+        raise
+
+
 class _SearchOutcome(NamedTuple):
     """What one bounded candidate search found."""
 
@@ -258,7 +275,6 @@ class _SearchOutcome(NamedTuple):
 
 
 def _search_for_assignment(
-    compose: Any,
     request: dict[str, Any],
     request_dir: str | None,
     searchable: tuple[int, ...],
@@ -272,7 +288,7 @@ def _search_for_assignment(
     or a collision between a candidate route and a requested pin stub
     rules out that assignment. Fixed pin conflicts and I/O errors propagate.
     """
-    evaluated = 1  # the baseline run, whose unrouted nets seed best_unrouted
+    evaluated = 1  # The baseline spent one trial even when it raised an error.
     best_unrouted = baseline_unrouted
     winner: tuple[int, ...] | None = None
     covered_space = False
@@ -289,20 +305,13 @@ def _search_for_assignment(
                 output=os.path.join(workdir, f"candidate_{evaluated}.gds"),
             )
             evaluated += 1
-            try:
-                report = compose(candidate, request_dir)
-            except LayerRuleError:
+            unrouted = _trial_unrouted(candidate, request_dir)
+            if isinstance(unrouted, GenComposeError):
                 continue
-            except GenComposeError as exc:
-                obstacle = (exc.details or {}).get("conflicts_with", {})
-                if exc.code == CODE_CONFLICT and "net" in obstacle:
-                    continue
-                raise
-            unrouted = list(report.get("unrouted_nets") or [])
             if not unrouted:
                 winner = climbs
                 break
-            if len(unrouted) < len(best_unrouted):
+            if not best_unrouted or len(unrouted) < len(best_unrouted):
                 best_unrouted = unrouted
         else:
             # The generator ran out: every assignment in the space was
