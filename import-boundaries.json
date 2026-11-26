@@ -1219,7 +1219,8 @@
       "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.reset_coverage_cmd",
-        "klayout_tools.reset_coverage"
+        "klayout_tools.reset_coverage",
+        "klayout_tools.reset_coverage_models"
       ]
     },
     "socket_check": {

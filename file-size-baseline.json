@@ -540,10 +540,6 @@
       "lines": 614
     },
     {
-      "path": "src/klayout_tools/reset_coverage.py",
-      "lines": 527
-    },
-    {
       "path": "src/klayout_tools/ring_check.py",
       "lines": 552
     },
