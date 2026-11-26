@@ -617,10 +617,11 @@ user entry *named* `klt_init_seed` is a request error (see
 - Flops whose `D` connects to the **same net** share one value (Icarus
   collapses connected ports into a single net); `environment.initial_state`
   reports `state_elements` (instances) and `d_nets` (independent draws).
-- A flop whose asynchronous reset is asserted during that first cycle simply
-  stays reset — which is the point: reset-covered flops are covered, and the
-  initial state decides the *unreset* ones (list those with `klt
-  reset-coverage`).
+- An asynchronous reset held through the first capture edge resets the flop.
+  If the reset is released before that edge, the flop can capture the
+  forced value. A synchronous reset that acts through `D` needs to remain
+  asserted until a capture edge after the drive releases `D`. Use
+  `klt reset-coverage` to list flops without a reset.
 - A value the testbench writes straight onto a flop's `D` net during that
   first cycle is lost on release; write stimulus after it. The testbench must
   drive a clock, and — for flops with a reset pin — keep that pin driven
@@ -629,17 +630,23 @@ user entry *named* `klt_init_seed` is a request error (see
   `D` or clock/enable pin are exit 1 naming the instance — never silently
   skipped. Memory-macro arrays are not initialised.
 - `engine: "verilator"` (no hierarchical `force` of cell-model pins) is exit 1,
-  as are the combinations with `options.sdf` and `--mutations` (not designed:
-  the SDF build elaborates a generated wrapper as the root; the isolated
+  as is the combination with `--mutations` (not designed: the isolated
   per-mutant builds do not carry the shim).
+
+**With `options.sdf`.** The power-up shim drives the DUT inside the SDF
+wrapper. It uses the elaborated name of each flop, including escaped
+instances renamed for annotation. Random mode runs all seeds against one
+annotated build. An actionable SDF diagnostic from any seed fails the run.
+`environment.sdf.dropped` counts benign diagnostics from the build and
+first run, so adding seeds preserves the count.
 
 **Response.** `environment.initial_state` is `null` unless requested; otherwise
 `{mode, seeds, netlist, clock, state_elements, d_nets, runs}` where `netlist`
 is the hashed `{path, scope, sha256}` envelope (#5784) and `runs`
 has one `{seed, status, results_xml}` per seed. For `random`, `tests` holds
 every seed's tests, each tagged `initial_state_seed`; `status` is `"fail"` if
-any seed failed, and the counts sum across seeds. `environment.results_xml`
-and `environment.random_seed` describe the first run.
+any seed failed, and the counts sum across seeds. `environment.results_xml`,
+`environment.test_log` and `environment.random_seed` describe the first run.
 A worked example is
 [`examples/functional-verification/initial-state/`](../../examples/functional-verification/initial-state/).
 
@@ -1880,7 +1887,7 @@ absolute path enters the report; `[]` when absent. Works with `--mutations`. Def
 | `pdk.cell_library` | string | Required when a `pdk` block is present (issue #5782). The standard-cell library whose behavioural Verilog models (`libs.ref/<cell_library>/verilog/`) are prepended to `sources` in dependency order — see "Gate-level cell models: `request.pdk`". |
 | `pdk.variant` | string \| null | Optional. PDK variant to resolve the install for (e.g. `sky130A`); `--pdk` overrides it. |
 | `pdk.root` | string \| null | Optional. Explicit install root, resolving against the request's own directory when relative (the same base every other path field uses); `--pdk-root` overrides it (resolved against the cwd, the sibling-verb convention). Pinning it is also the fix the `pdk_ambiguous_install` refusal's own message names. |
-| `options.initial_state` | object | Optional. Gate-level power-up state control, Icarus only (`mode`, `seeds`, `netlist`, `clock`) — see "Gate-level power-up state: `options.initial_state`". Not combinable with `options.sdf` or `--mutations` (exit 1). |
+| `options.initial_state` | object | Optional. Gate-level power-up state control, Icarus only (`mode`, `seeds`, `netlist`, `clock`) — see "Gate-level power-up state: `options.initial_state`". Works with `options.sdf`. Not combinable with `--mutations` (exit 1). |
 | `options.trace` | boolean | Defaults to `false`. `true` turns on cocotb's own `Runner(waves=True)` on both the build and test steps for whichever engine ran — Icarus dumps `<hdl_toplevel>.fst`, Verilator dumps `dump.vcd` — and the resulting file is contracted in the response's `trace` field, ready to hand to [`klt wave build`](wave.md). Not engine-restricted, unlike `options.coverage`/`options.sdf`: both engines have a waveform-dump path through cocotb. Not currently combinable with `--mutations` (exit 1) — see "Mutation testing: `--mutations`" → "Out of scope". |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. Non-empty together with `options.sdf` on Icarus is exit 1 (see "How the annotation is wired") -- the SDF top-level-port workaround elaborates a generated wrapper as the new `-s` root, and cocotb's parameter-override syntax would then silently target that wrapper instead of the real DUT. Echoed verbatim as `environment.parameters` (`{}` when absent; issue #5697), so a stored envelope states which parameterization it is evidence for -- a parameterized DUT swept over several sizes produces reports that differ in this field, not only in log hashes. On `--mutations` runs the echo rides the baseline report the mutation envelope reuses. Whether a future `run_identity` digest (issue #2097) folds in `parameters` is explicitly left to that design's follow-up; nothing here changes it. |
 
