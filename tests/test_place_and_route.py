@@ -2427,6 +2427,8 @@ def _stage_from_script_path(script_path: str) -> str:
     raise AssertionError(f"could not determine stage from {script_path}")
 
 
+_CLOCK_METRICS = {"clock__period_ns__636c6b": 1.1, "clock__registers__636c6b": 2}
+
 #: Real per-stage `-metrics` shapes, trimmed from issue #425's own live
 #: worked example (a real `openroad/orfs` Docker run against a real
 #: volare-fetched sky130A install, full floorplan->place->cts->route).
@@ -2672,10 +2674,9 @@ def _stub_openroad_success(
         Path(checkpoint_out).write_text("fake odb checkpoint\n")
 
         with open(metrics_path, "w", encoding="utf-8") as handle:
-            # Issue #1865: `stage_metrics` lets a test substitute a whole
-            # per-stage `-metrics` dump (e.g. OpenSTA's unconstrained
-            # `1e+39` sentinel) without rewriting the module-level default.
-            json.dump((stage_metrics or _STAGE_METRICS)[stage], handle)
+            json.dump(
+                {**_CLOCK_METRICS, **(stage_metrics or _STAGE_METRICS)[stage]}, handle
+            )
 
         stdout_lines = []
         if stage != "floorplan":
@@ -3675,6 +3676,7 @@ def _stub_openroad_success_with_post_route_spef(
     worst_slack_ns: float = -0.5,
     total_negative_slack_ns: float = -1.0,
     writes_sdf: bool | None = None,
+    stage_metrics: dict | None = None,
 ) -> None:
     """Layer the second, `_route_spef.tcl`-only `openroad` invocation on top
     of `_stub_openroad_success`'s existing per-stage fake -- that helper's
@@ -3687,7 +3689,7 @@ def _stub_openroad_success_with_post_route_spef(
     deliberately does not (OpenSTA reporting success while producing
     nothing), and `None` -- the default -- asserts no `write_sdf` line was
     generated at all."""
-    _stub_openroad_success(monkeypatch)
+    _stub_openroad_success(monkeypatch, stage_metrics=stage_metrics)
     base_fake_run = place_and_route.subprocess.run
 
     def fake_run(cmd, **kwargs):
@@ -4790,7 +4792,7 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
             checkpoint_out = _script_write_db_path(script_path)
             Path(checkpoint_out).write_text("fake odb\n")
             with open(cmd[-2], "w", encoding="utf-8") as handle:
-                json.dump(_STAGE_METRICS["floorplan"], handle)
+                json.dump({**_CLOCK_METRICS, **_STAGE_METRICS["floorplan"]}, handle)
             return fake_completed(returncode=0)
         return fake_completed(
             returncode=1, stderr="[ERROR PPL-0001] no valid pin placement found\n"
@@ -6650,7 +6652,7 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
         with open(cmd[-2], "w", encoding="utf-8") as handle:
-            json.dump(_STAGE_METRICS[stage], handle)
+            json.dump({**_CLOCK_METRICS, **_STAGE_METRICS[stage]}, handle)
         return fake_completed(returncode=0)
 
     patch_openroad_run(monkeypatch, fake_run)
@@ -6704,7 +6706,7 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
         with open(cmd[-2], "w", encoding="utf-8") as handle:
-            json.dump(_STAGE_METRICS["floorplan"], handle)
+            json.dump({**_CLOCK_METRICS, **_STAGE_METRICS["floorplan"]}, handle)
         return fake_completed(returncode=0)
 
     patch_openroad_run(monkeypatch, fake_run)
@@ -8310,14 +8312,11 @@ def test_cts_stage_guards_clock_tree_synthesis_against_zero_fanout_clock(
 
     cts_lines = _script_lines(_stage_script(request_path, "cts"))
 
-    guard_index = next(
-        i
-        for i, line in enumerate(cts_lines)
-        if line.startswith("set _klt_cts_seq_sinks [llength [all_registers")
+    guard_index = cts_lines.index(
+        "    if {[llength [all_registers -clock $clk]] > 0} {"
     )
-    assert "[get_clocks {clk}]]]" in cts_lines[guard_index]
-
-    if_index = cts_lines.index("if {$_klt_cts_seq_sinks > 0} {")
+    assert cts_lines.index("foreach clk [all_clocks] {") < guard_index
+    if_index = cts_lines.index("if {[llength $klt_cts_nets] > 0} {")
     cts_call_index = next(
         i for i, line in enumerate(cts_lines) if line.startswith("clock_tree_synthesis")
     )
@@ -12334,9 +12333,10 @@ def test_documented_asap7_tracks_example_validates_and_emits_issue_4493():
 
 
 def test_place_and_route_clock_lines_pin_units_issue_4089():
-    assert place_and_route._clock_lines("clk", 1.0) == [
+    lines = place_and_route._clock_lines("clk", 1.0)
+    assert [lines[0], lines[-1]] == [
         "set_cmd_units -time ns -capacitance pF",
-        "create_clock -name clk -period 1.0 [get_ports clk]",
+        "create_clock -name clk -period 1.0 $klt_root",
     ]
     assert place_and_route._clock_lines(None, None) == []
 
