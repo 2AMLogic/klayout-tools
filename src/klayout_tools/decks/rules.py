@@ -39,10 +39,9 @@ class DerivedLayer:
     margin, restricted to wherever the bottom-plate conductor (``Metal4``)
     already comes near it. Checking this rule against raw ``Metal4`` (the way
     ``mim.space.1`` approximates ``MIMTM.1``) would be actively wrong, not
-    merely conservative: ordinary ``Metal4``-``Via4``-``Metal5`` routing
-    anywhere in the layout would falsely trip it, since an unscoped
-    "``Metal4`` must enclose every ``Via4`` by the MiM margin" check has
-    nothing to do with routing vias at all.
+    merely conservative: ordinary ``Metal4``-``Via4``-``Metal5`` routing anywhere in the
+    layout would falsely trip it, since an unscoped "``Metal4`` must enclose every
+    ``Via4`` by the MiM margin" check has nothing to do with routing vias at all.
 
     ``mode`` selects *which* derivation is applied (see the values below).
     The default, ``"sized_intersection"``, is the original (issue #345) one:
@@ -199,15 +198,15 @@ class DerivedLayer:
     ``context_sized_by_um``, then the derived region is split by whole
     polygon with ``interacting`` (``context="near"``) or ``not_interacting``
     (``context="far"``). This is how a rule pair expresses gf180mcu's
-    ``NP.3``/``PP.5`` well-distance splits -- e.g. a ``PCOMP`` (``Comp`` AND
-    ``Pplus``) is held to the strict 0.16 um when it comes within 0.429 um
-    of an ``Nwell``/``Dnwell`` and to the relaxed value otherwise -- without
-    a third chained derivation. The two halves are an exact complement of
-    each other, so a polygon is never checked against neither or both.
-    Context layers absent from the stream contribute an empty region (every
-    polygon is then ``"far"``) and never cause the rule to be skipped.
-    Whole-polygon selection errs strict: a polygon that is only partly
-    within reach of the context is entirely ``"near"``.
+    ``NP.3`` well-distance split -- e.g. a ``PCOMP`` (``Comp`` AND ``Pplus``)
+    within 0.429 um of an ``Nwell``/``Dnwell`` keeps 0.16 um from ``Nplus``
+    and 0.08 um otherwise -- without a third chained derivation. The ``PP.5``
+    split selects edges instead (:class:`DrcRule.extension_spec`). The two
+    halves are an exact complement of each other, so a polygon is never
+    checked against neither or both. Context layers absent from the stream
+    contribute an empty region (every polygon is then ``"far"``) and never
+    cause the rule to be skipped. Whole-polygon selection errs strict: a
+    polygon that is only partly within reach of the context is ``"near"``.
 
     **Second context stage (issue #3682).** ``context2_layers`` /
     ``context2_sized_by_um`` / ``context2`` repeat the same partition as a
@@ -744,15 +743,11 @@ class DrcRule:
     (2) outside Nwell and DNWELL" -- both resolve to the *same* 0.16um
     value, so ``nplus.enclosing.comp.1`` needs no equivalent gate). Setting
     ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``) on
-    ``pplus.enclosing.comp.1`` matches this exactly: a layout drawing
-    neither has no shape this rule's 0.16um threshold can correctly apply
-    to, so the whole rule is skipped rather than evaluated at the wrong,
-    stricter threshold; one drawing *either* keeps the unchanged (still
-    approximate -- butting edges, ``euclidian`` vs. ``projection``; see the
-    rule's own comment in ``decks/gf180mcu.py``) flat 0.16um behaviour, the
-    gate being unable to narrow *which* ``PCOMP`` shapes are in which DRM
-    sub-case without the same unsupported three-input derivation. Defaults
-    to ``None``: no gate, so a rule skips only on a missing input layer.
+    ``pplus.enclosing.comp.1`` skips the strict check when neither layer
+    is present. If either is present, ``extension_spec`` selects the PCOMP
+    edge portions for the appropriate sub-case (#7969). See the rule in
+    ``decks/gf180mcu.py`` for remaining approximations.
+    Defaults to ``None``: no gate, so a rule skips only on a missing input layer.
 
     ``voltage_independent`` (issue #2369) opts a rule out of
     ``run_drc()``'s ``coverage.voltage_domain_warnings`` gate (issue #552/
@@ -850,6 +845,7 @@ class DrcRule:
     text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
     approximations: list[dict[str, str]] | None = None
     other_layer_subtract: tuple[tuple[int, int], ...] = ()
+    extension_spec: Any = None  # `drc_implant_extension.ImplantExtensionSpec` (#7969)
 
 
 class UnknownDeckError(Exception):

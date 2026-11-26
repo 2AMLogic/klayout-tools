@@ -2627,9 +2627,10 @@ splits `NP.3b`-`NP.3e`/`PP.3b`-`PP.3e` onto the stricter 0.16 µm everywhere;
 `nplus.enclosing.poly2.1`/`pplus.enclosing.poly2.1` measure every transistor
 gate rather than only the matching channel type, because the official
 `ngate`/`pgate` is a four-layer boolean; `nplus.enclosing.comp.1`/
-`pplus.enclosing.comp.1` apply the strict 0.16 µm to butted edges the
-official rules exclude, and use KLayout's default `euclidian` metric where
-`NP.5b`/`PP.5b` use `projection`). Each is called out explicitly in its
+`pplus.enclosing.comp.far.1` measure edges the official rules leave out --
+butted ones for `NP.5b`, `Nplus`-coincident ones for `PP.5di` -- and use
+KLayout's default `euclidian` metric where `NP.5b`/`PP.5di` use
+`projection`). Each is called out explicitly in its
 rule's docstring in `gf180mcu.py`; the threshold values used are always the
 real, unmodified DRM values, and every implant approximation errs strict
 (over-flagging), never permissive -- **with one exception, fixed in issue
@@ -2643,8 +2644,8 @@ substrate tap, confirmed a false positive against a real fetched
 the PDK's own deck. `pplus.enclosing.comp.1` now carries a
 `requires_any_layer` gate (`Nwell`, `Dnwell`): a layout drawing neither
 anywhere skips the rule entirely rather than misapplying the flat 0.16 µm,
-while a layout drawing either keeps the pre-#2634 behaviour (still subject
-to the butting-edge/`euclidian`-metric approximations above). Its mirror,
+while a layout drawing either is checked as "Edge-selected `PP.5`" below
+describes. Its mirror,
 `nplus.enclosing.comp.1`, needed no such gate: `NP.5b`'s own two
 sub-cases -- "(1) inside LVPWELL (2) outside Nwell and DNWELL" -- both
 resolve to the same 0.16 µm regardless of well context, verified the same
@@ -2655,18 +2656,37 @@ used to flag the substrate tap of every unmodified gf180mcu PDK
 `endcap`/`filltie` cell (`Pplus` 0.08 µm beyond the tap, `Nplus` 0.08 µm
 away, ~0.48 µm from the cell's `Nwell`), so a placed-and-routed digital macro
 could never reach a clean DRC. `nplus.space.pcomp.1` and
-`pplus.enclosing.comp.1` now cover only the *near-well* half of the official
+`pplus.enclosing.comp.1` cover only the *near-well* half of the official
 split -- a `PCOMP` (`Comp` AND `Pplus`) that comes within 0.429 µm of an
-`Nwell` or interacts with a `Dnwell` (guard band grown with
-`DerivedLayer.context`), at the strict 0.16 µm -- and two new rules,
-`nplus.space.pcomp.far.1` (`NP.3cii`, 0.08 µm) and
+`Nwell` or interacts with a `Dnwell`, at the strict 0.16 µm -- and two new
+rules, `nplus.space.pcomp.far.1` (`NP.3cii`, 0.08 µm) and
 `pplus.enclosing.comp.far.1` (`PP.5di`, 0.02 µm), cover the exact complement
 (including layouts that draw no well at all). The relaxation is applied only
-where the context is positively identified: selection is whole-polygon (a
-`PCOMP` only partly within reach stays strict), and the `DNWELL`/`LVPWELL`
-branches (`NP.3bii`, `PP.5ci`) are **not** relaxed -- anything within reach of
-a `Dnwell` stays on the strict near rule. The mirrored `pplus.space.ncomp.1`
+where the context is positively identified, and the `DNWELL`/`LVPWELL`
+branches (`NP.3bii`, `PP.5ci`) are **not** relaxed. For `nplus.space.pcomp.1`
+selection is whole-polygon (guard band grown with `DerivedLayer.context`; a
+`PCOMP` only partly within reach stays strict, and anything within reach of a
+`Dnwell` stays on the strict near rule). The mirrored `pplus.space.ncomp.1`
 and `nplus.enclosing.comp.1` keep the flat strict value.
+
+**Edge-selected `PP.5` (issue #7969).** `pplus.enclosing.comp.1` and
+`pplus.enclosing.comp.far.1` no longer select whole `PCOMP` polygons: each
+`PCOMP` edge portion is held to 0.16 µm (`PP.5b`, `PP.5dii`) or 0.02 µm
+(`PP.5di`) by its own context, as the foundry `rule_decks/pplus.drc` selects
+it, and a marker is the one offending edge portion. A `PCOMP` wholly outside
+`DNWELL` is split by a 0.429 µm band around a *pure* `Nwell` (one touching no
+`Dnwell`): the edge portions inside the band are the strict rule's, the rest
+the far rule's, so a tap with one edge near a well is no longer flagged on
+its far side -- the 434 outside-well markers of the #5084 corpus ledger. A
+`Pplus` edge portion coincident with an `NCOMP` edge is not measured, and
+both 0.16 µm checks use the `projection` metric, which removes the ledger's
+other 11. A `PCOMP` not wholly outside `DNWELL` is the strict rule's. Still
+strict: a `PCOMP` inside both `DNWELL` and `LVPWELL` (the untranscribed
+`PP.5ci`/`PP.5cii` split) or straddling a `DNWELL` boundary keeps the flat
+0.16 µm with `euclidian` metrics, and so does a `PCOMP` edge portion inside
+the band that coincides with an `Nplus` edge -- the butted-edge portion
+`PP.5dii` drops, which the far rule likewise still measures when `PP.5di`
+drops it, both with `euclidian` metrics (#7970).
 
 `DerivedLayer` also takes an optional **second context stage**
 (`context2_layers`, `context2_sized_by_um`, `context2`, issue #3682): the same
