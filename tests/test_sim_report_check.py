@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -174,6 +175,15 @@ def test_missing_file_drifts(tree):
     assert "not found" in result["checks"][1]["error"]
 
 
+def test_unusable_recorded_path_keeps_missing_file_diagnostic(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    _edit_report(report, lambda env: env["netlist_closure"][1].update(path="bad\0name"))
+    result = check_sim_report(report, root=str(tmp))
+    assert result["diagnosis"] == "indeterminate"
+    assert "not found" in result["checks"][1]["error"]
+
+
 def test_unreadable_include_reports_drift_and_checks_other_files(
     tree, monkeypatch, capsys
 ):
@@ -198,6 +208,47 @@ def test_unreadable_include_reports_drift_and_checks_other_files(
     assert failed["match"] is False and failed["actual"] is None
     assert inc.name in failed["error"] and "permission denied" in failed["error"]
     assert identity["match"] is False and identity["actual"] is None
+
+
+def test_lookup_permission_error_is_not_reported_as_a_missing_include(
+    tree, monkeypatch
+):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    real_stat = os.stat
+
+    def deny_lookup(path, *args, **kwargs):
+        if path == str(inc):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", deny_lookup)
+    top.write_text(".include models_a.spice\nr1 n1 0 2k\n")
+    result = check_sim_report(report, root=str(tmp))
+    assert (result["status"], result["diagnosis"]) == ("drifted", "indeterminate")
+    changed, inaccessible, identity = result["checks"]
+    assert not changed["match"] and changed["actual"] is not None
+    assert inaccessible["actual"] is None and identity["actual"] is None
+    assert str(inc) in inaccessible["error"]
+    assert os.strerror(errno.EACCES) in inaccessible["error"]
+
+
+def test_include_removed_during_hash_keeps_missing_file_diagnostic(tree, monkeypatch):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    original = sim_report_check.sha256_file
+
+    def disappear(path):
+        if path == str(inc):
+            raise FileNotFoundError(path)
+        return original(path)
+
+    monkeypatch.setattr(sim_report_check, "sha256_file", disappear)
+    result = check_sim_report(report, root=str(tmp))
+    assert result["diagnosis"] == "indeterminate"
+    assert result["checks"][1]["error"] == f"closure file not found: {inc}"
 
 
 def test_root_reanchors(tree, tmp_path_factory):
