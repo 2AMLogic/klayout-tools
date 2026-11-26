@@ -107,7 +107,7 @@ def _fail_if_openroad_invoked(monkeypatch) -> None:
         raise AssertionError(f"OpenROAD was invoked: {cmd[:2]}")
 
     monkeypatch.setattr(place_and_route.subprocess, "run", _refuse)
-    monkeypatch.setattr(_openroad_engine.subprocess, "run", _refuse)
+    monkeypatch.setattr(_openroad_engine, "Popen", _refuse)
 
 
 def _run_cli(request_path: str, def_path: str, *extra: str) -> int:
