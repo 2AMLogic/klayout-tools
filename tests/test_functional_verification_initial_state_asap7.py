@@ -272,6 +272,29 @@ def test_udp_spelling_preserves_the_drive_list(tmp_path, escaped):
     assert not unsupported
 
 
+@pytest.mark.parametrize("delay", ["#0", "#(0, 0)", "#((1-1), (2-2))"])
+@pytest.mark.parametrize("named", [False, True], ids=["anonymous", "named"])
+def test_delayed_udp_instances_preserve_the_drive_list(tmp_path, delay, named):
+    _stage_asap7(tmp_path)
+    models = tmp_path / "asap7_models.v"
+    models.write_text(
+        re.sub(
+            r"\b(altos_\w+)\s*\(",
+            lambda match: (
+                f"{match[1]} {delay}\n" + (f"inst_{match[1]} " if named else "") + "("
+            ),
+            models.read_text(),
+        )
+    )
+    drivable, unsupported = sequential_elements(
+        str(tmp_path / "asap7_drivable_net.v"),
+        [str(tmp_path / "asap7_udps.v"), str(models)],
+        "top",
+    )
+    assert [entry["instance"] for entry in drivable] == ["f0", "l0"]
+    assert not unsupported
+
+
 def _header_form(udps: str) -> str:
     """Move each state-holding UDP's output register into its port list."""
 

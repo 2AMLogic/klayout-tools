@@ -25,10 +25,8 @@ _PRIMITIVE_RE = re.compile(
 )
 _TABLE_RE = re.compile(r"\btable\b(.*?)\bendtable\b", re.S)
 _REG_DECL_RE = re.compile(r"\breg\b\s*(?:\[[^\]]*\]\s*)?([^;]+);")
-_ANON_INST_RE = re.compile(rf"{_STMT_START}({_IDENT})\s*\(", re.M)
 _MODULE_RE = re.compile(r"\bmodule\s+(\\?\S+?)\s*\((.*?)\)\s*;(.*?)\bendmodule\b", re.S)
 _DIR_RE = re.compile(r"\b(input|output|inout)\b\s*(?:\[[^\]]*\]\s*)?([^;]+);")
-_STMT_RE = re.compile(rf"{_STMT_START}({_IDENT})\s+(?:`\w+\s+)?({_IDENT})\s*\(", re.M)
 _COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
 _GATE_PRIMS = {"buf", "not"}
 _KEYWORDS = {
@@ -48,7 +46,7 @@ _KEYWORDS = {
 #: instance name (``altos_dff (q, v, clk, d)``); every other ``keyword (``
 #: shape -- ``if (…)`` in an ``always`` block, ``ifnone (…)`` in a ``specify``
 #: block -- is a statement, not an instance.
-_ANON_INST_EXCLUDE = _KEYWORDS | {
+_NON_INSTANCE_TYPES = _KEYWORDS | {
     "always",
     "begin",
     "case",
@@ -89,6 +87,18 @@ _ANON_INST_EXCLUDE = _KEYWORDS | {
     "wait",
     "while",
 }
+
+
+# Match the whole instance prefix once, including an optional gate/UDP delay
+# and instance name. The name may start on another line. Skip reserved words
+# before matching so a keyword cannot consume an instance on the next line.
+_RESERVED = "|".join(sorted(_NON_INSTANCE_TYPES))
+_DELAY_VALUE = r"(?:\([^;]*?\)|\\\S+|`?[\w$.'+-]+)"
+_INSTANCE_RE = re.compile(
+    rf"{_STMT_START}(?!(?:{_RESERVED})(?![\w$]))({_IDENT})\s*"
+    rf"(?:#\s*{_DELAY_VALUE}\s*)?(?:`\w+\s+)?(?:{_IDENT}\s*)?\(",
+    re.M,
+)
 
 
 class ResetCoverageError(Exception):
@@ -151,14 +161,8 @@ def _build_model(name: str, body: str, udps: dict[str, bool]) -> _CellModel:
     for direction, decl in _DIR_RE.findall(body):
         (inputs if direction == "input" else outputs).extend(_names(decl))
     model = _CellModel(name, inputs, outputs)
-    instances = [(t, n) for t, n in _STMT_RE.findall(body) if t not in _KEYWORDS]
-    # Gates and UDPs may be instantiated without an instance name
-    # (ASAP7: ``altos_dff (int_fwire_IQN, notifier, clk, d, xcr)``);
-    # module instances may not.
-    instances += [
-        (t, "") for t in _ANON_INST_RE.findall(body) if t not in _ANON_INST_EXCLUDE
-    ]
-    model.primitives = [t.lstrip("\\") for t, _ in instances]
+    instances = _INSTANCE_RE.findall(body)
+    model.primitives = [name.lstrip("\\") for name in instances]
     model.sequential = any(_is_state_udp(udps, t) for t in model.primitives)
     if model.sequential:
         for pin in inputs:
@@ -168,10 +172,10 @@ def _build_model(name: str, body: str, udps: dict[str, bool]) -> _CellModel:
     signal_inputs = [p for p in inputs if p not in _POWER_PINS]
     only_wires = instances and all(
         t in _GATE_PRIMS or t.split("$")[0].rsplit("__", 1)[-1] == "udp_pwrgood_pp"
-        for t, _ in instances
+        for t in instances
     )
     if only_wires and len(signal_inputs) == 1 and len(outputs) == 1:
-        model.passthrough_parity = sum(1 for t, _ in instances if t == "not") % 2
+        model.passthrough_parity = sum(1 for t in instances if t == "not") % 2
     return model
 
 
