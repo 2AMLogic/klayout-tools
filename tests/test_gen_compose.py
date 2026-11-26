@@ -2952,31 +2952,18 @@ def test_compose_labels_jogged_route_exactly_once_not_per_segment(tmp_path, pdk_
 def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
     tmp_path, pdk_root
 ):
-    # "tap" is a valid routable role but is neither a `metals[]` entry nor the
-    # deck's `poly` layer, so `_resolve_label_layer` finds no label convention
-    # for it -- the metal is still drawn, but no label, and a note explains
-    # why. (Since #210 gave `poly` a `poly_label`, poly no longer exercises
-    # this path; `tap` still does.)
-    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
-    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    import klayout.db as kdb
+
+    # Only tap geometry can make a direct landing on the unlabelled tap stripe.
+    bjt = _gen_block(tmp_path, pdk_root, "bjt_array", "bjt", add_collector_ring=True)
+    pins = [{"block": "b1", "port": "COLL_E"}, {"block": "b2", "port": "COLL_W"}]
     output = tmp_path / "unlabelled.gds"
     report = compose(
         {
             "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "blocks": [
-                {"id": "b1", "generator_report": r1},
-                {"id": "b2", "generator_report": r2},
-            ],
+            "blocks": [{"id": pin["block"], "generator_report": bjt} for pin in pins],
             "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 1.0},
-            "connectivity": [
-                {
-                    "net": "N1",
-                    "pins": [
-                        {"block": "b1", "port": "P2"},
-                        {"block": "b2", "port": "P1"},
-                    ],
-                }
-            ],
+            "connectivity": [{"net": "N1", "pins": pins}],
             "routing": {"layer_role": "tap", "width_um": 0.17},
             "options": {"cell_name": "unlabelled_0", "output": str(output)},
         }
@@ -2986,16 +2973,23 @@ def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
         "no PDK label-layer convention" in note for note in report["drc_hints"]["notes"]
     )
 
-    import klayout.db as kdb
-
     layout = kdb.Layout()
     layout.read(str(output))
     top = layout.cell("unlabelled_0")
     tap = layout.layer(65, 44)
-    paths = [s for s in top.shapes(tap).each() if s.is_path()]
-    assert len(paths) == 1  # metal still drawn
-    li1_pin = layout.layer(67, 5)
-    assert list(top.shapes(li1_pin).each()) == []  # but no label anywhere
+    (path,) = [s for s in top.shapes(tap).each() if s.is_path()]
+    stripe = kdb.Region(path.polygon)
+    # Check positive-area overlap with each placed ring at its reported port.
+    instances = sorted(top.each_inst(), key=lambda inst: inst.trans.disp.x)
+    for inst, pin in zip(instances, pins, strict=True):
+        port = next(p for p in bjt["ports"] if p["name"] == pin["port"])
+        assert (port["layer"]["layer"], port["layer"]["datatype"]) == (65, 44)
+        local = kdb.DPoint(port["x_um"], port["y_um"]).to_itype(layout.dbu)
+        point = inst.trans * local
+        landing = kdb.Region(kdb.Box(point, point).enlarged(1))
+        ring = kdb.Region(inst.cell.begin_shapes_rec(tap)).transformed(inst.trans)
+        assert not (stripe & ring & landing).is_empty()
+    assert list(top.shapes(layout.layer(67, 5)).each()) == []  # but no li1.pin label
 
 
 def test_compose_reports_unroutable_net_as_partial_success(tmp_path, pdk_root):
@@ -7374,14 +7368,14 @@ def test_resolve_via_drop_layer_bare_poly_gate_port_is_rejected():
     assert "gate_contact" in error
 
 
-def test_resolve_via_drop_layer_poly_route_layer_still_draws_directly():
-    # The rejection above is about the *pin's* layer, not the backbone's: a
-    # route whose own layer_role resolves outside the metals stack (e.g.
-    # "poly"/"tap") has no stack to walk and keeps drawing directly.
+def test_resolve_via_drop_layer_poly_route_to_a_metal_pin_is_rejected():
+    # The mirror of the rejection above (#7957): a backbone whose own layer_role
+    # resolves outside the metals stack (e.g. "poly"/"tap") has no stack to walk,
+    # and a pin *on* `deck.metals` is only overlapped, never contacted.
     deck = get_extraction_deck("sky130")
     ladder, error = _resolve_via_drop_layer(deck, deck.poly, (67, 20))
-    assert ladder is None
-    assert error is None
+    assert ladder is None and "routing.layer_role" in (error or "")
+    assert _resolve_via_drop_layer(deck, deck.poly, deck.poly) == (None, None)  # direct
 
 
 def test_resolve_via_drop_layer_adjacent_metals_resolves_the_via():
