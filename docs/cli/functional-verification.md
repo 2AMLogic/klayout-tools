@@ -827,8 +827,9 @@ neither is a module no retained delay lands in.
 
 A module-local SystemVerilog `timeunit` overrides the active
 `` `timescale `` for that module. Directives take effect in source order
-across files. `` `resetall `` restores the default. The cocotb path supplies
-the unit of `options.timescale` as its compiler default. The Verilog-bench
+across files. After `` `resetall `` or before the first directive, a module
+inherits the compilation-unit `timeunit`, then the compiler default. Cocotb
+supplies `options.timescale` as its compiler default. The Verilog-bench
 path requires a known HDL unit. For sources with macros, conditionals, or
 includes, the preflight runs the Icarus preprocessor with the build's
 include paths, defines, and per-source define wrappers. It refuses before

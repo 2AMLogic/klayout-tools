@@ -19,7 +19,8 @@ _NAME = r"(?:[A-Za-z_][\w$]*|\\\S+)"
 _TOKEN = re.compile(
     rf"\\\S+|`timescale\s+(?P<directive>{_UNIT})\s*/\s*{_UNIT}|`resetall\b"
     rf"|(?<![\w$])(?:module|macromodule)\s+(?:(?:static|automatic)\s+)?(?P<module>{_NAME})"
-    r"|(?<![\w$])(?P<end>endmodule)\b|(?<![\w$])(?P<local>timeunit)\b"
+    r"|(?<![\w$])(?P<scope>package|interface|program)(?![\w$])"
+    r"|(?<![\w$])(?P<end>endmodule)(?![\w$])|(?<![\w$])(?P<local>timeunit)(?![\w$])"
 )
 _LOCAL_DECLARATION = re.compile(rf"\s*(?P<unit>{_UNIT})\s*(?:/\s*{_UNIT}\s*)?;")
 # A module-local timeunit declaration precedes other module items. In a
@@ -39,6 +40,9 @@ def _check_build_args(args: list[str]) -> None:
         if arg in ("-D", "-I"):
             if next(operands, None) is not None:
                 continue
+        elif arg == "-T":
+            if next(operands, None) in ("min", "typ", "max"):
+                continue
         elif arg.startswith(("-D", "-I", "-W")) or arg in (
             "-g2012",
             "-g2005-sv",
@@ -48,6 +52,14 @@ def _check_build_args(args: list[str]) -> None:
             "-gno-std-include",
             "-gspecify",
             "-ginterconnect",
+            "-gassertions",
+            "-gsupported-assertions",
+            "-gno-assertions",
+            "-gstrict-expr-width",
+            "-gno-strict-expr-width",
+            "-Tmin",
+            "-Ttyp",
+            "-Tmax",
         ):
             continue
         raise FunctionalVerificationError(
@@ -120,18 +132,34 @@ def _active_sources(
     return [_hdl_code(output.stdout)]
 
 
+def _declared_unit(text: str, start: int) -> str | None:
+    value = _LOCAL_DECLARATION.match(text, start)
+    return "".join(value["unit"].split()) if value else None
+
+
+def _compilation_default(texts: list[str], compiler_default: str | None) -> str | None:
+    """A compilation-unit timeunit precedes design elements and spans source files."""
+    for text in texts:
+        for token in _TOKEN.finditer(text):
+            if token["module"] or token["scope"]:
+                return compiler_default
+            if token["local"]:
+                return _declared_unit(text, token.end())
+    return compiler_default
+
+
 def _local_unit(text: str, start: int, token: re.Match[str]) -> str | None:
     header = _MODULE_HEADER.match(text, start)
-    value = _LOCAL_DECLARATION.match(text, token.end())
-    if header is None or header.end() != token.start() or value is None:
+    if header is None or header.end() != token.start():
         return None
-    return "".join(value["unit"].split())
+    return _declared_unit(text, token.end())
 
 
 def _verilog_time_units(
     source_texts: list[str], default_unit: str | None
 ) -> dict[str, str | None]:
     """An inline timeunit overrides the active directive for that module only."""
+    default_unit = _compilation_default(source_texts, default_unit)
     units: dict[str, str | None] = {}
     directive = None
     module = None
@@ -148,11 +176,6 @@ def _verilog_time_units(
                 directive = None
             elif token["end"]:
                 module = None
-            elif token["local"]:
-                if module is None:
-                    # An out-of-module declaration might set the compilation
-                    # unit default. Only an explicit directive is certain now.
-                    default_unit = None
-                else:
-                    units[module] = _local_unit(text, header_start, token)
+            elif token["local"] and module is not None:
+                units[module] = _local_unit(text, header_start, token)
     return units

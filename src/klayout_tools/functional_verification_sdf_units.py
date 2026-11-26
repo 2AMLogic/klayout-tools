@@ -22,7 +22,8 @@ The unit each delay lands in, as Icarus elaborates it:
 * A module-local ``timeunit`` overrides the active directive for that
   module. Otherwise the unit is the last `` `timescale `` before its declaration, read
   across the sources in compile order: the directive persists from one file
-  into the next and `` `resetall `` restores the compile-time default.
+  into the next and `` `resetall `` restores the compilation-unit ``timeunit``,
+  falling back to the compile-time default when none was declared.
 * That default is the request's ``options.timescale`` unit on the cocotb
   path (cocotb's Icarus runner passes it as ``+timescale+<unit>/<precision>``)
   and nothing on the Verilog-bench path, which rejects ``options.timescale``.
