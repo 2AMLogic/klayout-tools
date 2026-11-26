@@ -300,7 +300,7 @@ Target: Core scaffolding, build setup, and initial feature implementation
 
 ## Getting Started
 
-*Documentation coming soon - this project uses [Loom](https://github.com/rjwalters/loom) for AI-powered development.*
+*Documentation coming soon - this project uses [Loom](https://github.com/2AMLogic/loom) for AI-powered development.*
 
 ## Development
 
@@ -322,7 +322,9 @@ MIT
 ```markdown
 # Work Plan
 
-Prioritized roadmap of upcoming work, maintained by the Guide role.
+Backlog snapshot from current GitHub label state, maintained by the Guide role.
+
+The body below is a snapshot of GitHub label state as of the last merged docs-maintenance PR — it may lag live labels until the next one merges. The `_Generated:` stamp at the top of the generated region dates the snapshot; `git log -1 -- WORK_PLAN.md` finds the merge that wrote it.
 
 <!-- Maintained automatically by the Guide triage agent. Manual edits are fine but may be overwritten. -->
 
@@ -340,7 +342,7 @@ Prioritized roadmap of upcoming work, maintained by the Guide role.
 
 ## Ready
 
-Human-approved issues ready for implementation (`loom:issue`).
+Human-approved issues (`loom:issue`) ready for implementation — excluding held (`loom:blocked`/`loom:operator`/`loom:frozen`), `loom:building`, and issues closed by an open `loom:pr` PR (listed under Approved).
 
 *None yet.*
 
@@ -372,10 +374,12 @@ Active epics with progress tracking.
 |------|-------|
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 0 |
+| Ready (`loom:issue`, net of holds/building/merge-pending) | 0 |
 
 **Note:** Initial backlog seeded from project bootstrapping. Issue numbers above are placeholders — update after GitHub issues are created.
 ```
+
+When generating `WORK_PLAN.md`, if the repo already keeps a hand-written roadmap (`ROADMAP.md` / `docs/ROADMAP.md` / `docs/roadmap.md`), add a line `Direction lives in the hand-written roadmap — see <path>.` right after the first preamble sentence. A freshly bootstrapped repo usually has none; then omit the line entirely (the Guide's convention).
 
 ### WORK_LOG.md Template
 
@@ -389,6 +393,8 @@ Entries are grouped by date, newest first. Each entry references the merged PR o
 <!-- Maintained automatically by the Guide triage agent. Manual edits are fine but may be overwritten. -->
 
 ## Archives
+
+## Entries
 
 ### {{TODAY_DATE}}
 

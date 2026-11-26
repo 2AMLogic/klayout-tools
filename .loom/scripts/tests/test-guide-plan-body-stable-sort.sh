@@ -29,7 +29,7 @@
 #
 # Verifies that:
 #   1. STRUCTURE: every `--jq` pipeline inside `render_plan_body()` carries
-#      `sort_by(.number)` (all 10 of them), and `approved_json` is sorted at
+#      `sort_by(.number)` (all 11 of them), and `approved_json` is sorted at
 #      the source so the `approved`/`held` split stays consistent.
 #   2. THE REGRESSION, executed rather than grepped: the REAL
 #      `render_plan_body()` (extracted from guide.md and eval'd against a
@@ -79,6 +79,9 @@ fi
 # the first line starting at column 0 after the opening line (its nested
 # `section()`/`count()` helpers are indented).
 RPB_BODY="$(awk '/^render_plan_body\(\) \{/{flag=1} flag{print} /^\}/{if(flag){exit}}' "$GUIDE_MD")"
+# #14785: render_plan_body() now calls the shared open-PR linkage helpers, so
+# they ride along in every eval of the extracted body.
+HELPERS_BODY="$(awk '/^open_pr_linkage_rows\(\) \{/{f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD"; awk '/^open_pr_annotation\(\) \{/{f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD")"
 
 # ---------------------------------------------------------------------------
 # Test 1: STRUCTURE — every forge listing in render_plan_body() sorts
@@ -93,7 +96,7 @@ fi
 pass "render_plan_body() body extracted from $GUIDE_MD"
 
 JQ_LINES="$(grep -c -- '--jq' <<<"$RPB_BODY")"
-assert_eq "$JQ_LINES" "10" "render_plan_body() has the expected 10 --jq forge pipelines"
+assert_eq "$JQ_LINES" "11" "render_plan_body() has the expected 11 --jq forge pipelines"
 
 UNSORTED="$(grep -n -- '--jq' <<<"$RPB_BODY" | grep -v 'sort_by(\.number)' || true)"
 if [[ -z "$UNSORTED" ]]; then
@@ -102,12 +105,13 @@ else
     fail "these --jq pipelines are missing sort_by(.number): $UNSORTED"
 fi
 
-# `approved_json` must be sorted AT THE SOURCE, so the `approved` and `held`
-# derivations (which share it, per #6457) can never disagree on order.
-if grep -A1 'approved_json=\$(' <<<"$RPB_BODY" | grep -q "sort_by(\.number)"; then
-    pass "approved_json is sorted at the source (covers both \$approved and \$held, #6457)"
+# #14785: the open-PR inventory must be sorted AT THE SOURCE, so the
+# `approved_json`/linkage derivations (which share it, per #6457) can never
+# disagree on order.
+if grep -A3 'pr_inventory=\$("\$GH_READ" pr list' <<<"$RPB_BODY" | grep -q "sort_by(\.number)"; then
+    pass "the open-PR inventory is sorted at the source (covers \$approved and \$held, #6457)"
 else
-    fail "expected approved_json's query to pipe through sort_by(.number)"
+    fail "expected the inventory query to pipe through sort_by(.number)"
 fi
 
 if grep -q '#6993' <<<"$RPB_BODY"; then
@@ -192,10 +196,12 @@ mk_fixtures() {
     _write pr-loom_review-requested.json \
         '{"number":6980,"title":"PR awaiting review A"}' \
         '{"number":6981,"title":"PR awaiting review B"}'
-    _write pr-loom_pr.json \
-        '{"number":6732,"title":"Approved PR held","labels":[{"name":"loom:pr"},{"name":"loom:operator"}]}' \
-        '{"number":6742,"title":"Approved PR free","labels":[{"name":"loom:pr"}]}' \
-        '{"number":6817,"title":"Approved PR held two","labels":[{"name":"loom:pr"},{"name":"loom:operator"}]}'
+    # #14785: the unlabelled open-PR inventory fixture (approved_json is now a
+    # filter of this fetch, not its own labelled query).
+    _write pr-.json \
+        '{"number":6732,"title":"Approved PR held","state":"open","labels":[{"name":"loom:pr"},{"name":"loom:operator"}],"closingIssuesReferences":[],"body":""}' \
+        '{"number":6742,"title":"Approved PR free","state":"open","labels":[{"name":"loom:pr"}],"closingIssuesReferences":[],"body":""}' \
+        '{"number":6817,"title":"Approved PR held two","state":"open","labels":[{"name":"loom:pr"},{"name":"loom:operator"}],"closingIssuesReferences":[],"body":""}'
     _write issue-loom_curated.json \
         '{"number":6612,"title":"Issue six-six-one-two"}' \
         '{"number":6613,"title":"resync orphan warning: distinguish formerly-shipped files"}'
@@ -216,9 +222,9 @@ mk_fixtures "$TMPROOT/order-b" b
 echo ""
 echo "Test 2: the real render_plan_body() is order-insensitive (#6993)"
 
-RENDER_A="$(LOOM_FIXTURE_DIR="$TMPROOT/order-a" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
-RENDER_A2="$(LOOM_FIXTURE_DIR="$TMPROOT/order-a" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
-RENDER_B="$(LOOM_FIXTURE_DIR="$TMPROOT/order-b" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+RENDER_A="$(LOOM_FIXTURE_DIR="$TMPROOT/order-a" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
+RENDER_A2="$(LOOM_FIXTURE_DIR="$TMPROOT/order-a" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
+RENDER_B="$(LOOM_FIXTURE_DIR="$TMPROOT/order-b" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
 
 if [[ -z "$RENDER_A" ]]; then
     fail "render_plan_body() produced no output against the fixtures (harness broken)"
@@ -291,7 +297,7 @@ echo "Test 5: edge cases (empty section, approved/held split, genuine changes)"
 # A label nobody carries must still render the section's `_None._` fallback
 # after sorting (`sort_by` on an empty array is an empty array, not an error).
 mkdir -p "$TMPROOT/order-empty"
-RENDER_EMPTY="$(LOOM_FIXTURE_DIR="$TMPROOT/order-empty" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+RENDER_EMPTY="$(LOOM_FIXTURE_DIR="$TMPROOT/order-empty" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
 EMPTY_SECTIONS="$(grep -c '^## ' <<<"$RENDER_EMPTY")"
 NONE_COUNT="$(grep -c '^_None\._$' <<<"$RENDER_EMPTY")"
 # Every section but "Backlog Balance" (which always renders its table) falls
@@ -311,7 +317,7 @@ assert_eq "$APPROVED_BODY" "#6732 #6742 #6817 " "approved PRs render in ascendin
 cp -r "$TMPROOT/order-a" "$TMPROOT/order-c"
 jq '. + [{"number":6615,"title":"A genuinely new ready issue"}]' \
     "$TMPROOT/order-a/issue-loom_issue.json" > "$TMPROOT/order-c/issue-loom_issue.json"
-RENDER_C="$(LOOM_FIXTURE_DIR="$TMPROOT/order-c" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+RENDER_C="$(LOOM_FIXTURE_DIR="$TMPROOT/order-c" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
 if [[ "$RENDER_A" != "$RENDER_C" ]]; then
     pass "a genuine label-state change (a new loom:issue) still changes the render"
 else

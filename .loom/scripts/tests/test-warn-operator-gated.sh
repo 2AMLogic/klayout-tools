@@ -168,6 +168,21 @@ assert_eq "4" "$out" "parses Depends on #A"
 out="$(parse_operator_gate_deps 'Blocked by #200')"
 assert_eq "" "$out" "Blocked by is NOT parsed (belongs to loom:blocked machinery)"
 
+out="$(parse_operator_gate_deps 'Part of Epic #2. Depends on #4')"
+assert_eq "4" "$out" "a Part-of-Epic parent on a mixed line is not a declared dependency (#14732/#14750)"
+
+out="$(parse_operator_gate_deps 'Part of #2. Depends on #4')"
+assert_eq "4" "$out" "a Part-of parent on a mixed line is not a declared dependency (#14732/#14750)"
+
+out="$(parse_operator_gate_deps 'Part of #2. Depends on #2')"
+assert_eq "2" "$out" "a parent declared again as a dependency IS a dependency (#14732/#14750)"
+
+out="$(parse_operator_gate_deps 'Part of Epic example-org/tool-repo#2. Depends on #4')"
+assert_eq "4" "$out" "a repo-qualified Epic parent is masked too (#14732/#14750)"
+
+out="$(parse_operator_gate_deps 'part of #2. Depends on #4')"
+assert_eq "4" "$out" "lowercase 'part of' phrase is masked (case agreement, #14732/#14750)"
+
 # =====================================================================
 echo
 echo "--- Title-prefix matcher: prefix at the true start, not a bare substring (#6391) ---"

@@ -62,7 +62,9 @@ run() {
         export STUB_LOG="$WORK/log" LIVE NOTE_POSTED; : >"$STUB_LOG"
         PR_NUMBER=555; GH_READ=gh_read
         PR_JSON='{"headRefOid":"abc1234","comments":[]}'
-        HOLD_BODY=""; MANUAL_RELEASE_SINCE_HOLD=false
+        # The sticky-hold precheck's outputs for "never held" — including
+        # HOLD_HEAD, which the head-scoped idempotency guard reads (#14833).
+        HOLD_BODY=""; HOLD_HEAD=""; MANUAL_RELEASE_SINCE_HOLD=false
         CONCERN_BULLET='- **Blast radius**: rewrites the merge gate.'
         BLOCKER_NUMBERS=""
         eval "$HOLD_BEHAVIOR" >/dev/null 2>&1

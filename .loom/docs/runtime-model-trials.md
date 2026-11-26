@@ -250,11 +250,11 @@ environment this adapter was built in, so the read/edit/test canary against a
 real model — #8561's last acceptance criterion — was **not** run, and no
 receipt of one was fabricated. It is tracked in **#8606**; the receipt it must
 produce has the same shape as
-[`native-harness-canary-2026-09-19.json`](https://github.com/rjwalters/loom/blob/main/docs/experiments/native-harness-canary-2026-09-19.json).
+[`native-harness-canary-2026-09-19.json`](https://github.com/2AMLogic/loom/blob/main/docs/experiments/native-harness-canary-2026-09-19.json).
 
 What *was* done instead is a **credential-free harness probe** of the real
 2.0.2 binary, recorded verbatim in
-[`docs/experiments/kimi-harness-probe-2026-09-22.json`](https://github.com/rjwalters/loom/blob/main/docs/experiments/kimi-harness-probe-2026-09-22.json):
+[`docs/experiments/kimi-harness-probe-2026-09-22.json`](https://github.com/2AMLogic/loom/blob/main/docs/experiments/kimi-harness-probe-2026-09-22.json):
 every claim this section makes about the CLI's flag surface, env family,
 model-selection routes and exit codes is an observation in that file. It is
 deliberately *not* filed as a canary — it proves the adapter targets the CLI
@@ -494,6 +494,16 @@ and no cooldown. A pool whose every account is at its cap fails closed at `78`
 with a diagnostic naming the cap. An account with no declared cap is
 unbounded, exactly as before #8424.
 
+A cap can also be declared in config —
+`runtimes.apiKeyLimits.<provider>.<account>.maxConcurrent`, with
+`exhaustionWindowSecs` beside it (#14932) — so a metered key's spend governor
+is reviewable and survives a rebuilt host. It is read from the calling
+workspace's resolved config; with both sources declaring a limit the stricter
+(smaller) cap wins and the config window wins; a malformed block withholds
+that provider's accounts like an unreadable `.limits.json`. `api-keys list`
+reports each limit's source. Full contract:
+[`configuring-resources.md`](configuring-resources.md) § Layer 4.
+
 In-flight holds are counted as one lease file per live spawn under
 `<provider>/.inflight/<account>/`, keyed on the spawning PID — which, because
 the spawn `exec`s, *is* the harness's PID for the whole run, so a lease is
@@ -503,6 +513,16 @@ default 4h). Unlike `.disabled`/`.bad_accounts.json`/`.limits.json` — which
 encode operator decisions and therefore fail *closed* — an unusable lease
 store degrades **open** and the spawn proceeds uncapped: a broken counter
 directory must not become an outage.
+
+A role draw checks the same cap before it picks, and a dispatching role tick
+also **reserves** the slot it picks (#14983): one file under
+`<provider>/.reserved/`, written under the same lock the selection counts
+under. A tick admits several runs of a role before any of them has started,
+and without the hold every one of those draws saw the last slot free. The
+launch's own selection ignores reservations and retires one when it takes its
+lease; a reservation no launch takes stops counting when the daemon that wrote
+it exits or after `LOOM_API_KEY_RESERVATION_STALE_SECS` (default 120). Sweep
+and phase dispatch do not reserve. This store degrades open too.
 
 **Syncing from an external secret source (#8511).** Everything above is a
 *per-host* registry an operator populates by running `add` on that host. That
@@ -815,7 +835,7 @@ A metered key is one credential shared across every fleet host, so no per-host
 mechanism can bound its aggregate spend; the decision on how that ceiling is
 imposed (provider-side hard ceiling first, observability-backend aggregation as a
 scoped fallback) is recorded in
-[`ADR-0020`](https://github.com/rjwalters/loom/blob/main/docs/adr/0020-fleet-metered-spend-ceiling.md).
+[`ADR-0020`](https://github.com/2AMLogic/loom/blob/main/docs/adr/0020-fleet-metered-spend-ceiling.md).
 
 **Kimi keeps its usage off the stdout stream entirely (issue #8564).** Unlike Pi
 and OpenCode, `kimi --output-format stream-json` carries **no** token counters:
@@ -869,7 +889,7 @@ Sources: [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-age
 [Z.ai OpenCode setup](https://docs.z.ai/devpack/tool/opencode),
 [OpenCode CLI](https://opencode.ai/docs/cli/).
 
-The [2026-09-19 canary receipt](https://github.com/rjwalters/loom/blob/main/docs/experiments/native-harness-canary-2026-09-19.json)
+The [2026-09-19 canary receipt](https://github.com/2AMLogic/loom/blob/main/docs/experiments/native-harness-canary-2026-09-19.json)
 records CLI versions, observed model/provider IDs, token counters, event hashes
 and independent results. Pi passed; OpenCode initially selected the wrong
 working directory under stale `PWD`, then passed after explicit directory

@@ -3,7 +3,7 @@
 #
 # Loom deletes worktrees from eight independent code paths (`loom-daemon
 # clean`, `clean --aggressive`, the daemon's periodic reaper, the daemon's
-# terminal-destroy path, `loom-recover-orphans`, `merge-pr.sh`'s post-merge
+# merge-observation pass, `loom-recover-orphans`, `merge-pr.sh`'s post-merge
 # cleanup, `worktree.sh remove`, `agent-destroy.sh`), each reporting to its own
 # sink. When a Builder's live worktree vanished mid-session (#5950, during
 # issue #5919) there was no single place to look for "what removed it?".
