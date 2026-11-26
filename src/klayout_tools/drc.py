@@ -93,6 +93,7 @@ from .drc_check_kinds import (
     _VERTEX_CHECKS,
     rule_threshold_fields,
 )
+from .drc_edge_band import edge_band_fields, run_edge_band_check, validate_edge_band
 from .drc_layer_selection import (
     cell_primary_region,
     select_other_region,
@@ -131,8 +132,8 @@ _NET_SPACE_CHECKS = {"net_space"}
 
 
 def _spec_layers(rule: DrcRule) -> set[tuple[int, int]]:
-    """Layers referenced by ``region_spec``/``net_spec``/``text_exempt``, if any."""
-    specs = (rule.region_spec, rule.net_spec, rule.text_exempt)
+    """Layers referenced by the rule's spec descriptors, if any."""
+    specs = (rule.region_spec, rule.net_spec, rule.text_exempt, rule.band_spec)
     return {layer for spec in specs if spec is not None for layer in spec.layers()}
 
 
@@ -1056,6 +1057,7 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                 },
                 "scope": rule.scope or None,
                 **rule_threshold_fields(rule, nominal_dbu_um),
+                **edge_band_fields(rule, nominal_dbu_um),
             }
         )
         if rule.scope:
@@ -1719,17 +1721,17 @@ def _edge_pairs_for_rule(
     other_region: Any,
 ) -> tuple[Any, Any]:
     """``(edge_pairs, outside_region)`` for an edge-pair-reporting ``rule``."""
+    if rule.band_spec is not None:
+        return run_edge_band_check(cell, setup, rule, region, other_region)
     if rule.check in _NET_SPACE_CHECKS:
         return _run_net_space_check(cell, setup.layout, rule, setup.dbu_scale), None
     if rule.check in _VERTEX_CHECKS:
-        # Vertex checks (issue #2642). Dispatched here rather than
-        # inside `_run_check` because neither reads `threshold_dbu`
-        # (and `"ongrid"` needs the layout's own `dbu`, which
-        # `_run_check`'s `dbu_scale` has already divided out) -- but
-        # both return the same `EdgePairs` shape, so everything
-        # downstream (bbox/polygon extraction, `rule_counts`,
-        # `violations[]`) is reused verbatim. Neither kind has an
-        # `outside_region` term.
+        # Vertex checks (issue #2642). Dispatched here rather than inside `_run_check`
+        # because neither reads `threshold_dbu` (and `"ongrid"` needs the layout's own
+        # `dbu`, which `_run_check`'s `dbu_scale` has already divided out) -- but both
+        # return the same `EdgePairs` shape, so everything downstream (bbox/polygon
+        # extraction, `rule_counts`, `violations[]`) is reused verbatim. Neither kind
+        # has an `outside_region` term.
         return _run_vertex_check(region, rule, setup.layout.dbu), None
     return _run_check(region, other_region, rule, setup.dbu_scale)
 
@@ -1809,31 +1811,29 @@ def _evaluate_rule(rule: DrcRule, setup: _DrcSetup, state: _DrcState) -> None:
     cell -- or record it in ``state.rules_skipped`` when an input is absent."""
     layout = setup.layout
 
-    # A `threshold_max_dbu` (#2370) attached to a check kind with no
-    # upper-bound branch is a deck-authoring mistake that must fail
-    # loudly, including on a stream where this rule's layer is absent
-    # (below) and the check itself never runs -- see
-    # `_validate_threshold_max`.
+    # A `threshold_max_dbu` (#2370) attached to a check kind with no upper-bound
+    # branch is a deck-authoring mistake that must fail loudly, including on a
+    # stream where this rule's layer is absent (below) and the check itself
+    # never runs -- see `_validate_threshold_max`.
     _validate_threshold_max(rule)
     _validate_require_containment(rule)
     _validate_other_layer_selection(rule)
     _validate_layer_selection(rule)
+    validate_edge_band(rule)
 
     # Gates that skip a rule before any layer resolution below -- see
-    # `_rule_skipped_before_evaluation` for each one and why. Like a
-    # missing `layer`/`other_layer`, they land the rule in
-    # `coverage.rules_skipped`; `_classify_skipped_rules` decides which
-    # reason code each one reports.
+    # `_rule_skipped_before_evaluation` for each one and why. Like a missing
+    # `layer`/`other_layer`, they land the rule in `coverage.rules_skipped`;
+    # `_classify_skipped_rules` decides which reason code each one reports.
     if _rule_skipped_before_evaluation(rule, layout):
         state.rules_skipped.append(rule.id)
         return
 
-    # For a `derived_layer` rule (#345), the region actually checked is
-    # computed from two *different* drawn layers (`derived_layer.base`/
-    # `intersect_with`) rather than `rule.layer`'s own raw shapes -- see
-    # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
-    # `coverage`/`layer_label` reporting below, never used to build the
-    # checked region in this branch.
+    # For a `derived_layer` rule (#345), the region actually checked is computed from
+    # two *different* drawn layers (`derived_layer.base`/`intersect_with`) rather than
+    # `rule.layer`'s own raw shapes -- see `DerivedLayer`'s docstring. `rule.layer`
+    # itself is resolved only for `coverage`/`layer_label` reporting below, never used
+    # to build the checked region in this branch.
     if _dispatch_region_rule(
         rule,
         layout,

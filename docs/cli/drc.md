@@ -341,7 +341,7 @@ also the order a `--rules` subset executes in.
 | `nominal_dbu_um` | The deck's nominal database unit in um; `threshold_dbu = threshold_um / nominal_dbu_um`. |
 | `rule_count` | Total registered rules in the deck. |
 | `groups.check` / `groups.scope` | Rule counts per check kind and per non-empty `scope` (the existing `DrcRule.scope` metadata `coverage.deck_scope` is built from), sorted by key. |
-| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `scope` (`null` when unset), `threshold_um` / `threshold_max_um` (the rule's distance threshold and optional upper bound in um; `null` for check kinds without a single distance threshold — `area`, `density`, `antenna`, `ongrid`, `angle`, `comp_coverage`, `tap_distance` — and `threshold_max_um` is `null` unless the rule has an upper bound). Pin a threshold to a deck via `provenance.deck.content_hash`. |
+| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `edge_band` (`{context_layers, exclude_layers, band_width_um, inner_threshold_um}`, present only on a rule that declares `DrcRule.band_spec` — gf180mcu's `nplus.enclosing.comp.1`, whose `threshold_um` is the band's limit and whose interior allows `inner_threshold_um`; see "Well-band split of `nplus.enclosing.comp.1`" in the gf180mcu section below), `scope` (`null` when unset), `threshold_um` / `threshold_max_um` (the rule's distance threshold and optional upper bound in um; `null` for check kinds without a single distance threshold — `area`, `density`, `antenna`, `ongrid`, `angle`, `comp_coverage`, `tap_distance` — and `threshold_max_um` is `null` unless the rule has an upper bound). Pin a threshold to a deck via `provenance.deck.content_hash`. |
 | `provenance` | The shared block, pinning the deck's content hash; no `input`, since no layout was read. |
 
 A listing **is not a DRC verdict**: it carries no `status`, `violations` or
@@ -2631,7 +2631,57 @@ where the context is positively identified: selection is whole-polygon (a
 `PCOMP` only partly within reach stays strict), and the `DNWELL`/`LVPWELL`
 branches (`NP.3bii`, `PP.5ci`) are **not** relaxed -- anything within reach of
 a `Dnwell` stays on the strict near rule. The mirrored `pplus.space.ncomp.1`
-and `nplus.enclosing.comp.1` keep the flat strict value.
+keeps the flat strict value; `nplus.enclosing.comp.1` selects its threshold
+per edge (next paragraph).
+
+**Well-band split of `nplus.enclosing.comp.1` (issue #7955).** The same flat
+0.16 µm flagged an NCOMP tap sitting deep inside a large `Nwell`. The foundry
+deck (`rule_decks/nplus.drc`) measures an NCOMP edge two ways, selected per
+edge by its distance from the boundary of a pure Nwell: `NP.5di` needs
+0.16 µm within 0.429 µm of the boundary, `NP.5dii` only 0.02 µm deeper
+inside. A tap with 80 nm of `Nplus` on every side, well inside the well, is
+legal there and was reported on all four edges here.
+`nplus.enclosing.comp.1` keeps its id, its `enclosed` check kind and its
+0.16 µm `threshold_dbu`, so `--rules nplus.enclosing.comp.1` selects both
+limits, and declares the split with `DrcRule.band_spec`
+(`drc_edge_band.EdgeBandSpec`). The checked region's edges are divided per
+edge -- never by clipping the tap polygon, which would leave an artificial
+edge at the cut for the check to measure -- into:
+
+- the **band**: the part within 0.429 µm of the boundary of a pure `Nwell`
+  (a well polygon touching no `DNWELL` polygon), held to 0.16 µm with the
+  `projection` metric (`NP.5di`);
+- the **interior**: the part deeper than 0.429 µm inside such a well, held to
+  0.02 µm (`NP.5dii`);
+- everything else -- no `Nwell` under the edge, no well drawn at all, or a tap
+  that touches a `DNWELL` polygon anywhere -- at the flat 0.16 µm, exactly as
+  before the split.
+
+An edge exactly 0.429 µm from the boundary is in the band. On a 1 µm `Comp`
+square with 80 nm of `Nplus`, the single rule reports **0** markers with a
+1 µm `Nwell` margin on every side, **4** with a 250 nm margin, **4** at a
+10 nm `Nplus` margin deep inside the well, and **0** at 200 nm -- the foundry
+expressions' own counts for the same geometry. A 20 nm margin passes in the
+interior and a 160 nm margin passes in the band, both at equality. With
+250 nm of `Nwell` on the left and 1 µm on the other three sides it reports
+three markers: the full left edge and the leftmost 179 nm of the top and
+bottom edges, the stretch of them inside the band. `--list-rules` shows the
+band under the rule's `edge_band` key.
+
+What the split still leaves approximated: butted edges are checked (the
+foundry deck drops them into `NP.6`); the `NP.5c` `DNWELL`/`LVPWELL` split is
+unexpressed, so a tap touching a `DNWELL` keeps 0.16 µm; outside the band the
+measure is `euclidian` where the official rule is `projection` (the
+conservative direction); and "pure well" is read whole-polygon -- the
+foundry's `nwell.not(dnwell)` is a boolean difference, so for the foundry a
+well that merely overlaps a `DNWELL` elsewhere is still pure away from the
+overlap, where here such a well is no context at all and its taps keep
+0.16 µm. The `PCOMP` side is deliberately not given a band: its own foundry
+rules differ. A `PCOMP` inside an `Nwell` is always within reach of the
+oversized well, so `pplus.enclosing.comp.1` holds it to 0.16 µm however deep
+it sits -- which is also what the foundry deck requires there, since `PP.5b`
+measures against the `Pplus` edges *inside* the well and only `PP.5d`
+(taps outside a well) is distance-split.
 
 `DerivedLayer` also takes an optional **second context stage**
 (`context2_layers`, `context2_sized_by_um`, `context2`, issue #3682): the same
