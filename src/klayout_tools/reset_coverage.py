@@ -7,8 +7,13 @@ answers the structural half of it. Given a flat gate-level netlist, the PDK's
 functional cell models and the name of the reset port, it classifies every
 instance:
 
-* a *sequential* cell (its model instantiates a ``udp_dff*``/``udp_dlatch*``
-  primitive) is **covered** when at least one of its asynchronous reset/set
+* a *sequential* cell (its model instantiates a state-holding UDP -- a
+  ``primitive`` declared in the supplied files whose output is a register
+  and whose table rows read ``inputs : current : next``, instantiated with
+  or without an instance name; sky130's ``udp_dff*``/``udp_dlatch*``
+  spelling is kept as a name fallback for wrappers supplied without their
+  primitives' declarations) is **covered** when at least one of its
+  asynchronous reset/set
   pins is driven from the reset port through only buffer/inverter cells with
   the right net polarity (the pin is asserted whenever the port is);
 * every other sequential cell is **unreset**, with a machine-readable reason
@@ -65,6 +70,12 @@ _ASYNC_PINS = {
 }
 
 _SEQ_UDP_RE = re.compile(r"udp_(?:dff|dlatch)(?:\$|$)")
+_PRIMITIVE_RE = re.compile(
+    r"\bprimitive\s+(\\?\S+?)\s*\((.*?)\)\s*;(.*?)\bendprimitive\b", re.S
+)
+_TABLE_RE = re.compile(r"\btable\b(.*?)\bendtable\b", re.S)
+_REG_DECL_RE = re.compile(r"\breg\b\s*(?:\[[^\]]*\]\s*)?([^;]+);")
+_ANON_INST_RE = re.compile(r"^\s*([A-Za-z_\\][\w$\\]*)\s*\(", re.M)
 _MODULE_RE = re.compile(r"\bmodule\s+(\\?\S+?)\s*\((.*?)\)\s*;(.*?)\bendmodule\b", re.S)
 _DIR_RE = re.compile(r"\b(input|output|inout)\b\s*(?:\[[^\]]*\]\s*)?([^;]+);")
 _STMT_RE = re.compile(r"^\s*([A-Za-z_\\][\w$\\]*)\s+(?:`\w+\s+)?([\w$\\]+)\s*\(", re.M)
@@ -81,6 +92,53 @@ _KEYWORDS = {
     "assign",
     "supply0",
     "supply1",
+}
+
+#: Line-leading keywords that can precede a ``(`` without being an
+#: instantiation. Only gates and UDPs may be instantiated without an
+#: instance name (``altos_dff (q, v, clk, d)``); every other ``keyword (``
+#: shape -- ``if (…)`` in an ``always`` block, ``ifnone (…)`` in a ``specify``
+#: block -- is a statement, not an instance.
+_ANON_INST_EXCLUDE = _KEYWORDS | {
+    "always",
+    "begin",
+    "case",
+    "casex",
+    "casez",
+    "deassign",
+    "defparam",
+    "disable",
+    "else",
+    "end",
+    "endcase",
+    "endfunction",
+    "endgenerate",
+    "endmodule",
+    "endprimitive",
+    "endspecify",
+    "endtask",
+    "endtable",
+    "event",
+    "for",
+    "forever",
+    "function",
+    "generate",
+    "if",
+    "ifnone",
+    "initial",
+    "integer",
+    "localparam",
+    "macromodule",
+    "parameter",
+    "primitive",
+    "real",
+    "realtime",
+    "repeat",
+    "specify",
+    "task",
+    "time",
+    "wait",
+    "while",
 }
 
 
@@ -129,15 +187,23 @@ def _names(decl: str) -> list[str]:
     ]
 
 
-def _build_model(name: str, body: str) -> _CellModel:
+def _build_model(name: str, body: str, state_udps: set[str]) -> _CellModel:
     inputs: list[str] = []
     outputs: list[str] = []
     for direction, decl in _DIR_RE.findall(body):
         (inputs if direction == "input" else outputs).extend(_names(decl))
     model = _CellModel(name, inputs, outputs)
     instances = [(t, n) for t, n in _STMT_RE.findall(body) if t not in _KEYWORDS]
+    # Gates and UDPs may be instantiated without an instance name
+    # (ASAP7: ``altos_dff (int_fwire_IQN, notifier, clk, d, xcr)``);
+    # module instances may not.
+    instances += [
+        (t, "") for t in _ANON_INST_RE.findall(body) if t not in _ANON_INST_EXCLUDE
+    ]
     model.primitives = [t for t, _ in instances]
-    model.sequential = any(_SEQ_UDP_RE.search(t) for t, _ in instances)
+    model.sequential = any(
+        t in state_udps or _SEQ_UDP_RE.search(t) for t in model.primitives
+    )
     if model.sequential:
         for pin in inputs:
             if pin in _ASYNC_PINS:
@@ -153,12 +219,57 @@ def _build_model(name: str, body: str) -> _CellModel:
     return model
 
 
+def _holds_state(body: str) -> bool:
+    """Whether a ``primitive`` body is a state-holding UDP: its output is a
+    declared register and its table's rows read ``inputs : current :
+    next`` (a combinational UDP's single row is ``inputs : output``)."""
+    outputs: set[str] = set()
+    for direction, decl in _DIR_RE.findall(body):
+        if direction == "output":
+            outputs.update(_names(decl))
+    regs = {n for decl in _REG_DECL_RE.findall(body) for n in _names(decl)}
+    if not regs & outputs:
+        return False
+    table = _TABLE_RE.search(body)
+    if table is None:
+        return False
+    return any(row.count(":") == 2 for row in table.group(1).split(";") if row.strip())
+
+
+def _state_holding_udps(texts: list[str]) -> set[str]:
+    """Names of the state-holding ``primitive``s across every supplied file,
+    first definition winning (ASAP7 re-declares each UDP under a second
+    ``ifdef`` branch, the way sky130 re-declares each module)."""
+    seen: set[str] = set()
+    stateful: set[str] = set()
+    for text in texts:
+        for match in _PRIMITIVE_RE.finditer(text):
+            name = match.group(1).lstrip("\\")
+            if name in seen:
+                continue
+            seen.add(name)
+            if _holds_state(match.group(3)):
+                stateful.add(name)
+    return stateful
+
+
 def load_cell_models(paths: list[str]) -> dict[str, _CellModel]:
     """Scan Verilog cell-model files; the first definition of a cell wins
-    (sky130 ships each module several times under ``ifdef`` branches)."""
+    (sky130 ships each module several times under ``ifdef`` branches).
+
+    A cell model is *sequential* when its body instantiates a state-holding
+    UDP -- any ``primitive`` declared across the supplied files whose output
+    is a register and whose table rows read ``inputs : current : next`` --
+    with or without an instance name (ASAP7's ``altos_dff*``/``altos_latch*``
+    family is unnamed), or a ``udp_dff*``/``udp_dlatch*`` primitive by name
+    (the sky130 fallback for cell wrappers supplied without the primitive
+    declarations). The primitives are indexed across every file before any
+    module is classified, so a UDP declared in a different file is
+    recognised regardless of source order."""
+    texts = [_COMMENT_RE.sub("", _read(path, "cell-model file")) for path in paths]
+    state_udps = _state_holding_udps(texts)
     models: dict[str, _CellModel] = {}
-    for path in paths:
-        text = _COMMENT_RE.sub("", _read(path, "cell-model file"))
+    for text in texts:
         for match in _MODULE_RE.finditer(text):
             name = match.group(1).lstrip("\\")
             if name in models:
@@ -173,7 +284,7 @@ def load_cell_models(paths: list[str]) -> dict[str, _CellModel]:
                     )
                     + body
                 )
-            model = _build_model(name, body)
+            model = _build_model(name, body, state_udps)
             if not model.inputs and not model.outputs:
                 model.inputs = header_ports
             models[name] = model
@@ -457,9 +568,11 @@ def reason_description(code: str) -> str:
 #: Clock/enable pins of a sequential cell.
 _CAPTURE_PINS = ("CLK", "GATE", "CLK_N", "GATE_N")
 
-#: Scan pins: a scan cell's D is only captured while its scan enable is off,
-#: which the force-D drive cannot guarantee.
-_SCAN_PINS = ("SCD", "SCE")
+#: Scan pin pairs: a scan cell's D is only captured while its scan enable
+#: is off, which the force-D drive cannot guarantee. sky130 spells the
+#: data/enable pair ``SCD``/``SCE``, ASAP7 ``SI``/``SE``; both pins of a
+#: pair must be present -- a clock gate's lone ``SE`` is not a scan pin.
+_SCAN_PIN_PAIRS = (("SCD", "SCE"), ("SI", "SE"))
 
 
 def sequential_elements(
@@ -505,7 +618,7 @@ def sequential_elements(
             continue
         else:
             capture = [p for p in model.inputs if p in _CAPTURE_PINS]
-            if any(p in model.inputs for p in _SCAN_PINS):
+            if any(all(p in model.inputs for p in pair) for pair in _SCAN_PIN_PAIRS):
                 reason = "scan_cell"
             elif "D" not in model.inputs or len(capture) != 1:
                 reason = "no_d_or_clock_pin"
