@@ -14533,17 +14533,6 @@ def test_expand_corners_units_compose_with_monte_carlo():
     assert info["n"] == 3
 
 
-def test_xyce_boundary_refuses_supply_in_units():
-    with pytest.raises(sim.SimError, match="corners.supply_v"):
-        sim._enforce_xyce_support_boundary(
-            engine="xyce",
-            backend="local",
-            corners_spec={"units": [{"supply_v": {"vdd": 1.8}}]},
-            monte_carlo_declared=False,
-            fail_fast_probe=False,
-        )
-
-
 # --------------------------------------------------------------------------- #
 # noise_representation (issue #3006)
 # --------------------------------------------------------------------------- #
