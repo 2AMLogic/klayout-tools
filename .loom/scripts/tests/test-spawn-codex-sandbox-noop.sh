@@ -25,6 +25,14 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 SPAWN_CODEX="$SCRIPTS_DIR/spawn-codex.sh"
 
+# The suite's result must not depend on the caller's session (#15140, #15188).
+# A daemon-dispatched Builder exports LOOM_ROLE, LOOM_MODEL,
+# LOOM_CODEX_AUTH_MODE_CHECK and LOOM_RUNTIME (auth-mode and classification
+# cases read them); CI's runner has none of them. Scrub them once here. Every
+# case that needs one sets it on its own run_* / env line. LOOM_DAEMON_BIN is
+# the caller's managed/probed daemon, never this suite's subject.
+unset LOOM_ROLE LOOM_MODEL LOOM_CODEX_AUTH_MODE_CHECK LOOM_RUNTIME LOOM_DAEMON_BIN
+
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 

@@ -2,7 +2,8 @@
 # test-cargo-target-dir-reclaim.sh — `worktree.sh remove` reclaims a REDIRECTED
 # cargo target directory (issue #7239).
 #
-# Covers the removal-time half of lib/cargo-target-dir.sh:
+# Covers the removal-time reclaim of a redirected cargo target dir (issue
+# #7239), now implemented only in Rust (`worktree_ops/cargo_target.rs`):
 #   1. A per-worktree target dir redirected OUTSIDE the worktree is reclaimed
 #      when its worktree is removed.
 #   2. A target dir another LIVE worktree also resolves to is left untouched
@@ -38,12 +39,13 @@
 #
 # Needs a BUILT `loom-daemon` since #8195 slice 3: `worktree.sh remove` is now
 # a thin stub over `loom-daemon worktree-remove`, which drives the RUST
-# reclaim (`worktree_ops/cargo_target.rs`) instead of this lib's bash one. The
-# `worktree.sh remove` cases below are unchanged and are the equivalence
-# evidence for the removal-time half; the resolution-parity cases (Test 7)
-# still compare the two SHELL implementations and are unaffected. So this suite
-# moved to the "Native Port Suites" CI job, which builds the binary, and FAILS
-# rather than skips without one.
+# reclaim (`worktree_ops/cargo_target.rs`). The bash reclaim stack this suite
+# once drove directly was deleted (#15075): every removal case now exercises
+# the Rust path — through `worktree.sh remove`, through merge-pr.sh's cleanup,
+# or through `loom-daemon cargo-target-dir reclaim` itself (Tests 6c, 9c, 10d,
+# 10e). The resolution-parity cases (Test 7) still compare the two SHELL
+# resolvers and are unaffected. This suite runs in the "Native Port Suites" CI
+# job, which builds the binary, and FAILS rather than skips without one.
 #
 # Usage:
 #   cargo build --package loom-daemon
@@ -421,26 +423,28 @@ fi
 # --- Test 6c: an unanswerable sharing question fails CLOSED ------------------
 echo ""
 echo "Test 6c: a failed 'git worktree list' refuses instead of assuming 'unshared'"
-# shellcheck source=../lib/cargo-target-dir.sh
-source "$LIB_SH"
 EXT6C="$TMP/ext-target-209"
 make_target_dir "$EXT6C"
 # A directory that is not a git repository at all, so `git worktree list`
 # cannot answer. An empty list and a failed list look identical on stdout —
 # only the exit status distinguishes them, and mistaking the second for the
-# first would delete a dir a sibling may still be building into.
+# first would delete a dir a sibling may still be building into. Driven
+# through `loom-daemon cargo-target-dir reclaim`, the one reclaim there is
+# since the bash stack was deleted (#15075); the record is the
+# `LEVEL<TAB>message` form `TargetDirOutcome::report_record` prints.
 NOT_A_REPO="$TMP/not-a-repo"
 mkdir -p "$NOT_A_REPO"
-rec6c="$(loom_reclaim_worktree_target_dir "$NOT_A_REPO" "$TMP/phantom-worktree" "$EXT6C" false)"
+rec6c="$("$LOOM_DAEMON_BIN" cargo-target-dir reclaim "$TMP/phantom-worktree" \
+    --resolved "$EXT6C" --repo-root "$NOT_A_REPO")"
 if [[ -d "$EXT6C" ]]; then
     pass "target dir survived an unanswerable sharing check"
 else
     fail "target dir was deleted despite an unanswerable sharing check"
 fi
-if [[ "$rec6c" == refused* && "$rec6c" == *"enumerate"* ]]; then
+if [[ "$rec6c" == WARNING* && "$rec6c" == *"enumerate"* ]]; then
     pass "the refusal names the failed worktree enumeration"
 else
-    fail "expected a 'refused ... enumerate' record, got: $rec6c"
+    fail "expected a 'WARNING ... enumerate' record, got: $rec6c"
 fi
 
 # --- Test 7: resolver parity with scripts/cargo-target-dir.sh ---------------
@@ -495,8 +499,6 @@ else
     # no-drift pattern, one level up. Nothing on the target-dir path is stubbed:
     # the RUST decision (`worktree_ops::cargo_target::plan_reclaim`) runs and its
     # record is replayed through the info/warning/success stubs.
-    # shellcheck source=../lib/cargo-target-dir.sh
-    source "$LIB_SH"
     # shellcheck source=lib/post-merge-cleanup-harness.sh
     source "$SCRIPT_DIR/lib/post-merge-cleanup-harness.sh"
     pmc_load "$MERGE_PR"
@@ -634,16 +636,14 @@ fi
 # CARGO_TARGET_DIR exists". A dir that is genuinely this worktree's own is
 # still reclaimed while some unrelated env value points elsewhere — otherwise
 # the feature would silently stop working on every host that exports one.
-# shellcheck source=../lib/cargo-target-dir.sh
-source "$LIB_SH"
 EXT9C="$TMP/ext-target-211"
 make_target_dir "$EXT9C"
-rec9c="$(CARGO_TARGET_DIR="$AMBIENT" loom_reclaim_worktree_target_dir \
-    "$REPO" "$REPO/.loom/worktrees/issue-211" "$EXT9C" false)"
-if [[ "$rec9c" == reclaimed* && ! -d "$EXT9C" ]]; then
+rec9c="$(CARGO_TARGET_DIR="$AMBIENT" "$LOOM_DAEMON_BIN" cargo-target-dir reclaim \
+    "$REPO/.loom/worktrees/issue-211" --resolved "$EXT9C" --repo-root "$REPO")"
+if [[ "$rec9c" == SUCCESS* && "$rec9c" == *"Reclaimed redirected cargo target dir"* && ! -d "$EXT9C" ]]; then
     pass "9c: a dir unrelated to the ambient env value is still reclaimed"
 else
-    fail "9c: expected a 'reclaimed' record, got: $rec9c"
+    fail "9c: expected a 'SUCCESS ... Reclaimed redirected cargo target dir' record, got: $rec9c"
 fi
 if [[ -f "$AMBIENT/PRECIOUS.txt" ]]; then
     pass "9c: the unrelated ambient cache is untouched"
@@ -776,36 +776,38 @@ fi
 
 # 10d: the gate-2f backstop. A worktree-local config is normally per-worktree
 # attribution — but not when it names the very directory a machine-global
-# config names. Verified through the library directly, since the point is the
-# reclaim-time decision.
+# config names. Verified through the reclaim verb directly, since the point is
+# the reclaim-time decision.
 echo ""
 echo "Test 10d: a worktree-local redirect that duplicates a machine-global one is refused"
 CH10D="$TMP/cargo-home-10d"
 SHARED10D="$TMP/machine-shared-cache-d"
 machine_global_cargo_home "$CH10D" "$SHARED10D"
-rec10d="$(CARGO_HOME="$CH10D" env -u CARGO_TARGET_DIR bash -c \
-    "source '$LIB_SH'; loom_reclaim_worktree_target_dir '$REPO10' '$REPO10/.loom/worktrees/issue-405' '$SHARED10D' false")"
+rec10d="$(CARGO_HOME="$CH10D" env -u CARGO_TARGET_DIR "$LOOM_DAEMON_BIN" \
+    cargo-target-dir reclaim "$REPO10/.loom/worktrees/issue-405" \
+    --resolved "$SHARED10D" --repo-root "$REPO10")"
 if [[ -f "$SHARED10D/PRECIOUS.txt" ]]; then
     pass "10d: the machine-global cache was not deleted"
 else
     fail "10d: the machine-global cache was deleted"
 fi
-if [[ "$rec10d" == refused* && "$rec10d" == *"machine-global"* ]]; then
+if [[ "$rec10d" == WARNING* && "$rec10d" == *"machine-global"* ]]; then
     pass "10d: the refusal names the machine-global config redirect"
 else
-    fail "10d: expected a 'refused ... machine-global' record, got: $rec10d"
+    fail "10d: expected a 'WARNING ... machine-global' record, got: $rec10d"
 fi
 
 # 10e: and the backstop stays scoped — a genuinely per-worktree dir is still
 # reclaimed while an unrelated machine-global redirect exists on the host.
 EXT10E="$TMP/ext-target-406"
 make_target_dir "$EXT10E"
-rec10e="$(CARGO_HOME="$CH10D" env -u CARGO_TARGET_DIR bash -c \
-    "source '$LIB_SH'; loom_reclaim_worktree_target_dir '$REPO10' '$REPO10/.loom/worktrees/issue-406' '$EXT10E' false")"
-if [[ "$rec10e" == reclaimed* && ! -d "$EXT10E" ]]; then
+rec10e="$(CARGO_HOME="$CH10D" env -u CARGO_TARGET_DIR "$LOOM_DAEMON_BIN" \
+    cargo-target-dir reclaim "$REPO10/.loom/worktrees/issue-406" \
+    --resolved "$EXT10E" --repo-root "$REPO10")"
+if [[ "$rec10e" == SUCCESS* && "$rec10e" == *"Reclaimed redirected cargo target dir"* && ! -d "$EXT10E" ]]; then
     pass "10e: a dir unrelated to the machine-global value is still reclaimed"
 else
-    fail "10e: expected a 'reclaimed' record, got: $rec10e"
+    fail "10e: expected a 'SUCCESS ... Reclaimed redirected cargo target dir' record, got: $rec10e"
 fi
 
 # --- Summary ----------------------------------------------------------------

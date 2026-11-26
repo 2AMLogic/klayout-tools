@@ -77,7 +77,7 @@ draw. Delete them from the config.
 
 The step tick draws **one item** from a single pool of every actionable item
 across the host's repos (`step_dispatch/item_draw.rs`; design
-[`work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md)
+[`work-finder-step-dispatch.md`](https://github.com/2AMLogic/loom/blob/main/docs/design/work-finder-step-dispatch.md)
 §1 ruling 1, §4.2). There is no separate repo draw. An item's weight is
 
 ```
@@ -225,6 +225,11 @@ canonical JSON — in a process global. The trace provenance stamper
 [trace-identity](trace-identity.md)). A run's telemetry is therefore
 reproducible from the exact hyperparameter vector it ran under: re-set the
 same `$LOOM_HYPERPARAMS` (or config block), get the same digest.
+
+A single-step run that names a prompt modifier (`LOOM_PROMPT_MODIFIER`, #15017) has
+its name folded into the digest as a trailing `promptModifier` member, so runs that
+differ only in the modifier digest differently; with none set the serialization, and
+so every existing digest, is unchanged. `loom-daemon hyperparams` prints it.
 
 The digest covers the whole resolved vector including inherited defaults —
 two runs with identical digests ran identical tunables, even if they got

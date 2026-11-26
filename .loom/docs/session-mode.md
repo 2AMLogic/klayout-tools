@@ -125,3 +125,77 @@ absence is the common case on every routine reinstall, so treating absence as
   only trigger; an empty array is already a meaningful, unrelated state (an
   operator driving the session tools with no terminals configured), and inferring
   session mode from it would opt in repos that never asked.
+
+## Gateway read profiles (`loom-tools gateway`)
+
+A session-only host runs no `loom-daemon`, so the daemon's gateway refresh loop
+never runs there and no `gh-config-gateway` profiles exist: tools that look for
+them skip the Cloudflare Worker gateways and fall back to direct reads on a
+smaller credential (#14884). The explicit replacement is the `loom-tools
+gateway` family — daemon-free, run by the operator:
+
+```bash
+loom-tools gateway refresh   # publish (session start, key rotation)
+loom-tools gateway status    # read-only freshness report
+loom-tools gateway clean     # leaving session mode: remove the publication
+```
+
+### What `refresh` writes, and where
+
+One publication pass of the same profile publisher the daemon's loop runs:
+for every owner configured in the **host defaults tier**
+(`~/.local/share/loom/config/defaults.json`, i.e. `LOOM_CONFIG_DEFAULTS_FILE`),
+it writes
+
+```
+~/.local/share/loom/session/.loom/gh-config-gateway/<owner>/{config.yml,hosts.yml}
+```
+
+(the `gh-ok` marker naming the version-checked `gh` sits beside them) — the
+same `.loom/gh-config-gateway/<owner>/hosts.yml` suffix and marker the readers
+already validate, `0700` directories and `0600` files, key only in the file,
+never in argv or output. Override the root with
+`LOOM_SESSION_GATEWAY_ROOT`; a destination inside a git checkout is refused.
+
+Trust rules (deliberate):
+
+- `forge.gateway` (origin + `keyRefs`) is read from the host defaults tier
+  **only**. A repository config tier or an inherited `LOOM_GH_GATEWAY_DIR`
+  cannot redirect a host key to another origin.
+- `refresh` resolves `mode` first and requires `session` — a daemon or fleet
+  host gets its profiles from its own route.
+- The profiles are the same read-only ones the daemon publishes: no `user`,
+  no `git_protocol`, nothing that grants dispatch or a write path.
+
+A second `refresh` picks up a rotated key, drops removed owners and withdraws
+a profile whose key no longer resolves. `gh` must be ≥ 2.100.0 (below that,
+`gh` ignores `api_host` and would send the key to GitHub); nothing is
+published and anything stale is withdrawn.
+
+### How a separately launched reader finds it
+
+If your fleet reader does not already discover the session profiles, export their
+directory in the shell that launches the reader.
+
+```bash
+export LOOM_GH_GATEWAY_DIR="$HOME/.local/share/loom/session/.loom/gh-config-gateway"
+```
+
+### Freshness, and `loom status`
+
+Freshness is the age of each owner's `hosts.yml` — rewritten by every
+`refresh` — against the 5-minute republish cadence the daemon's loop uses:
+`current` within it, `due for refresh` beyond it, `missing` when a configured
+owner has no profile, `stray` when a profile is no longer configured or not a
+trusted (owner-only) directory. `loom-tools gateway status` prints exactly
+that, with no credentials; `loom status` includes the same report whenever
+there is one to make (a non-session host with no publication prints nothing).
+
+### Leaving session mode
+
+`loom-tools gateway clean` removes **only**
+`~/.local/share/loom/session/.loom/gh-config-gateway` — never a checkout's
+publication (a daemon host's workspace profiles), whatever directory you run
+it from, and it is idempotent. Run it when you leave session mode; `refresh`
+refuses to run once `mode` is no longer `session`, so a stale publication is
+cleaned rather than refreshed.

@@ -17,6 +17,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPAWN_CODEX="$(cd "$SCRIPT_DIR/.." && pwd)/spawn-codex.sh"
+
+# The suite's result must not depend on the caller's session (#15140, #15188).
+# A daemon-dispatched Builder exports LOOM_ROLE, LOOM_MODEL,
+# LOOM_CODEX_AUTH_MODE_CHECK and LOOM_RUNTIME (model-pin, auth-mode and
+# forwarded-variable cases read them); CI's runner has none of them. Scrub them
+# once here. Every case that needs one sets it on its own run_* / env line, and
+# the per-case `env -u` lists below stay as belt and braces. LOOM_DAEMON_BIN is
+# the caller's managed/probed daemon, never this suite's subject.
+unset LOOM_ROLE LOOM_MODEL LOOM_CODEX_AUTH_MODE_CHECK LOOM_RUNTIME LOOM_DAEMON_BIN
+
 # THIS checkout's build, up front, or nothing (#10662): the boundary below is
 # the real `loom-daemon session-exec posture`, and spawn-codex.sh execs it.
 # shellcheck source=lib/require-daemon-bin.sh
@@ -121,11 +131,13 @@ out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
     LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
     LOOM_CODEX_HOME="$PROFILE" HOME="$IDENT_HOME" GIT_CONFIG_NOSYSTEM=1 \
     LOOM_SWEEP_CLAIM_OWNED=20 LOOM_SWEEP_LEASE_RENEW_DISPATCHED=20 LOOM_LEASE_HOST_ID=fleet-host-7 \
+    LOOM_LEASE_PUBLISH_HOSTNAME=1 \
     bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
 line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
 assert_contains "--env LOOM_SWEEP_CLAIM_OWNED=20" "$line" "the claim marker is forwarded into the container"
 assert_contains "--env LOOM_SWEEP_LEASE_RENEW_DISPATCHED=20" "$line" "the dispatch's lease-renewal marker is forwarded with it"
 assert_contains "--env LOOM_LEASE_HOST_ID=fleet-host-7" "$line" "the dispatcher's lease host id is forwarded with it"
+assert_contains "--env LOOM_LEASE_PUBLISH_HOSTNAME=1" "$line" "the raw-publish opt-in travels with the lease host id (#13998): publish and compare must agree on the same form"
 assert_contains "--env GIT_AUTHOR_NAME=fleet-bot[bot]" "$line" "the host's git user.name is forwarded as the author name"
 assert_contains "--env GIT_COMMITTER_NAME=fleet-bot[bot]" "$line" "…and as the committer name"
 assert_contains "--env GIT_AUTHOR_EMAIL=1+fleet-bot[bot]@users.noreply.example.invalid" "$line" "the host's git user.email is forwarded as the author email"

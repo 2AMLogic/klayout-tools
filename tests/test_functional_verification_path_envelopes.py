@@ -249,10 +249,7 @@ def test_initial_state_netlist_is_enveloped(tmp_path, monkeypatch, netlist_key):
 
 
 def test_no_absolute_path_survives_a_full_options_report(tmp_path, monkeypatch):
-    """`options.sdf` and `options.initial_state` are mutually exclusive, so
-    the gate runs twice: sdf + source_defines, then initial_state +
-    source_defines. `find_absolute_path_fields` is the in-process form of
-    `klt env-provenance lint-envelope`."""
+    """Check path envelopes with source defines on both simulation paths."""
     from test_functional_verification_initial_state import MODELS, NETLIST
 
     _fake_repo(tmp_path, monkeypatch)
