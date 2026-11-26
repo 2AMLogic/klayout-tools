@@ -213,11 +213,8 @@ def _resolve_via_drop_layer(
 
     Returns ``(ladder, error)``:
 
-    * ``(None, None)`` -- no drop needed. Either ``port_layer`` already *is*
-      ``route_layer`` (the pre-#454 single-metal routing path, unchanged), or
-      ``route_layer`` itself is not a member of ``deck.metals`` (a
-      ``"poly"``/``"tap"``-role backbone has no metals stack to walk, so it
-      draws directly exactly as it always has).
+    * ``(None, None)`` -- draw directly when the layers match, or when
+      a metal route reaches a legacy port with no modeled via convention.
     * ``(ladder, None)`` -- a drop is needed and fully resolved. ``ladder`` is
       a non-empty, ordered tuple of :data:`_ViaDropHop` entries -- one per via
       the backbone must drop through between ``route_layer`` and
@@ -266,10 +263,10 @@ def _resolve_via_drop_layer(
     try:
         route_idx = deck.metals.index(route_layer)
     except ValueError:
-        # The backbone itself is not on a declared routing-metal level (e.g.
-        # routing.layer_role "tap"): there is no metals stack to drop through,
-        # so draw directly on route_layer exactly as before #454.
-        return None, None
+        return None, (
+            "the route is outside the deck's metal stack and no via-drop "
+            "connects it to this pin's layer"
+        )
     try:
         port_idx = deck.metals.index(port_layer)
     except ValueError:

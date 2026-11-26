@@ -38,7 +38,7 @@ def pdk_root(tmp_path):
     return root
 
 
-def _walk_connectivity(report, gen_reports, request):
+def _walk_connectivity(report, gen_reports, request, family="sky130"):
     """The independent GDS connectivity walk: ``{net: terminals joined}``
     plus the set of other nets each net's cluster touches.
 
@@ -46,7 +46,7 @@ def _walk_connectivity(report, gen_reports, request):
     GDS, the deck's own metals/vias stack, and the request's pin list
     (block port geometry + the report's placement offsets).
     """
-    deck = get_extraction_deck("sky130")
+    deck = get_extraction_deck(family)
     layout = kdb.Layout()
     layout.read(report["gds_path"])
     top = layout.cell(report["cell_name"])

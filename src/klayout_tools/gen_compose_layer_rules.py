@@ -73,23 +73,22 @@ def routing_planes_above(
 
 
 def alternative_routing_roles(variant: str, primary_role: str) -> tuple[str, ...]:
-    """List higher planes in ascending order, then lower planes in descending order."""
+    """List named metal planes above then below primary, or bottom-up if off-stack."""
     primary = _resolve_route_layer(variant, primary_role)
     family = _pdk_family(variant)
     planes = _variant_planes(get_extraction_deck(family), variant)
-    if primary not in planes:
-        return ()
-    index = planes.index(primary)
-    alternatives = (*planes[index + 1 :], *reversed(planes[:index]))
+    if primary in planes:
+        index = planes.index(primary)
+        planes = planes[index + 1 :] + tuple(reversed(planes[:index]))
+    roles = _PDK_ROLE_LAYERS[family]
+    metal_names = [role for role in roles if re.fullmatch(r"metal\d*", role)]
     by_plane: dict[tuple[int, int], str] = {}
-    for role, layer in _PDK_ROLE_LAYERS[family].items():
-        if layer is None:
-            continue
-        if re.fullmatch(r"metal\d*", role):
-            by_plane[layer] = role
-        elif role == "top_metal":
+    # A device role may be the only name ordinary compose exposes for a plane.
+    for role in (*metal_names, "top_metal", *roles):
+        layer = roles.get(role)
+        if layer is not None:
             by_plane.setdefault(layer, role)
-    return tuple(by_plane[plane] for plane in alternatives if plane in by_plane)
+    return tuple(by_plane[plane] for plane in planes if plane in by_plane)
 
 
 # Native GF180 metaltop.rb selects the 9K/11K MT.1 and MT.2a rules on

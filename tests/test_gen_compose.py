@@ -7374,14 +7374,12 @@ def test_resolve_via_drop_layer_bare_poly_gate_port_is_rejected():
     assert "gate_contact" in error
 
 
-def test_resolve_via_drop_layer_poly_route_layer_still_draws_directly():
-    # The rejection above is about the *pin's* layer, not the backbone's: a
-    # route whose own layer_role resolves outside the metals stack (e.g.
-    # "poly"/"tap") has no stack to walk and keeps drawing directly.
+def test_poly_backbone_draws_directly_only_on_its_own_pin_layer():
     deck = get_extraction_deck("sky130")
+    assert _resolve_via_drop_layer(deck, deck.poly, deck.poly) == (None, None)
     ladder, error = _resolve_via_drop_layer(deck, deck.poly, (67, 20))
     assert ladder is None
-    assert error is None
+    assert error is not None and "no via-drop" in error
 
 
 def test_resolve_via_drop_layer_adjacent_metals_resolves_the_via():

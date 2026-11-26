@@ -1548,14 +1548,10 @@ rather than drawing something that does not connect:
   `ExtractionDeck.vias` (not the case for any two `routing.layer_role`
   values this table currently exposes on sky130, gf180mcu, `sg13g2`, or
   `sg13cmos5l` — each family's `"metal"`→`"metal2"`→`"metal3"` prefix is a
-  fully-connected run of declared vias). gf180mcu's Metal4-5 levels, and
-  `sg13g2`'s/`sg13cmos5l`'s own Metal4 and above (Metal4 through TopMetal2
-  on `sg13g2`, Metal4/TopMetal1 on `sg13cmos5l`), remain unexposed as
-  `routing.layer_role` roles at all (each curated `EXTRACTION_DECK` declares
-  the full metals stack for extraction, but `klayout_tools.gen
-  ._PDK_ROLE_LAYERS` stops at `"metal3"` for every family), so a route can
-  never be asked to reach them via `routing.layer_role`/via-drop in the
-  first place.
+  fully-connected run of declared vias). A route can name any metal plane
+  exposed by a role for its family. On SG13G2, `cap_bottom_plate` names
+  Metal5 and `cap_top_via_metal` names TopMetal1. The via ladder can pass
+  through intermediate planes such as Metal4 even when they have no role.
 - A pin on the deck's bare **`poly`** layer — a `mos_array`/`diff_pair` gate
   drawn *without* [`params.gate_contact`](gen.md) (issue #492). No via in the
   metals stack lands on poly, so the backbone would end as an uncontacted
@@ -1566,6 +1562,11 @@ rather than drawing something that does not connect:
   and the two ways forward — re-run the block's generator with
   `params.gate_contact: true` so the gate reports a contacted `"metal"`-role
   pad, or name the gate with `pins[]` (below) instead of routing to it.
+
+  A backbone on a layer outside the metal stack, such as `poly`, can draw
+  directly to a pin on that layer. If the pin declares a different layer,
+  the router reports the leg as unrouted because it cannot draw a connecting
+  via. Per-net metal roles can route nets with metal pins in the same request.
 
   A third check (#469) generalizes both checks above from *reported*
   `ports[]` geometry to the block's **actual drawn** shapes. The two checks
@@ -2266,9 +2267,14 @@ use temporary layouts. If the original request hits one of these errors, the
 search can still publish a complete assignment. If it finds none, the CLI
 exits with code 1, reports the original error and preserves any existing output.
 Net names must be unique in suggestion mode so the assignment can be replayed.
-The `roles` list starts with higher planes, ascending from the primary layer,
-then lists lower planes in descending order. The variant's available routing
-planes determine `candidate_space`, the number of combinations, and
+The `roles` list contains one role for each alternative metal plane the
+variant exposes to ordinary compose. The search prefers conventional metal
+names. On SG13G2, for example, it uses `cap_bottom_plate` for Metal5.
+Starting on a metal plane, it tries higher planes in ascending order, then
+lower planes in descending order. Starting outside the metal stack (for
+example, on sky130A `poly`), it tries metal planes from bottom to top.
+These alternatives and the option to inherit the original layer determine
+`candidate_space`, the number of combinations, and
 `candidates_evaluated` counts the trials used. If the original layout has an
 open net and all nets are already pinned, the command reports an input error.
 
@@ -2607,7 +2613,7 @@ exit codes).
 | `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason), `channel_track` (#1467, present only when `routed: true` — which channel track this leg's backbone landed on; `0` is the untracked/default fixed shape, `>0` means the router offset it to clear an already-routed net contending for the same channel; see "Channel track assignment (#1467)" above), and `blocking_net` (#6961, present only on an unrouted leg whose rejection names an already-routed net — the exact `connectivity[].net` label of the net whose accepted geometry blocked this leg, so a caller can reorder `connectivity[]` without parsing `reason`; see "Two-plane crossing capacity and the per-leg `blocking_net`" below. Omitted for every successful leg — including one that succeeded only after a cross-layer retry discarded its earlier collision — and for every geometry-based rejection that names no net; the label is carried alongside the reason from the conflict check itself, never extracted from the wording). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. A leg the caller named via `connectivity[].legs[]` (#1529) is reported in this exact same shape — no distinct field marks a leg as caller-steered versus auto-selected — with one behavioural difference: a **rejected named leg is kept even on a `status: "routed"` net** (an auto-selected candidate's rejection is a router detail; a named leg's is the caller's own path not being drawn, and must not be silent). Check `legs[].routed`, not just `nets[].routed`, when supplying `legs[]`. |
 | `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry); entries whose request carried `request` also carry `requested` / `achieved` (#3971, see below). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
 | `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. To find which already-routed net blocked a listed net's rejected legs, look the label up in `nets[]` and read `legs[].blocking_net` (#6961, see the section below) — no reason-prose parsing needed. |
-| `layer_suggestions` | object | Present only when the request set `routing.suggest_layers` (issue #1962; additive). The per-net layer-assignment search's verdict: `status` (`"resolved"` / `"conflict"` / `"budget_exhausted"`), `assignments` (`{net: layer_role}` to copy into `connectivity[].layer_role` — empty unless resolved), `nets_searched`, `candidates_evaluated`, `candidate_space`, `roles` (the searched ladder above `routing.layer_role`), and, on failure, `unresolved_nets` (the nets the closest candidate still left unrouted) and `note`. See [Layer suggestion mode](#layer-suggestion-mode-routingsuggest_layers-1962). |
+| `layer_suggestions` | object | Present only when the request set `routing.suggest_layers` (issue #1962; additive). The per-net layer-assignment search's verdict: `status` (`"resolved"` / `"conflict"` / `"budget_exhausted"`), `assignments` (`{net: layer_role}` to copy into `connectivity[].layer_role` — empty unless resolved), `nets_searched`, `candidates_evaluated`, `candidate_space`, `roles` (the alternative metal roles in search order), and, on failure, `unresolved_nets` (the nets the closest candidate still left unrouted) and `note`. See [Layer suggestion mode](#layer-suggestion-mode-routingsuggest_layers-1962). |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
 | `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. **A gateable signal** (#2638): the `"explicit"`-placement clearance advisory below no longer fires on the two placements that violate a declared minimum *legitimately* — an intra-array pitch a generator reported as its own `drc_hints.min_spacing_um`, and a pair the request declares via `blocks[].abuts` — so a downstream flow can assert `warnings[] == []` rather than asserting a count it has to re-baseline every time a block moves. |
 | `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A compose request involves no rule/model deck and no single input layout stream (it composes parameters plus block sub-reports, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |

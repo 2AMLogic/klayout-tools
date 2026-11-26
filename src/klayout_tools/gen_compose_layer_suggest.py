@@ -30,7 +30,8 @@ the caller left unpinned:
 * **Ordered by total rank.** Candidates are enumerated with every net left
   as-is first (the baseline, i.e. exactly today's behaviour), then
   assignments ranked by layer preference (higher planes first, then lower
-  planes). The lowest total rank goes first, with ties broken in declaration
+  planes, or bottom-up when the primary is outside the metal stack).
+  The lowest total rank goes first, with ties broken in declaration
   order -- so earlier-declared nets stay low, matching the router's own
   first-routed-net-wins order. The first assignment that routes every net
   wins; the enumeration order is fixed, so the mapping is deterministic.
