@@ -568,8 +568,8 @@ draws that the spec never declared" below.
     the well/tub diffusion layer; each of its physically distinct (merged)
     shapes is checked independently. `null` (issue #2255) declares that
     this block draws **no** well/tub layer for this tie at all — the
-    native-substrate case — and requires `well_boxes` below to assert the
-    region instead. The key itself is always required: the absence of a
+    native-substrate case. Supply one region source: `well_boxes` to name
+    its coordinates, or `well_complement_of` to derive it from drawn layers. The key itself is always required: the absence of a
     drawn well must be declared, never inferred from an omitted key. A
     non-`null` value that draws **no geometry at all** in the stream (a
     typo'd layer/datatype, a PDK whose tub layer number changed, a GDS
@@ -593,14 +593,11 @@ draws that the spec never declared" below.
   - `well_boxes` (optional array of `[left, bottom, right, top]` micrometre
     boxes, default `[]`, issue #2255) — a caller **assertion** of the
     substrate region this tie covers, for a block that draws no well/tub
-    layer to name. Valid **only** with `well_layer: null`, and required
-    with it (an empty/omitted list there is a spec error, not a tie that
-    quietly checks nothing); declaring it alongside a drawn `well_layer` is
-    an error too — to narrow a drawn well's taps, use `tap_boxes`, and to say
-    which of its shapes this entry is about, use `well_requires_boxes` /
-    `well_excludes_boxes` below. Unlike
-    every other optional key on this entry, this one *substitutes* for a
-    required field rather than narrowing one, so it is graded under its own
+    layer to name. A null `well_layer` accepts either nonempty `well_boxes` or
+    `well_complement_of`. An entry with both region sources, neither source,
+    or asserted substrate geometry alongside a drawn `well_layer` is invalid.
+    Use `tap_boxes` to narrow a drawn well’s taps and `well_requires_boxes` /
+    `well_excludes_boxes` to select its shapes. A substrate assertion has its own
     coverage classification (`erc_coverage.checked_by_well_assertion`,
     separate from `tap_boxes`' `checked_by_assertion`) and carries its own
     falsifiability test: an asserted region indistinguishable from the whole
@@ -1149,17 +1146,11 @@ source/drain contact inside the well, and those contacts are real
 conductors, so `erc.missing_tie` will report the well as tied whenever any
 of them happens to reach the declared supply.
 
-A block sitting in a native substrate with no *drawn* well/tub layer is
-**no longer unmodellable** (issue #2255): `well_layer` accepts `null`, with
-`well_boxes` asserting the substrate region in its place — see "A block
-with no drawn well at all" below for the form, its falsifiability test, and
-what that costs the resulting evidence. What stays unmodelled is anything
-that would *derive* such a region on the caller's behalf: there is no
-implicit "the whole top cell is the substrate" region and no derived
-`substrate = extent − nwell` boolean, both of which were considered and
-rejected as unfalsifiable — they make `erc.missing_tie` satisfiable by any
-contact anywhere that reaches the declared net, which is exactly the silent
-pass the sections above exist to close.
+For a native substrate without a drawn tub, set `well_layer: null` and
+supply one region source. `well_complement_of` computes the top-cell extent
+minus the union of the specified drawn layers (issue #3750). `well_boxes`
+asserts a caller-supplied region (issue #2255). See “A block with no drawn
+well at all” for the coverage and skipped-work rules for both sources.
 
 One drawn well layer holding two differently-biased well **classes** — a
 device-body well beside a vertical bipolar's base tub, ordinary on any PDK
@@ -1424,11 +1415,12 @@ the drawn-well (n-well) half of such a design was ever graded, and
 nothing for its substrate had nothing to disclose. (Issue #2541 since gave
 that spec a disclosure path — `undeclared_classes`, above — but it remains
 a disclosure, and an unmet item 11: a substrate tie a block really does
-draw is better *declared* with `well_boxes` than disclosed.)
+draw can be declared with `well_boxes` or `well_complement_of`.)
 
-The declarable form is `well_layer: null` plus a `well_boxes` list naming
-the substrate region the tie covers, in the same `[left, bottom, right,
-top]` micrometre boxes `tap_boxes` uses:
+The example below uses the coordinate-based form, `well_layer: null` and
+`well_boxes`, with the same `[left, bottom, right, top]` micrometre boxes
+as `tap_boxes`. For a substrate delineated by drawn wells, supply their
+layers with `well_complement_of` in place of the coordinate list.
 
 ```json
 {
@@ -1452,17 +1444,13 @@ top]` micrometre boxes `tap_boxes` uses:
 }
 ```
 
-**This is not the `tap_boxes` mechanism applied one layer up, and the
-difference matters.** `tap_boxes` *narrows* a required, drawn `tap_layer`:
-it composes with geometry, and geometry is still what gets measured. This
-*substitutes* for a required drawn layer, so nothing in the stream
-corroborates the region at all. Three consequences follow, all deliberate:
+`tap_boxes` narrows a drawn tap layer. In the example, `well_boxes`
+provides the well-side coordinates. The stream supplies the tap geometry.
 
-- **The two forms are mutually exclusive.** `well_boxes` is valid only with
-  `well_layer: null`, and required with it — an empty or omitted list there
-  is a spec error. "There is no well and I am not asserting one" is already
-  expressible (omit the entry, say why in `ties_disclosure`), and unlike
-  this form that route cannot be mistaken for a graded check.
+- **Choose one substrate source.** With `well_layer: null`, supply nonempty
+  `well_boxes` or `well_complement_of`. A tie with both sources or neither
+  source is a spec error. To disclose an undeclared tie, omit its entry
+  and record the reason in `ties_disclosure`.
 - **It has its own coverage bucket**, `erc_coverage.checked_by_well_assertion`
   — a list of the same `erc.missing_tie` work identities that also appear in
   `checked`, parallel to but separate from `tap_boxes`' own
@@ -3290,8 +3278,8 @@ any other checked, non-degenerate tie:
   narrowing.
 - `checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) — the
   work identities whose **well side** rested on caller-named coordinates, in
-  either of two forms: the region itself asserted (`ties[].well_layer: null` +
-  `ties[].well_boxes`, because the block draws no well/tub layer at all), or a
+  a substrate region (`ties[].well_layer: null` with either `ties[].well_boxes`
+  or `ties[].well_complement_of`), or a
   drawn well whose *class selection* was named in boxes
   (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`, because no drawn
   layer separates the tub's two bias classes). Deliberately a separate list
