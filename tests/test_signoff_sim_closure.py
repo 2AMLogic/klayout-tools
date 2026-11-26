@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from klayout_tools.signoff import build_tier_report
@@ -307,3 +308,38 @@ def test_block_is_json_serialisable_and_garbage_closures_never_raise(tmp_path):
         block = check_sim_closure(envelope, str(tmp_path / "sim.json"), tmp_path)
         json.dumps(block)
         assert block["status"] in {"verified", "partial", "not_recorded"}
+
+
+def test_committed_include_rename_is_not_found(tmp_path):
+    repo = _git_checkout(tmp_path)
+    _circuit(repo)
+    report = _sim_report(repo)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "Original simulation inputs")
+    _git(repo, "mv", "sub.spice", "renamed.spice")
+    _git(repo, "commit", "-qm", "Rename the included deck")
+
+    citation = _cited(_grade(report, repo))
+    assert citation["sim_closure"]["unverifiable"] == [
+        {"path": "sub.spice", "reason": "not_found"}
+    ]
+
+
+def test_tracked_include_lookup_denied_is_unreadable(tmp_path, monkeypatch):
+    repo = _git_checkout(tmp_path)
+    _circuit(repo)
+    report = _sim_report(repo)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "Track the divider inputs")
+    real_stat = os.stat
+
+    def deny_lookup(path, *args, **kwargs):
+        if os.fspath(path) == str(repo / "sub.spice"):
+            raise PermissionError("Permission denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", deny_lookup)
+    citation = _cited(_grade(report, repo))
+    assert citation["sim_closure"]["unverifiable"] == [
+        {"path": "sub.spice", "reason": "unreadable"}
+    ]
