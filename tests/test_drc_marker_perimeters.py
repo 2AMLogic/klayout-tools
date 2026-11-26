@@ -4,7 +4,7 @@ import klayout.db as kdb
 import pytest
 
 import klayout_tools.drc as drc
-from helpers.drc_marker_ring import assert_simple_quad
+from helpers.drc_marker_ring import assert_simple_quad, first_meeting_sides
 from klayout_tools.decks import DrcRule
 
 _ENCLOSURE_CORNERS = [[0, 54], [0, 1946], [20, 100], [20, 1900]]
@@ -160,3 +160,22 @@ def test_chamfer_reports_triangular_marker_outlines(tmp_path, monkeypatch):
         (2000, -110, 2110, 116): {(2000, -110), (2000, 116), (2110, 0)},
         (1884, -110, 2110, 0): {(2000, -110), (1884, 0), (2110, 0)},
     }
+
+
+def test_sloped_implant_markers_have_simple_perimeters(tmp_path):
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(22, 0)).insert(kdb.Box(0, 0, 2000, 1000))
+    outline = [(-100, -100), (1900, -75), (2100, 1100), (-100, 1100)]
+    top.shapes(layout.layer(32, 0)).insert(
+        kdb.Polygon([kdb.Point(*point) for point in outline])
+    )
+    path = tmp_path / "sloped-implant.gds"
+    layout.write(str(path))
+
+    report = drc.run_drc(str(path), "gf180mcu", rules=["nplus.enclosing.comp.1"])
+    assert report["violations"]
+    for marker in report["violations"]:
+        points = marker["polygon"]
+        assert points and first_meeting_sides(points) is None, marker

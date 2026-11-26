@@ -367,3 +367,24 @@ def test_ring_oracle_rejects_the_pre_fix_bowties():
     # ...and accepts a perimeter, including one traced the other way round.
     assert_simple_quad([[0, 0], [0, 2000], [20, 2000], [20, 0]])
     assert_simple_quad([[0, 0], [20, 0], [20, 2000], [0, 2000]])
+
+
+def test_retraced_normalized_ring_keeps_the_three_extreme_points():
+    # The last normalized vertex lies one dbu up the first side.
+    pair = kdb.EdgePair(
+        kdb.Edge(2000, 1000, 2000, 512), kdb.Edge(2100, 1100, 2000, 513)
+    )
+    points = _edge_pair_hull_points(pair)
+    assert points is not None and len(points) == 3
+    assert {tuple(point) for point in points} == {
+        (2000, 512),
+        (2000, 1000),
+        (2100, 1100),
+    }
+
+
+def test_crossing_measurement_edges_keep_all_four_extreme_points():
+    pair = kdb.EdgePair(kdb.Edge(0, 0, 20, 20), kdb.Edge(0, 20, 20, 0))
+    assert_simple_quad(
+        _edge_pair_hull_points(pair), [(0, 0), (20, 20), (0, 20), (20, 0)]
+    )

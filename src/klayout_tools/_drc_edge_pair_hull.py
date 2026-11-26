@@ -23,7 +23,9 @@ def _edge_pair_hull_points(edge_pair: Any) -> list[list[int]] | None:
     the walk crosses itself (issue #7979). A crossed ring is re-walked from
     ``EdgePair.normalized()``, KLayout's own re-orientation of the pair for
     polygon conversion. Parallel pairs retain all four corners. A chamfer
-    can instead yield a triangle when a collinear point drops out. A ring
+    can instead yield a triangle when a collinear point drops out. If the
+    normalized walk still crosses or retraces a side, its extreme points
+    define the perimeter. A ring
     that is already simple keeps KLayout's vertex sequence verbatim.
 
     Three ways a marker has no usable outline, per the contract in
@@ -59,10 +61,37 @@ def _edge_pair_hull_points(edge_pair: Any) -> list[list[int]] | None:
     if _ring_self_intersects(points):
         # KLayout reorients the pair before walking its outline. At a
         # chamfer the polygon conversion can omit a collinear point.
-        return [
+        normalized = [
             [pt.x, pt.y] for pt in edge_pair.normalized().polygon(0).each_point_hull()
         ]
+        if _ring_self_intersects(normalized):
+            return _convex_perimeter(points)
+        return normalized
     return points
+
+
+def _turn(a: list[int], b: list[int], c: list[int]) -> int:
+    """Signed cross product of a-b and a-c, in integer database units."""
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _convex_perimeter(points: list[list[int]]) -> list[list[int]]:
+    """Walk the extreme vertices of a crossed four-point marker.
+
+    The lower and upper chains turn left at every retained vertex. This
+    removes a retraced collinear point while keeping both ends of the side.
+    """
+
+    def chain(vertices: list[list[int]]) -> list[list[int]]:
+        result: list[list[int]] = []
+        for vertex in vertices:
+            while len(result) >= 2 and _turn(result[-2], result[-1], vertex) <= 0:
+                result.pop()
+            result.append(vertex)
+        return result[:-1]  # The other chain starts at this endpoint.
+
+    ordered = sorted(points)
+    return chain(ordered) + chain(ordered[::-1])
 
 
 def _ring_self_intersects(points: list[list[int]]) -> bool:
@@ -96,7 +125,7 @@ def _sides_meet(a: list[int], b: list[int], c: list[int], d: list[int]) -> bool:
     """True when closed segments ``a-b`` and ``c-d`` share at least a point."""
 
     def _orient(p: list[int], q: list[int], r: list[int]) -> int:
-        cross = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        cross = _turn(p, q, r)
         return (cross > 0) - (cross < 0)
 
     def _within(p: list[int], q: list[int], r: list[int]) -> bool:
