@@ -1,13 +1,8 @@
-- **`klt drc`: `enclosed`/`enclosing` markers list `polygon` in perimeter
-  order** (#7979): KLayout pairs the two edges of an enclosure check in the
-  same direction, so the four corners of the marker were listed in a
-  self-crossing order (consecutive vertices ran along a diagonal) and
-  `violations[].polygon` could not be used as an outline -- rendered,
-  measured, or built into a `kdb.Polygon`. The same four corners are now
-  listed around the quad's perimeter, for every deck's `enclosed`/`enclosing`
-  rule (e.g. gf180mcu `nplus.enclosing.comp.1`). Vertex order only: `bbox`,
-  the corner set, `space`/`width`/`separation` markers, two-point segments
-  and `null` polygons are unchanged, and no field is added, removed or
-  retyped. The starting vertex and winding are not specified. The committed
-  `examples/drc/example.drc.json` is regenerated for its four
-  `diff.enclosing.licon.1` markers.
+- **DRC marker perimeter order** (#7979). When an enclosure check produces
+  two edges in the same direction, `klt drc` now reports the outline vertices
+  in perimeter order. This fixes the crossed quadrilaterals reported by
+  gf180mcu `nplus.enclosing.comp.1`. Parallel edges retain all four corners.
+  At a chamfer, the outline can be a triangle when KLayout omits a collinear
+  point. The report keeps its marker bounding boxes, two-point segments and
+  null polygons. Existing simple rings keep their vertex order. The four `diff.enclosing.licon.1` markers in
+  `examples/drc/example.drc.json` show the corrected order.

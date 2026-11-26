@@ -17,22 +17,22 @@ untouched-case assertions are exact rather than structural.
 Perimeter order (issue #7979): an ``enclosed``/``enclosing`` pair runs both
 edges the same direction, so KLayout's own ``polygon(0)`` walk of it is a
 self-crossing bowtie. Those rings are now re-walked around the perimeter
-(same corner set); rings that were already simple -- every
+(same corners for parallel edges); rings that were already simple -- every
 ``space``/``width``/``separation`` marker -- keep KLayout's vertex sequence.
 The literals for the crossed pairs below were re-captured accordingly, and
-``_assert_simple_ring`` checks them structurally as well, because a signed
+``assert_simple_quad`` checks them structurally as well, because a signed
 area cannot tell a bowtie from a perimeter when its lobes are equal.
 """
 
 from __future__ import annotations
 
 import random
-from fractions import Fraction
 
 import klayout.db as kdb
 import pytest
 
 import klayout_tools.drc as drc
+from helpers.drc_marker_ring import assert_simple_quad, first_meeting_sides
 from klayout_tools._drc_edge_pair_hull import _edge_pair_hull_points
 from klayout_tools.decks import DrcRule
 
@@ -57,62 +57,6 @@ def _write_two_layer_layout(tmp_path, a_box, b_box) -> str:
 def _run_with_deck(monkeypatch, rule: DrcRule, path: str) -> dict:
     monkeypatch.setattr(drc, "get_deck", lambda _: [rule])
     return drc.run_drc(path, "sky130")
-
-
-def _sides_meet(p, q, r, s) -> bool:
-    """Exact test: do the closed segments ``p-q`` and ``r-s`` share a point?
-
-    Solved parametrically over ``Fraction``s -- deliberately a different
-    formulation from the orientation test in the module under test, so the
-    two cannot share a bug.
-    """
-    d1 = (q[0] - p[0], q[1] - p[1])
-    d2 = (s[0] - r[0], s[1] - r[1])
-    w = (r[0] - p[0], r[1] - p[1])
-    denom = d1[0] * d2[1] - d1[1] * d2[0]
-    if denom != 0:
-        t = Fraction(w[0] * d2[1] - w[1] * d2[0], denom)
-        u = Fraction(w[0] * d1[1] - w[1] * d1[0], denom)
-        return 0 <= t <= 1 and 0 <= u <= 1
-    if w[0] * d1[1] - w[1] * d1[0] != 0:
-        return False  # parallel, on different lines
-
-    # Collinear: the two sides meet iff their projections onto d1 overlap.
-    def proj(pt):
-        return (pt[0] - p[0]) * d1[0] + (pt[1] - p[1]) * d1[1]
-
-    a_lo, a_hi = 0, proj(q)
-    b_lo, b_hi = sorted((proj(r), proj(s)))
-    return max(a_lo, b_lo) <= min(a_hi, b_hi)
-
-
-def _first_meeting_sides(points) -> tuple[int, int] | None:
-    """The first pair of non-adjacent sides of the closed ring ``points``
-    that meet (the closing side counts as adjacent to the first), or
-    ``None`` when the ring is simple."""
-    n = len(points)
-    for i in range(n):
-        for j in range(i + 2, n):
-            if i == 0 and j == n - 1:
-                continue
-            if _sides_meet(
-                points[i], points[(i + 1) % n], points[j], points[(j + 1) % n]
-            ):
-                return i, j
-    return None
-
-
-def _assert_simple_ring(points, corners=None) -> None:
-    """``points`` is a four-corner perimeter: four distinct vertices (the
-    set equal to ``corners`` when given) and no two non-adjacent sides --
-    the closing side included -- meeting."""
-    assert len(points) == 4, points
-    assert len({tuple(p) for p in points}) == 4, points
-    if corners is not None:
-        assert {tuple(p) for p in points} == {tuple(c) for c in corners}
-    assert _first_meeting_sides(points) is None, (
-        f"non-adjacent sides {_first_meeting_sides(points)} of {points} meet"
-    )
 
 
 def test_flush_edge_violation_polygon_is_two_point_segment(tmp_path, monkeypatch):
@@ -191,10 +135,10 @@ def test_positive_extension_violation_polygon_is_perimeter_order(tmp_path, monke
         [980, 1900],
         [1000, 1946],
     ]
-    _assert_simple_ring(
+    assert_simple_quad(
         by_left[0]["polygon"], [[0, 54], [0, 1946], [20, 100], [20, 1900]]
     )
-    _assert_simple_ring(
+    assert_simple_quad(
         by_left[980]["polygon"], [[1000, 54], [980, 1900], [980, 100], [1000, 1946]]
     )
 
@@ -250,7 +194,7 @@ def test_equal_length_edges_violation_polygon_is_perimeter_order(tmp_path, monke
     ]
     for key in ((0, 0, 20, 2000), (980, 0, 1000, 2000)):
         left, bottom, right, top = key
-        _assert_simple_ring(
+        assert_simple_quad(
             by_bbox[key]["polygon"],
             [[left, bottom], [left, top], [right, bottom], [right, top]],
         )
@@ -340,7 +284,7 @@ def test_hull_points_same_direction_quad_walked_in_perimeter_order():
     )
     points = _edge_pair_hull_points(edge_pair)
     assert points == [[0, 54], [0, 1946], [20, 1900], [20, 100]]
-    _assert_simple_ring(points, [[0, 54], [0, 1946], [20, 100], [20, 1900]])
+    assert_simple_quad(points, [[0, 54], [0, 1946], [20, 100], [20, 1900]])
 
 
 def test_hull_points_equal_length_edges_walked_in_perimeter_order():
@@ -357,7 +301,7 @@ def test_hull_points_equal_length_edges_walked_in_perimeter_order():
     )
     points = _edge_pair_hull_points(edge_pair)
     assert points == [[0, 0], [0, 2000], [20, 2000], [20, 0]]
-    _assert_simple_ring(points, [[0, 0], [20, 2000], [20, 0], [0, 2000]])
+    assert_simple_quad(points, [[0, 0], [20, 2000], [20, 0], [0, 2000]])
 
 
 def test_parallel_edge_pairs_walk_a_simple_ring_over_the_raw_corners():
@@ -394,8 +338,8 @@ def test_parallel_edge_pairs_walk_a_simple_ring_over_the_raw_corners():
         if points is None or len(points) == 2:
             continue  # the #5869 collapses; covered by the tests above
         assert {tuple(p) for p in points} == {tuple(p) for p in raw}, (edge_pair, raw)
-        assert _first_meeting_sides(points) is None, (edge_pair, raw, points)
-        if _first_meeting_sides(raw) is None:
+        assert first_meeting_sides(points) is None, (edge_pair, raw, points)
+        if first_meeting_sides(raw) is None:
             assert points == raw, (edge_pair, raw, points)
             verbatim += 1
         else:
@@ -419,113 +363,7 @@ def test_ring_oracle_rejects_the_pre_fix_bowties():
     ]
     for ring in bowties:
         with pytest.raises(AssertionError):
-            _assert_simple_ring(ring)
+            assert_simple_quad(ring)
     # ...and accepts a perimeter, including one traced the other way round.
-    _assert_simple_ring([[0, 0], [0, 2000], [20, 2000], [20, 0]])
-    _assert_simple_ring([[0, 0], [20, 0], [20, 2000], [0, 2000]])
-
-
-# --- every check kind: markers bound a simple ring (issue #7979) -----------
-
-_ENCLOSURE_CORNERS = [[0, 54], [0, 1946], [20, 100], [20, 1900]]
-
-#: One nondegenerate marker per edge-pair check kind: (rule kwargs, shapes as
-#: (layer, box), the marker's bbox, its four corners). ``enclosed`` and
-#: ``enclosing`` are the two same-direction kinds; the others are antiparallel
-#: and must come through unchanged in shape.
-_KIND_CASES = {
-    "enclosing": (
-        {"layer": (1, 0), "other_layer": (2, 0)},
-        [(1, (0, 0, 1000, 2000)), (2, (20, 100, 980, 1900))],
-        (0, 54, 20, 1946),
-        _ENCLOSURE_CORNERS,
-    ),
-    "enclosed": (
-        {"layer": (1, 0), "other_layer": (2, 0)},
-        [(2, (0, 0, 1000, 2000)), (1, (20, 100, 980, 1900))],
-        (0, 54, 20, 1946),
-        _ENCLOSURE_CORNERS,
-    ),
-    "separation": (
-        {"layer": (1, 0), "other_layer": (2, 0)},
-        [(1, (0, 0, 500, 1000)), (2, (540, 100, 1000, 900))],
-        (500, 70, 540, 930),
-        [[500, 70], [500, 930], [540, 100], [540, 900]],
-    ),
-    "space": (
-        {"layer": (1, 0)},
-        [(1, (0, 0, 500, 1000)), (1, (540, 200, 1000, 1200))],
-        (500, 170, 540, 1030),
-        [[500, 170], [500, 1000], [540, 200], [540, 1030]],
-    ),
-    "width": (
-        {"layer": (1, 0)},
-        [(1, (0, 0, 30, 1000))],
-        (0, 0, 30, 1000),
-        [[0, 0], [0, 1000], [30, 0], [30, 1000]],
-    ),
-}
-
-
-@pytest.mark.parametrize("check", sorted(_KIND_CASES))
-def test_every_check_kind_polygon_is_a_simple_ring(check, tmp_path, monkeypatch):
-    layer_kwargs, shapes, bbox, corners = _KIND_CASES[check]
-    layout = kdb.Layout()
-    layout.dbu = 0.001
-    top = layout.create_cell("TOP")
-    for layer, box in shapes:
-        top.shapes(layout.layer(layer, 0)).insert(kdb.Box(*box))
-    path = tmp_path / f"{check}.gds"
-    layout.write(str(path))
-    rule = DrcRule(
-        id=f"test.{check}",
-        description=f"synthetic 50 dbu {check}",
-        check=check,
-        threshold_dbu=50,
-        **layer_kwargs,
-    )
-
-    report = _run_with_deck(monkeypatch, rule, str(path))
-
-    markers = [
-        v
-        for v in report["violations"]
-        if (v["bbox"]["left"], v["bbox"]["bottom"]) == bbox[:2]
-        and (v["bbox"]["right"], v["bbox"]["top"]) == bbox[2:]
-    ]
-    assert len(markers) == 1, report["violations"]
-    _assert_simple_ring(markers[0]["polygon"], corners)
-
-
-def test_gf180_nplus_enclosing_comp_markers_are_simple_rings(tmp_path):
-    """The issue #7979 reproducer, through the real GF180MCU deck: four
-    ``nplus.enclosing.comp.1`` violations, each a simple ring over the same
-    four integer corners as the bowtie it replaces."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    top.shapes(layout.layer(22, 0)).insert(kdb.Box(0, 0, 2000, 1000))  # Comp
-    top.shapes(layout.layer(32, 0)).insert(kdb.Box(-110, -110, 2110, 1110))  # Nplus
-    path = tmp_path / "tap.gds"
-    layout.write(str(path))
-
-    report = drc.run_drc(str(path), "gf180mcu", rules=["nplus.enclosing.comp.1"])
-
-    expected = {
-        (-110, -110, 0, 1110): [[-110, -110], [-110, 1110], [0, 0], [0, 1000]],
-        (-110, -110, 2110, 0): [[-110, -110], [2000, 0], [0, 0], [2110, -110]],
-        (-110, 1000, 2110, 1110): [[0, 1000], [2000, 1000], [-110, 1110], [2110, 1110]],
-        (2000, -110, 2110, 1110): [[2110, -110], [2000, 1000], [2000, 0], [2110, 1110]],
-    }
-    assert report["rule_counts"] == {"nplus.enclosing.comp.1": 4}
-    by_bbox = {
-        (
-            v["bbox"]["left"],
-            v["bbox"]["bottom"],
-            v["bbox"]["right"],
-            v["bbox"]["top"],
-        ): v
-        for v in report["violations"]
-    }
-    assert set(by_bbox) == set(expected)
-    for key, corners in expected.items():
-        _assert_simple_ring(by_bbox[key]["polygon"], corners)
+    assert_simple_quad([[0, 0], [0, 2000], [20, 2000], [20, 0]])
+    assert_simple_quad([[0, 0], [20, 0], [20, 2000], [0, 2000]])
