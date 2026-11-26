@@ -56,6 +56,26 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_layer_suggestions(report: dict) -> None:
+    """routing.suggest_layers (#1962): the per-net layer-assignment search's
+    verdict -- what to copy into connectivity[].layer_role, or which nets the
+    closest trial left open. Nothing prints when the request did not opt
+    in, keeping the text format unchanged for every other request."""
+    suggestions = report.get("layer_suggestions")
+    if not suggestions:
+        return
+    print()
+    print("layer_suggestions:")
+    print(f"  status: {suggestions['status']}")
+    for net, role in (suggestions.get("assignments") or {}).items():
+        print(f"  suggested: {net} -> {role}")
+    for net in suggestions.get("unresolved_nets") or []:
+        print(f"  unresolved in closest trial: {net}")
+    note = suggestions.get("note")
+    if note:
+        print(f"  note: {note}")
+
+
 def _print_text(report: dict) -> None:
     print(f"cell_name: {report['cell_name']}")
     print(f"gds_path: {report['gds_path']}")
@@ -101,6 +121,8 @@ def _print_text(report: dict) -> None:
                 )
             else:
                 print(f"  {net['net']}  UNROUTED{leg_note}")
+
+    _print_layer_suggestions(report)
 
     pins = report.get("pins") or []
     if pins:

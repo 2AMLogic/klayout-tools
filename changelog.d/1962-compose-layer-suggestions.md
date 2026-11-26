@@ -1,0 +1,1 @@
+- `klt gen-compose` can search for per-net routing layers with `routing.suggest_layers`. The report includes a replayable assignment when all nets route and distinguishes a search budget limit from an exhausted set of assignments. (#1962)

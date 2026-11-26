@@ -126,6 +126,10 @@ class GenComposeError(Exception):
         self.details = details
 
 
+class LayerWidthError(GenComposeError):
+    """The requested or inherited width is illegal on the selected routing layer."""
+
+
 _ORIENTATIONS = ORIENTATIONS
 
 

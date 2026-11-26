@@ -14,12 +14,19 @@ The router and composition API re-export these rule lookups for existing callers
 from __future__ import annotations
 
 import math
+import re
 from functools import lru_cache
 from typing import Any
 
 from . import gen_compose_top_metal_floors as _top_metal_floors
 from ._jsonnum import is_int
-from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+from .decks import (
+    ExtractionDeck,
+    UnknownDeckError,
+    get_deck,
+    get_extraction_deck,
+    get_nominal_dbu,
+)
 from .decks.plain_rules import largest_plain_rule_um
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
 from .gen_compose_base import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM, GenComposeError
@@ -56,6 +63,33 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
             f"'{family}''s curated deck -- cannot route on it"
         )
     return pair
+
+
+def routing_planes_above(
+    deck: ExtractionDeck | None, primary: tuple[int, int] | None, variant: str | None
+) -> tuple[tuple[int, int], ...]:
+    """Available routing planes above primary, in the variant's stack order."""
+    if deck is None or primary is None or primary not in deck.metals:
+        return ()
+    # The GF180 family deck describes C/D; A and B have fewer routing metals.
+    limit = {"gf180mcuA": 3, "gf180mcuB": 4}.get(variant or "")
+    return deck.metals[deck.metals.index(primary) + 1 : limit]
+
+
+def routing_roles_above(variant: str, primary_role: str) -> tuple[str, ...]:
+    """Name the higher planes a caller can select in connectivity[].layer_role."""
+    primary = _resolve_route_layer(variant, primary_role)
+    family = _pdk_family(variant)
+    planes = routing_planes_above(get_extraction_deck(family), primary, variant)
+    by_plane: dict[tuple[int, int], str] = {}
+    for role, layer in _PDK_ROLE_LAYERS[family].items():
+        if layer is None:
+            continue
+        if re.fullmatch(r"metal\d*", role):
+            by_plane[layer] = role
+        elif role == "top_metal":
+            by_plane.setdefault(layer, role)
+    return tuple(by_plane[plane] for plane in planes if plane in by_plane)
 
 
 # Native GF180 metaltop.rb selects the 9K/11K MT.1 and MT.2a rules on
