@@ -1,1 +1,0 @@
-- **`klt lvs` (`klayout-runset`) restores commented xschem top headers and aligns headerless `.TOP` decks** (#7918).
