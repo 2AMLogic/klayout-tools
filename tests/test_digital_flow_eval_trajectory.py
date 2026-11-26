@@ -166,6 +166,13 @@ _STAGE_METRICS = {
     },
 }
 
+#: The per-root clock inventory every stage dump must now carry
+#: (``ClockPlan.inventory`` raises when it is absent): hex of the UTF-8 root
+#: name ``clk`` -- the port the flow requests below -- with its
+#: ``clock_period_ns`` of 1.1. Same shape as ``tests/test_place_and_route.py``'s
+#: own ``_CLOCK_METRICS``.
+_CLOCK_METRICS = {"clock__period_ns__636c6b": 1.1, "clock__registers__636c6b": 2}
+
 
 def _write(path: Path, text: str) -> str:
     path.write_text(text, encoding="utf-8")
@@ -343,7 +350,7 @@ def _fake_openroad_run(cmd, **kwargs) -> subprocess.CompletedProcess:
 
     Path(_script_write_db_path(script_path)).write_text("fake odb checkpoint\n")
     with open(metrics_path, "w", encoding="utf-8") as handle:
-        json.dump(_STAGE_METRICS[stage], handle)
+        json.dump({**_CLOCK_METRICS, **_STAGE_METRICS[stage]}, handle)
 
     if stage == "route":
         def_path = os.path.join(os.path.dirname(script_path), "gcd.def")
