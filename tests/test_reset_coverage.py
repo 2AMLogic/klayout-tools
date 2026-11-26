@@ -44,6 +44,13 @@ def test_classification_reason_codes():
     assert report["summary"]["covered"] == 1
 
 
+def test_wrapped_inverter_instance_preserves_reset_path(tmp_path):
+    models = tmp_path / "cells.v"
+    models.write_text(Path(MODELS).read_text().replace("not not0", "not\n    not0"))
+    report = run_reset_coverage(NETLIST, [str(models)], "rst_n")
+    assert _by_inst(report)["f1"]["status"] == "covered"
+
+
 def test_active_high_reset_flips_polarity():
     report = run_reset_coverage(NETLIST, [MODELS], "rst_n", reset_polarity="high")
     got = _by_inst(report)

@@ -866,6 +866,7 @@
         "klayout_tools",
         "klayout_tools._annotation",
         "klayout_tools._artifact_envelope",
+        "klayout_tools._batch_approvals",
         "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
@@ -1219,7 +1220,8 @@
       "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.reset_coverage_cmd",
-        "klayout_tools.reset_coverage"
+        "klayout_tools.reset_coverage",
+        "klayout_tools.reset_coverage_models"
       ]
     },
     "socket_check": {
