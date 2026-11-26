@@ -42,7 +42,7 @@ import klayout.db as kdb
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
-from helpers.subprocess_fakes import fake_completed, patch_openroad_run
+from helpers.subprocess_fakes import CLOCK_METRICS, fake_completed, patch_openroad_run
 from klayout_tools import functional_verification as fv
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route
@@ -343,7 +343,7 @@ def _fake_openroad_run(cmd, **kwargs) -> subprocess.CompletedProcess:
 
     Path(_script_write_db_path(script_path)).write_text("fake odb checkpoint\n")
     with open(metrics_path, "w", encoding="utf-8") as handle:
-        json.dump(_STAGE_METRICS[stage], handle)
+        json.dump({**CLOCK_METRICS, **_STAGE_METRICS[stage]}, handle)
 
     if stage == "route":
         def_path = os.path.join(os.path.dirname(script_path), "gcd.def")

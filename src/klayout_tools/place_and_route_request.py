@@ -42,7 +42,7 @@ from .place_and_route_asap7 import RVT_LIBRARIES, RVT_LIBRARY_DEFAULTS
 from .place_and_route_base import STAGE_ORDER
 from .place_and_route_base import PlaceAndRouteError as PlaceAndRouteError
 from .place_and_route_cell_libraries import _NO_TAPCELL_LIBRARIES
-from .place_and_route_clock import validate_clock_constraints
+from .place_and_route_clock import ClockConstraints, validate_clock_constraints
 from .place_and_route_hints import NETLIST_HINT
 from .place_and_route_layers import (
     _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
@@ -1470,45 +1470,41 @@ def _reject_wired_port_less_pins(
             )
 
 
+_CONSTRAINT_KEYS = {
+    "clock_port",
+    "clock_period_ns",
+    "clocks",
+    "clock_groups",
+    "max_transition_ns",
+    "max_capacitance_pf",
+    "max_fanout",
+    "input_delay_ns",
+    "output_delay_ns",
+    "power_activity",
+    "multicycle_paths",
+}
+
+
 def _validate_constraints(
     constraints: Any,
 ) -> tuple[
-    str | None,
-    float | None,
+    ClockConstraints,
     float | None,
     float | None,
     float | None,
     float | None,
     float | None,
 ]:
-    """Validate ``request.constraints``.
-
-    Returns ``(clock_port, clock_period_ns, max_transition_ns,
-    max_capacitance_pf, max_fanout, input_delay_ns, output_delay_ns)``. The
-    first two are the pre-existing clock fields -- required together,
-    `None`/`None` when both are omitted (unchanged behavior). The three
-    design-rule-constraint fields (issue #1709) are each independently
-    optional regardless of clock presence: a caller may set e.g.
-    `max_fanout` alone, or alongside the clock fields, or not at all --
-    `None` per field when omitted, matching this function's own pre-existing
-    "omitted preserves prior behavior exactly" convention.
-
-    The last two (issue #1865) are the **I/O timing** constraints:
-    `input_delay_ns` is the arrival time of every non-clock input port
-    relative to the clock, `output_delay_ns` the required time at every
-    output port. Each is independently optional -- but, unlike the
-    design-rule fields, each *requires* `clock_port`/`clock_period_ns`,
-    since `set_input_delay`/`set_output_delay` are both defined relative to
-    a named clock and have no meaning without one.
-    """
+    """Normalize clocks and validate design-rule limits and primary-clock I/O delays."""
     if constraints is None:
-        return None, None, None, None, None, None, None
+        constraints = {}
     if not isinstance(constraints, dict):
         raise PlaceAndRouteError("request.constraints must be a JSON object")
-
-    clock_port, clock_period_ns = validate_clock_constraints(
-        constraints, PlaceAndRouteError
-    )
+    if unknown := constraints.keys() - _CONSTRAINT_KEYS:
+        raise PlaceAndRouteError(
+            "request.constraints has unknown field(s): " + ", ".join(sorted(unknown))
+        )
+    clocks = validate_clock_constraints(constraints)
 
     max_transition_ns = constraints.get("max_transition_ns")
     if max_transition_ns is not None:
@@ -1534,26 +1530,21 @@ def _validate_constraints(
             )
         max_fanout = float(max_fanout)
 
-    # Issue #1865: I/O timing constraints. Both are plain non-negative
-    # numbers (0 is a meaningful, commonly-written value -- "the port is
-    # valid exactly at the clock edge" -- so unlike the design-rule fields
-    # above these are `>= 0`, not `> 0`), and both are relative to
-    # `clock_port`, so neither can be honoured without one.
+    # Both I/O delays are relative to the primary real or virtual clock.
     input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
     output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
     if (input_delay_ns is not None or output_delay_ns is not None) and (
-        clock_period_ns is None
+        clocks.period_ns is None
     ):
         raise PlaceAndRouteError(
             "request.constraints.input_delay_ns/output_delay_ns require "
-            "request.constraints.clock_period_ns (with or without clock_port) "
+            "request.constraints.clocks or clock_period_ns "
             "-- set_input_delay/"
             "set_output_delay are defined relative to a named clock"
         )
 
     return (
-        clock_port,
-        clock_period_ns,
+        clocks,
         max_transition_ns,
         max_capacitance_pf,
         max_fanout,

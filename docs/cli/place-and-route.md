@@ -1292,6 +1292,23 @@ is the distinct final-site count, never an accumulated engine counter.
 
 ## I/O timing constraints (`input_delay_ns`, `output_delay_ns`) and `timing_status` (issue #1865)
 
+For multiple real roots, declare their ports and periods in request order.
+The first clock supplies the reference for scalar I/O delays. All declared
+clock ports are excluded from the input delay.
+
+```json
+{
+  "constraints": {
+    "clocks": [{"port": "clk_a", "period_ns": 40}, {"port": "clk_b", "period_ns": 80}],
+    "clock_groups": [["clk_a"], ["clk_b"]]
+  }
+}
+```
+
+The optional groups apply an asynchronous timing exception between groups.
+Omit them to time paths between the clocks. Each implementation stage and
+post-route timing session recreates these constraints after loading the design.
+
 Before issue #1865, this command's entire timing-constraint surface was
 `constraints.clock_port` + `.clock_period_ns` — one `create_clock` line in the
 generated Tcl and nothing else. That is enough for a design whose timing paths
@@ -1321,9 +1338,8 @@ timed at all.
 
 ### Constrain the boundary: `input_delay_ns` / `output_delay_ns`
 
-Each is an optional non-negative scalar applied to *all* ports on its side of
-the design, and each requires `clock_port`/`clock_period_ns` (both SDC commands
-are defined relative to a named clock). Given
+Each optional delay is a non-negative number relative to the primary clock. Input
+delay applies to every data input and output delay applies to every output. Given
 
 ```json
 "constraints": {
@@ -2637,13 +2653,15 @@ live re-measurement above.
 | `power.connects[].max_columns` | integer \| omitted | → `add_pdn_connect -max_columns`. Positive integer when given. |
 | `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
 | `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. On the gf180mcu libraries an applied `split_cuts` adds a `warnings[]` entry naming the rule ids it is measured to trip under `klt drc --deck gf180mcu` (issue #7311; `{Metal3 0.128}`, #4301). |
-| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Optional at every stage. **Unconstrained run** (issue #5672, additive): with neither field, `place`/`cts`/`route` still run — global placement keeps its routability optimization and omits `-timing_driven`, no `create_clock` is emitted, and the timing-driven passes `repair_design` and `repair_timing` (`place`) and `clock_tree_synthesis` and `repair_timing -hold` (`cts`) are skipped, any clock net is routed as an ordinary signal net, `timing_status` is `"unconstrained"`, and `warnings` names every skipped pass. This lets a timing-free (structural) standard-cell Liberty reach routing; a caller who merely *forgot* the period gets the same unoptimised result, hence the warning. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
+| `constraints.clocks` | array of objects, optional | Real root clocks in order. Each entry requires a unique linked port name and a positive, finite scalar `period_ns`. The list must contain at least one clock and is mutually exclusive with both scalar clock fields. |
+| `constraints.clock_groups` | array of arrays, optional | At least two non-empty groups of port names from `constraints.clocks`. Paths between different groups are asynchronous. |
+| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Optional at every stage. **Unconstrained run** (issue #5672, additive): with all clock fields omitted, `place`/`cts`/`route` still run — global placement keeps its routability optimization and omits `-timing_driven`, no `create_clock` is emitted, and the timing-driven passes `repair_design` and `repair_timing` (`place`) and `clock_tree_synthesis` and `repair_timing -hold` (`cts`) are skipped, any clock net is routed as an ordinary signal net, `timing_status` is `"unconstrained"`, and `warnings` names every skipped pass. This lets a timing-free (structural) standard-cell Liberty reach routing; a caller who merely *forgot* the period gets the same unoptimised result, hence the warning. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
 | `constraints.multicycle_paths` | array of objects, optional | Paired setup and hold exceptions for clocked paths. See [Multicycle paths](#multicycle-paths). |
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
 | `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. Note the response reports **no** fanout violation count to go with it — see "Design-rule-check verdict" for the `sta::max_fanout_violation_count` SIGSEGV that rules one out. |
 | `constraints.power_activity` | object \| omitted | Additive field (issue #4914). `{"activity"?: number >= 0, "duty"?: number in [0, 1]}`, at least one key; validation, errors and semantics are `klt sta`'s (issue #3744). Emitted as `set_power_activity -global ...` before the power report in each stage that reports power, so `estimated_power_mw` is computed under it; echoed in `power_basis`. Global activity/duty only (no VCD/SAIF). Omitted, the generated Tcl and every number are unchanged. |
-| `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful — "the port is valid exactly at the clock edge"); **requires** `constraints.clock_port`/`.clock_period_ns`, since `set_input_delay` is defined relative to a named clock. Omitted (the default) emits no `set_input_delay` line, byte-identical to this command's behavior before this field existed. Without it, a design whose only timing paths run *input port → register* has no constrained startpoint and every slack field degrades to the unconstrained sentinel — see "I/O timing constraints" below. |
+| `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful — "the port is valid exactly at the clock edge"); **requires** a real or virtual clock, since `set_input_delay` is defined relative to a named clock. Omitted (the default) emits no `set_input_delay` line, byte-identical to this command's behavior before this field existed. Without it, a design whose only timing paths run *input port → register* has no constrained startpoint and every slack field degrades to the unconstrained sentinel — see "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation, same clock requirement, and same omitted-default behavior as `input_delay_ns` above; the two are independently optional (either alone is valid). Covers the *register → output port* half of the same gap. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
@@ -3033,6 +3051,7 @@ uncapped.
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved OpenROAD build string (`openroad -version`'s own token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string | Echo of the request. |
 | `status` | string | `"failed"` when OpenROAD reports a wholly unrouted multi-terminal signal net or the final GDS shows a split routed net. Both outcomes retain the full report. Other completed runs report `"ok"`. |
+| `clock_roots` | array of objects | OpenSTA's real root clocks at the last completed stage, in request order. Each entry gives the linked `port`, measured `period_ns`, and number of sequential cells clocked by it (`clocked_registers`). Each `stages[]` entry carries its own inventory. Virtual and unconstrained runs report an empty array. |
 | `stage_reached` | string | The last stage this run actually completed. Always equal to or beyond the request's own `target_stage` in a successful response. |
 | `seed` | integer | Echo of the request. |
 | `netlist` | `{path, scope}` | Additive field (issue #3751). The gate-level netlist the run placed — the file `request.netlist` names — as the `{path, scope}` envelope (`docs/json-contract.md`): `{"path": "<repo-relative POSIX path>", "scope": "repo"}`, or `{"path": null, "scope": "external"}` when it lies outside the repo (an absolute path is never emitted). `provenance.input.content_hash` is the `sha256:` digest of the **raw bytes of this file**, with no transform, concatenation or temp copy, so `sha256sum <path>` reproduces it offline. In a `--backend batch` report each `corner_runs[]` entry carries the field as the runner emitted it (that unit's own netlist). |
