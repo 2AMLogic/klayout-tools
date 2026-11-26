@@ -332,16 +332,18 @@ def test_sg13g2_defined_native_name_keeps_reachable_child(
 ):
     import klayout.db as kdb
 
+    ref_dir = tmp_path / "customer's reference"
+    ref_dir.mkdir()
     call = f"Xchild a b c d {model}{params}"
     definition = f".subckt {model} a b c d{params}\nR1 a b 1k\nR2 c d 2k\n.ends\n"
     if included:
-        (tmp_path / "cells.sp").write_text(definition)
-        definition = ".include cells.sp\n"
-    converted = _sg13g2_text(tmp_path, _schem(call) + definition)
+        (ref_dir / "cells.sp").write_text(definition)
+        definition = ".include 'cells.sp'\n"
+    converted = _sg13g2_text(ref_dir, _schem(call) + definition)
     assert call in converted.splitlines()
 
     netlist = kdb.Netlist()
-    netlist.read(str(tmp_path / "reference_converted.sp"), kdb.NetlistSpiceReader())
+    netlist.read(str(ref_dir / "reference_converted.sp"), kdb.NetlistSpiceReader())
     top = netlist.circuit_by_name("LAYOUT")
     (child,) = top.each_subcircuit()
     child_circuit = child.circuit_ref()
@@ -424,3 +426,64 @@ def test_sg13g2_report_replays_with_its_conversion_inputs(tmp_path, fake_klayout
     result = rerun_lvs_report(str(committed))
     assert result["status"] == "match", result
     assert not result.get("drift"), result
+
+
+# --- Issue #7918: commented xschem wrapper and headerless implicit .TOP ------
+
+
+def _read_converted(tmp_path, ref_dir, text, *, layout_top="lay_block", **ref_kw):
+    import klayout.db as kdb
+
+    from klayout_tools.lvs_runset_reference import convert_reference
+
+    source = ref_dir / "top.sp"
+    source.write_bytes(text.encode("utf-8"))
+    deck = tmp_path / "pdk.lvs"
+    deck.write_text("# runset\n")
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    req = {"layout": {"top": layout_top}, "reference": dict(ref_kw)}
+    out = convert_reference(str(source), req, str(work), str(deck))
+    nl = kdb.Netlist()
+    nl.read(out, kdb.NetlistSpiceReader())
+    return out, source, nl
+
+
+@pytest.mark.parametrize("ref_top", [None, "my_block", ".TOP"])
+def test_xschem_wrapper_supplies_top_pins_and_relative_include(tmp_path, ref_top):
+    sub = tmp_path / "schem"
+    sub.mkdir()
+    leaf = sub / "leaf.sp"
+    leaf_bytes = b".subckt my_leaf a y vdd vss\nR1 a y 1k\n.ends\n"
+    leaf.write_bytes(leaf_bytes)
+    raw = (
+        "* header\n.include leaf.sp\n**.subckt my_block a y\n*+ vdd vss\n"
+        "X0 a y vdd vss my_leaf\n*+ note\n**.ends\n.end\n"
+    )
+    kw = {} if ref_top is None else {"top": ref_top}
+    out, source, nl = _read_converted(tmp_path, sub, raw, **kw)
+    assert out != str(source)
+    assert source.read_bytes() == raw.encode("utf-8")
+    assert leaf.read_bytes() == leaf_bytes
+    top = nl.circuit_by_name("LAY_BLOCK")
+    assert top is not None
+    assert [p.name() for p in top.each_pin()] == ["A", "Y", "VDD", "VSS"]
+    assert [s.circuit_ref().name for s in top.each_subcircuit()] == ["MY_LEAF"]
+    assert nl.circuit_by_name("MY_LEAF") is not None
+
+
+def test_implicit_top_isolates_instances_with_zero_pins_and_subckt_call(tmp_path):
+    raw = (
+        ".option scale=1u\nXM1 d g s b sky130_fd_pr__nfet_01v8 W=1u L=0.15u\n"
+        "X0 a y my_leaf\n.subckt my_leaf a y\nR1 a y 1k\n.ends\n.end\n"
+    )
+    out, source, nl = _read_converted(
+        tmp_path, tmp_path, raw, top=".TOP", form="subckt-call", deck="sky130"
+    )
+    assert source.read_text() == raw
+    assert "M1 d g s b nfet L=0.15U W=1U" in Path(out).read_text()
+    top = nl.circuit_by_name("LAY_BLOCK")
+    assert top is not None and list(top.each_pin()) == []
+    assert [s.circuit_ref().name for s in top.each_subcircuit()] == ["MY_LEAF"]
+    leaf = nl.circuit_by_name("MY_LEAF")
+    assert [d.device_class().name for d in leaf.each_device()] == ["RES"]
