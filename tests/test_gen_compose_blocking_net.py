@@ -17,7 +17,7 @@ rejections that name no net.
 
 import pytest
 
-from klayout_tools.gen_compose import compose
+from klayout_tools.gen_compose import GenComposeError, compose
 from test_gen_compose import _crossing_routes_fixture, _gen_block, _make_install
 
 
@@ -32,6 +32,63 @@ def pdk_root(tmp_path):
     return root
 
 
+def _three_net_crossing_request(tmp_path, pdk_root, output):
+    """Six resistor blocks with two vertical nets sharing a waypoint lane."""
+    origins = {
+        "bw": {"x": 0.0, "y": 15.0},
+        "be": {"x": 30.0, "y": 15.0},
+        "bn1": {"x": 10.0, "y": 25.0},
+        "bs1": {"x": 18.0, "y": 5.0},
+        "bn2": {"x": 10.0, "y": 45.0},
+        "bs2": {"x": 18.0, "y": -15.0},
+    }
+    names = list(origins)
+    reports = {
+        name: _gen_block(tmp_path, pdk_root, "resistor_strip", name, num=1)
+        for name in names
+    }
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [{"id": name, "generator_report": reports[name]} for name in names],
+        "placement": {
+            "strategy": "explicit",
+            "order": names,
+            "origins_um": origins,
+        },
+        "connectivity": [
+            {
+                "net": "NET_H",
+                "pins": [
+                    {"block": "bw", "port": "P2"},
+                    {"block": "be", "port": "P1"},
+                ],
+            },
+            {
+                "net": "NET_V1",
+                "pins": [
+                    {"block": "bn1", "port": "P2"},
+                    {"block": "bs1", "port": "P1"},
+                ],
+                "waypoints_um": [[16.0, 25.21], [16.0, 5.21]],
+            },
+            {
+                "net": "NET_V2",
+                "pins": [
+                    {"block": "bn2", "port": "P2"},
+                    {"block": "bs2", "port": "P1"},
+                ],
+                "waypoints_um": [[16.0, 45.21], [16.0, -15.21]],
+            },
+        ],
+        "routing": {
+            "layer_role": "metal",
+            "width_um": 0.17,
+            "cross_block_layer_role": "metal2",
+        },
+        "options": {"cell_name": "cross_both_layers", "output": str(output)},
+    }, reports
+
+
 def test_blocking_net_on_the_both_layers_cross_layer_failure(tmp_path, pdk_root):
     # The #1680 both-layers regression (`test_compose_route_vs_route_
     # collision_that_conflicts_on_both_layers_still_fails` in
@@ -44,72 +101,10 @@ def test_blocking_net_on_the_both_layers_cross_layer_failure(tmp_path, pdk_root)
     # collision only decides the *retry*; it never replaces the reported
     # reason), and NET_V1's successfully retried leg carries no blocker
     # field at all.
-    bw = _gen_block(tmp_path, pdk_root, "resistor_strip", "bw", num=1)
-    be = _gen_block(tmp_path, pdk_root, "resistor_strip", "be", num=1)
-    bn1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bn1", num=1)
-    bs1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bs1", num=1)
-    bn2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bn2", num=1)
-    bs2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bs2", num=1)
-    output = tmp_path / "cross_both_layers.gds"
-    report = compose(
-        {
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "blocks": [
-                {"id": "bw", "generator_report": bw},
-                {"id": "be", "generator_report": be},
-                {"id": "bn1", "generator_report": bn1},
-                {"id": "bs1", "generator_report": bs1},
-                {"id": "bn2", "generator_report": bn2},
-                {"id": "bs2", "generator_report": bs2},
-            ],
-            "placement": {
-                "strategy": "explicit",
-                "order": ["bw", "be", "bn1", "bs1", "bn2", "bs2"],
-                "origins_um": {
-                    "bw": {"x": 0.0, "y": 15.0},
-                    "be": {"x": 30.0, "y": 15.0},
-                    "bn1": {"x": 10.0, "y": 25.0},
-                    "bs1": {"x": 18.0, "y": 5.0},
-                    "bn2": {"x": 10.0, "y": 45.0},
-                    "bs2": {"x": 18.0, "y": -15.0},
-                },
-            },
-            "connectivity": [
-                {
-                    "net": "NET_H",
-                    "pins": [
-                        {"block": "bw", "port": "P2"},
-                        {"block": "be", "port": "P1"},
-                    ],
-                },
-                {
-                    "net": "NET_V1",
-                    "pins": [
-                        {"block": "bn1", "port": "P2"},
-                        {"block": "bs1", "port": "P1"},
-                    ],
-                    "waypoints_um": [[16.0, 25.21], [16.0, 5.21]],
-                },
-                {
-                    "net": "NET_V2",
-                    "pins": [
-                        {"block": "bn2", "port": "P2"},
-                        {"block": "bs2", "port": "P1"},
-                    ],
-                    # Same x=16 vertical lane as NET_V1's own retried
-                    # cross-layer backbone, spanning a superset of its y
-                    # range -- guaranteed to collide on the cross layer too.
-                    "waypoints_um": [[16.0, 45.21], [16.0, -15.21]],
-                },
-            ],
-            "routing": {
-                "layer_role": "metal",
-                "width_um": 0.17,
-                "cross_block_layer_role": "metal2",
-            },
-            "options": {"cell_name": "cross_both_layers", "output": str(output)},
-        }
+    request, _ = _three_net_crossing_request(
+        tmp_path, pdk_root, tmp_path / "cross_both_layers.gds"
     )
+    report = compose(request)
 
     nets_by_name = {net["net"]: net for net in report["nets"]}
     assert nets_by_name["NET_H"]["routed"] is True
@@ -294,3 +289,24 @@ def test_blocking_net_omitted_on_geometry_only_rejections(tmp_path, pdk_root):
     assert rejected  # the rejected legs fail against b1's own geometry alone
     assert all(leg["reason"] is not None for leg in rejected)
     assert all("blocking_net" not in leg for leg in rejected)
+
+
+def test_suggestion_rejects_ambiguous_replay_names(tmp_path, pdk_root):
+    output = tmp_path / "repeated.gds"
+    request, _ = _three_net_crossing_request(tmp_path, pdk_root, output)
+    h, _, v2 = request["connectivity"]
+    h["net"] = v2["net"]
+    request["routing"]["suggest_layers"] = True
+    with pytest.raises(GenComposeError, match="unique.*repeated net: 'NET_V2'"):
+        compose(request)
+    assert not output.exists()
+
+
+def test_disabled_suggestions_preserve_declare_only(tmp_path, pdk_root):
+    request, _ = _three_net_crossing_request(
+        tmp_path, pdk_root, tmp_path / "declare.gds"
+    )
+    del request["routing"]
+    original = compose(request)
+    request["routing"] = {"suggest_layers": False}
+    assert compose(request) == original

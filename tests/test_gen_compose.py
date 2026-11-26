@@ -2952,28 +2952,25 @@ def test_compose_labels_jogged_route_exactly_once_not_per_segment(tmp_path, pdk_
 def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
     tmp_path, pdk_root
 ):
-    # "tap" is a valid routable role but is neither a `metals[]` entry nor the
-    # deck's `poly` layer, so `_resolve_label_layer` finds no label convention
-    # for it -- the metal is still drawn, but no label, and a note explains
-    # why. (Since #210 gave `poly` a `poly_label`, poly no longer exercises
-    # this path; `tap` still does.)
-    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
-    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    # The collector-ring ports and the route all lie on sky130 tap (65/44),
+    # so the route needs no via. The deck has no label convention for tap.
+    b1 = _gen_block(tmp_path, pdk_root, "bjt_array", "bjt1")
+    b2 = _gen_block(tmp_path, pdk_root, "bjt_array", "bjt2")
     output = tmp_path / "unlabelled.gds"
     report = compose(
         {
             "pdk": {"variant": "sky130A", "root": str(pdk_root)},
             "blocks": [
-                {"id": "b1", "generator_report": r1},
-                {"id": "b2", "generator_report": r2},
+                {"id": "b1", "generator_report": b1},
+                {"id": "b2", "generator_report": b2},
             ],
             "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 1.0},
             "connectivity": [
                 {
                     "net": "N1",
                     "pins": [
-                        {"block": "b1", "port": "P2"},
-                        {"block": "b2", "port": "P1"},
+                        {"block": "b1", "port": "COLL_E"},
+                        {"block": "b2", "port": "COLL_W"},
                     ],
                 }
             ],
@@ -2993,9 +2990,9 @@ def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
     top = layout.cell("unlabelled_0")
     tap = layout.layer(65, 44)
     paths = [s for s in top.shapes(tap).each() if s.is_path()]
-    assert len(paths) == 1  # metal still drawn
-    li1_pin = layout.layer(67, 5)
-    assert list(top.shapes(li1_pin).each()) == []  # but no label anywhere
+    assert len(paths) == 1
+    for layer in layout.layer_indexes():
+        assert not any(shape.is_text() for shape in top.shapes(layer).each())
 
 
 def test_compose_reports_unroutable_net_as_partial_success(tmp_path, pdk_root):
@@ -7282,18 +7279,11 @@ def test_resolve_via_drop_layer_same_layer_needs_no_drop():
     assert error is None
 
 
-def test_resolve_via_drop_layer_unrelated_role_needs_no_drop():
-    # A role that is neither a metals-stack level, nor the deck's poly
-    # layer, nor a diffusion-class (`active`/`tap`) layer -- via-drop only
-    # ever applies between two declared routing-metal levels, so this keeps
-    # the pre-#454 "draw directly on route_layer" behavior rather than being
-    # treated as "needs a drop but none found". sky130's `nwell` (64/20) is
-    # such a layer: no `klt gen` generator reports a port on it, but the
-    # deck models it.
+def test_resolve_via_drop_layer_rejects_an_unsupported_pin_layer():
     deck = get_extraction_deck("sky130")
     ladder, error = _resolve_via_drop_layer(deck, (67, 20), deck.nwell)
     assert ladder is None
-    assert error is None
+    assert error is not None and "no supported via-drop" in error
 
 
 def test_resolve_via_drop_layer_tap_role_port_resolves_a_contact_hop():
@@ -7374,14 +7364,12 @@ def test_resolve_via_drop_layer_bare_poly_gate_port_is_rejected():
     assert "gate_contact" in error
 
 
-def test_resolve_via_drop_layer_poly_route_layer_still_draws_directly():
-    # The rejection above is about the *pin's* layer, not the backbone's: a
-    # route whose own layer_role resolves outside the metals stack (e.g.
-    # "poly"/"tap") has no stack to walk and keeps drawing directly.
+def test_poly_backbone_draws_directly_only_on_its_own_pin_layer():
     deck = get_extraction_deck("sky130")
+    assert _resolve_via_drop_layer(deck, deck.poly, deck.poly) == (None, None)
     ladder, error = _resolve_via_drop_layer(deck, deck.poly, (67, 20))
     assert ladder is None
-    assert error is None
+    assert error is not None and "no via-drop" in error
 
 
 def test_resolve_via_drop_layer_adjacent_metals_resolves_the_via():

@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .gen import GenError
-from .gen_compose_base import GenComposeError
+from .gen_compose_base import GenComposeError, LayerRuleError
 from .gen_compose_pad_notch import _pad_introduced_notches_dbu
 from .gen_compose_routing import (
     _pdk_family,
@@ -342,7 +342,11 @@ def _search_landing(
         raise GenComposeError(f"ports_from_labels: port '{name}': {ladder_error}")
     dbu = nets.dbu
     ladder = ladder or ()
-    hop_pads_um, cuts_um = _stack_sizes(variant, ladder, pad_override_um)
+    try:
+        hop_pads_um, cuts_um = _stack_sizes(variant, ladder, pad_override_um)
+    except LayerRuleError as exc:
+        # The block fixes its label-access ladder independently of every route.
+        raise GenComposeError(str(exc)) from exc
     array = access["via_array"]
     pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
     pads_um: dict[_LayerPair, float] = {} if ladder else {net_layer: 0.0}

@@ -1474,17 +1474,12 @@ targeted emitters (`Q0_E`/`Q1_E`/`Q2_E`) into one node — every other emitter
 and every base tie stays its own distinct node, matching the hand-drawn `klt
 draw` workaround #454 was filed to replace.
 
-A pin whose own layer is not a member of the resolved family's
-`ExtractionDeck.metals` stack, but which a `routing.layer_role` shape already
-covers at that position (e.g. a guard ring's ordinary `TAP_*` port, always
-reported on the metals-stack `"metal"` role itself), is left exactly as
-before #454 — drawn directly on `routing.layer_role`, no via-drop attempted,
-since via-drop only ever applies between two declared routing-metal levels.
-
-One case draws a *contact* ladder down to a deck diffusion-class role instead
-of declining to act, one case draws a multi-level *ladder* between two metal
-levels, and one case is rejected outright, reporting the net unroutable
-rather than drawing something that does not connect:
+A route can land directly on a pin whose declared layer matches the
+backbone. For example, an ordinary guard-ring `TAP_*` port on `"metal"`
+accepts a `"metal"` route. When the layers differ, the router needs a
+supported via or contact path. A sky130A `cap_top_plate` or
+`cap2_top_plate` port has no supported drop from a routing metal, so both
+ordinary compose and layer suggestion report that leg as open.
 
 - A pin reported on a deck **diffusion-class role** — `ExtractionDeck.active`
   or `ExtractionDeck.tap` (issue #2312 added the latter; on a family whose
@@ -1548,14 +1543,10 @@ rather than drawing something that does not connect:
   `ExtractionDeck.vias` (not the case for any two `routing.layer_role`
   values this table currently exposes on sky130, gf180mcu, `sg13g2`, or
   `sg13cmos5l` — each family's `"metal"`→`"metal2"`→`"metal3"` prefix is a
-  fully-connected run of declared vias). gf180mcu's Metal4-5 levels, and
-  `sg13g2`'s/`sg13cmos5l`'s own Metal4 and above (Metal4 through TopMetal2
-  on `sg13g2`, Metal4/TopMetal1 on `sg13cmos5l`), remain unexposed as
-  `routing.layer_role` roles at all (each curated `EXTRACTION_DECK` declares
-  the full metals stack for extraction, but `klayout_tools.gen
-  ._PDK_ROLE_LAYERS` stops at `"metal3"` for every family), so a route can
-  never be asked to reach them via `routing.layer_role`/via-drop in the
-  first place.
+  fully-connected run of declared vias). A route can name any metal plane
+  exposed by a role for its family. On SG13G2, `cap_bottom_plate` names
+  Metal5 and `cap_top_via_metal` names TopMetal1. The via ladder can pass
+  through intermediate planes such as Metal4 even when they have no role.
 - A pin on the deck's bare **`poly`** layer — a `mos_array`/`diff_pair` gate
   drawn *without* [`params.gate_contact`](gen.md) (issue #492). No via in the
   metals stack lands on poly, so the backbone would end as an uncontacted
@@ -1566,6 +1557,11 @@ rather than drawing something that does not connect:
   and the two ways forward — re-run the block's generator with
   `params.gate_contact: true` so the gate reports a contacted `"metal"`-role
   pad, or name the gate with `pins[]` (below) instead of routing to it.
+
+  A backbone on a layer outside the metal stack, such as `poly`, can draw
+  directly to a pin on that layer. If the pin declares a different layer,
+  the router reports the leg as unrouted because it cannot draw a connecting
+  via. Per-net metal roles can route nets with metal pins in the same request.
 
   A third check (#469) generalizes both checks above from *reported*
   `ports[]` geometry to the block's **actual drawn** shapes. The two checks
@@ -2190,12 +2186,16 @@ and a hand-placed junction block), is
 
 ### What this does *not* do
 
-`gen-compose` does not compute the planar split for you. There is no
-`--check-planar` and no "route what you can on plane A, spill the rest to
+By default, `gen-compose` does not compute the planar split for you. There is
+no `--check-planar` and no "route what you can on plane A, spill the rest to
 plane B" mode: the caller names the planes, and the router draws and checks
 them (every one of `route_two_pin()`'s checks runs per leg against the plane
 that leg actually draws on, and the route-vs-route check already skips
-genuinely different planes, #1386). Allocating *tracks* within one plane is a
+genuinely different planes, #1386). The opt-in
+[layer suggestion mode](#layer-suggestion-mode-routingsuggest_layers-1962)
+below (#1962) searches for *a* split for you, but it is exactly that — an
+opt-in, bounded search over the per-net planes, not a default behaviour.
+Allocating *tracks* within one plane is a
 separate, orthogonal gap (#1467) — the two compose, and neither substitutes
 for the other: tracks cannot make a non-planar graph drawable on one plane,
 and planes do not stop two same-plane nets from wanting the same channel.
@@ -2209,6 +2209,69 @@ since fixed there; all four supported families now expose
 The full rationale, including why the alternative (an N-pass `routing[]`
 request array with an internal merge) was rejected, is recorded in
 [`docs/design/gen-compose-per-net-layer.md`](../design/gen-compose-per-net-layer.md).
+
+## Layer suggestion mode (`routing.suggest_layers`, #1962)
+
+Set `routing.suggest_layers` to `true` to have the router try alternative metal layers
+for nets with no explicit `layer_role`. Each trial uses the ordinary compose
+checks, including via landings, spacing and width floors. The search keeps
+the placement, net order, pins, widths, waypoints and caller-pinned roles.
+It starts with the original request, then tries assignments in increasing
+total layer rank. At the same total rank it favors the original layers of
+earlier nets.
+
+For example, the sky130A three-net crossing routes two nets in its original
+order. On the fifth trial the router finds `{"NET_V2": "metal3"}`, which
+connects all three. To request suggestions and replay a successful assignment
+for a routed composition, run these commands beside the original request
+so relative block-report paths resolve in the same directory.
+
+```sh
+jq '.routing.suggest_layers = true | .options.output = "suggested.gds"' \
+  compose.json > suggest.json
+klt gen-compose suggest.json --format json > suggested-report.json
+
+jq --slurpfile report suggested-report.json '
+  $report[0].layer_suggestions as $s
+  | if $s.status != "resolved" then error($s.status) else . end
+  | .connectivity |= map(if $s.assignments[.net]
+                          then .layer_role = $s.assignments[.net] else . end)
+  | del(.routing.suggest_layers, .routing.suggest_layers_budget)
+  | .options.output = "replay.gds"
+' suggest.json > replay.json
+klt gen-compose replay.json --format json > replay-report.json
+```
+
+Read `layer_suggestions.status` to interpret the saved layout.
+
+| Status | Saved layout and next action |
+| --- | --- |
+| `resolved` | Every net routed. Copy the returned `assignments` into the matching nets to replay. An empty mapping means the original request already worked. |
+| `budget_exhausted` | The original layout is saved and some assignments remain untested. Increase `routing.suggest_layers_budget` or pin known roles to reduce the search space. |
+| `conflict` | Every assignment in this search was tried and each left at least one net open or violated a deck rule. Inspect the routing constraints, widths and waypoints. |
+
+On either incomplete result the CLI exits with code 3. Top-level
+`unrouted_nets` and the per-leg diagnostics describe the saved layout.
+`layer_suggestions.unresolved_nets` lists the nets left open by the closest
+trial. Different trials may connect different subsets of the nets.
+
+The positive integer `routing.suggest_layers_budget` defaults to 32 and
+includes the baseline. A trial counts even when its layer violates a width
+or landing-pad floor or its route collides with a requested pin stub. Trials
+use temporary layouts. If the original request hits one of these errors, the
+search can still publish a complete assignment. If it finds none, the CLI
+exits with code 1, reports the original error and preserves any existing output.
+Net names must be unique in suggestion mode so the assignment can be replayed.
+The `roles` list contains one role for each alternative metal plane the
+variant exposes to ordinary compose. The search prefers conventional metal
+names. On SG13G2, for example, it uses `cap_bottom_plate` for Metal5.
+Starting on a metal plane, it tries higher planes in ascending order, then
+lower planes in descending order. Starting outside the metal stack (for
+example, on sky130A `poly`), it tries metal planes from bottom to top.
+These alternatives and the option to inherit the original layer determine
+`candidate_space`, the number of combinations, and
+`candidates_evaluated` counts the trials used. If the original layout has an
+open net and all nets are already pinned, the command reports an input error.
 
 ## CLI shape (a Builder decision, per the spike's own flag)
 
@@ -2434,6 +2497,8 @@ exit codes).
 | `routing.cross_block_width_um` | number | Optional (issue #1620). The width a leg draws at once it actually falls back to `routing.cross_block_layer_role` — independent of `routing.width_um`, so naming a cross-block layer with a stricter deck minimum never forces the *primary* plane's own routing wider than requested. Defaults to `routing.cross_block_layer_role`'s own deck minimum-width rule when omitted; when given, must be `> 0` and floored the same way `routing.width_um` is against `routing.layer_role` (an application error, exit 1, naming this field, the offending value, and the resolved deck's own rule id and threshold). Ignored (and meaningless) without `routing.cross_block_layer_role` also configured. |
 | `routing.landing_pad_size_um` | number | Optional (issue #5803). The side (µm) of the square landing pad every via-drop draws on each of its `landing_layers`, replacing the fixed 0.42 µm baseline (sized from the contact-enclosure convention) — the knob that reconciles a generator's terminal pitch with the composer's pad footprint. Must be `> 0`. Each drawn `(landing layer, via layer)` pair's own deck floor — the pad layer's minimum-area side and the via side plus twice its enclosing-margin rule, the same floors #2072/#2074 grow the default pads with — is checked against the override once routing has resolved which pairs this request actually draws: an override below a pair's floor is an application error (exit 1) naming the binding rule and required square side. The resolved deck supplies area and enclosure rules. On gf180mcuC/D Metal5 the native 9K/11K runset also supplies MT.1 (0.44 µm width) and MT.4 (0.5625 µm² area, requiring a 0.75 µm square). Where the floors allow it, pads draw at exactly the override, and the route-vs-route collision checks measure the same footprint the drawing inserts. Omitting it changes nothing (default pads, byte-for-byte). |
 | `routing.minimal_ladder` | boolean | Optional (issue #6058), default `false`. Shrinks a multi-hop via-drop ladder's **intermediate** hop pads — the pads on metal levels the ladder merely passes through, neither the backbone's own plane nor the pin's own layer — from the fixed 0.42 µm baseline to each pair's own deck floor: the pad layer's minimum-area side, its minimum-width rule, and the via side plus twice *both* the pair's plain enclosure margin and its two-adjacent-edges enclosure margin. On sky130A that floors a met1 pad over via1 at 0.32 µm (`met1.enclosing_adjacent.via.1`: 0.15 µm cut + 2×0.085 µm) where the baseline drew 0.42 µm. The two **terminal** pads of each endpoint (its port's own layer and the leg's route layer) keep today's sizing, and a pair whose deck declares no enclosure rule keeps the baseline (no information justifies shrinking). The route-vs-route collision checks measure the same shrunk footprints drawing inserts (checks and drawn output cannot disagree), and `klt drc` on the composed output stays clean: the floors are read from the same curated deck. **Minimum compatible terminal pitch**: for two equal square pads of side *s* on a layer whose same-layer spacing rule is *d* (axis-aligned, edge to edge), the layer-local pitch is *s + d* — e.g. two 0.320 µm met1 squares against sky130A's `met1.space.1` (0.140 µm) need ≥ 0.460 µm centre-to-centre. A ladder deposits pads on *every* plane it crosses, so derive a route's real bound from the largest `pad side + spacing` on any plane the two routes share — intermediate pads at their minimal-ladder floors, terminal pads at the (unchanged) baseline or override, arrays adding `(max(rows, cols) − 1) × pitch`. Assumptions behind the quoted numbers: sky130A curated deck, single cuts (no `access.via_array`), sky130's li1→met5 metals stack. Cannot be combined with `routing.landing_pad_size_um` (they select two different pad-sizing policies; setting both is an application error, exit 1, naming both fields). `false`/omitted is byte-for-byte today's output. |
+| `routing.suggest_layers` | boolean | Optional (issue #1962), default `false`. The opt-in **per-net layer suggestion mode**: a bounded, deterministic search over `connectivity[].layer_role` assignments for the nets the caller left unpinned, each candidate evaluated by a full ordinary compose pass (the exact request a replay of the suggestion would run). The response gains an additive `layer_suggestions` block whose `assignments` mapping — `{net: layer_role}` — a caller copies into `connectivity[].layer_role` and replays through the ordinary command to obtain the reported route outcome. Caller-pinned roles, pins, `waypoints_um`, placement and widths are honoured verbatim. See [Layer suggestion mode](#layer-suggestion-mode-routingsuggest_layers-1962). A non-boolean value is an application error (exit 1); `false`/omitted is byte-for-byte today's behaviour. |
+| `routing.suggest_layers_budget` | integer | Optional (issue #1962). A positive integer capping how many compose runs (baseline included; the winning final run is not counted) one suggestion request may spend before the search stops and reports `status: "budget_exhausted"` in the `layer_suggestions` block. Defaults to `32`. Each unit is one full compose evaluation, so this is the knob that keeps the mode bounded on large compositions. A zero/negative/non-integer value is an application error (exit 1). |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 | `options.boundary` | object | Optional (#3998). `{"bbox_um": {"x0", "y0", "x1", "y1"}}` draws exactly one rectangle on layer 235/4 (`prBoundary.boundary`, shared by sky130 and gf180mcu) in the top cell. The extent is exactly the caller-given `bbox_um`, never derived from the placed content (containment is advisory, not enforced). Density decks (e.g. `gf180mcu_density.lydrc`) need this layer to evaluate their whole-design ratios; without it they silently check nothing. Invalid (`boundary` not an object, missing/non-numeric corner, `x1 <= x0` or `y1 <= y0`) is an application error (exit 1). Omitted or `null`: output is unchanged. Example: `"options": {"cell_name": "chip_top", "output": "chip_top.gds", "boundary": {"bbox_um": {"x0": 0, "y0": 0, "x1": 2000, "y1": 2000}}}`. |
 | `options.check_placement` | boolean | Optional (#6942), default `false`. The opt-in **hard placement gate** — the fail-fast counterpart to the advisory checks above. With `true`, the request fails (exit 1, before any routing is drawn and before `options.output` is created or replaced) when any two blocks' declared placed footprints intersect with positive width **and** height, or when any block's real, stream-measured footprint extends past its own declared `bbox_um` beyond the containment tolerance — even with no other block nearby. Edge and corner contact passes (abut-by-design flows are not penalized); a `blocks[].abuts` declaration suppresses only the *clearance* advisory and never exempts a positive-area intersection. Under `strategy: "array"` the growth rule compares the base tile's measured footprint against that tile's own declaration (the array union can hide one tile's growth). A non-boolean value is an application error (exit 1). `false`/omitted: today's behavior byte-for-byte. The same rules are exposed as a library function, `klayout_tools.gen_compose.check_placement_overlap(declared_um, measured_um=None)`, so a hand-rolled merge (`Layout.read` + `Cell.copy_tree` + `CellInstArray`) can run the identical gate as a preflight with no request document, PDK, or second CLI — see "Opt-in placement gate (`options.check_placement`, #6942)" below. |
@@ -2543,6 +2608,7 @@ exit codes).
 | `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason), `channel_track` (#1467, present only when `routed: true` — which channel track this leg's backbone landed on; `0` is the untracked/default fixed shape, `>0` means the router offset it to clear an already-routed net contending for the same channel; see "Channel track assignment (#1467)" above), and `blocking_net` (#6961, present only on an unrouted leg whose rejection names an already-routed net — the exact `connectivity[].net` label of the net whose accepted geometry blocked this leg, so a caller can reorder `connectivity[]` without parsing `reason`; see "Two-plane crossing capacity and the per-leg `blocking_net`" below. Omitted for every successful leg — including one that succeeded only after a cross-layer retry discarded its earlier collision — and for every geometry-based rejection that names no net; the label is carried alongside the reason from the conflict check itself, never extracted from the wording). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. A leg the caller named via `connectivity[].legs[]` (#1529) is reported in this exact same shape — no distinct field marks a leg as caller-steered versus auto-selected — with one behavioural difference: a **rejected named leg is kept even on a `status: "routed"` net** (an auto-selected candidate's rejection is a router detail; a named leg's is the caller's own path not being drawn, and must not be silent). Check `legs[].routed`, not just `nets[].routed`, when supplying `legs[]`. |
 | `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry); entries whose request carried `request` also carry `requested` / `achieved` (#3971, see below). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
 | `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. To find which already-routed net blocked a listed net's rejected legs, look the label up in `nets[]` and read `legs[].blocking_net` (#6961, see the section below) — no reason-prose parsing needed. |
+| `layer_suggestions` | object | Present only when the request set `routing.suggest_layers` (issue #1962; additive). The per-net layer-assignment search's verdict: `status` (`"resolved"` / `"conflict"` / `"budget_exhausted"`), `assignments` (`{net: layer_role}` to copy into `connectivity[].layer_role` — empty unless resolved), `nets_searched`, `candidates_evaluated`, `candidate_space`, `roles` (the alternative metal roles in search order), and, on failure, `unresolved_nets` (the nets the closest candidate still left unrouted) and `note`. See [Layer suggestion mode](#layer-suggestion-mode-routingsuggest_layers-1962). |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
 | `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. **A gateable signal** (#2638): the `"explicit"`-placement clearance advisory below no longer fires on the two placements that violate a declared minimum *legitimately* — an intra-array pitch a generator reported as its own `drc_hints.min_spacing_um`, and a pair the request declares via `blocks[].abuts` — so a downstream flow can assert `warnings[] == []` rather than asserting a count it has to re-baseline every time a block moves. |
 | `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A compose request involves no rule/model deck and no single input layout stream (it composes parameters plus block sub-reports, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
@@ -2615,16 +2681,24 @@ nets:
   VOUT  routed  length=3.2um
   VDD  routed  length=8.76um  (2 legs)
 
+layer_suggestions:
+  status: resolved
+  suggested: VDD -> metal3
+
 matched_groups:
   diff_pair:pair:2  (diffpair)
 ```
+
+(`layer_suggestions:` prints only when the request set
+`routing.suggest_layers`; a failing search lists `unresolved in closest trial:` lines and a
+`note:` instead of `suggested:` ones.)
 
 ## Exit codes and errors
 
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, an infeasible `pins[].request` (distinct `error.code`s, see "Requested port coordinates" #3971), a block's `generator_report`/GDS could not be read, the `options.output` directory does not exist, or — only with `options.check_placement: true` (#6942) — a failed placement gate: a positive-area pairwise footprint intersection or a measured footprint that outgrew its own declaration (see "Opt-in placement gate (`options.check_placement`, #6942)" below), refused before any routing is drawn or the output is written. |
+| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty, or a malformed `routing.suggest_layers`/`routing.suggest_layers_budget` or suggestion-mode misuse (#1962 — see that section's error list)), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, an infeasible `pins[].request` (distinct `error.code`s, see "Requested port coordinates" #3971), a block's `generator_report`/GDS could not be read, the `options.output` directory does not exist, or — only with `options.check_placement: true` (#6942) — a failed placement gate: a positive-area pairwise footprint intersection or a measured footprint that outgrew its own declaration (see "Opt-in placement gate (`options.check_placement`, #6942)" below), refused before any routing is drawn or the output is written. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 

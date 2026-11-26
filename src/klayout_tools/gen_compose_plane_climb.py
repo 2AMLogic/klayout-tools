@@ -49,6 +49,7 @@ from .gen_compose_layer_rules import (
     _min_width_um_for_layer,
     _port_own_layer,
     _route_spacing_rule,
+    routing_planes_above,
 )
 from .gen_compose_plane_change import RouteConflict, _leg_conflict_reason
 
@@ -203,17 +204,9 @@ class PlaneClimbContext(NamedTuple):
         """The deck's own metals-stack planes strictly above this net's
         ``route_layer``, in stack order; empty when the net's plane is not a
         metals-stack member (or no deck was given)."""
-        if (
-            self.extraction_deck is None
-            or self.route_layer is None
-            or self.route_layer not in self.extraction_deck.metals
-        ):
-            return ()
-        start = self.extraction_deck.metals.index(self.route_layer)
-        # The family deck describes the five-metal C/D stack. A and B
-        # ship only three and four routing metals respectively.
-        limit = {"gf180mcuA": 3, "gf180mcuB": 4}.get(self.pdk_variant or "")
-        return self.extraction_deck.metals[start + 1 : limit]
+        return routing_planes_above(
+            self.extraction_deck, self.route_layer, self.pdk_variant
+        )
 
     def retry_rejected_leg(
         self,

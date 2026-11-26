@@ -126,6 +126,14 @@ class GenComposeError(Exception):
         self.details = details
 
 
+class LayerRuleError(GenComposeError):
+    """The selected routing layer rejects a width or landing-pad size."""
+
+
+class LayerWidthError(LayerRuleError):
+    """The requested or inherited width is illegal on the selected routing layer."""
+
+
 _ORIENTATIONS = ORIENTATIONS
 
 

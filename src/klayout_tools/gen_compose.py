@@ -187,6 +187,7 @@ from collections.abc import Callable
 from functools import cache, partial
 from typing import Any
 
+from . import gen_compose_layer_suggest as _layer_suggest
 from . import gen_compose_port_request as _pr
 from ._jsonnum import is_finite_number, is_int
 from ._layout import write_layout
@@ -221,11 +222,12 @@ from .gen_compose_base import (
     GenComposeError as GenComposeError,
 )
 from .gen_compose_base import (
-    _apply_orientation_um as _apply_orientation_um,
-)
-from .gen_compose_base import (
+    LayerWidthError,
     _nearest_grid_point_within,
     _port_probe_position_um,
+)
+from .gen_compose_base import (
+    _apply_orientation_um as _apply_orientation_um,
 )
 from .gen_compose_base import (
     _orient_port as _orient_port,
@@ -2921,16 +2923,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     ``routing`` is given at all. Returns a dict matching the documented
     response schema (see ``docs/cli/gen-compose.md``).
 
-    ``request_dir`` is the directory a relative ``blocks[].generator_report``
-    path string resolves against (mirrors ``klt lvs``'s
-    ``load_request_arg``/``_resolve_relative`` convention, ``lvs.py``) --
-    normally the request document's own directory, passed in by
-    ``cli/gen_compose_cmd.py``. Defaults to the current working directory
-    when omitted (``None``), so a direct/library caller with no request file
-    at all (e.g. an inline dict, as ``tests/test_metrics_regression.py``
-    calls this function) keeps resolving cwd-relative paths unchanged. An
-    absolute ``generator_report`` path, or one given as an inline JSON
-    object, is unaffected by ``request_dir`` either way.
+    Resolve relative ``blocks[].generator_report`` paths against
+    ``request_dir`` (the request file's directory in the CLI, or the
+    current working directory when omitted by a library caller). Absolute
+    paths and inline JSON objects are unaffected.
 
     The response carries the shared ``provenance`` block (issue #2035) built
     by :func:`~klayout_tools._provenance.build_provenance` -- see
@@ -2977,13 +2973,14 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     routing = request.get("routing") or {}
     if not isinstance(routing, dict):
         raise GenComposeError("request.routing must be a JSON object")
-    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
+    if _layer_suggest.suggestions_enabled(routing):
+        return _layer_suggest.compose_with_layer_suggestions(
+            request, pdk_info["variant"], request_dir
+        )
+    routing = _layer_suggest.ordinary_routing(routing)
     landing_pad_override_um = None
-    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
-    # sizing; True sizes a ladder's intermediate hop pads at their own
-    # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
-    # sizes). The two fields select competing pad-sizing policies and are
-    # rejected together before label-derived landings are searched.
+    # Minimal ladders size intermediate pads at their per-pair floors.
+    # Reject conflicting pad policies before searching label-derived landings.
     minimal_ladder = False
     if request.get("connectivity") and routing:
         landing_pad_override_um = _parse_landing_pad_override(
@@ -3427,13 +3424,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         if floor is not None and width < floor[0] - 1e-9:
             floor_um, rule_id = floor
             if requested_um is None:
-                raise GenComposeError(
+                raise LayerWidthError(
                     f"the layer this entry routes on has a stricter PDK deck "
                     f"minimum width ('{rule_id}', >= {floor_um}um) than the "
                     f"inherited routing width ({width}um) -- set {where} "
                     "rather than widening routing.width_um for every net"
                 )
-            raise GenComposeError(
+            raise LayerWidthError(
                 f"{where} ({width}um) is narrower than the resolved PDK "
                 "deck's own minimum width for the layer this entry routes on "
                 f"-- '{rule_id}' requires >= {floor_um}um"
