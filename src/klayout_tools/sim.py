@@ -126,6 +126,7 @@ from . import (
     sim_noise_spectrum,
     sim_op_args,
     sim_passes,
+    sim_plot,
     sim_portable,
     sim_probit_sigma,
     sim_search,
@@ -182,6 +183,7 @@ from ._paths import (
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from ._provenance import sha256_file as sha256_file
+from ._spice_number import parse_plain as _parse_plain_number
 from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
@@ -424,7 +426,8 @@ from .sim_measurement_results import (
 from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
-from .sim_plot import render_waveform_svg
+from .sim_plot import _measurement_diagnostic_hints as _measurement_diagnostic_hints
+from .sim_plot import render_waveform_svg as render_waveform_svg
 from .sim_population_limits import validate_k_sigma as _validate_k_sigma
 
 #: Moved to `sim_raw.py` (issue #6752) so measurement modules read a waveform
@@ -4183,13 +4186,16 @@ def _run_sim_corners(
     # is needed.
     plots_by_corner: dict[str, list[dict[str, str]]] = {}
     if plot_dir is not None:
+        signals_by_name, hints_by_signal = sim_plot.prepare_annotations(
+            measurements_spec
+        )
         os.makedirs(plot_dir, exist_ok=True)
         for corner in corners:
-            corner_plots = _write_corner_plots(
+            corner_plots = sim_plot.write_corner_plots(
                 corner=corner,
                 plot_dir=plot_dir,
                 analysis_kind=analysis.get("kind"),
-                measurements_spec=per_corner_specs,
+                hints_by_signal=hints_by_signal,
             )
             if corner_plots:
                 corner["artifacts"]["plots"] = corner_plots
@@ -4206,10 +4212,9 @@ def _run_sim_corners(
         # acceptance criterion. `None` when no worst-case corner exists (an
         # empty corner matrix) or that measurement's `.meas` card names no
         # recognisable signal/has no matching rendered plot.
-        specs_by_name = {spec["name"]: spec for spec in measurements_spec}
         for entry in measurements_rollup:
-            entry["plot"] = _measurement_plot_path(
-                entry, specs_by_name.get(entry["name"]), plots_by_corner
+            entry["plot"] = sim_plot.measurement_plot_path(
+                entry, signals_by_name.get(entry["name"]), plots_by_corner
             )
 
     grid_stats = sim_probit_sigma.rollup(monte_carlo_stats, corner_points, corners)
@@ -8785,19 +8790,6 @@ def _classify_xyce_diagnostics(log_text: str) -> list[dict[str, str]]:
 # --------------------------------------------------------------------------- #
 
 
-def _parse_spice_seconds(raw: str) -> float | None:
-    """Parse a SPICE time literal (``100u``, ``1e-4``, ``5n``) to seconds,
-    via the shared :mod:`._spice_number` engineering-notation table, the
-    same one :func:`_parse_width_um` uses for geometry. Unlike a bare
-    geometry literal, a SPICE time literal has no ambiguous "bare" case --
-    seconds is always the implicit base unit -- so, unlike
-    :func:`_parse_width_um`, no additional unit conversion is applied on top
-    of the suffix multiplier. Returns ``None`` for anything that is not a
-    plain numeric literal.
-    """
-    return spice_number.parse(raw)
-
-
 #: Deliberately generous floor used only by :func:`_preflight_timeout_warning`
 #: -- NOT a real per-engine throughput estimate. ngspice's actual rate
 #: depends heavily on circuit size/complexity/convergence behavior and is
@@ -9329,18 +9321,6 @@ _MODEL_WIDTH_CEILING_UM = 100.0
 _MOS_INSTANCE_RE = re.compile(r"^\s*([MX]\S+)\s+(?:\S+\s+){4}(\S+)(.*)$", re.IGNORECASE)
 
 _PARAM_ASSIGN_RE = re.compile(r"(\w+)\s*=\s*(\S+)")
-
-
-def _parse_plain_number(raw: str) -> float | None:
-    """Parse a bare, dimensionless SPICE numeric literal (e.g. an ``nf=``
-    or ``m=`` instance-multiplier value). Returns ``None`` for anything
-    that is not a plain number -- an expression like ``{n*2}`` this
-    diagnostic cannot evaluate.
-    """
-    match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
-    if match is None:
-        return None
-    return float(match.group(1))
 
 
 def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
@@ -10277,189 +10257,4 @@ def _rollup_measurements(
 # --------------------------------------------------------------------------- #
 
 noise_representation = sim_noise.noise_representation
-
-
-# --------------------------------------------------------------------------- #
-# Waveform plots (`--plot`, issue #1723)
-# --------------------------------------------------------------------------- #
-
-#: The first `v(...)`/`i(...)`-shaped (optionally derivative-prefixed, e.g.
-#: `vd(...)`/`ir(...)`) parenthesized token in a `.meas` card's `spice` text
-#: -- the signal that card is actually about. ngspice itself always lowercases
-#: node/signal names in its rawfile `variables[].name` (see
-#: `parse_ascii_rawfile`'s docstring example), so the reconstructed name below
-#: is lowercased to match, regardless of how the request's own `.meas` text
-#: capitalizes it.
-_MEAS_SIGNAL_TOKEN_RE = re.compile(r"\b([a-z]{1,3})\(([^)]*)\)", re.IGNORECASE)
-
-#: `from=<value>` / `to=<value>` trailers on an `AVG`/`RMS`/`PP`/`MIN`/`MAX`/
-#: `INTEG` measurement -- the "measurement window" #1723 asks to shade on a
-#: `tran` plot.
-_MEAS_FROM_RE = re.compile(r"\bfrom\s*=\s*(\S+)", re.IGNORECASE)
-_MEAS_TO_RE = re.compile(r"\bto\s*=\s*(\S+)", re.IGNORECASE)
-
-#: `WHEN <signal>=<value>` on a threshold-crossing measurement -- the
-#: `.meas` target #1723 asks to draw as a reference line. `\S+` between
-#: `when` and the final `=` is deliberately greedy-then-backtracking so it
-#: still matches when the signal token itself carries no space before its
-#: own `=` (e.g. `when v(out)=1.5`, not `when v(out) = 1.5`).
-_MEAS_WHEN_TARGET_RE = re.compile(
-    r"\bwhen\s+\S+\s*=\s*([-+]?[\d.]+(?:[eE][-+]?\d+)?[a-zA-Z]*)", re.IGNORECASE
-)
-
-
-def _measurement_diagnostic_hints(spice: str) -> dict[str, Any]:
-    """Best-effort extraction of the plotting context a `.meas` card's own
-    ``spice`` text implies: which signal it is about, the time window it
-    integrates/searches over (``from=``/``to=``), and the threshold value it
-    searches for (``WHEN <signal>=<value>``).
-
-    Never raises -- an unrecognised card shape (e.g. a ``TRIG``/``TARG``
-    delay measurement, which has no single window or target this simple
-    parser understands) yields ``{"signal": None, "window": None, "target":
-    None}``, and the caller (:func:`_write_corner_plots`) just renders that
-    signal's curve without the extra context rather than failing the whole
-    plot batch. This is deliberately not a general SPICE expression
-    evaluator -- see :mod:`klayout_tools.sim_plot`'s module docstring on
-    scope.
-    """
-    signal_match = _MEAS_SIGNAL_TOKEN_RE.search(spice)
-    signal = (
-        f"{signal_match.group(1).lower()}({signal_match.group(2).lower()})"
-        if signal_match
-        else None
-    )
-
-    window: tuple[float, float] | None = None
-    from_match = _MEAS_FROM_RE.search(spice)
-    to_match = _MEAS_TO_RE.search(spice)
-    if from_match is not None and to_match is not None:
-        from_s = _parse_spice_seconds(from_match.group(1))
-        to_s = _parse_spice_seconds(to_match.group(1))
-        if from_s is not None and to_s is not None:
-            window = (from_s, to_s)
-
-    target: float | None = None
-    when_match = _MEAS_WHEN_TARGET_RE.search(spice)
-    if when_match is not None:
-        target = _parse_plain_number(when_match.group(1))
-
-    return {"signal": signal, "window": window, "target": target}
-
-
-def _write_corner_plots(
-    *,
-    corner: dict[str, Any],
-    plot_dir: str,
-    analysis_kind: str | None,
-    measurements_spec: list[dict[str, Any]],
-) -> list[dict[str, str]]:
-    """Render one SVG per non-sweep signal captured in ``corner``'s persisted
-    waveform artifact, writing each to ``plot_dir`` with a deterministic
-    filename (``<corner_slug>__<signal_slug>.svg``).
-
-    Any `tran` measurement whose own signal (see
-    :func:`_measurement_diagnostic_hints`) matches a rendered signal gets its
-    ``from=``/``to=`` window shaded and its ``WHEN``-target drawn as a
-    reference line on that signal's plot -- issue #1723's "the `.meas`
-    target drawn as a line" / "the measurement window shaded" acceptance
-    criteria. `ac` plots use a log-scaled frequency axis; `dc`/`tran` use a
-    linear sweep axis (window shading only applies to `tran`, since
-    ``from=``/``to=`` on a `dc`/`ac` measurement is over the swept
-    source/frequency, not simulated time, and this issue's shading is
-    specifically the *time* window the Proposal describes).
-
-    Returns ``[]`` -- writing nothing -- when this corner has no persisted
-    waveform artifact (an errored corner that never produced a rawfile) or
-    that artifact cannot be read/parsed; never raises, since one corner's
-    bad artifact should not abort plotting every other corner.
-    """
-    waveform_path = corner["artifacts"].get("waveform")
-    if not waveform_path or not os.path.isfile(waveform_path):
-        return []
-    try:
-        with open(waveform_path, encoding="utf-8") as handle:
-            waveform = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return []
-
-    variables = waveform.get("variables") or []
-    points = waveform.get("points") or []
-    if len(variables) < 2 or not points:
-        return []
-
-    sweep_name = variables[0]["name"]
-    x_values = [point[0] for point in points]
-    log_x = analysis_kind == "ac"
-
-    hints_by_signal: dict[str, dict[str, Any]] = {}
-    for spec in measurements_spec:
-        hints = _measurement_diagnostic_hints(spec.get("spice", ""))
-        if hints["signal"] is None:
-            continue
-        # Merge across every measurement naming this signal (e.g. a `PP`
-        # window-measurement and a separate `WHEN` threshold-measurement
-        # both over `v(out)`) -- the first *non-None* window/target found
-        # wins for each field independently, rather than one measurement's
-        # hints unconditionally shadowing another's.
-        merged = hints_by_signal.setdefault(
-            hints["signal"], {"window": None, "target": None}
-        )
-        if merged["window"] is None and hints["window"] is not None:
-            merged["window"] = hints["window"]
-        if merged["target"] is None and hints["target"] is not None:
-            merged["target"] = hints["target"]
-
-    corner_slug = _slugify_corner_id(corner["corner_id"])
-    written: list[dict[str, str]] = []
-    for var in variables[1:]:
-        name = var["name"]
-        y_values = [point[var["index"]] for point in points]
-        hint = hints_by_signal.get(name.lower())
-        window = hint["window"] if hint and analysis_kind == "tran" else None
-        target = hint["target"] if hint else None
-        svg = render_waveform_svg(
-            signal_name=name,
-            corner_id=corner["corner_id"],
-            x_values=x_values,
-            y_values=y_values,
-            x_axis_label=sweep_name,
-            log_x=log_x,
-            window=window,
-            target=target,
-        )
-        path = os.path.join(plot_dir, f"{corner_slug}__{_slugify_signal(name)}.svg")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(svg)
-        written.append({"signal": name, "path": path})
-    return written
-
-
-def _measurement_plot_path(
-    entry: dict[str, Any],
-    spec: dict[str, Any] | None,
-    plots_by_corner: dict[str, list[dict[str, str]]],
-) -> str | None:
-    """The SVG path (if any) belonging next to one measurement rollup
-    ``entry`` -- its own ``.meas`` card's signal, rendered at its
-    ``worst_case`` corner -- so a `--plot` run's miss report names the
-    picture to look at next to the number that missed (issue #1723).
-
-    Returns ``None`` when there is no worst-case corner (an empty corner
-    matrix), ``spec`` is missing (should not happen -- every rollup entry
-    comes from a ``measurements_spec`` entry), that card names no
-    recognisable signal, or that corner rendered no matching plot.
-    """
-    worst_case = entry.get("worst_case")
-    if worst_case is None or spec is None:
-        return None
-    corner_plots = plots_by_corner.get(worst_case["corner_id"])
-    if not corner_plots:
-        return None
-    signal = _measurement_diagnostic_hints(spec.get("spice", ""))["signal"]
-    if signal is None:
-        return None
-    for plot in corner_plots:
-        if plot["signal"].lower() == signal:
-            return plot["path"]
-    return None
+_parse_spice_seconds = spice_number.parse

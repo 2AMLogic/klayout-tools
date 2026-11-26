@@ -1,19 +1,16 @@
-"""Unit tests for :mod:`klayout_tools.sim_plot` -- the dependency-free
-waveform-SVG renderer backing ``klt sim --plot`` (issue #1723).
-
-These are pure-function tests over :func:`render_waveform_svg` only; the
-higher-level "which signal gets which window/target, what filenames get
-written" wiring lives in ``tests/test_sim.py`` (the caller,
-``klayout_tools.sim._write_corner_plots``).
-"""
+"""Waveform SVG rendering and per-simulation annotation tests."""
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from klayout_tools import sim
 from klayout_tools.sim_plot import render_waveform_svg
+from test_sim import _stub_subprocess_run_with_waveform, _write_body, _write_request
 
 _SVG_ROOT_RE = re.compile(r"^<svg\b")
 
@@ -157,3 +154,38 @@ def test_render_waveform_svg_escapes_signal_and_corner_id():
     assert "<out>" not in svg
     assert "&lt;out&gt;" in svg
     assert "&amp;" in svg
+
+
+def test_plot_annotations_are_parsed_once_for_all_corners(tmp_path, monkeypatch):
+    cards = [
+        {"name": "avgout", "spice": ".meas tran avgout AVG v(out) FROM=1n TO=2n"},
+        {"name": "cross", "spice": ".meas tran cross WHEN v(out)=0.5 RISE=1"},
+    ]
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "corners": {"params": {"vdd": [0.8, 1.0, 1.2]}},
+            "measurements": cards,
+        },
+    )
+    _stub_subprocess_run_with_waveform(monkeypatch, points=[(0.0, 0.0), (3e-9, 1.0)])
+    parse = Mock(wraps=sim._measurement_diagnostic_hints)
+    monkeypatch.setattr(
+        f"{sim._measurement_diagnostic_hints.__module__}._measurement_diagnostic_hints",
+        parse,
+    )
+
+    sim.run_sim(str(request))
+    parse.assert_not_called()
+    report = sim.run_sim(str(request), plot_dir=str(tmp_path / "plots"))
+
+    assert [call.args[0] for call in parse.call_args_list] == [
+        card["spice"] for card in cards
+    ]
+    assert len(report["plots"]) == 3
+    for plot in report["plots"]:
+        svg = Path(plot["path"]).read_text()
+        assert 'fill="#fde68a"' in svg and "target=0.5" in svg

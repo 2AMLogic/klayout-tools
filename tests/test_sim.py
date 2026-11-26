@@ -10258,14 +10258,14 @@ def _write_ascii_rawfile(
 
 
 def _stub_subprocess_run_with_waveform(monkeypatch, *, points, log_text="clean run\n"):
-    """Like :func:`_stub_subprocess_run`, but also writes a synthetic ASCII
-    rawfile at the corner's own `waveform.raw` path -- the real `ngspice`
-    binary is stubbed out entirely (see `_stub_subprocess_run`), so nothing
-    actually executes the deck's `.control` block `write` command; this
-    fakes that side effect so the plot-writing code under test has a real
-    waveform artifact to read."""
+    """Write a synthetic ngspice log and waveform.raw for each simulated corner.
+    Let other subprocesses, including provenance probes, run normally."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if "-o" not in cmd:
+            return real_run(cmd, **kwargs)
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
