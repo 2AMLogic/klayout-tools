@@ -5759,13 +5759,28 @@ def _run_local(
 
     This is the unit a backend implements: given the expanded corner list
     plus the resolved netlist/model paths and run options, return
-    ``(per_corner_reports, engine_version, remote_environment)``. Each
-    scheduler reproduces the original in-line loop byte-for-byte (same
-    ordering, same ``engine_version`` last-writer-wins tracking);
-    ``request`` and (unless ``parallel=True``) ``max_workers`` are
-    parity-only (see :data:`_BACKENDS`) and ignored.
+    ``(per_corner_reports, engine_version, remote_environment)``. A calibration
+    probe can cancel the sweep before scheduling. In that case each pending
+    corner receives the probe diagnostic in input order. Otherwise the scheduler
+    tracks the engine version from the last corner that reports one.
     """
     del request  # unused by either local scheduling strategy, see docstring
+
+    if probe_abort is not None:
+        if parallel:
+            _resolve_max_workers(max_workers)  # Keep the host's clamp notice.
+        corners = [
+            _unrun_corner_report(
+                point,
+                measurements_spec,
+                probe_abort["code"],
+                message=probe_abort["message"],
+                reached_s=probe_abort.get("reached_s"),
+                fraction=probe_abort.get("fraction"),
+            )
+            for point in corner_points
+        ]
+        return corners, None, None
 
     def run_corner(point: CornerPoint) -> tuple[dict[str, Any], str | None]:
         return _run_corner_with_retry(
@@ -5808,7 +5823,6 @@ def _run_local(
         deadline=deadline,
         initial_ppid=initial_ppid,
         checkpoint=checkpoint,
-        probe_abort=probe_abort,
     )
     return corners, engine_version, None
 
@@ -5822,7 +5836,6 @@ def _run_local_corners_sequentially(
     deadline: float | None,
     initial_ppid: int | None,
     checkpoint: _Checkpoint | None,
-    probe_abort: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """The ``local`` scheduling strategy: call ``run_corner`` (the runner
     :func:`_run_local` bound once for the whole sweep, issue #6896) with
@@ -5834,30 +5847,11 @@ def _run_local_corners_sequentially(
     of being run -- a corner already in flight is never interrupted (there
     is only ever one, for this sequential backend). ``checkpoint``, when
     given, records each corner as it completes for a later ``--resume``.
-
-    ``probe_abort`` (issue #1694, the two-pass probe model's fail-fast half
-    -- see ``_run_fail_fast_probe`` and docs/design/sim-corner-reached-s.md)
-    is the ``{"code", "message", "reached_s", "fraction"}`` decision ``run_sim``
-    already made *before* calling the backend at all: when given, **every**
-    corner in ``corner_points`` is reported unrun via
-    :func:`_unrun_corner_report` with that code/message/estimate, and no
-    ``ngspice`` process is ever spawned for this sweep -- the whole point of
-    running the calibration probe first is to make this decision before any
-    real corner (not just the ones after some in-flight budget/orphan check)
-    burns its own ``options.timeout_s``.
     """
     del max_workers  # unused: sequential local run, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
     stop_reason: str | None = None
-    abort_message: str | None = None
-    abort_reached_s: float | None = None
-    abort_fraction: float | None = None
-    if probe_abort is not None:
-        stop_reason = probe_abort["code"]
-        abort_message = probe_abort["message"]
-        abort_reached_s = probe_abort.get("reached_s")
-        abort_fraction = probe_abort.get("fraction")
     for point in corner_points:
         if stop_reason is None:
             if deadline is not None and time.monotonic() >= deadline:
@@ -5865,16 +5859,7 @@ def _run_local_corners_sequentially(
             elif initial_ppid is not None and os.getppid() != initial_ppid:
                 stop_reason = "orphaned"
         if stop_reason is not None:
-            corners.append(
-                _unrun_corner_report(
-                    point,
-                    measurements_spec,
-                    stop_reason,
-                    message=abort_message,
-                    reached_s=abort_reached_s,
-                    fraction=abort_fraction,
-                )
-            )
+            corners.append(_unrun_corner_report(point, measurements_spec, stop_reason))
             continue
         result, version = run_corner(point)
         corners.append(result)
@@ -6005,7 +5990,6 @@ def _run_local_corners_pooled(
     deadline: float | None,
     initial_ppid: int | None,
     checkpoint: _Checkpoint | None,
-    probe_abort: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """The ``local-parallel`` scheduling strategy: fan the expanded corner
     list across a bounded local worker pool, submitting ``run_corner`` (the
@@ -6053,26 +6037,12 @@ def _run_local_corners_pooled(
     given, records each corner the instant its future resolves -- not
     batched at the end -- so a crash mid-sweep loses at most the corners
     still in flight at that moment.
-
-    ``probe_abort`` (issue #1694): identical contract to
-    :func:`_run_local_corners_sequentially`'s own -- when given,
-    ``stop_reason`` starts pre-set to its code, so ``_fill`` never
-    submits a single corner to the pool and every corner comes back
-    through :func:`_unrun_corner_report` with that code/message/estimate.
     """
     resolved_workers = _resolve_max_workers(max_workers)
 
     total = len(corner_points)
     results: list[tuple[dict[str, Any], str | None] | None] = [None] * total
     stop_reason: str | None = None
-    abort_message: str | None = None
-    abort_reached_s: float | None = None
-    abort_fraction: float | None = None
-    if probe_abort is not None:
-        stop_reason = probe_abort["code"]
-        abort_message = probe_abort["message"]
-        abort_reached_s = probe_abort.get("reached_s")
-        abort_fraction = probe_abort.get("fraction")
     next_index = 0
 
     def _stopped() -> str | None:
@@ -6121,12 +6091,7 @@ def _run_local_corners_pooled(
             assert stop_reason is not None
             corners.append(
                 _unrun_corner_report(
-                    corner_points[index],
-                    measurements_spec,
-                    stop_reason,
-                    message=abort_message,
-                    reached_s=abort_reached_s,
-                    fraction=abort_fraction,
+                    corner_points[index], measurements_spec, stop_reason
                 )
             )
             continue
