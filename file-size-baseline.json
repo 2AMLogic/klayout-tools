@@ -77,7 +77,7 @@
     },
     {
       "path": "native/wave/src/build.rs",
-      "lines": 655
+      "lines": 545
     },
     {
       "path": "native/wave/src/fst.rs",
@@ -329,7 +329,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2643
+      "lines": 2642
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -477,7 +477,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3604
+      "lines": 3580
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -509,7 +509,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4364
+      "lines": 4108
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -540,10 +540,6 @@
       "lines": 614
     },
     {
-      "path": "src/klayout_tools/reset_coverage.py",
-      "lines": 527
-    },
-    {
       "path": "src/klayout_tools/ring_check.py",
       "lines": 552
     },
@@ -557,7 +553,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
-      "lines": 695
+      "lines": 649
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",
@@ -573,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 909
+      "lines": 844
     },
     {
       "path": "src/klayout_tools/sim_decks.py",

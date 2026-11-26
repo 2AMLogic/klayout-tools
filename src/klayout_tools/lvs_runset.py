@@ -617,17 +617,18 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     binary = _resolve_klayout_binary(options, request_dir)
 
     from .lvs_passive_pairing import runset_report_field
-    from .lvs_runset_reference import _unresolved_reference_calls, convert_reference
+    from .lvs_runset_reference import _unresolved_reference_calls, prepare_reference
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
-        # Issue #4805: a ``subckt-call`` reference is converted into work_dir.
-        runset_reference = convert_reference(reference, request, work_dir, deck_file)
+        ref_sp, scan_top, source_top = prepare_reference(
+            reference, request, work_dir, deck_file
+        )
         lvsdb_path, completed = _run_runset(
             binary=binary,
             deck_file=deck_file,
             layout=layout,
-            reference=runset_reference,
+            reference=ref_sp,
             top=top,
             deck_vars=deck_vars,
             timeout_s=timeout_s,
@@ -638,9 +639,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
                 request["reference"].get("deck") == "sg13g2"
                 or os.path.basename(deck_file) == "sg13g2.lvs"
             )
-            verdict = read_lvsdb_verdict(
-                lvsdb_path, runset_reference, sg13g2=diagnose_passives
-            )
+            verdict = read_lvsdb_verdict(lvsdb_path, ref_sp, sg13g2=diagnose_passives)
         except LvsError as exc:
             if completed.returncode == 0:
                 raise
@@ -648,10 +647,10 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             # keep the exit-status diagnosis, not just the db-read message.
             raise LvsError(_nonzero_exit_message(binary, completed)) from exc
         augment_verdict(verdict, lvsdb_path)
-        _attach_reference_source(verdict, runset_reference, deck_file)
+        _attach_reference_source(verdict, ref_sp, deck_file)
         unresolved = _unresolved_reference_calls(
-            runset_reference,
-            request["reference"].get("top") and (top or request["reference"]["top"]),
+            ref_sp,
+            scan_top,
             verdict["coverage"]["declared_device_classes"],
             deck_file,
             _unresolved_reference_subckt_calls,
@@ -702,7 +701,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "layout": repo_relative_path(layout, repo_root=repo_root_for(layout)),
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
-        "reference_top": request["reference"].get("top") or verdict["reference_top"],
+        "reference_top": source_top or verdict["reference_top"],
         "deck_file": deck_file_echo,
         "deck_vars": deck_vars,
         "options": {k: options[k] for k in _ALLOWED_OPTIONS if k in options},

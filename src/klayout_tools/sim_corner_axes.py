@@ -8,10 +8,12 @@ the ``exclude`` selector validation and matchers.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from . import sim_supply_waveform
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number, is_number
 from .sim_corner_point import (
     CornerPoint,
     _validate_param_scalar,
@@ -40,6 +42,50 @@ NGSPICE_SOLVER_OPTIONS = (
     "trtol",
     "vntol",
 )
+
+
+#: A string option value lands verbatim in a deck card, so it is limited to
+#: a bare token (``method=gear``) -- no whitespace, quotes or newlines.
+_NGSPICE_OPTION_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+def _validate_ngspice_options(value: Any) -> dict[str, Any]:
+    """Validate ``options.ngspice_options`` (issue #3111).
+
+    Returns the declared map unchanged (``{}`` when omitted or ``null``).
+    Keys must come from :data:`NGSPICE_SOLVER_OPTIONS`; values must be a
+    finite number, a bool or a bare-token string.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SimError(
+            "options.ngspice_options must be an object mapping ngspice "
+            f".options names to scalar values (got {json.dumps(value, default=repr)})"
+        )
+    for name, item in value.items():
+        if name not in NGSPICE_SOLVER_OPTIONS:
+            raise SimError(
+                f"options.ngspice_options key {json.dumps(name)} is not a "
+                "supported solver option; supported: "
+                + ", ".join(NGSPICE_SOLVER_OPTIONS)
+            )
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, (int, float)):
+            if not is_finite_number(item):
+                raise SimError(
+                    f"options.ngspice_options.{name} must be finite (got {item!r})"
+                )
+            continue
+        if isinstance(item, str) and _NGSPICE_OPTION_TOKEN.fullmatch(item):
+            continue
+        raise SimError(
+            f"options.ngspice_options.{name} must be a number, a boolean or "
+            f"a bare-token string (got {json.dumps(item, default=repr)})"
+        )
+    return dict(value)
+
 
 #: ``corners.options`` (issue #3125): the numeric solver ``.options`` a
 #: corner axis may sweep. A subset of :data:`NGSPICE_SOLVER_OPTIONS` -- the

@@ -202,6 +202,12 @@ this document (and the code) win.
   closure file missing from the tree is `drifted`, never `match`. `--root`
   re-anchors `scope: "repo"` entries; otherwise they resolve from the report's
   own location. Exit `0` match, `3` drifted, `1` missing/unparseable report.
+
+  `provenance.input.content_hash` stays **top-deck-only** (pinned equal to
+  `environment.netlist_sha256`); the transitive `.include` set lives in
+  `environment.netlist_closure`. `klt signoff --manifest` re-hashes that
+  closure for a cited report and discloses drift in `citation.sim_closure`
+  (issue #7860; see [`signoff.md`](signoff.md)).
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -5356,10 +5362,16 @@ unavailable, it reports `unknown`. Use an image that includes the step policy.
 The classification is deliberately narrow: it applies only when ngspice
 logged the reason `out of interval` together with `failed!` for that card
 **and** the corner carries no error-severity diagnostic (diverged solve,
-timeout, …). A malformed card (`Error: measure … : <other reason>`), a
-missing vector, or a failed solve still grades `error` even with
-`on_unreached: "null"`. Without the field, behavior and output are
-byte-identical to before.
+timeout, …). The one exception is gmin/source-stepping narration
+(`singular_matrix` / `nonconvergence`) in a log without ngspice's
+`simulation(s) aborted` trailer: that is the noise ngspice prints on the way to
+a completed solve, so it does not block the opt-in (issue #7906). Such a corner
+grades the miss `not_reached` and downgrades the narration to `warning`, as for
+any recovered corner — unless another measurement on the corner also returned
+no value, which keeps the narration at `error`. A malformed card
+(`Error: measure … : <other reason>`), a missing vector, or a failed solve
+still grades `error` even with `on_unreached: "null"`. Without the field,
+behavior and output are byte-identical to before.
 
 `on_unreached` is rejected (exit `1`) on an `expr` or `crossings` measurement
 and for any value other than `"error"`/`"null"`. It is not applied to the

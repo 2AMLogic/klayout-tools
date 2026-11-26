@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import post_route_sta as sta
 from test_post_route_sta import (
     _LIVE_ONLY,
@@ -37,7 +37,7 @@ def _engine(monkeypatch, versions):
         )
         return fake_completed(stdout=marker)
 
-    monkeypatch.setattr(sta.subprocess, "run", run)
+    patch_openroad_run(monkeypatch, run)
 
 
 @pytest.mark.parametrize(

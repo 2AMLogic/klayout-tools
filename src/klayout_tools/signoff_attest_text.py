@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .signoff_attest_command import failed_output_tail
+from .signoff_git_source import member_label
 
 
 def check_label(check: Mapping[str, Any]) -> str:
@@ -22,7 +23,7 @@ def check_label(check: Mapping[str, Any]) -> str:
 def _what_present(c: dict) -> str:
     if c.get("role") == "testbench_dependency":
         return f"dependency {c['path']} of {c['testbench']} present"
-    what = f"{c['role']} {c['path']} present"
+    what = f"{c['role']} {member_label(c['path'])} present"
     benches = c.get("testbenches")
     if benches:
         what += f" (bench: {', '.join(benches)})"
@@ -95,7 +96,7 @@ def _what_citation(c: dict) -> str:
 def _what_recorded_hash(c: dict) -> str:
     what = f"{c['role']} {c['target']} recorded hash"
     if not c["passed"]:
-        paths = ", ".join(m["path"] for m in c.get("mismatches", []))
+        paths = ", ".join(member_label(m["path"]) for m in c.get("mismatches", []))
         what += f" mismatch: {paths}"
     return what
 

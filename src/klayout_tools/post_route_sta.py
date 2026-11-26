@@ -1325,72 +1325,50 @@ def _run_corner_session(
     if has_def:
         assert run.def_path is not None
         spef_net_names = _spef_net_names(spef_path) if spef_path is not None else None
-        lines = _sta_script_lines(
-            tech_lef=tech_lef,
-            cell_lef=cell_lef,
+        design: _DefStaInput | _NetlistStaInput = _DefStaInput(
             def_path=run.def_path,
-            liberty_path=liberty_path,
-            clock_port=run.clock_port,
-            clock_period_ns=clock_period_ns,
             spef_path=spef_path,
             spef_net_names=spef_net_names,
-            input_delay_ns=constraints.input_delay_ns,
-            output_delay_ns=constraints.output_delay_ns,
-            macro_lefs=macro_lefs,
-            macro_liberty_paths=macro_liberty_paths,
-            input_delays=constraints.input_delays,
-            output_delays=constraints.output_delays,
-            input_transition_ns=constraints.input_transition_ns,
-            input_transitions=constraints.input_transitions,
-            boundary=constraints.boundary,
-            report_ports=constraints.report_ports,
-            report_path_stages=constraints.report_path_stages,
-            max_violating_endpoints=constraints.max_violating_endpoints,
-            false_path_from=constraints.false_path_from,
-            report_instances=constraints.report_instances,
             propagated_clock=run.propagated_clock,
-            clock_extras=clock_extras,
-            power_activity=run.power_activity,
-            clock_uncertainty=run.clock_uncertainty,
-            clock_transition=run.clock_transition,
-            multicycle_lines=mcp_lines,
-            timing_derate=run.timing_derate,
             sdf_path=sdf_path,
         )
     else:
         spef_net_names = None
         assert run.verilog_path is not None and run.hdl_toplevel is not None
-        lines = _sta_netlist_script_lines(
-            tech_lef=tech_lef,
-            cell_lef=cell_lef,
+        design = _NetlistStaInput(
             verilog_path=run.verilog_path,
-            liberty_path=liberty_path,
             hdl_toplevel=run.hdl_toplevel,
-            clock_port=run.clock_port,
-            clock_period_ns=clock_period_ns,
             wire_load_model=run.wire_load_model,
             wire_load_mode=run.wire_load_mode,
-            input_delay_ns=constraints.input_delay_ns,
-            output_delay_ns=constraints.output_delay_ns,
-            macro_lefs=macro_lefs,
-            macro_liberty_paths=macro_liberty_paths,
-            input_delays=constraints.input_delays,
-            output_delays=constraints.output_delays,
-            input_transition_ns=constraints.input_transition_ns,
-            input_transitions=constraints.input_transitions,
-            boundary=constraints.boundary,
-            report_ports=constraints.report_ports,
-            report_path_stages=constraints.report_path_stages,
-            max_violating_endpoints=constraints.max_violating_endpoints,
-            false_path_from=constraints.false_path_from,
-            report_instances=constraints.report_instances,
-            power_activity=run.power_activity,
-            clock_extras=clock_extras,
-            clock_uncertainty=run.clock_uncertainty,
-            clock_transition=run.clock_transition,
-            multicycle_lines=mcp_lines,
-            timing_derate=run.timing_derate,
         )
+    lines = _build_sta_session_lines(
+        design,
+        tech_lef=tech_lef,
+        cell_lef=cell_lef,
+        liberty_path=liberty_path,
+        clock_port=run.clock_port,
+        clock_period_ns=clock_period_ns,
+        input_delay_ns=constraints.input_delay_ns,
+        output_delay_ns=constraints.output_delay_ns,
+        macro_lefs=macro_lefs,
+        macro_liberty_paths=macro_liberty_paths,
+        input_delays=constraints.input_delays,
+        output_delays=constraints.output_delays,
+        input_transition_ns=constraints.input_transition_ns,
+        input_transitions=constraints.input_transitions,
+        boundary=constraints.boundary,
+        report_ports=constraints.report_ports,
+        report_path_stages=constraints.report_path_stages,
+        max_violating_endpoints=constraints.max_violating_endpoints,
+        false_path_from=constraints.false_path_from,
+        report_instances=constraints.report_instances,
+        clock_extras=clock_extras,
+        power_activity=run.power_activity,
+        clock_uncertainty=run.clock_uncertainty,
+        clock_transition=run.clock_transition,
+        multicycle_lines=mcp_lines,
+        timing_derate=run.timing_derate,
+    )
     _write_script(script_path, lines)
 
     completed = _run_openroad(
@@ -3363,16 +3341,124 @@ def _electrical_check_lines() -> list[str]:
     return lines
 
 
+@dataclass(frozen=True, kw_only=True)
+class _DefStaInput:
+    """The routed DEF supplies all placement geometry for a fresh session."""
+
+    def_path: str
+    spef_path: str | None
+    spef_net_names: list[str] | None
+    propagated_clock: bool
+    sdf_path: str | None
+
+    def load_lines(self, lefs: list[str], liberties: list[str]) -> list[str]:
+        if self.sdf_path is not None and self.spef_path is None:
+            raise ValueError("sdf_path requires spef_path")
+        # DEF component masters must already exist, including all macro LEFs.
+        return [*lefs, f"read_def {_tcl_literal(self.def_path)}", *liberties]
+
+    def parasitic_lines(self, clock_port: str) -> list[str]:
+        """Bracket SPEF reader warnings separately from SDF writer diagnostics.
+
+        Clock latency and sink counts are queried after annotation so that the
+        evidence uses the same parasitics as the timing and power reports.
+        """
+        lines: list[str] = []
+        if self.spef_path is not None:
+            lines += _spef_net_check_lines(self.spef_net_names or [])
+            lines += _delay_fingerprint_lines(_DELAY_PRE_BEGIN, _DELAY_PRE_END)
+            lines.append(f'puts "{_SPEF_READ_BEGIN}"')
+            lines.append(f"read_spef {_tcl_literal(self.spef_path)}")  # issue #5708
+            lines.append(f'puts "{_SPEF_READ_END}"')
+            if self.sdf_path is not None:
+                lines.append(write_sdf_line(self.sdf_path))
+            lines += _delay_fingerprint_lines(_DELAY_POST_BEGIN, _DELAY_POST_END)
+            lines += _parasitic_annotation_lines()
+        if self.propagated_clock:
+            lines += _clock_latency_lines()
+            lines += _clock_sink_count_lines(clock_port)
+        return lines
+
+
+@dataclass(frozen=True, kw_only=True)
+class _NetlistStaInput:
+    """Link the structural netlist after loading its cell and macro libraries."""
+
+    verilog_path: str
+    hdl_toplevel: str
+    wire_load_model: str | None
+    wire_load_mode: str | None
+
+    def load_lines(self, lefs: list[str], liberties: list[str]) -> list[str]:
+        return [
+            *liberties,
+            *lefs,
+            f"read_verilog {_tcl_literal(self.verilog_path)}",
+            f"link_design {_tcl_literal(self.hdl_toplevel)}",
+        ]
+
+    def parasitic_lines(self, _clock_port: str) -> list[str]:
+        """Apply the wire-load estimate and record the engine build."""
+        lines: list[str] = []
+        if self.wire_load_mode is not None:
+            lines.append(f"set_wire_load_mode {self.wire_load_mode}")
+        if self.wire_load_model is not None:
+            lines.append(f"set_wire_load_model -name {{{self.wire_load_model}}}")
+        lines.append(_sta_wire_load.SESSION_MARKER_TCL)
+        return lines
+
+
 def _sta_script_lines(
+    *,
+    def_path: str,
+    spef_path: str | None = None,
+    spef_net_names: list[str] | None = None,
+    propagated_clock: bool = False,
+    sdf_path: str | None = None,
+    **session: Any,
+) -> list[str]:
+    """Build one from-scratch timing session on a routed DEF."""
+    return _build_sta_session_lines(
+        _DefStaInput(
+            def_path=def_path,
+            spef_path=spef_path,
+            spef_net_names=spef_net_names,
+            propagated_clock=propagated_clock,
+            sdf_path=sdf_path,
+        ),
+        **session,
+    )
+
+
+def _sta_netlist_script_lines(
+    *,
+    verilog_path: str,
+    hdl_toplevel: str,
+    wire_load_model: str | None = None,
+    wire_load_mode: str | None = None,
+    **session: Any,
+) -> list[str]:
+    """Build one from-scratch timing session on a linked Verilog netlist."""
+    return _build_sta_session_lines(
+        _NetlistStaInput(
+            verilog_path=verilog_path,
+            hdl_toplevel=hdl_toplevel,
+            wire_load_model=wire_load_model,
+            wire_load_mode=wire_load_mode,
+        ),
+        **session,
+    )
+
+
+def _build_sta_session_lines(
+    design: _DefStaInput | _NetlistStaInput,
+    /,
     *,
     tech_lef: str,
     cell_lef: str,
-    def_path: str,
     liberty_path: str,
     clock_port: str,
     clock_period_ns: float,
-    spef_path: str | None = None,
-    spef_net_names: list[str] | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
     macro_lefs: list[str] | None = None,
@@ -3387,77 +3473,28 @@ def _sta_script_lines(
     max_violating_endpoints: int | None = None,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
-    propagated_clock: bool = False,
     clock_extras: dict[str, Any] | None = None,
-    sdf_path: str | None = None,
     power_activity: dict[str, float] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
     clock_transition: float | None = None,
     multicycle_lines: list[str] | None = None,
     timing_derate: dict[str, float | None] | None = None,
 ) -> list[str]:
-    """Build the Tcl script for the single, from-scratch OpenSTA session
-    this verb runs: load the LEF/DEF pair directly (no netlist, no
-    ``link_design``, and deliberately **no** ``-floorplan_initialize`` --
-    that flag is ``place_and_route.py``'s own floorplan-*stage* load of a
-    caller-supplied DEF as a starting point for further implementation; this
-    verb's ``read_def`` instead loads an already-complete, already-routed
-    design as the analysis target itself, the one and only geometry this
-    session ever times), then ``read_liberty``/``create_clock`` and,
-    optionally, a caller-supplied ``spef``.
-
-    ``macro_lefs``/``macro_liberty_paths`` (issue #2635,
-    ``request.macros``) are emitted **before** ``read_def`` and immediately
-    after the standard-cell ``read_liberty`` respectively. The LEF ordering
-    is load-bearing: ``read_def``'s own ``COMPONENTS`` records are resolved
-    against the already-loaded masters, so a macro LEF read afterwards is
-    too late -- that is precisely the ``[ERROR ORD-2013] instance <inst>
-    LEF master <cell> not found`` this field closes (live-reproduced against
-    OpenROAD 26Q3 on sky130A, and live-confirmed fixed by this one extra
-    ``read_lef``).
-
-    When a ``spef`` is given, ``read_spef`` is wrapped in the annotation
-    *evidence* scaffolding issue #1624 added: the pre-existing name-
-    correlation check, a ``report_checks`` delay fingerprint on either side
-    of the call, markers bracketing the call itself (so the SPEF reader's
-    own warnings land in one delimited stdout region), and a closing
-    ``report_parasitic_annotation``. See :func:`_spef_annotation_block` for
-    what each piece proves.
-
-    ``propagated_clock`` (issue #2739) emits ``set_propagated_clock`` on the
-    clock ``_clock_lines`` just created -- after the design and the timing
-    constraint are loaded, before any I/O delay / SPEF / metric collection,
-    so every report this session produces (including the SPEF delay
-    fingerprints and the timing metrics) is the propagated analysis. The
-    evidence dump (:func:`_clock_latency_lines`) runs *after* ``read_spef``
-    so its network latencies reflect the same parasitics the timing
-    numbers do, and is followed by the sink-count query
-    (:func:`_clock_sink_count_lines`, issue #7417) that
-    ``clock_propagation.clock_sinks`` is parsed from.
-
-    ``sdf_path`` (issue #2886; requires ``spef_path``) appends the shared
-    ``write_sdf`` command (:func:`~klayout_tools._openroad_engine.write_sdf_line`)
-    immediately after ``read_spef`` -- outside the reader-warning markers,
-    so SDF-writer diagnostics are never counted as SPEF reader warnings,
-    and before every report command, the same ordering ``klt
-    place-and-route``'s ``post_route_sdf`` uses.
-    """
-    if sdf_path is not None and spef_path is None:
-        raise ValueError("sdf_path requires spef_path")
-    lines = [
-        f"read_lef {_tcl_literal(tech_lef)}",
-        f"read_lef {_tcl_literal(cell_lef)}",
+    """Assemble constraints, parasitics and reports in their engine order."""
+    lefs = [
+        f"read_lef {_tcl_literal(path)}"
+        for path in [tech_lef, cell_lef, *(macro_lefs or [])]
     ]
-    lines += [f"read_lef {_tcl_literal(lef)}" for lef in macro_lefs or []]
-    lines += [
-        f"read_def {_tcl_literal(def_path)}",
-        f"read_liberty {_tcl_literal(liberty_path)}",
+    liberties = [
+        f"read_liberty {_tcl_literal(path)}"
+        for path in [liberty_path, *(macro_liberty_paths or [])]
     ]
-    lines += [f"read_liberty {_tcl_literal(lib)}" for lib in macro_liberty_paths or []]
+    lines = design.load_lines(lefs, liberties)
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _transition.transition_lines(clock_port, clock_transition)
     lines += _extra_clock_lines(clock_extras)
-    if propagated_clock:
+    # Propagate each clock before applying the I/O delays or reading SPEF.
+    if isinstance(design, _DefStaInput) and design.propagated_clock:
         lines += _propagated_clock_lines(clock_port)
         if clock_extras:
             for name in [e["port"] for e in clock_extras["clocks"]] + [
@@ -3482,19 +3519,7 @@ def _sta_script_lines(
     # Issue #6921: after the I/O delays/false paths (the port check
     # keeps its stop-the-session precedence), before every report.
     lines += multicycle_lines or []
-    if spef_path is not None:
-        lines += _spef_net_check_lines(spef_net_names or [])
-        lines += _delay_fingerprint_lines(_DELAY_PRE_BEGIN, _DELAY_PRE_END)
-        lines.append(f'puts "{_SPEF_READ_BEGIN}"')
-        lines.append(f"read_spef {_tcl_literal(spef_path)}")  # issue #5708
-        lines.append(f'puts "{_SPEF_READ_END}"')
-        if sdf_path is not None:
-            lines.append(write_sdf_line(sdf_path))
-        lines += _delay_fingerprint_lines(_DELAY_POST_BEGIN, _DELAY_POST_END)
-        lines += _parasitic_annotation_lines()
-    if propagated_clock:
-        lines += _clock_latency_lines()
-        lines += _clock_sink_count_lines(clock_port)
+    lines += design.parasitic_lines(clock_port)
     lines += [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
@@ -3515,126 +3540,8 @@ def _sta_script_lines(
     lines += _instance_path_lines(report_instances)
     # Before the completeness query, which must stay the script's last
     # statements (issue #2780): it can take the session down.
-    lines += _electrical_check_lines()
-    lines += _generated.evidence_lines(clock_extras)
-    lines += _constraint_completeness_lines()
-    return lines
-
-
-def _sta_netlist_script_lines(
-    *,
-    tech_lef: str,
-    cell_lef: str,
-    verilog_path: str,
-    liberty_path: str,
-    hdl_toplevel: str,
-    clock_port: str,
-    clock_period_ns: float,
-    wire_load_model: str | None = None,
-    wire_load_mode: str | None = None,
-    input_delay_ns: float | None = None,
-    output_delay_ns: float | None = None,
-    macro_lefs: list[str] | None = None,
-    macro_liberty_paths: list[str] | None = None,
-    input_delays: IoDelayMap | None = None,
-    output_delays: IoDelayMap | None = None,
-    input_transition_ns: float | None = None,
-    input_transitions: dict[str, float] | None = None,
-    boundary: dict[str, Any] | None = None,
-    report_ports: list[str] | None = None,
-    report_path_stages: bool = False,
-    max_violating_endpoints: int | None = None,
-    false_path_from: list[str] | None = None,
-    report_instances: list[str] | None = None,
-    power_activity: dict[str, float] | None = None,
-    clock_extras: dict[str, Any] | None = None,
-    clock_uncertainty: dict[str, float | None] | None = None,
-    clock_transition: float | None = None,
-    multicycle_lines: list[str] | None = None,
-    timing_derate: dict[str, float | None] | None = None,
-) -> list[str]:
-    """Build the Tcl script for a from-scratch, netlist-input OpenSTA
-    session (issue #1825): no DEF, no placement, no routing. Links a
-    structural netlist directly (``read_verilog`` + ``link_design``) --
-    the same ``read_liberty`` -> ``read_lef`` x2 -> ``read_verilog`` ->
-    ``link_design`` -> ``create_clock`` order ``place_and_route.py``'s own
-    ``"floorplan"``-stage load already runs (see that module's
-    ``_stage_script_lines`` docstring for the ordering rationale), minus
-    that stage's floorplan-init/macro-placement/PDN steps -- none of those
-    have meaning without any placement geometry.
-
-    ``wire_load_model``/``wire_load_mode`` (both optional, and only ever
-    non-``None`` here -- :func:`_validate_wire_load_estimate` rejects them
-    outright for a ``def``-mode request) drive OpenSTA's own
-    ``set_wire_load_model``/``set_wire_load_mode``, this module's chosen
-    parasitics-estimate mechanism for a geometry-free session (see this
-    module's own docstring "From-scratch netlist input" section for why
-    this -- not a flat per-net capacitance, and not either of
-    ``place_and_route.py``'s ``estimate_parasitics`` modes -- was chosen).
-    The session records the engine build after processing its wire-load
-    settings. The pinned build leaves the model and mode unset unless the
-    script sets them explicitly (see :mod:`._sta_wire_load`).
-
-    Timing, power and violation reporting share the DEF session's commands.
-    """
-    lines = [f"read_liberty {_tcl_literal(liberty_path)}"]
-    # Issue #2635 (`request.macros`): each macro's corner-matching liberty
-    # right after the standard-cell one, each macro's LEF right after the
-    # cell LEF -- both necessarily before `read_verilog`/`link_design`,
-    # which is where an undeclared macro surfaces as `ORD-2013`.
-    lines += [f"read_liberty {_tcl_literal(lib)}" for lib in macro_liberty_paths or []]
-    lines += [
-        f"read_lef {_tcl_literal(tech_lef)}",
-        f"read_lef {_tcl_literal(cell_lef)}",
-    ]
-    lines += [f"read_lef {_tcl_literal(lef)}" for lef in macro_lefs or []]
-    lines += [
-        f"read_verilog {_tcl_literal(verilog_path)}",
-        f"link_design {_tcl_literal(hdl_toplevel)}",
-    ]
-    lines += _clock_lines(clock_port, clock_period_ns)
-    lines += _transition.transition_lines(clock_port, clock_transition)
-    lines += _extra_clock_lines(clock_extras)
-    lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
-    lines += _derate.timing_derate_lines(timing_derate)
-    lines += _request_io_delay_lines(
-        clock_port,
-        input_delay_ns,
-        output_delay_ns,
-        input_delays,
-        output_delays,
-        input_transition_ns,
-        input_transitions,
-        report_ports,
-        false_path_from,
-        report_instances,
-        boundary,
-    )
-    lines += multicycle_lines or []  # issue #6921: same seam as def mode
-    # Mode is enum-validated; model is a braced Tcl word (no substitution).
-    if wire_load_mode is not None:
-        lines.append(f"set_wire_load_mode {wire_load_mode}")
-    if wire_load_model is not None:
-        lines.append(f"set_wire_load_model -name {{{wire_load_model}}}")
-    lines.append(_sta_wire_load.SESSION_MARKER_TCL)
-    lines += [
-        "report_worst_slack_metric -setup",
-        "report_worst_slack_metric -hold",
-        "report_tns_metric -setup",
-        "report_tns_metric -hold",
-        "report_fmax_metric",
-    ]
-    lines += _power_activity_lines(power_activity)
-    lines += [
-        "report_power_metric",
-        "report_clock_skew_metric -setup",
-    ]
-    lines += _violation_count_lines()
-    lines += _worst_path_lines()
-    lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
-    lines += _violating_endpoint_lines(max_violating_endpoints)  # issue #7418
-    lines += _port_path_lines(report_ports)
-    lines += _instance_path_lines(report_instances)
+    if isinstance(design, _DefStaInput):
+        lines += _electrical_check_lines()
     lines += _generated.evidence_lines(clock_extras)
     lines += _constraint_completeness_lines()
     return lines

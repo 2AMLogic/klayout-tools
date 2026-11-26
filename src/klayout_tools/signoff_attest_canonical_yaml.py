@@ -36,7 +36,7 @@ nor are ``!!binary "YWI="`` and the string ``"bytes:6162"``.
 
 Grading-time counterpart: :func:`rehash_checks` re-hashes a committed
 envelope's yaml checks through this same digest, exactly as
-:func:`klayout_tools.signoff._verify_generic_input_set` re-hashes raw-byte
+:func:`klayout_tools.signoff_input_set.verify_generic_input_set` re-hashes raw-byte
 checks (issue #4197) -- without it, a comment edit would leave the
 ``--manifest`` row ``stale_evidence`` even with ``--check`` at ``match``.
 

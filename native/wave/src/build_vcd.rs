@@ -13,7 +13,6 @@ use std::ops::ControlFlow;
 use rustc_hash::FxHashSet;
 
 use crate::parser::{parse_streaming, try_parse_header, VcdHandler, VcdHeader};
-use crate::signal::SignalMeta;
 use crate::store_writer::StoreWriter;
 
 pub struct VcdSummary {
@@ -73,22 +72,4 @@ pub fn stream_body(
 ) {
     let mut handler = Handler { store };
     parse_streaming(reader, watched_ids, &mut handler);
-}
-
-/// Signals from a parsed header, filtered to `allow_list` (`None` = every
-/// declared signal), preserving VCD declaration order (including
-/// duplicate ids -- `StoreWriter::create` handles those as FST aliases).
-pub fn filter_signals<'a>(
-    all: &'a [SignalMeta],
-    allow_list: Option<&[String]>,
-) -> Vec<&'a SignalMeta> {
-    match allow_list {
-        None => all.iter().collect(),
-        Some(names) => {
-            let wanted: FxHashSet<&str> = names.iter().map(|s| s.as_str()).collect();
-            all.iter()
-                .filter(|s| wanted.contains(s.name.as_str()))
-                .collect()
-        }
-    }
 }

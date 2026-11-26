@@ -166,7 +166,7 @@ unavailable:
 
 | Reader | Markers / phrases | Filter unavailable |
 |---|---|---|
-| `claim-staleness.sh` | `loom:claim-activity`, `loom:standdown` | `unknown` (never stomp) |
+| `claim-staleness.sh` | `loom:claim-activity`, `loom:standdown`, `loom:reclaim` (#15044) | `unknown` (never stomp) |
 | `sweep-lease-fence.sh` | `loom:lease`, `loom:lease-yield` | fails open, as on an unreadable listing |
 | `sweep-lease-publish.sh` | same | publishes anyway, as on an unreadable listing |
 | `sweep-lease-renew.sh` | same | exit 1, nothing patched |

@@ -203,6 +203,7 @@ def _corner_measurement_results(
             spec,
             unreached_names=unreached_names,
             diagnostics=engine_diagnostics or [],
+            log_text=log_text,
         ):
             attributed.add(str(name).lower())
             measurement_results.append(

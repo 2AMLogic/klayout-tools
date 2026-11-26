@@ -6,8 +6,35 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-26
+
+- **PR #7907**: fix: pex delta error names an ngspice window miss, not stepping narration
+- **Issue #7904** (closed): klt pex: delta[].error reports a warning-severity singular_matrix diagnostic instead of the measurement failure
+
 ### 2026-11-25
 
+- **PR #7915**: Share waveform store setup and finalization across VCD and FST
+- **PR #7913**: build(deps-dev): bump vite from 8.3.7 to 8.3.8 in /site in the npm-minor-patch group across 1 directory
+- **PR #7912**: Keep stale KLayout Debian packages from breaking ASAP7 CI
+- **PR #7843**: Share Tcl assembly for DEF and netlist timing sessions
+- **PR #7047**: fix(release): gate PR setup pre-push, recover pushed branch, report failed runs
+- **PR #7890**: refactor: retire the experimental congestion pre-check
+- **PR #7547**: build(deps): bump docker/login-action from 4.7.0 to 4.8.0 in the github-actions group across 1 directory
+- **Issue #7914** (closed): Share store setup and finalization between build_from_vcd and build_from_fst in native/wave
+- **Issue #7911** (closed): Stale KLayout Debian cache breaks ASAP7 CI after runner package updates
+- **Issue #7840** (closed): Share session constraint and reporting Tcl assembly between _sta_script_lines and _sta_netlist_script_lines
+- **Issue #6911** (closed): Report failed release preparation and tagging, and recover the release branch on retry
+- **Issue #7710** (closed): Remove unwired FLUTE/RUDY congestion pre-check spike (Rust crate + wrapper + CI leg)
+- **PR #7903**: Decouple derived measurement rollups from the simulation runner
+- **PR #7901**: Share endpoint geometry selection across bundle routing layers
+- **PR #7896**: Make the merge queue the default for klayout-tools
+- **PR #7894**: feat(em): solve steady heat and Joule self-heating with Geode
+- **Issue #7902** (closed): Remove the simulation runner import from derived measurement rollups
+- **Issue #7899** (closed): Share endpoint geometry selection between bundle routing and plane climbs
+- **Issue #7897** (closed): docs: index results.temperature in klt em's Response section and refresh the em parser docstring
+- **Issue #7893** (closed): [Epic #708] Validate electrothermal temperature rise on a real power device
+- **Issue #7892** (closed): [Epic #708] Expose steady heat and Joule self-heating through klt em
+- **Issue #708** (closed): Epic: finite-element full-field solver for klt (Rust) — volumetric fields, electrothermal, MoM cross-validation
 - **PR #7888**: Document the canary CI gate and allow manual inventory checks
 - **PR #7887**: Keep parallel fake fleet collectors bound to their own shard
 - **PR #7871**: fix: write SG13G2 cap_cmim and poly-resistor calls as native cards
@@ -5243,35 +5270,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #2546** (closed): bug: an upper- or mixed-case measurements[].spice name never harvests, because ngspice lower-cases the .meas name in its own report
 - **Issue #2543** (closed): merge-pr.sh hardcodes squash merge; fails on repos with squash disabled (klayout-tools)
 - **Issue #2498** (closed): klt characterize: no verb emits a Liberty model from SPICE — the last stage of a cell flow with no open answer
-
-### 2026-09-26
-
-- **PR #2539**: fix(sim): validate models.pdk on the batch backend before any S3 write
-- **PR #2538**: feat(sim): per-section model libraries in a corners.process bundle
-- **PR #2536**: fix(sim): default save all so a netlist's own .save can't starve measurements
-- **PR #2535**: refactor(synthesize): move arithmetic candidate selection into synthesize_arithmetic
-- **PR #2534**: feat(sim): first-class OSDI (Verilog-A) model preload via options.osdi_preload
-- **PR #2530**: fix(sim): anchor ngspice's cwd to the corner dir, add options.ngspice_init
-- **PR #2529**: docs(tiers): remove item 11's stale #2255 native-substrate "Known gap"
-- **PR #2528**: feat(characterize): power/leakage extraction, batch mode, and vendor-.lib accuracy harness
-- **PR #2525**: feat(erc): measure a declared net's unlabelled remainder on the roles it owns (#2510)
-- **PR #2519**: fix(yield): exclude klt sim's inconclusive draws from the yield population
-- **PR #2516**: feat(characterize): single-cell combinational NLDM extraction and .lib emission
-- **PR #2509**: feat(erc): report the matched island count behind every declared net
-- **PR #2504**: fix(signoff): name which half of item 11 a failing LVS citation leaves unproven
-- **Issue #2532** (closed): Split synthesize.py's arithmetic-candidate-selection subsystem (~719 lines) into synthesize_arithmetic
-- **Issue #2523** (closed): klt sim: batch backend never validates PDK against the fleet's published AMI images before submission
-- **Issue #2522** (closed): klt sim: corners.process bundle form is bound to one models.lib file — cannot mix per-device-family corner libraries
-- **Issue #2521** (closed): klt sim: no save-policy control — netlist-body .save cards silently starve measurements
-- **Issue #2520** (closed): klt sim: ngspice corner runs inherit the caller's cwd, so .spiceinit compatibility mode is unreproducible
-- **Issue #2518** (closed): Sandbox: 2am-bot-issues broker verification (closed on purpose, not work)
-- **Issue #2514** (closed): docs: T1 item 11 contradicts itself on native-substrate ties — #2255's well_layer: null form is documented as both available and nonexistent
-- **Issue #2513** (closed): klt sim has no hook for an OSDI/Verilog-A model preload, so a generated deck must carry its own .control block
-- **Issue #2511** (closed): klt sim: cannot express an OSDI (Verilog-A) device, an ngspice compatibility mode, a save policy, or a multi-library corner axis
-- **Issue #2510** (closed): klt erc: measure the declared net's conductor geometry not reachable from any label (option 2 from #2497)
-- **Issue #2507** (closed): yield: exclude implausible_solution samples from klt yield's population (the #2493 filter, one verb over)
-- **Issue #2503** (closed): klt characterize: power extraction, multi-cell batch mode, and vendor-.lib accuracy validation
-- **Issue #2502** (closed): klt characterize: single-cell combinational NLDM extraction and .lib emission (core mechanism)
-- **Issue #2497** (closed): klt erc: erc.unconnected_net counts only islands carrying the declared label, so a rail split into a labelled piece and an unlabelled orphan grades clean
-- **Issue #2495** (closed): Friction: T1 item 11's analog LVS half is a restatement of the overall LVS verdict, so a structural supply claim is gated on an unrelated device-parameter defect
 

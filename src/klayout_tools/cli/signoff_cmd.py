@@ -152,6 +152,7 @@ from ..signoff_generator_batch import (
     GeneratorExecution,
     resolve_execution,
 )
+from ..signoff_git_source import member_label
 from ..signoff_grouped_citations import print_group_coverage as _print_group_coverage
 from ..signoff_grouped_citations import print_power_delivery as _print_power_delivery
 from ..signoff_output import write_output_or_message
@@ -489,9 +490,7 @@ def _print_binding_members(members: list[dict] | None) -> None:
     """Print each member of a set-bound generic citation (issue #3044) with
     its verification status, so a drifted member is named on the row."""
     for member in members or []:
-        path = member.get("path")
-        if isinstance(path, dict):
-            path = path.get("path")
+        path = member_label(member.get("path"))
         print(f"        member {path}: {member.get('status')}")
 
 
