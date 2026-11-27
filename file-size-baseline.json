@@ -281,7 +281,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9157
+      "lines": 8791
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -333,15 +333,15 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 3931
+      "lines": 3733
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 4700
+      "lines": 4661
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4803
+      "lines": 4771
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -385,7 +385,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 5887
+      "lines": 5867
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -401,7 +401,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2194
+      "lines": 2193
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
@@ -477,7 +477,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 2554
+      "lines": 2488
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -505,7 +505,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4089
+      "lines": 4082
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -541,7 +541,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 6554
+      "lines": 6342
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -557,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 10305
+      "lines": 9054
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -625,7 +625,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4370
+      "lines": 4255
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",

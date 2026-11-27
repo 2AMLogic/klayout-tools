@@ -149,9 +149,6 @@ from .place_and_route_fences import checked_fence_reports, fence_failure_context
 from .place_and_route_gds_merge import (
     _DEF_INSTANCE_NAME_PROPERTY_ID as _DEF_INSTANCE_NAME_PROPERTY_ID,
 )
-from .place_and_route_gds_merge import (
-    _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
-)
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 from .place_and_route_hints import grt_hint, null_unconstrained_fmax
 from .place_and_route_layer_map import explain_spef_layer_map
@@ -204,10 +201,10 @@ from .place_and_route_reports import (
 # The request-validation subsystem (issue #3699 split) lives in
 # `place_and_route_request.py`: the pure validators/resolvers that take a request
 # dict and return validated values or raise `PlaceAndRouteError`, plus that
-# exception and the validation-only tables. Everything is re-exported (redundant
-# `X as X` aliases, same convention as the blocks above and below) so
-# `klayout_tools.place_and_route.<name>` keeps resolving for the CLI, `eval`, the
-# batch backend and the test suite.
+# exception and the validation-only tables. Still-referenced helpers are
+# re-exported (redundant `X as X` aliases, same convention as the blocks above
+# and below) so `klayout_tools.place_and_route.<name>` keeps resolving for the
+# CLI, `eval`, the batch backend and the test suite.
 from .place_and_route_request import (
     _PDN_PRESETS as _PDN_PRESETS,
 )
@@ -239,61 +236,19 @@ from .place_and_route_request import (
     _resolve_netlist as _resolve_netlist,
 )
 from .place_and_route_request import (
-    _resolve_pdn_preset as _resolve_pdn_preset,
-)
-from .place_and_route_request import (
-    _validate_constraints as _validate_constraints,
-)
-from .place_and_route_request import (
     _validate_floorplan as _validate_floorplan,
-)
-from .place_and_route_request import (
-    _validate_instance_groups as _validate_instance_groups,
 )
 from .place_and_route_request import (
     _validate_io as _validate_io,
 )
 from .place_and_route_request import (
-    _validate_library as _validate_library,
-)
-from .place_and_route_request import (
     _validate_macros as _validate_macros,
-)
-from .place_and_route_request import (
-    _validate_max_antenna_repair_iterations as _validate_max_antenna_repair_iterations,
-)
-from .place_and_route_request import (
-    _validate_output_dbu_um as _validate_output_dbu_um,
-)
-from .place_and_route_request import (
-    _validate_placement_density as _validate_placement_density,
 )
 from .place_and_route_request import (
     _validate_portable_paths as _validate_portable_paths,
 )
 from .place_and_route_request import (
-    _validate_post_route_sdf as _validate_post_route_sdf,
-)
-from .place_and_route_request import (
-    _validate_post_route_spef as _validate_post_route_spef,
-)
-from .place_and_route_request import (
     _validate_power as _validate_power,
-)
-from .place_and_route_request import (
-    _validate_route_allow_congestion as _validate_route_allow_congestion,
-)
-from .place_and_route_request import (
-    _validate_route_congestion_iterations as _validate_route_congestion_iterations,
-)
-from .place_and_route_request import (
-    _validate_route_critical_nets_percentage as _validate_route_critical_nets_percentage,  # noqa: E501
-)
-from .place_and_route_request import (
-    _validate_seed as _validate_seed,
-)
-from .place_and_route_request import (
-    _validate_sweep_corners as _validate_sweep_corners,
 )
 from .place_and_route_request import (
     _validate_target_stage as _validate_target_stage,
@@ -308,9 +263,6 @@ from .place_and_route_request_checks import (
 # Keep the split script emitters importable here for existing callers (#3904).
 from .place_and_route_script import (
     _antenna_check_lines as _antenna_check_lines,
-)
-from .place_and_route_script import (
-    _antenna_diode_absent as _antenna_diode_absent,
 )
 from .place_and_route_script import (
     _clock_lines as _clock_lines,
@@ -334,28 +286,13 @@ from .place_and_route_script import (
     _io_delay_lines as _io_delay_lines,
 )
 from .place_and_route_script import (
-    _macro_blockage_lines as _macro_blockage_lines,
-)
-from .place_and_route_script import (
     _macro_pdn_grid_lines as _macro_pdn_grid_lines,
-)
-from .place_and_route_script import (
-    _metrics_report_lines as _metrics_report_lines,
-)
-from .place_and_route_script import (
-    _pdn_connect_spec as _pdn_connect_spec,
 )
 from .place_and_route_script import (
     _pdn_connects_applied as _pdn_connects_applied,
 )
 from .place_and_route_script import (
     _power_delivery_lines as _power_delivery_lines,
-)
-from .place_and_route_script import (
-    _power_physical_only_masters as _power_physical_only_masters,
-)
-from .place_and_route_script import (
-    _row_rail_lines as _row_rail_lines,
 )
 from .place_and_route_script import (
     _stage_script_lines as _stage_script_lines,
@@ -368,9 +305,6 @@ from .place_and_route_script import (
 )
 from .place_and_route_script import (
     _violation_count_lines as _violation_count_lines,
-)
-from .place_and_route_script import (
-    _wire_rc_lines as _wire_rc_lines,
 )
 from .place_and_route_script import (
     _write_script as _write_script,

@@ -296,17 +296,12 @@ from .synthesize_arithmetic import (
 )
 from .synthesize_arithmetic import _measure_candidate as _measure_candidate
 from .synthesize_arithmetic import _parse_yosys_param_int as _parse_yosys_param_int
-from .synthesize_arithmetic import _prepare_adder_candidate as _prepare_adder_candidate
 from .synthesize_arithmetic import _probe_add_widths as _probe_add_widths
 from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
-from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
 from .synthesize_constrained_timing import (
     _resolve_clocks as _resolve_clocks,
-)
-from .synthesize_constrained_timing import (
-    _validate_clock_entry as _validate_clock_entry,
 )
 from .synthesize_constrained_timing import (
     constrained_timing_fields,
@@ -335,9 +330,9 @@ from .synthesize_library_hint import (
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
 
-# Re-exported from `synthesize_script` (issue #7010's split): every name
-# below stays importable from this module for its existing callers -- the
-# lazy `from .synthesize import ...` sites in `synthesize_abc_stages`/
+# Re-exported from `synthesize_script` (issue #7010's split): the names
+# below stay importable from this module for existing callers -- the lazy
+# `from .synthesize import ...` sites in `synthesize_abc_stages`/
 # `synthesize_memory` and the test suite's `synthesize.<name>` references.
 from .synthesize_script import (
     _COMMIT_RUNNABLE_HEADER,
@@ -351,12 +346,6 @@ from .synthesize_script import (
     run_script_path,
 )
 from .synthesize_script import RUN_SCRIPT_SUFFIX as RUN_SCRIPT_SUFFIX
-from .synthesize_script import (
-    _abc_pass_command as _abc_pass_command,
-)
-from .synthesize_script import (
-    _script_input_text as _script_input_text,
-)
 from .synthesize_script import (
     _script_path_text as _script_path_text,
 )

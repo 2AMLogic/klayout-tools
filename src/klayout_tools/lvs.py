@@ -158,13 +158,7 @@ from .extract import (
 from .extract_netlist_write import write_spice_netlist
 from .extract_progress import StageTimer, active_timer, stage
 from .lvs_base import (  # noqa: F401 -- shared vocabulary re-exported by lvs
-    _COLLATERAL_NET_DESCRIPTION,
-    _MAX_PARAMETER_TOLERANCE,
     _MAX_TOLERANCE_PASSES,
-    _PARAM_ABS_EPSILON,
-    _PARAM_DISPLAY_NAMES,
-    _PARAM_REL_EPSILON,
-    _POWER_INSTANCE_SAMPLE_LIMIT,
     BODY_STATUS_UNCHECKED,
     BODY_STATUS_UNVERIFIED,
     BODY_STATUS_VERIFIED,

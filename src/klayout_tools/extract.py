@@ -211,18 +211,11 @@ from .extract_abstract import (
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 from .extract_abstract_poly import connect_terminal_poly, terminal_poly
-from .extract_assemble import _describe_device_models as _describe_device_models
-from .extract_assemble import _describe_label_layers as _describe_label_layers
-from .extract_assemble import _hierarchy_fields as _hierarchy_fields
-from .extract_assemble import _pin_ties_field as _pin_ties_field
 
 # Final report assembly moved out of `run_extract` (issue #5196).
 from .extract_assemble import assemble_extract_report, finfet_device_census
 from .extract_base import _METRIC_NAME_BY_FIELD as _METRIC_NAME_BY_FIELD
 from .extract_base import _MIN_PARASITIC_R_OHM as _MIN_PARASITIC_R_OHM
-from .extract_base import _PARAM_PRECISION_FARAD as _PARAM_PRECISION_FARAD
-from .extract_base import _PARAM_PRECISION_OHM as _PARAM_PRECISION_OHM
-from .extract_base import _PARAM_PRECISION_UM as _PARAM_PRECISION_UM
 from .extract_base import (
     _PARASITICS_METRIC_NAME_BY_FIELD as _PARASITICS_METRIC_NAME_BY_FIELD,
 )
@@ -235,19 +228,11 @@ from .extract_base import (
     SUBSTRATE_DC_TIE_RESISTANCE_OHM as SUBSTRATE_DC_TIE_RESISTANCE_OHM,
 )
 from .extract_base import _bbox_um_rounded as _bbox_um_rounded
-from .extract_base import _build_metrics as _build_metrics
 from .extract_base import (
     _parasitic_model_header_comment as _parasitic_model_header_comment,
 )
-from .extract_base import _substrate_tie_header_line as _substrate_tie_header_line
 from .extract_base import substrate_tie_mode as substrate_tie_mode
 from .extract_base import substrate_tie_written_ohms as substrate_tie_written_ohms
-from .extract_detect_block import (
-    _fixed_value_capacitor_classes as _fixed_value_capacitor_classes,
-)
-from .extract_detect_block import (
-    _fixed_value_capacitor_note as _fixed_value_capacitor_note,
-)
 
 # The pre-report detection/warning run also moved out of `run_extract`
 # (issue #5196, stage 7) -- see `extract_detect_block.py`'s module docstring.
@@ -256,15 +241,10 @@ from .extract_detect_block import build_detection_findings, refuse_case_fold_net
 # The layout-geometry device-recognition diagnostics (diode near-miss,
 # unmodelled poly / flavour-marker / unsupported-device / voltage-domain
 # markers, diode substrate-label divergence) moved out too (issue #5736).
-# `_diode_required_terms` and `_is_synthesized_substrate_net_name` are
-# re-exported for `tests/test_extract.py`, `extract_parasitics.py` and (with
-# `_extraction_deck_name`) `extract_finfet.py`.
+# `_diode_required_terms` is re-exported for `tests/test_extract.py`.
 from .extract_detect_diode_near_miss import _collect_diode_near_miss_warnings
 from .extract_detect_diode_near_miss import (
     _diode_required_terms as _diode_required_terms,
-)
-from .extract_detect_diode_near_miss import (
-    _extraction_deck_name as _extraction_deck_name,
 )
 from .extract_detect_markers import (
     _detect_missing_flavour_markers,
@@ -275,9 +255,6 @@ from .extract_detect_markers import (
 )
 from .extract_detect_substrate_label import (
     _detect_diode_substrate_label_divergence,
-)
-from .extract_detect_substrate_label import (
-    _is_synthesized_substrate_net_name as _is_synthesized_substrate_net_name,
 )
 from .extract_flavour import (
     _extract_flavour_devices,
@@ -290,24 +267,13 @@ from .extract_mos_capacitor import _resolve_mos_capacitors
 
 # Moved out (issue #5481) and re-exported, so every existing
 # `from .extract import _resolve_netlist_target` still resolves.
-from .extract_netlist_target import _default_output_path as _default_output_path
-from .extract_netlist_target import _finish_netlist_write as _finish_netlist_write
 from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_target
 from .extract_netlist_target import (
     _validate_no_netlist_flags as _validate_no_netlist_flags,
 )
 from .extract_netlist_write import PIN_TIE_RESISTANCE as PIN_TIE_RESISTANCE
-from .extract_netlist_write import (
-    _apply_pin_ties_if_circuit as _apply_pin_ties_if_circuit,
-)
-from .extract_netlist_write import _apply_pin_ties_to_spice as _apply_pin_ties_to_spice
-from .extract_netlist_write import _model_delegate_factory as _model_delegate_factory
-from .extract_netlist_write import _substitution_notes as _substitution_notes
 from .extract_netlist_write import write_flat_netlist, write_spice_netlist
 from .extract_netselect import NetSelectors
-from .extract_netselect import _build_net_selectors as _build_net_selectors
-from .extract_netselect import _report_net_selectors as _report_net_selectors
-from .extract_netselect import _selects_critical as _selects_critical
 from .extract_orient import orient_asymmetric_mos
 from .extract_parasitics import (
     SPICE_HIERARCHY_SEPARATOR,
@@ -341,9 +307,6 @@ from .extract_passive_regions import (
 from .extract_passive_regions import _resistor_body_region as _resistor_body_region
 from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
-)
-from .extract_pdk_resolve import (
-    _require_pdk_for_device_models as _require_pdk_for_device_models,
 )
 from .extract_pdk_resolve import resolve_pdk_and_model_bindings
 from .extract_pin_clusters import _promoted_pin_nets_by_cluster
@@ -409,12 +372,6 @@ from .extract_spef_block import (
 )
 from .extract_spef_block import write_spef_block
 from .extract_validate import _attach_resistance_paths as _attach_resistance_paths
-from .extract_validate import _require_parasitics as _require_parasitics
-from .extract_validate import _resistance_path_limit as _resistance_path_limit
-from .extract_validate import _resolve_substrate_tie_ohms as _resolve_substrate_tie_ohms
-from .extract_validate import (
-    _validate_resistance_path_args as _validate_resistance_path_args,
-)
 from .extract_validate import validate_run_extract_args
 
 # The SPEF-export subsystem lives in its own module (issue #1195). Two of its

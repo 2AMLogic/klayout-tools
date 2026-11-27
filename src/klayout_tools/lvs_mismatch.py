@@ -68,9 +68,8 @@ from .lvs_net_identity import (
     pair,
     record_circuit_nets,
 )
-from .lvs_supply_universe import (  # noqa: F401  (re-exported)
+from .lvs_supply_universe import (
     _is_unverified_supply_correspondence,
-    _net_name_aliases,
     _SupplyPinUniverse,
 )
 

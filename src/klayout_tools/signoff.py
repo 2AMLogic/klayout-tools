@@ -185,37 +185,9 @@ from .signoff_envelopes import (
     _UNION_ORIGINS,
     _EvidenceEnvelope,
 )
-from .signoff_envelopes import _DrcEnvelope as _DrcEnvelope
-from .signoff_envelopes import _DrcRequired as _DrcRequired
-from .signoff_envelopes import _EnvelopeCommon as _EnvelopeCommon
-from .signoff_envelopes import _ErcEnvelope as _ErcEnvelope
-from .signoff_envelopes import _ErcRequired as _ErcRequired
-from .signoff_envelopes import _ErrorEnvelope as _ErrorEnvelope
-from .signoff_envelopes import _ErrorRequired as _ErrorRequired
-from .signoff_envelopes import _ExtractEnvelope as _ExtractEnvelope
-from .signoff_envelopes import _ExtractRequired as _ExtractRequired
 from .signoff_envelopes import (
     _FunctionalVerificationEnvelope as _FunctionalVerificationEnvelope,
 )
-from .signoff_envelopes import (
-    _FunctionalVerificationRequired as _FunctionalVerificationRequired,
-)
-from .signoff_envelopes import _GenericEnvelope as _GenericEnvelope
-from .signoff_envelopes import _GenericRequired as _GenericRequired
-from .signoff_envelopes import _LvsEnvelope as _LvsEnvelope
-from .signoff_envelopes import _LvsRequired as _LvsRequired
-from .signoff_envelopes import _PexEnvelope as _PexEnvelope
-from .signoff_envelopes import _PexRequired as _PexRequired
-from .signoff_envelopes import _PlaceAndRouteEnvelope as _PlaceAndRouteEnvelope
-from .signoff_envelopes import _PlaceAndRouteRequired as _PlaceAndRouteRequired
-from .signoff_envelopes import _PowerEnvelope as _PowerEnvelope
-from .signoff_envelopes import _PowerRequired as _PowerRequired
-from .signoff_envelopes import _SimEnvelope as _SimEnvelope
-from .signoff_envelopes import _SimRequired as _SimRequired
-from .signoff_envelopes import _StaEnvelope as _StaEnvelope
-from .signoff_envelopes import _StaRequired as _StaRequired
-from .signoff_envelopes import _YieldEnvelope as _YieldEnvelope
-from .signoff_envelopes import _YieldRequired as _YieldRequired
 from .signoff_evidence_pin import (
     PIN_STALE,
     PIN_UNVERIFIABLE,
@@ -233,22 +205,14 @@ from .signoff_evidence_pin import (
 # builder), `signoff_fleet_reduction.py` (the per-block blocker reduction)
 # and `signoff_fleet_check.py` (the `--check` drift comparison), following
 # the same split precedent as `signoff_power_delivery` and
-# `signoff_envelopes`. Every moved name is re-imported here *by name* so
-# `signoff.<name>` keeps resolving exactly as it did before the split; the
+# `signoff_envelopes`. Public entry points and still-referenced helpers are
+# re-imported here *by name* so `signoff.<name>` keeps resolving; the
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
 from .signoff_fleet import DOC_PROSE_REPORT_PATHS as DOC_PROSE_REPORT_PATHS
 from .signoff_fleet import RUN_IDENTITY_REPORT_PATHS as RUN_IDENTITY_REPORT_PATHS
 from .signoff_fleet import VOLATILE_REPORT_PATHS as VOLATILE_REPORT_PATHS
-from .signoff_fleet import _blocking_item_view as _blocking_item_view
-from .signoff_fleet import _blocking_t1_item as _blocking_t1_item
 from .signoff_fleet import _check_signoff_report as _check_signoff_report
-from .signoff_fleet import _drc_coverage_rows as _drc_coverage_rows
-from .signoff_fleet import (
-    _load_committed_signoff_report as _load_committed_signoff_report,
-)
-from .signoff_fleet import _read_fleet_block_manifest as _read_fleet_block_manifest
-from .signoff_fleet import _ungraded_t1_items as _ungraded_t1_items
 from .signoff_fleet import build_fleet_report as build_fleet_report
 from .signoff_fleet import check_fleet_report as check_fleet_report
 from .signoff_fleet import check_tier_report as check_tier_report
@@ -386,13 +350,10 @@ from .signoff_timing_margin import (
     _grade_timing_margin,
 )
 from .signoff_timing_margin import (
-    _missing_timing_margin as _missing_timing_margin,
-)
-from .signoff_timing_margin import (
     _row_margin_lacking_corners as _row_margin_lacking_corners,
 )
 
-# The 22 shared `_REASON_*` unmet-reason strings moved verbatim to the
+# The shared `_REASON_*` unmet-reason strings moved verbatim to the
 # stdlib-only `signoff_unmet_reasons` leaf in the same split as
 # `signoff_base` above (issue #7371), re-imported here *by name* so
 # `signoff.<name>` keeps resolving; the `X as X` form marks the one with
@@ -420,26 +381,13 @@ from .signoff_unmet_reasons import (
     unmet_reason_counts,
 )
 from .signoff_unmet_reasons import (
-    _REASON_EVIDENCE_NOT_KLT_NATIVE as _REASON_EVIDENCE_NOT_KLT_NATIVE,
-)
-from .signoff_unmet_reasons import (
     _REASON_UNGRADEABLE_BY_BUILD as _REASON_UNGRADEABLE_BY_BUILD,
-)
-from .signoff_unmet_reasons import (
-    _REASON_WRONG_ITEM as _REASON_WRONG_ITEM,
 )
 from .signoff_upstream_source import read_upstream_source
 
 # The `klt yield` campaign-disclosure rollups (issue #2467), split out of
-# this file for its size-ratchet ceiling (issue #5815) and re-imported by
-# name so `signoff.<name>` keeps resolving; `X as X` marks deliberate re-exports.
+# this file for its size-ratchet ceiling (issue #5815).
 from .signoff_yield_disclosure import _yield_campaign_disclosure, graded_entry_campaign
-from .signoff_yield_disclosure import (
-    _yield_negative_control_rollup as _yield_negative_control_rollup,
-)
-from .signoff_yield_disclosure import (
-    _yield_sample_size_rollup as _yield_sample_size_rollup,
-)
 from .synthesize_abc import unmapped_comb_cells
 
 __all__ = [

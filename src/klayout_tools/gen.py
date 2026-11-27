@@ -116,13 +116,7 @@ from .gen_diode import resolve_diode_voltage_class
 # one-way.
 from .gen_hbt import bjt_array_describe, bjt_array_layer_params, produce_hbt_array
 from .gen_layer_params import (
-    _CAP_GEOMETRY_MIN_KEYS as _CAP_GEOMETRY_MIN_KEYS,
-)
-from .gen_layer_params import (
     _DEFAULT_RES_FLAVOR as _DEFAULT_RES_FLAVOR,
-)
-from .gen_layer_params import (
-    _GENERATOR_FAMILY_DEFERRED as _GENERATOR_FAMILY_DEFERRED,
 )
 
 # Issue #1875 moved the PDK layer-parameter/design-rule lookup subsystem (the
@@ -145,13 +139,7 @@ from .gen_layer_params import (
     _MAX_CAP_TOP_PLATE_REQUIRES as _MAX_CAP_TOP_PLATE_REQUIRES,
 )
 from .gen_layer_params import (
-    _MAX_METAL_RES_LEVEL as _MAX_METAL_RES_LEVEL,
-)
-from .gen_layer_params import (
     _MAX_RES_FLAVOR_LAYERS as _MAX_RES_FLAVOR_LAYERS,
-)
-from .gen_layer_params import (
-    _METAL_RES_GEOMETRY_MIN_KEYS as _METAL_RES_GEOMETRY_MIN_KEYS,
 )
 from .gen_layer_params import (
     _MOS_ARRAY_WELL_TAP_FAMILIES as _MOS_ARRAY_WELL_TAP_FAMILIES,
@@ -163,49 +151,22 @@ from .gen_layer_params import (
     _PDK_CAP_GEOMETRY_MIN_UM as _PDK_CAP_GEOMETRY_MIN_UM,
 )
 from .gen_layer_params import (
-    _PDK_CAP_TOP_PLATE_REQUIRES as _PDK_CAP_TOP_PLATE_REQUIRES,
-)
-from .gen_layer_params import (
-    _PDK_CONTACT_GATE_EXTRA_OFFSET_UM as _PDK_CONTACT_GATE_EXTRA_OFFSET_UM,
-)
-from .gen_layer_params import (
     _PDK_CUT_FIXED_SIZE_UM as _PDK_CUT_FIXED_SIZE_UM,
-)
-from .gen_layer_params import (
-    _PDK_GATE_BOTTOM_ENDCAP_UM as _PDK_GATE_BOTTOM_ENDCAP_UM,
 )
 from .gen_layer_params import (
     _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM as _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM,
 )
 from .gen_layer_params import (
-    _PDK_METAL_RES_DEVICE_CLASS as _PDK_METAL_RES_DEVICE_CLASS,
-)
-from .gen_layer_params import (
-    _PDK_METAL_RES_LEVEL_MIN_UM as _PDK_METAL_RES_LEVEL_MIN_UM,
-)
-from .gen_layer_params import (
     _PDK_METAL_RES_LEVELS as _PDK_METAL_RES_LEVELS,
-)
-from .gen_layer_params import (
-    _PDK_RES_FLAVOR_DEVICE_CLASS as _PDK_RES_FLAVOR_DEVICE_CLASS,
 )
 from .gen_layer_params import (
     _PDK_RES_FLAVOR_LAYERS as _PDK_RES_FLAVOR_LAYERS,
 )
 from .gen_layer_params import (
-    _PDK_RES_FLAVOR_MIN_W_UM as _PDK_RES_FLAVOR_MIN_W_UM,
-)
-from .gen_layer_params import (
     _PDK_ROLE_LAYERS as _PDK_ROLE_LAYERS,
 )
 from .gen_layer_params import (
-    _PDK_SD_IMPLANT_MARGIN_UM as _PDK_SD_IMPLANT_MARGIN_UM,
-)
-from .gen_layer_params import (
     _PDK_VOLTAGE_FLAVOR_LAYERS as _PDK_VOLTAGE_FLAVOR_LAYERS,
-)
-from .gen_layer_params import (
-    _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM as _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM,
 )
 from .gen_layer_params import (
     CAP_BOTTOM_PLATE_MARGIN_UM,
@@ -252,25 +213,13 @@ from .gen_layer_params import (
     UNIT_MIN_W_UM as UNIT_MIN_W_UM,
 )
 from .gen_layer_params import (
-    _bjt_unit_implant_margin_um as _bjt_unit_implant_margin_um,
-)
-from .gen_layer_params import (
-    _cap_family_layers as _cap_family_layers,
-)
-from .gen_layer_params import (
     _cap_geometry_min_um as _cap_geometry_min_um,
-)
-from .gen_layer_params import (
-    _cap_top_plate_requires as _cap_top_plate_requires,
 )
 from .gen_layer_params import (
     _contact_gate_extra_offset_um as _contact_gate_extra_offset_um,
 )
 from .gen_layer_params import (
     _cut_fixed_size_um as _cut_fixed_size_um,
-)
-from .gen_layer_params import (
-    _device_layer_params as _device_layer_params,
 )
 from .gen_layer_params import (
     _gate_bottom_endcap_um as _gate_bottom_endcap_um,
@@ -282,28 +231,7 @@ from .gen_layer_params import (
     _gate_top_endcap_um as _gate_top_endcap_um,
 )
 from .gen_layer_params import (
-    _metal_res_geometry_min_um as _metal_res_geometry_min_um,
-)
-from .gen_layer_params import (
-    _metal_res_layers as _metal_res_layers,
-)
-from .gen_layer_params import (
-    _mos_array_well_tap_role_layer as _mos_array_well_tap_role_layer,
-)
-from .gen_layer_params import (
     _pdk_family as _pdk_family,
-)
-from .gen_layer_params import (
-    _reject_deferred_family as _reject_deferred_family,
-)
-from .gen_layer_params import (
-    _res_flavor_layers as _res_flavor_layers,
-)
-from .gen_layer_params import (
-    _res_flavor_min_width_um as _res_flavor_min_width_um,
-)
-from .gen_layer_params import (
-    _res_flavor_min_width_um_floor as _res_flavor_min_width_um_floor,
 )
 from .gen_layer_params import (
     _resolve_expected_device_class as _resolve_expected_device_class,
@@ -312,22 +240,10 @@ from .gen_layer_params import (
     _ring_implant_margin_um as _ring_implant_margin_um,
 )
 from .gen_layer_params import (
-    _ring_tap_implant_layer as _ring_tap_implant_layer,
-)
-from .gen_layer_params import (
-    _role_layer_info as _role_layer_info,
-)
-from .gen_layer_params import (
     _sd_implant_margin_um as _sd_implant_margin_um,
 )
 from .gen_layer_params import (
-    _sd_implant_min_space_um as _sd_implant_min_space_um,
-)
-from .gen_layer_params import (
     _tap_pad_ring_implant_margins_um as _tap_pad_ring_implant_margins_um,
-)
-from .gen_layer_params import (
-    _voltage_flavor_mark_layer as _voltage_flavor_mark_layer,
 )
 from .gen_layer_params import (
     _voltage_flavor_mark_margin_um as _voltage_flavor_mark_margin_um,

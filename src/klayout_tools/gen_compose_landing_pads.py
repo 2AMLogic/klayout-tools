@@ -24,9 +24,9 @@ pad-vs-pitch rejection (``_leg_conflict_message``,
 ``_drawn_pad_side_um``, ``_pad_conflict_escape_note``,
 ``_pad_is_intermediate``) moved to
 :mod:`.gen_compose_pad_conflicts` when #6058 grew it past this file's own
-size-ratchet ceiling; the names are re-imported at module scope below so
-every pre-existing ``gen_compose_landing_pads.<name>`` import path (the
-test suite's included) keeps resolving unchanged.
+size-ratchet ceiling; the still-referenced names are re-imported at module
+scope below so pre-existing ``gen_compose_landing_pads.<name>`` import paths
+keep resolving unchanged.
 
 Landing-pad calculations share dimensions and array geometry with the drawing code.
 """
@@ -42,13 +42,10 @@ from .gen_compose_base import (
     _drop_array_extra_um,
 )
 from .gen_compose_pad_conflicts import (  # noqa: F401 -- re-export (see above)
-    _drawn_pad_side_um,
     _landing_pad_conflict_reason,
     _leg_conflict_message,
-    _pad_conflict_escape_note,
     _pad_is_intermediate,
     _pad_other_block_contact_reason,
-    _terminal_pitch_um,
 )
 
 #: One pad box a leg draws: ``(pad_layer, block_id, (x0, y0, x1, y1)_um,
