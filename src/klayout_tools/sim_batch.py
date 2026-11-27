@@ -1237,7 +1237,7 @@ def launch_job(
     regression.
 
     **Capacity wait (issues #2721, #2917).** A launch the provisioner refuses
-    for lack of Spot capacity, or because the shared fleet is at
+    for lack of Spot capacity, a vCPU ceiling, or because the fleet is at
     ``BATCH_MAX_CONCURRENT_INSTANCES``, raises :class:`BatchError` with
     ``code == "batch_no_capacity"`` / ``"batch_concurrency_cap"``
     (:func:`_classify_launch_failure`). With
