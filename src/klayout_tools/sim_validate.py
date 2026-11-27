@@ -1,13 +1,10 @@
 """Pure-input validation of ``klt sim``'s measurement specs (split out of sim.py).
 
-Everything here validates the ``measurements[]`` / ``options.fail_on_diagnostic``
-request fields and raises :class:`~klayout_tools.sim_errors.SimError` on a bad
-spec; nothing depends on ``run_sim`` or the corner runner. ``sim.py`` re-exports
-every name (self-aliased) so ``klayout_tools.sim.<name>`` keeps working for
-callers and tests, and ``sim_steps`` imports from here directly instead of via
-function-local ``from .sim import ...`` (issue #3689; precedent
-``sim_remote.py``, issue #1764).
-"""
+Validates the ``measurements[]`` / ``options.fail_on_diagnostic`` request fields
+and raises :class:`~klayout_tools.sim_errors.SimError`; nothing depends on
+``run_sim`` or the corner runner. ``sim.py`` re-exports every name (self-aliased)
+and ``sim_steps`` imports from here directly (issue #3689; precedent
+``sim_remote.py``, #1764)."""
 
 from __future__ import annotations
 
@@ -17,24 +14,31 @@ from typing import Any
 from . import (
     sim_crossings,
     sim_cycle_mean,
+    sim_derive,
     sim_energy,
     sim_eye,
+    sim_forms,
     sim_noise,
     sim_search,
+    sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
+    sim_step_resolution,
     sim_stress,
     sim_tian,
     sim_transfer_meas,
+    sim_windowed,
 )
+from ._meas_lint import check_meas_signal_position
+from .sim_case_names import validate_case_variant_names, validate_measurement_shapes
 from .sim_errors import SimError
 
 #: A `.meas` card's declared analysis type (the token right after
 #: ``.meas``/``.measure``), e.g. ``tran`` in ``.meas tran vout find v(out)``.
 _MEAS_CARD_TYPE_RE = re.compile(r"^\s*\.meas(?:ure)?\s+(\S+)", re.IGNORECASE)
 
-#: A value position in a `.meas` card: an identifier right after ``=`` that is
-#: not a function call (``v(x)``/``i(x)`` never match -- the negative
-#: lookahead rejects a following ``(``). Issue #3038.
+#: A value position in a `.meas` card: an identifier right after ``=`` that
+#: is not a function call (the negative lookahead rejects ``(``). Issue #3038.
 _MEAS_VALUE_REF_RE = re.compile(r"=\s*([A-Za-z_]\w*)\b(?!\s*\()")
 
 #: ngspice's own ``.MEASURE`` statement only implements these analysis types
@@ -61,27 +65,26 @@ _EXPR_MEAS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ON_UNREACHED_VALUES = ("error", "null")
 
 
-def _validate_meas_card(name: str, spice: str) -> None:
+def _validate_meas_card(name: str, spice: str, control_scope: bool = False) -> None:
     """Reject a ``.meas`` card declaring an analysis type ngspice's own
     ``.MEASURE`` statement does not implement.
 
-    Most notably ``"op"``: it is a legitimate ``analysis.kind`` (ngspice's
+    Most notably ``"op"``: a legitimate ``analysis.kind`` (ngspice's
     operating-point analysis runs fine as a plain ``op`` control-block
-    command), but there is no such thing as ``.MEASURE OP`` -- an operating
-    point has no sweep variable for a measurement to search over the way
-    DC/AC/TRAN/SP do. Pairing ``analysis.kind: "op"`` with a ``.meas op``
-    card fails with ngspice's own
-    ``Error: unrecognized analysis type 'op' for the following .meas
-    statement`` (verified against ngspice 46, see issue #205) -- this
-    catches it before the request ever reaches ngspice, with an actionable
-    message instead of a raw parser error. Applies to every ``.meas`` card
-    regardless of the request's own ``analysis.kind``: a ``.meas`` type
-    ngspice does not implement is invalid on its own terms, not just when
-    paired with a mismatched analysis.
+    command), but there is no ``.MEASURE OP`` -- an operating point has no
+    sweep variable to search over the way DC/AC/TRAN/SP do. Pairing
+    ``analysis.kind: "op"`` with a ``.meas op`` card fails with ngspice's
+    own ``Error: unrecognized analysis type 'op' for the following .meas
+    statement`` (ngspice 46, issue #205); caught here before the request
+    reaches ngspice. Applies to every ``.meas`` card regardless of the
+    request's ``analysis.kind``: an unimplemented ``.meas`` type is
+    invalid on its own terms, not just with a mismatched analysis.
 
-    A card this function does not recognise as a ``.meas``/``.measure``
-    line (unexpected shape) is left alone -- validating hand-written SPICE
-    syntax in general is out of scope here.
+    It also refuses a signal-position arithmetic expression (issue #5651)
+    before any corner runs -- see ``klayout_tools._meas_lint``.
+
+    A card this function does not recognise as a ``.meas``/``.measure`` line
+    (unexpected shape) is left alone: hand-written SPICE syntax is out of scope.
     """
     match = _MEAS_CARD_TYPE_RE.match(spice)
     if match is None:
@@ -97,6 +100,7 @@ def _validate_meas_card(name: str, spice: str) -> None:
             'its own `.control` block -- or use analysis.kind: "tran" with '
             "a short single-step transient and `.meas tran ... at=<t>`"
         )
+    check_meas_signal_position(name, spice, control_scope)
 
 
 def _validate_no_dependent_meas_cards(measurements_spec: list[dict[str, Any]]) -> None:
@@ -202,9 +206,9 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     - **An ``expr`` name is unique across the whole ``measurements[]``
       list.** A duplicate ``let`` silently overwrites the earlier vector, so
       both response entries would report the *second* expression's value.
-      Only checked for entries involving an ``expr`` -- a request whose
-      duplicate names are all ``spice`` cards behaves exactly as it did
-      before this issue (ngspice's own ``.meas`` handling owns that case).
+      Byte-identical duplicates among any entries are refused as well
+      (issue #6289, by :func:`validate_case_variant_names`) -- before that
+      issue, a spice-only duplicate crashed coverage as an unhandled ``ValueError``.
 
     Does **not** validate the expression's ngspice syntax or that it reduces
     to a scalar: neither is knowable without running the engine, and both
@@ -213,14 +217,13 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     boundary ``spice`` already has -- hand-written SPICE is passed through,
     not parsed.
 
-    Split across three helpers (:func:`_validate_measurement_form`,
-    :func:`_validate_expr_body`, :func:`_validate_expr_names_unique`) rather
-    than written as one loop, so no single function carries the whole rule
-    set's branch count -- see ``scripts/check_complexity_baseline.py``.
+    Split into helpers so no one function carries the whole rule set's
+    branch count (see ``scripts/check_complexity_baseline.py``).
     """
-    for spec in measurements_spec:
+    for spec in validate_measurement_shapes(measurements_spec):
         _validate_measurement_form(spec)
     _validate_expr_names_unique(measurements_spec)
+    validate_case_variant_names(measurements_spec)
 
 
 def _validate_optional_flag(name: Any, spec: dict[str, Any]) -> None:
@@ -284,39 +287,36 @@ def _validate_rawfile_form(
 
 
 def _require_measurement_form(name: Any, has_form: bool) -> None:
-    """A ``measurements[]`` entry needs a ``name`` and one declared form."""
+    """A ``measurements[]`` entry needs a ``name`` and one declared form.
+
+    The option list is rendered from :data:`sim_forms.FORMS`, the single form
+    registry, so a newly registered form cannot ship missing from it (#6328 --
+    ``eye``/``step_resolution``/``settled`` once were)."""
     if name is None or not has_form:
+        forms = ", ".join(f"'{form}'" for form in sim_forms.FORMS)
         raise SimError(
             "each request.measurements[] entry requires 'name' and "
-            "exactly one of 'spice' (a verbatim .meas card), 'expr' "
-            "(an ngspice expression evaluated after the analysis), "
-            "'crossings' (a threshold-crossing time series), "
-            "'cycle_mean' (a mean over whole reference cycles), "
-            "'energy' (a source's energy over a transient window), "
-            "'stress' (a node pair's worst |V| over a transient window), "
-            "'noise' (a spot/band-integrated noise-spectrum value) or "
-            "'transfer' (an AC return-ratio metric), "
-            "'tian' (a dual-injection AC stability metric) or "
-            "'snm' (a butterfly static noise margin of a DC sweep) or "
-            "'search' (a bisection boundary over a source value)"
+            f"exactly one of {forms}"
         )
 
 
+# `derive` is last: the first validator to see a conflict names its form first.
 _EXCLUSIVE_FORM_VALIDATORS = (
+    sim_windowed.validate_form_exclusive,
+    sim_slope_band_meas.validate_form_exclusive,
+    sim_settled.validate_form_exclusive,
+    sim_step_resolution.validate_form_exclusive,
     sim_eye.validate_form_exclusive,
     sim_search.validate_form_exclusive,
     sim_snm_meas.validate_form_exclusive,
     sim_tian.validate_form_exclusive,
     sim_transfer_meas.validate_form_exclusive,
+    sim_derive.validate_form_exclusive,
 )
 
 
 def _validate_measurement_form(spec: dict[str, Any]) -> None:
-    """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
-    one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
-    the round trip through the deck and back out of the log. See
-    :func:`_validate_measurement_forms` for why each rule exists."""
-    # Newest-first: #4292 eye, #4121 search, #3895 snm, #3160 tian, #2923 transfer.
+    """Validate the measurement form and its name."""
     for validator in _EXCLUSIVE_FORM_VALIDATORS:
         if validator(spec):
             return
@@ -385,10 +385,9 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
 
 
 def _validate_on_unreached(name: Any, spec: dict[str, Any], *, has_spice: bool) -> None:
-    """``measurements[].on_unreached`` (issue #3108): ``"error"`` | ``"null"``,
-    and only on a ``spice`` (``.meas``) measurement -- an ``expr`` or
-    ``crossings`` entry has no "target" to leave unreached, so it is rejected
-    rather than silently ignored."""
+    """``measurements[].on_unreached`` (issue #3108): ``"error"`` | ``"null"``, and only
+    on a ``spice`` (``.meas``) measurement -- an ``expr`` or ``crossings`` entry has no
+    "target" to leave unreached, so it is rejected rather than silently ignored."""
     if "on_unreached" not in spec:
         return
     value = spec["on_unreached"]
@@ -467,20 +466,18 @@ def _validate_expr_names_unique(measurements_spec: list[dict[str, Any]]) -> None
 
 def _measurement_name_key(name: Any) -> Any:
     """A ``measurements[].name`` reduced to the identity ngspice actually
-    round-trips: the lower-cased string. A non-string name is returned
-    unchanged so this stays total (``_validate_measurement_form`` is what
-    rejects one)."""
+    round-trips: the lower-cased string. A non-string name is returned unchanged
+    so this stays total (``_validate_measurement_form`` is what rejects one)."""
     return name.lower() if isinstance(name, str) else name
 
 
 def _expr_measurements(
     measurements_spec: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """The ``measurements[]`` entries declared as an ``expr`` (issue #2533),
-    in the caller's own declaration order -- which is also the order their
-    ``let`` lines are emitted in, so a later expression may reference an
-    earlier one's name (verified against ngspice 46: ``let b = a * 2`` after
-    ``let a = ...`` resolves)."""
+    """The ``measurements[]`` entries declared as an ``expr`` (issue #2533), in the
+    caller's own declaration order -- which is also the order their ``let`` lines are
+    emitted in, so a later expression may reference an earlier one's name (verified
+    against ngspice 46: ``let b = a * 2`` after ``let a = ...`` resolves)."""
     return [
         spec
         for spec in measurements_spec

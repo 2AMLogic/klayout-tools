@@ -61,6 +61,7 @@ fi
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# Local assert_eq kept: takes (actual, expected, msg); shared assert_eq is (expected, actual, msg).
 assert_eq() {
     local actual="$1" expected="$2" msg="$3"
     if [[ "$actual" == "$expected" ]]; then pass "$msg"; else fail "$msg (got '$actual', expected '$expected')"; fi
@@ -153,7 +154,8 @@ CALL_COUNT_FILE="$SANDBOX/calls.count"
 # override, "fail" = the search API call fails (total_count unknown).
 STUB_TOTAL_OVERRIDE=""
 
-# The pagination functions call `git remote get-url origin`; give them a repo.
+# The pagination functions read `GUIDE_REPO` (derived from the docs worktree, #13923); give them a repo.
+export GUIDE_REPO="example/stub"
 STUB_REPO="$SANDBOX/repo"
 git init -q "$STUB_REPO"
 git -C "$STUB_REPO" remote add origin git@github.com:example/stub.git

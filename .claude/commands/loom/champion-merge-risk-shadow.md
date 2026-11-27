@@ -1,3 +1,6 @@
+---
+disable-model-invocation: true
+---
 # Shadow-Mode Merge-Risk Pre-Score (#8545) — telemetry, never a verdict
 
 Load-gated: `champion-pr-merge.md`'s `merge-risk` criterion points here, and **only when
@@ -16,6 +19,10 @@ find out how often a hold is later released with no new commits — i.e. how
 many holds were noise. **Nothing can be learned from the comparison if the
 score is allowed to change the verdict it is being compared against**, which is
 why every rule below is about keeping the two apart.
+
+The shadow score is also **not** the confidence behind Champion's merge-risk
+self-release (#12950, `champion-pr-merge.md` → "Self-release"). Feeding it in
+would end this experiment.
 
 ## What to run, after your own verdict is final
 

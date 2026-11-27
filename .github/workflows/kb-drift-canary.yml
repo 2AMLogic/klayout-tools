@@ -74,7 +74,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -100,38 +100,37 @@ jobs:
       - name: Verify ngspice runs headlessly
         run: ngspice -v
 
-      - name: Install ciel
-        run: |
-          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user ciel==2.6.1
-          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
-
-      - name: Cache full sky130A PDK (ciel, pinned)
+      - name: Install ciel + restore/fetch the pinned sky130A PDK (device-model libs)
+        # Shared composite action (issue #5658): defaults to the
+        # device-models-only library list, which is folded into the cache
+        # key -- so this nightly entry can never serve a std-cell consumer.
         id: pdk-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.ciel
-          # Same pinned open_pdks build equiv-canary.yml/place-and-route-
-          # smoke.yml pin, reused here for reproducibility rather than
-          # "whatever ciel's latest is at run time".
-          key: sky130A-ciel-f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
-
-      - name: Fetch full sky130A PDK (ciel, cache miss only)
-        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        # timeout-minutes caps the whole composite (composite-action
+        # steps cannot carry timeout-minutes themselves); strictly tighter
+        # than the inline triple's fetch-only 20-minute cap.
         timeout-minutes: 20
-        run: |
-          ciel enable --pdk-family sky130 -l sky130_fd_pr f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
+        uses: ./.github/actions/setup-sky130a-pdk
 
       - name: Recheck kb/ measured figures against a fresh klt sim
-        # GitHub Actions' default bash shell runs with `-eo pipefail`, so
+        # This step has no `shell:` key, so GitHub Actions runs it as
+        # `bash -e {0}` -- which does NOT enable `pipefail` (only an explicit
+        # `shell: bash` selects `bash --noprofile --norc -eo pipefail`). Without
+        # the `set -o pipefail` below, the pipeline's status is `tee`'s (0), so
         # `klt kb validate`'s own nonzero exit (exit 3 -- "ran successfully
         # but found one or more invalid entries", per docs/cli/kb.md's exit
-        # code table) fails this step -- and therefore the job -- through
-        # the `tee` pipe below, exactly as it would running the bare command.
-        # No separate "check the JSON and fail" step needed.
+        # code table) would be swallowed and a drifted figure would leave the
+        # job green (issue #6678). With it, that exit fails this step -- and
+        # therefore the job -- through the `tee` pipe, exactly as it would
+        # running the bare command, while `tee` still writes the JSON report
+        # the always-run upload step below collects. No separate "check the
+        # JSON and fail" step needed. The `set -o` line is load-bearing:
+        # tests/test_kb_drift_canary_pipefail.py runs this block under
+        # `bash -e` with a failing stub to pin it.
         env:
           PDK: sky130A
           PDK_ROOT: /home/runner/.ciel
         run: |
+          set -o pipefail
           uv run --frozen --extra dev klt kb validate --recheck-measured \
             --format json | tee kb-drift-canary.json
 

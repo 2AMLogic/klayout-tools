@@ -1,60 +1,26 @@
 """``klt place-and-route --backend batch``: run each ``pdk.rebuild_corners``
 unit on the Spot batch fleet (issue #3518).
 
-A fleet dispatch host that must not run hand-launched grids sets
-``KLT_SIM_BACKEND=batch`` (or a caller passes ``--backend batch`` / sets the
-request's ``backend``), and every corner of a multi-corner request becomes
-one job on the same S3 job contract ``klt sim --backend batch`` and ``klt
-netlist --backend batch`` use. **This module owns no transport of its own**:
-submit, launch, poll, collect, the runner-version preflight and the
-bucket/profile/provision-script resolution are :mod:`klayout_tools.sim_batch`'s,
-called as they are. What is place-and-route-specific is small:
+The backend uses the existing simulation fleet transport. An explicit batch
+selection submits even one unit. Environment-selected batch uses the local
+backend for a single unit. Each corner receives the request tree excluding
+.klt and .git, with a corner-specific local request. Referenced netlist and
+macro files must live under the request directory. The package size limit
+is checked before upload. Jobs call the local CLI with JSON output and copy
+the stage artifacts back whether the route passes or fails.
 
-1. **Backend selection** (:func:`resolve_backend`) reuses
-   :func:`klayout_tools.sim.resolve_backend`'s precedence (flag > request >
-   ``$KLT_SIM_BACKEND`` > ``local``). An env-sourced ``batch`` steps back to
-   ``local`` for a single unit (a request without ``pdk.rebuild_corners``, or
-   a one-element list) -- the same rule ``klt sim`` applies. An *explicit*
-   ``batch`` on a single unit is refused rather than silently run locally.
-2. **What is uploaded.** The job instance holds no forge credential, so the
-   submitter ships one ``tree.tar.gz`` of the request's directory (minus
-   ``.klt/`` and ``.git/``), refused above :data:`MAX_BATCH_TREE_BYTES`
-   *before* anything is written to S3, plus the unit's own ``request.json``:
-   the request with ``pdk.rebuild_corners`` replaced by ``pdk.corner`` and
-   ``backend`` dropped. The netlist and macro LEF/GDS must live under the
-   request directory; one outside it is refused, not silently left behind.
-3. **What runs.** The job command extracts the tree, drops the unit request
-   over the original, and runs ``klt place-and-route <request> --backend
-   local --format json`` there -- explicitly local, so a runner whose
-   environment sets ``KLT_SIM_BACKEND`` cannot recurse. The runner's
-   ``.klt/place-and-route/`` is copied to ``$EDA_OUTPUT_DIR/artifacts/``.
-4. **What comes back.** Each unit's artifacts land in the same
-   ``.klt/place-and-route/<corner>/`` directory a local run would write, and
-   every runner path in its report is rewritten to that directory, so
-   ``--check``/``--rerun`` see the layout they expect. The aggregated report
-   keeps the local shape and adds ``environment.remote.fleet[]`` (one block
-   per job, ``job_id`` included) and a ``job_id`` per ``corner_runs`` entry.
-5. **No fallback, ever.** A unit whose upload, launch, poll or run fails is a
-   ``failed`` ``corner_runs`` entry with the error, the job id and, when the
-   runner reported one, its ``error.code``; the command exits ``1``. Nothing
-   here can launch OpenROAD on this host. An unresolvable fleet config is a
-   :class:`~klayout_tools.place_and_route.PlaceAndRouteError` before any
-   upload.
-
-``deck_content_hash`` is the hash of the liberty deck the *runner* used (its
-report's ``provenance.deck.content_hash``). When this host can resolve the
-same corner's deck too, the two are compared and a disagreement fails the
-unit: a fleet image whose PDK differs from this host's would otherwise pass
-with a fake runner and silently diverge on the fleet.
+Outputs are installed in the local unit directory and runner paths rewritten
+for report verification. Each corner retains its job ID and remote environment.
+A failed job retains its error code with no local fallback. A physical open
+retains the finished route report and its artifacts. Runner Liberty hashes
+must match the locally resolved corner when available.
 """
 
 from __future__ import annotations
 
 import contextlib
 import copy
-import json
 import os
-import shlex
 import shutil
 import tarfile
 import tempfile
@@ -63,14 +29,22 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, _provenance, output_lock, remote_transport, sim, sim_batch
-from ._provenance import _content_hash
-from .netlist_batch import _remote_stderr_tail, _runner_error
+from ._batch_collect import remote_stderr_tail, runner_error
+from ._jsonnum import is_number
+from ._report_verify import get_path
 from .place_and_route import (
     SCHEMA_VERSION,
     PlaceAndRouteError,
     _resolve_liberty,
     _resolve_netlist,
 )
+from .place_and_route_batch_job import (
+    BATCH_JOB_TOOL,
+    BATCH_THREADS_EXCEED_VCPUS_CODE,
+    BATCH_TREE_FILENAME,
+    build_job_spec,
+)
+from .place_and_route_request_checks import _validate_request_level
 
 #: The host-default variable, shared with ``klt sim`` (2am#1004).
 BACKEND_ENV = sim.BACKEND_ENV
@@ -82,17 +56,6 @@ SUPPORTED_BACKENDS = ("local", "batch")
 #: Cap on the **uncompressed** total size of the uploaded request tree
 #: (256 MiB: a netlist plus macro LEF/GDS, never a whole checkout).
 MAX_BATCH_TREE_BYTES = 256 * 1024 * 1024
-
-#: The tree input and the per-unit request under ``inputs/``.
-BATCH_TREE_FILENAME = "tree.tar.gz"
-BATCH_REQUEST_FILENAME = "request.json"
-
-#: Under ``$EDA_OUTPUT_DIR``: the runner's absolute stage-output path(s), and
-#: the copied ``.klt/place-and-route/`` tree.
-BATCH_TREE_ROOT_FILENAME = "tree_root.txt"
-
-#: ``job.json``'s ``tool`` label.
-BATCH_JOB_TOOL = "openroad"
 
 #: Per-unit job timeout when ``request.batch.job_timeout_s`` is not set. A
 #: full floorplan-to-route flow has no timeout of its own to derive one from.
@@ -123,7 +86,8 @@ def resolve_backend(flag: str | None, request: dict[str, Any], *, units: int) ->
     independent units.
 
     A host-default ``batch`` steps back to ``local`` when ``units`` is 1; an
-    explicit ``batch`` with one unit is a :class:`PlaceAndRouteError`.
+    explicit ``batch`` with one unit is kept (the whole flow is one job,
+    :mod:`klayout_tools.place_and_route_batch_single`, issue #5799).
     """
     backend, from_host_default = sim.resolve_backend(flag, request)
     if backend not in SUPPORTED_BACKENDS:
@@ -135,12 +99,6 @@ def resolve_backend(flag: str | None, request: dict[str, Any], *, units: int) ->
     backend = sim._yield_host_default_backend(
         backend, from_host_default, reason_ok=units > 1
     )
-    if backend == "batch" and units <= 1:
-        raise PlaceAndRouteError(
-            "backend 'batch' dispatches one job per pdk.rebuild_corners unit "
-            "and needs at least two corners; a single-unit request runs on "
-            "this host (backend 'local')"
-        )
     return backend
 
 
@@ -228,87 +186,6 @@ def unit_request(request: dict[str, Any], corner: str) -> dict[str, Any]:
     return unit
 
 
-def build_job_spec(
-    *,
-    request_name: str,
-    unit: dict[str, Any],
-    tarball_path: str,
-    pdk_variant: str | None,
-    timeout_s: float,
-    version_check: str = "enforce",
-) -> sim_batch.BatchJobSpec:
-    """One unit's job as a :class:`~klayout_tools.sim_batch.BatchJobSpec`.
-
-    ``cmd`` is the runner-version preflight, then: extract the tree into a
-    fresh directory, record that directory's path, install the unit request
-    over the original, and run ``klt place-and-route`` there with ``--backend
-    local --format json``. The report goes to ``report.json`` and stderr is
-    teed to ``stderr.log`` (where klt writes an error envelope), the channels
-    ``klt sim``'s batch job uses; the stage output is copied to
-    ``$EDA_OUTPUT_DIR/artifacts/`` whether or not the run succeeded.
-    """
-    try:
-        preflight = (
-            sim_batch._runner_preflight_script(
-                _provenance._klt_version(), enforce=version_check == "enforce"
-            )
-            + sim_batch.par_backend_preflight_lines()
-        )
-    except Exception as exc:  # SimError: a client version unsafe to embed
-        raise PlaceAndRouteError(str(exc)) from exc
-    out = '"$EDA_OUTPUT_DIR/{}"'
-    name = shlex.quote(request_name)
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
-            f'tar -xzf "$EDA_INPUT_DIR/{BATCH_TREE_FILENAME}" -C "$w"',
-            f'cp "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" "$w/"{name}',
-            'cd "$w"',
-            "printf '%s\\n%s\\n' \"$w/.klt/place-and-route\" "
-            '"$(pwd -P)/.klt/place-and-route" >' + out.format(BATCH_TREE_ROOT_FILENAME),
-        ]
-    )
-    argv = ["klt place-and-route", name]
-    if pdk_variant:
-        argv += ["--pdk", shlex.quote(pdk_variant)]
-    argv += ["--backend local --format json"]
-    collect = (
-        "if [ -d .klt/place-and-route ]; then "
-        f'mkdir -p "$EDA_OUTPUT_DIR/{sim_batch.BATCH_ARTIFACTS_DIRNAME}" && '
-        "cp -a .klt/place-and-route/. "
-        f'"$EDA_OUTPUT_DIR/{sim_batch.BATCH_ARTIFACTS_DIRNAME}/"; fi'
-    )
-    command = (
-        preflight
-        + setup
-        + " && "
-        + " ".join(argv)
-        + f' > "$EDA_OUTPUT_DIR/{sim_batch.BATCH_REPORT_FILENAME}"'
-        + f' 2> >(tee "$EDA_OUTPUT_DIR/{sim_batch.BATCH_STDERR_FILENAME}" >&2)'
-        + f"; rc=$?; wait $! 2>/dev/null; {collect}; exit $rc"
-    )
-    return sim_batch.BatchJobSpec(
-        cmd=command,
-        tool=BATCH_JOB_TOOL,
-        pdk_variant=pdk_variant,
-        timeout_seconds=int(timeout_s),
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=BATCH_TREE_FILENAME,
-                label="request tree",
-                local_path=tarball_path,
-            ),
-            sim_batch.BatchJobInput(
-                name=BATCH_REQUEST_FILENAME,
-                label="unit request",
-                content=json.dumps(unit),
-            ),
-        ),
-    )
-
-
 def new_job_id() -> str:
     """A fresh ``[A-Za-z0-9._-]+`` job id, recognisable in the bucket."""
     return _batch_common.make_job_id("par")
@@ -321,7 +198,7 @@ def new_job_id() -> str:
 
 def _job_timeout_s(request: dict[str, Any]) -> float:
     value = (request.get("batch") or {}).get("job_timeout_s", DEFAULT_JOB_TIMEOUT_S)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if not is_number(value) or value <= 0:
         raise PlaceAndRouteError(
             "request.batch.job_timeout_s must be a positive number of seconds"
         )
@@ -340,7 +217,7 @@ def _resolve_config(
         synthetic["batch"] = request["batch"]
     try:
         return sim_batch._resolve_batch_config(
-            synthetic, corner_count=1, timeout_s=timeout_s
+            synthetic, corner_count=1, timeout_s=timeout_s, sim_image_profiles=False
         )
     except (sim.SimError, sim_batch.BatchError) as exc:
         raise PlaceAndRouteError(
@@ -388,18 +265,20 @@ def _job_failure(
 ) -> _UnitFailed:
     """A job that did not finish ``done``: the runner's own klt error when one
     can be recovered from the collected outputs, else a stderr tail."""
-    runner_error, error_note = _runner_error(collected)
+    error, error_note = runner_error(collected)
     message, code, _ = _batch_common.job_failure_parts(
         job_id=job_id,
         state=str(status.get("state") or ""),
         exit_code=sim_batch._status_exit_code(status),
         detail="",
-        runner_error=runner_error,
+        runner_error=error,
         note="; ".join(item for item in (note, error_note) if item),
-        stderr_tail=_remote_stderr_tail(collected),
+        stderr_tail=remote_stderr_tail(collected),
         harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
         + "/harness.log",
     )
+    if code == BATCH_THREADS_EXCEED_VCPUS_CODE:
+        message += f" (instance type: {status.get('instance_type') or 'unknown'})"
     return _UnitFailed(
         f"{message} {_NO_FALLBACK}", code=code, job_id=job_id, remote=remote
     )
@@ -408,24 +287,6 @@ def _job_failure(
 # --------------------------------------------------------------------------- #
 # Collected output
 # --------------------------------------------------------------------------- #
-
-
-def _rewrite_paths(value: Any, runner_roots: list[str], local_dir: str) -> Any:
-    """``value`` with every string under a runner stage-output root re-rooted
-    at ``local_dir`` (the directory a local run would have written)."""
-    if isinstance(value, str):
-        for root in runner_roots:
-            if value == root or value.startswith(root + "/"):
-                return local_dir + value[len(root) :]
-        return value
-    if isinstance(value, list):
-        return [_rewrite_paths(item, runner_roots, local_dir) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _rewrite_paths(item, runner_roots, local_dir)
-            for key, item in value.items()
-        }
-    return value
 
 
 def _read_unit_report(collected: str, job_id: str) -> dict[str, Any]:
@@ -454,6 +315,29 @@ def _read_unit_report(collected: str, job_id: str) -> dict[str, Any]:
     return report
 
 
+def _completed_open_report(collected: str, status: dict, note: str) -> dict | None:
+    """A worker may complete the route and exit 1 to report a physical open."""
+    if (
+        note
+        or status.get("state") not in {"done", "failed"}
+        or sim_batch._status_exit_code(status) != 1
+    ):
+        return None
+    try:
+        report = sim_batch.read_collected_report(collected)
+    except sim_batch.BatchError:
+        return None
+    if report.get("status") == "failed" and report.get("stage_reached") == "route":
+        comp = get_path(report, ("congestion", "completeness"))
+        whole = get_path(comp, ("unrouted_net_count",))
+        partial = get_path(comp, ("pin_connectivity", "open_nets"))
+        if (type(whole) is int and whole > 0) or (
+            isinstance(partial, list) and partial
+        ):
+            return report
+    return None
+
+
 def _runner_deck_hash(report: dict[str, Any]) -> str | None:
     deck = (report.get("provenance") or {}).get("deck")
     value = deck.get("content_hash") if isinstance(deck, dict) else None
@@ -461,7 +345,7 @@ def _runner_deck_hash(report: dict[str, Any]) -> str | None:
 
 
 def _local_deck_hash(
-    cell_library: str, corner: str, pdk_variant: str | None
+    cell_library: str, corner: str | None, pdk_variant: str | None
 ) -> str | None:
     """This host's hash of the corner's liberty deck, or ``None`` when this
     host cannot resolve it (the runner's PDK is then the only evidence)."""
@@ -471,19 +355,18 @@ def _local_deck_hash(
         )
     except PlaceAndRouteError:
         return None
-    return _content_hash(path)
+    return _provenance.content_hash(path)
 
 
 def _preflight(
     request: dict[str, Any], request_dir: str, pdk_variant: str | None
 ) -> tuple[str | None, str, list[tuple[str, str]], float, sim_batch.BatchConfig]:
-    """The request-level checks done before any upload: the netlist hash, the
-    cell library, the packaged tree, the job timeout and the fleet config."""
-    netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    input_hash = _content_hash(netlist_path)
-    cell_library = request["pdk"].get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PlaceAndRouteError("request.pdk.cell_library is required")
+    """The checks done before any upload. The local backend's whole request
+    contract runs first (#7583), so a request defect is one error before any
+    fleet spend and outranks a packaging or fleet-config problem."""
+    checks = _validate_request_level(request, request_dir)
+    input_hash = _provenance.content_hash(checks.netlist_path)
+    cell_library = checks.cell_library
     files = package_tree(request, request_dir)
     timeout_s = _job_timeout_s(request)
     config = _resolve_config(request, pdk_variant, timeout_s)
@@ -688,15 +571,24 @@ def _finish_unit(
         if done:
             raise _transport_failure(job_id, exc) from exc
         note = str(exc)
-    if not done:
+    report = (
+        _read_unit_report(collected, job_id)
+        if done
+        else _completed_open_report(collected, status, note)
+    )
+    if report is None:
         raise _job_failure(config, job_id, status, collected, remote, note)
-    report = _read_unit_report(collected, job_id)
+    # A worker predating --threads ran at one thread. Explicit requests use
+    # the flag, so an older CLI would have failed before producing this report.
+    report.setdefault("environment", {}).setdefault("threads", 1)
+    for stage in report.get("stages", []):
+        stage.setdefault("threads", 1)
     remote.update(sim_batch._read_runner_identity(collected))
     artifacts = os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME)
     if os.path.isdir(artifacts):
         os.makedirs(unit_dir, exist_ok=True)
         shutil.copytree(artifacts, unit_dir, dirs_exist_ok=True)
-    return _rewrite_paths(
+    return _batch_common.rewrite_runner_paths(
         report, _batch_common.read_runner_roots(collected), unit_dir
     ), remote
 

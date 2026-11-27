@@ -236,16 +236,116 @@ Array instances contribute one child per element.
 | Field | Meaning |
 | ----- | ------- |
 | `children[]` | One entry per direct instance: `name` (`<cell>[<n>]`, ordinal by position), `cell`, `bbox_um`, `bbox_area_um2`, `own_whitespace_um2` (instance bbox area minus the child's flattened drawn area). Sorted by `bbox_area_um2` descending, then name. |
-| `gap_components[]` | Connected pieces of the top bbox not covered by any instance bbox: `position`, `bbox_um`, `area_um2`. Zero-area gaps are dropped. Sorted by area descending. |
+| `gap_components[]` | Connected pieces of the top bbox not covered by any instance bbox: `position`, `bbox_um`, `area_um2`, `drawn_area_um2`, `drawn_components[]`. Zero-area gaps are dropped. Sorted by area descending. |
+| `gap_components[].drawn_area_um2` | Coverage of the actual gap polygon (holes respected) by geometry drawn directly in the top cell, merged across eligible layers so overlaps count once. `0.0` when the gap carries no direct top-cell drawing. |
+| `gap_components[].drawn_components[]` | Connected components of that coverage: `bbox_um`, `drawn_area_um2`, `piece_count`. Sorted by drawn area descending, then bbox position (deterministic for equal-area components). |
 | `unattributed_um2` | `bbox_area - (sum(children) - overlap) - sum(gaps)`; expected `0`. |
 | `instance_overlap_um2` | Area double-covered by overlapping instance bboxes (counted once in the partition). |
 | `top_level_drawn_area_um2` | Drawn area of shapes placed directly in the top cell (not an extra partition term). |
 | `sums_to_total` | `true` when `unattributed_um2` is exactly zero (integer dbu² arithmetic). |
+| `bands[]` | Leaf cells only (no child instances; absent otherwise, issue #5189): a Y-axis partition of the bbox into full-width bands, bottom to top. Each has `bbox_um`, `area_um2`, `layers` (sorted `"L/D"` list of drawn, non-annotation layers overlapping the band; `[]` = bare whitespace) and `drawn_area_um2` (merged drawn area inside the band). Adjacent strips with the same `layers` set are merged; band areas sum exactly to the bbox area. |
 
 `position` is `margin:<edges>` (edges joined by `+`, order bottom, left,
 right, top) when the gap touches the top bbox boundary; otherwise
 `between:<a>,<b>` (names sorted) when it abuts two or more instances, or
 `left_of|right_of|above|below:<inst>` for one; `interior` if it abuts none.
+
+#### Gap drawn coverage and components (issue #6941)
+
+A hand-placed analog top cell draws real structure *inside* its gaps --
+guard rings, reserved-but-empty regions, top-level strap corridors -- and a
+single `area_um2` cannot tell a ring from dead whitespace. Each gap row
+therefore also reports its drawn contents, sourced from exactly the
+non-recursive, annotation-filtered top-cell geometry that
+`top_level_drawn_area_um2` totals (with `--flatten-wrappers`, still the top
+cell only: a wrapper's own drawing between its leaves is not top-level
+drawing). The coverage is intersected with the gap polygon *before*
+connectivity, so a structure a child footprint crosses (a strap running
+over a placed block) splits into one component per side, and each original
+shape with positive-area overlap counts once as a `piece` per component it
+lands in -- a split shape contributes to both.
+
+`piece_count` references the original top-cell shapes because the merged
+coverage alone loses that information: two overlapping rectangles on
+different layers are one physical footprint (overlaps count once) with two
+contributing pieces, and a reserved annotation-layer shape contributes
+neither area nor pieces.
+
+The two drawn-area totals relate as: `top_level_drawn_area_um2` counts all
+direct drawing including the part over child bboxes, while
+`sum(gap_components[].drawn_area_um2)` counts only the part inside gaps.
+Component areas describe a gap's *contents* and never enter the bbox
+partition -- `sums_to_total` stays child bboxes plus gap areas only.
+
+#### P&R decomposition (`--pnr-report`)
+
+Issue #5181. `--pnr-report <place-and-route report.json>` (requires
+`--attribute`; otherwise the standard error envelope is emitted, as for an
+unreadable or malformed report) adds `attribution.pnr_decomposition`.
+Without the flag the output is unchanged. Tap/endcap/filler masters are read
+from the report's `power` block (`tapcell_master`, `endcap_master`,
+`filler_masters`, incl. `row_rail`), die/core areas from its top-level or
+last-stage `die_area_um2`/`core_area_um2`.
+
+| Field | Meaning |
+| ----- | ------- |
+| `logical_cells` | `{area_um2, source}`: union of direct-instance bboxes whose master is not physical-only. |
+| `physical_only_cells` | Same, for tap/endcap/filler masters (overlap with logical not double-counted). |
+| `core_whitespace` | Report core area minus the two cell terms (floored at 0). |
+| `die_margin` | Report die area minus core area. |
+| `guard_ring` | Top bbox minus the bbox of non-guard-ring instances (masters whose name contains `guard`); `0` when none. |
+| `sum_um2`, `bbox_area_um2` | Term sum and the top bbox area. |
+| `residual_um2` | `bbox_area_um2 - sum_um2`; nonzero when the report does not describe the layout. |
+| `tolerance_um2` | Absolute tolerance (`0.001`) for `sums_to_total`. |
+| `sums_to_total` | `abs(residual_um2) <= tolerance_um2`. |
+| `logical_cell_area_um2`, `overrun_ratio` | `overrun_ratio` = bbox area / logical cell area (`null` if no logical cells). |
+
+A report whose die or core area exceeds the layout bbox is rejected.
+
+### Cell footprint block (`--cell-footprint`)
+
+Opt-in (issue #5180). `--cell-footprint` adds an additive `cell_footprint`
+object (existing fields unchanged); `--group-by-instance-prefix SEP` implies it
+and fills `grouping`. `--lef PATH` (repeatable; file or directory; first path
+wins) supplies `MACRO ... SIZE w BY h`. The GDS bbox of a std cell includes
+well/implant overhang, so the footprint uses the abutment box instead.
+
+| Field | Meaning |
+| ----- | ------- |
+| `masters[]` | Per placed master: `category`, `footprint_um2`, `source`, `instance_count`, `total_um2`. Arrayed instances count one per member. |
+| `masters[].source` | Fallback chain, observable: `prboundary` (cell draws layer 235/4) -> `lef` (`SIZE` from `--lef`) -> `bbox` (cell bbox, overstates). |
+| `total_footprint_um2` / `share_of_bbox` | Sum over all direct instances of the top cell, and its share of the top bbox area. |
+| `category_um2`, `physical_only_um2` | Footprint per category; `fill`/`tap`/`endcap` (physical-only) are also summed separately. |
+| `grouping` | `null` without `--group-by-instance-prefix`. Otherwise `{status, separator, groups[]}`; each group has `instance_count`, `footprint_um2`, `share_of_bbox`, `category_um2`. |
+
+Categories (sky130_fd_sc_hd masters, by base name; first match wins):
+`tap` (`tap*`), `endcap` (`endcap*`), `fill` (`fill*`, `decap*`, `diode*`),
+`clock-tree` (`clkbuf*`, `clkinv*`, `clkdlybuf*`, `dlclkp`/`sdlclkp`),
+`sequential` (`df*`, `sdf*`, `edf*`, `dl*`, `sdl*`), `buffer` (`buf*`,
+`bufbuf*`, `bufinv*`, `dlygate*`, `dlymetal*`, `probe*`), otherwise `logic`.
+Masters outside `sky130_fd_sc_hd__` are `other`.
+
+Grouping is by the first `SEP`-delimited component of the instance name
+(`u_foo/u1/x` with `/` -> `u_foo`); a name with no `SEP`, or no name, goes to
+`(top)`. Group footprints (physical-only cells included) sum to
+`total_footprint_um2`. Instance names are read from instance user properties
+(key `1`, the GDS `PROPATTR` convention, or `name`/`instance`). Most P&R GDS
+output has none; then `grouping.status` is `unavailable` (with a `reason`)
+and no groups are invented. Only direct instances of the top cell are
+considered; multi-level hierarchy is not walked.
+
+#### `--flatten-wrappers`
+
+Opt-in (issue #5179; requires `--attribute`, otherwise a usage error with the
+standard envelope). A direct child that is a *wrapper* — a cell with two or
+more direct instances — is recursively expanded into its instances (composing
+transforms, array elements included); a cell with fewer than two is a *leaf*.
+`children[]` then lists leaves only, named by hierarchical path such as
+`COMP[0]/OTA[0]` (ordinals per cell name by position, at each level), and gap
+`position` labels name leaves. A wrapper's own whitespace and any shapes it
+draws between inner blocks become ordinary gap components, and the sum
+identity / `sums_to_total` still hold. Without the flag the output is
+unchanged.
 
 ### Budget and reference blocks
 

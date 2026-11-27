@@ -45,6 +45,7 @@ import os
 from typing import Any
 
 from . import env_provenance
+from ._jsonnum import is_int
 from ._verilog_params import chparam_lines, read_verilog_line
 
 #: The memory outcome vocabulary, per module and overall. Fixed (a caller may
@@ -168,7 +169,7 @@ def _load_modules(stats_path: str) -> dict[str, Any] | None:
 
 
 def _int(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    return value if is_int(value) else 0
 
 
 def memory_counts(modules: dict[str, Any]) -> dict[str, dict[str, int]]:

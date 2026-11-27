@@ -11,14 +11,16 @@ lives here. ``erc.py`` imports these names back, so
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
-from ._jsonnum import is_number
-from ._paths import (
-    _parse_layer_datatype,
-    _reject_unknown_keys,
-    _validate_via_entries,
+from ._jsonnum import is_finite_number, is_int
+from ._paths import _reject_unknown_keys, _validate_via_entries, parse_layer_datatype
+from .erc_spec_boxes import (  # -- _parse_um_boxes is re-exported
+    _parse_isolation_boxes,
+    _parse_tap_boxes,
+    _parse_um_boxes,
+    _parse_well_boxes,
+    validate_common_native_substrate,
 )
 
 #: The stable ``erc_coverage.inapplicable`` reason for the undeclared
@@ -81,8 +83,7 @@ _TIES_DISCLOSURE_COVERAGE_REASON: dict[str, str] = {
 
 
 #: The keys each part of the ``klt erc`` spec file recognises (issue #2243).
-#: Any other key is rejected with its full path rather than ignored -- see
-#: ``docs/cli/erc.md``'s "Unrecognised spec keys". Keep these in step with
+#: Unknown keys are rejected with their full path. Keep these in step with
 #: the ``_validate_*``/``_parse_*`` readers below when a spec field is added.
 _SPEC_KEYS = (
     "stackup",
@@ -90,8 +91,10 @@ _SPEC_KEYS = (
     "nets",
     "ties",
     "ties_disclosure",
+    "common_native_substrate",
     "devices",
     "antenna_limits",
+    "keepouts",
 )
 _STACKUP_KEYS = ("name", "layer", "label_layer", "active_layer", "role")
 _NET_KEYS = (
@@ -109,12 +112,14 @@ _TIE_KEYS = (
     "well_layer",
     "tap_layer",
     "connect_to",
+    "through",
     "net",
     "tap_requires",
     "tap_excludes",
     "tap_is_dedicated",
     "tap_boxes",
     "well_boxes",
+    "isolation_boxes",
     "well_complement_of",
     "well_requires",
     "well_excludes",
@@ -178,12 +183,12 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
             raise ErcError(f"spec '{spec_path}': duplicate stackup name {name!r}")
         names.append(name)
 
-        layer = _parse_layer_datatype(
+        layer = parse_layer_datatype(
             str(entry["layer"]), spec_path, f"stackup[{i}].layer", ErcError
         )
         label_layer = None
         if entry.get("label_layer") is not None:
-            label_layer = _parse_layer_datatype(
+            label_layer = parse_layer_datatype(
                 str(entry["label_layer"]),
                 spec_path,
                 f"stackup[{i}].label_layer",
@@ -197,7 +202,7 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
                     f"spec '{spec_path}': stackup[{i}].active_layer is only "
                     "valid on stackup[0] (the gate role)"
                 )
-            active_layer = _parse_layer_datatype(
+            active_layer = parse_layer_datatype(
                 str(entry["active_layer"]),
                 spec_path,
                 f"stackup[{i}].active_layer",
@@ -307,12 +312,7 @@ def _validate_antenna_limit_entry(
 
 
 def _validate_antenna_max_ratio(max_ratio: Any, spec_path: str, where: str) -> float:
-    if (
-        isinstance(max_ratio, bool)
-        or not isinstance(max_ratio, (int, float))
-        or not math.isfinite(max_ratio)
-        or max_ratio <= 0
-    ):
+    if not is_finite_number(max_ratio) or max_ratio <= 0:
         raise ErcError(
             f"spec '{spec_path}': {where}.max_ratio must be a finite "
             f"number > 0 (got {max_ratio!r})"
@@ -488,7 +488,7 @@ def _parse_net_islands(entry: dict[str, Any], spec_path: str, index: int) -> int
     Split out of :func:`_validate_nets` to keep that function under the
     repo's C901 complexity ratchet, as :func:`_parse_same_net_as` is."""
     islands = entry.get("islands", 1)
-    if isinstance(islands, bool) or not isinstance(islands, int) or islands < 1:
+    if not is_int(islands) or islands < 1:
         raise ErcError(
             f"spec '{spec_path}': nets[{index}].islands must be an integer "
             f">= 1 (got {entry.get('islands')!r})"
@@ -652,7 +652,7 @@ def _parse_tie_layer_list(
     layers *mean*. The layer-list counterpart of :func:`_parse_um_boxes`.
 
     Omitted/``null`` -> ``[]``. Every entry is validated by
-    :func:`~klayout_tools._paths._parse_layer_datatype` rather than coerced:
+    :func:`~klayout_tools._paths.parse_layer_datatype` rather than coerced:
     a silently-dropped layer would weaken a narrowing the caller believes
     they declared.
     """
@@ -665,7 +665,7 @@ def _parse_tie_layer_list(
             "of '<layer>/<datatype>' strings"
         )
     return [
-        _parse_layer_datatype(
+        parse_layer_datatype(
             str(value), spec_path, f"ties[{index}].{key}[{j}]", ErcError
         )
         for j, value in enumerate(raw)
@@ -679,7 +679,7 @@ def _parse_cell_names(
     #4373: ``well_requires_cells`` / ``well_excludes_cells``). Omitted/``null``
     -> ``[]``. Every entry must be a non-empty string; whether the name exists
     in the stream is checked at run time against the layout, where it is
-    known (:func:`~klayout_tools.erc._cells_region`)."""
+    known (:func:`~klayout_tools.erc_well_regions._cells_region`)."""
     raw = entry.get(key, [])
     if raw is None:
         raw = []
@@ -744,102 +744,6 @@ def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -
     return raw
 
 
-def _parse_um_boxes(
-    entry: dict[str, Any],
-    key: str,
-    spec_path: str,
-    index: int,
-    section: str = "ties",
-) -> list[tuple[float, float, float, float]]:
-    """One spec entry's ``[left, bottom, right, top]`` micrometre box list
-    under ``key`` -- the shared parser behind ``ties[].tap_boxes`` (issue
-    #2234, :func:`_parse_tap_boxes`), ``ties[].well_boxes`` (issue #2255,
-    :func:`_parse_well_boxes`), ``ties[].well_requires_boxes`` /
-    ``ties[].well_excludes_boxes`` (issue #2540, :func:`_parse_well_selection`)
-    and ``nets[].unlabelled_allowed_boxes`` (issue #2524,
-    :func:`_parse_unlabelled_allowed_boxes`), which take the identical
-    literal-geometry shape and differ only in what the boxes *mean*.
-
-    ``[left, bottom, right, top]`` is the same tuple
-    :func:`~klayout_tools._layout.clip_box` already converts for ``klt
-    clip``/``components.py``. Omitted/``null`` -> ``[]``. Every box is
-    validated rather than coerced: a 3-element array, a non-number, a bool
-    (JSON ``true`` is not a coordinate), or an inverted/degenerate extent is
-    a spec error, since a silently-dropped box would weaken an assertion the
-    caller believes they made.
-
-    ``section`` names the spec array the entry came from, so the error
-    message points at the caller's own key path (``ties[2].tap_boxes[0]`` vs.
-    ``nets[1].unlabelled_allowed_boxes[0]``) rather than at whichever array
-    happened to be the first user of this parser.
-    """
-    raw = entry.get(key, [])
-    if raw is None:
-        raw = []
-    if not isinstance(raw, list):
-        raise ErcError(
-            f"spec '{spec_path}': {section}[{index}].{key} must be an array of "
-            "[left, bottom, right, top] micrometre boxes"
-        )
-    boxes: list[tuple[float, float, float, float]] = []
-    for j, value in enumerate(raw):
-        field = f"{section}[{index}].{key}[{j}]"
-        if (
-            not isinstance(value, list)
-            or len(value) != 4
-            or not all(is_number(v) for v in value)
-        ):
-            raise ErcError(
-                f"spec '{spec_path}': {field} must be a 4-number "
-                "[left, bottom, right, top] array"
-            )
-        left, bottom, right, top = (float(v) for v in value)
-        if left >= right or bottom >= top:
-            raise ErcError(
-                f"spec '{spec_path}': {field} must have left < right and bottom < top"
-            )
-        boxes.append((left, bottom, right, top))
-    return boxes
-
-
-def _parse_tap_boxes(
-    entry: dict[str, Any], spec_path: str, index: int
-) -> list[tuple[float, float, float, float]]:
-    """``ties[].tap_boxes`` (optional, issue #2234): a caller *assertion* of
-    where the tap geometry is, as a list of ``[left, bottom, right, top]``
-    micrometre boxes intersected into ``tap_layer``. Composes with
-    ``tap_requires`` (both narrow the same region) but, unlike it, needs no
-    PDK marker layer to exist at all: a stream whose taps are genuinely
-    drawn but carry no distinguishing implant/marker layer can point
-    directly at them instead. Omitted/``null`` -> ``[]`` (no assertion,
-    pre-#2234 behaviour, byte-identical). Split out of :func:`_validate_ties`
-    to keep that function under the repo's C901 complexity ratchet, as
-    :func:`_parse_tap_requires` is.
-    """
-    return _parse_um_boxes(entry, "tap_boxes", spec_path, index)
-
-
-def _parse_well_boxes(
-    entry: dict[str, Any], spec_path: str, index: int
-) -> list[tuple[float, float, float, float]]:
-    """``ties[].well_boxes`` (optional, issue #2255): a caller *assertion*
-    of the substrate/well region this tie is about, for a block that draws
-    no well/tub layer for it to name -- the same ``[left, bottom, right,
-    top]`` micrometre box list ``tap_boxes`` takes, and deliberately so, but
-    a fundamentally different kind of claim.
-
-    ``tap_boxes`` **narrows** a required, drawn ``tap_layer``: it composes
-    with the geometry, and the geometry is still what is measured. This
-    **substitutes** for a required drawn layer, so the region it names is
-    not corroborated by anything in the stream at all. That is why it is
-    valid only with ``well_layer: null`` (:func:`_parse_well_declaration`),
-    why it is graded under its own coverage classification rather than
-    folded into ``checked_by_assertion``, and why it carries its own
-    degeneracy test (:func:`_degenerate_tie_reasons`).
-    """
-    return _parse_um_boxes(entry, "well_boxes", spec_path, index)
-
-
 def _parse_well_complement_of(
     entry: dict[str, Any], spec_path: str, index: int
 ) -> list[tuple[int, int]]:
@@ -847,7 +751,7 @@ def _parse_well_complement_of(
     half of a tie for a process whose bulk has no drawn well/tub shape -- a
     ``"<layer>/<datatype>"`` string or a non-empty array of them. The tie's
     region is the top-cell extent minus the merged union of those layers
-    (see :func:`~klayout_tools.erc._tie_well_region`), so it follows the
+    (see :func:`~klayout_tools.erc_well_regions._tie_well_region`), so it follows the
     layout instead of going stale like a hand-kept ``well_boxes`` list.
 
     Omitted/``null`` -> ``[]``. Valid only with ``well_layer: null``
@@ -863,7 +767,7 @@ def _parse_well_complement_of(
             "'<layer>/<datatype>' string or a non-empty array of them"
         )
     return [
-        _parse_layer_datatype(
+        parse_layer_datatype(
             str(value), spec_path, f"ties[{index}].well_complement_of[{j}]", ErcError
         )
         for j, value in enumerate(values)
@@ -891,7 +795,7 @@ def _parse_well_selection(
       ``well_layer`` geometry drawn directly in instances of the
       ``well_requires_cells`` cells and with none of the
       ``well_excludes_cells`` geometry, evaluated in each instance's
-      transformed frame (see :func:`~klayout_tools.erc._cells_region`).
+      transformed frame (see :func:`~klayout_tools.erc_well_regions._cells_region`).
 
     All six exist for the one thing the tap side cannot express: a single
     drawn tub layer carrying two differently-biased well classes (device-body
@@ -1048,64 +952,50 @@ def _parse_well_declaration(
             "'well_requires'/'well_excludes' (a marker layer that does)"
         )
     return {
-        "well_layer": _parse_layer_datatype(
+        "well_layer": parse_layer_datatype(
             str(raw), spec_path, f"ties[{index}].well_layer", ErcError
         ),
         **declaration,
     }
 
 
+def _tie_through(
+    entry: dict[str, Any],
+    connect_to: str,
+    via_roles: dict[str, tuple[str, str]],
+    spec_path: str,
+    index: int,
+) -> str | None:
+    """Resolve an optional contact by name against the validated via endpoints."""
+    if "through" not in entry:
+        return None
+    name = entry["through"]
+    field = f"spec '{spec_path}': ties[{index}].through"
+    if not isinstance(name, str) or not name.strip() or name not in via_roles:
+        raise ErcError(f"{field} must name a declared via (got {name!r})")
+    if connect_to not in via_roles[name]:
+        raise ErcError(
+            f"{field} via {name!r} must include connect_to {connect_to!r} "
+            "in its between roles"
+        )
+    return name
+
+
 def _validate_ties(
-    spec: dict[str, Any], spec_path: str, stackup_names: list[str]
+    spec: dict[str, Any],
+    spec_path: str,
+    stackup_names: list[str],
+    vias: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Validate the optional ``ties`` array (issue #861): substrate/well
-    tie declarations for the ``erc.missing_tie`` check. Each entry names a
-    well/tub layer and the tap (contact) layer expected inside it, the
-    ``stackup`` role the tap must be wired up to, and the supply net that
-    tap must ultimately reach. Omitted or empty -> no missing-tie findings
-    are computed.
+    """Validate well and tap declarations used to check supply connectivity.
 
-    ``tap_requires`` (optional array of ``"<layer>/<datatype>"``, issue
-    #2169) intersects further layers into the tap, so the spec can express
-    the *boolean* a real PDK tap is drawn as -- ``Comp ∩ Nplus`` inside an
-    n-well, ``Comp ∩ Pplus`` inside a p-well -- rather than a single layer
-    that is either an implant (not a conductor) or a diffusion/cut shared
-    with every source/drain in the same well. Same "second plain layer
-    field, intersected at use time" shape as ``stackup[0].active_layer``
-    (issue #1979), generalised to a list; omitted -> ``tap_layer`` alone,
-    unchanged.
+    The derived tap conductor can be narrowed by markers or asserted boxes
+    or declared dedicated. A named ``through`` via qualifies its physical
+    connection to the ``connect_to`` role. Omission uses polygon overlap.
 
-    ``tap_is_dedicated`` (optional boolean, issue #2199) is the other way
-    to say the same thing for a PDK that draws taps on their own layer:
-    nothing needs narrowing because the layer is already tap-only. A tie
-    that declares neither is *degenerate* -- see
-    :func:`_degenerate_tie_reasons` -- and is graded as skipped rather than
-    checked work.
-
-    ``tap_boxes`` (optional array of ``[left, bottom, right, top]``
-    micrometre boxes, issue #2234) is a third, caller-*asserted* way: rather
-    than narrowing ``tap_layer`` by a PDK marker layer's boolean, the spec
-    names the tap geometry directly. For a stream that draws taps with no
-    distinguishing marker at all -- neither ``tap_requires`` nor
-    ``tap_is_dedicated`` has anything true to narrow or affirm -- this is
-    the only way to declare a tie that is not degenerate. Graded under its
-    own coverage classification (:func:`_connectivity_coverage`'s
-    ``checked_by_assertion``) rather than folded into an ordinary
-    geometrically-derived pass, and held to the same falsifiability test as
-    every other narrowing form (:func:`_degenerate_tie_reasons`): an
-    assertion that removes nothing from the drawn ``tap_layer`` is still
-    degenerate.
-
-    ``well_boxes`` (optional array of the same micrometre boxes, issue
-    #2255) is the *well*-side counterpart, and the one thing on this entry
-    that substitutes for a required field rather than narrowing one: with
-    ``"well_layer": null``, it asserts the substrate region of a block that
-    draws no well/tub layer at all (a native-substrate, NMOS-in-bulk
-    block), which before this could not declare a substrate tie in any
-    form. Exactly one of the two well forms may be given -- see
-    :func:`_parse_well_declaration` -- and an assertion covering the whole
-    top-cell extent is graded as skipped work, not as evidence (see
-    :func:`_degenerate_tie_reasons`).
+    A tie names its drawn well layer or asserts substrate geometry with
+    ``well_boxes`` when ``well_layer`` is null (#2255). An assertion covering
+    the whole cell is graded as skipped (see :func:`_degenerate_tie_reasons`).
 
     ``well_requires``/``well_excludes`` (optional arrays of
     ``"<layer>/<datatype>"``, issue #2339) narrow the *drawn* well the way
@@ -1135,7 +1025,9 @@ def _validate_ties(
     half of such a tie rests on the caller's word, a tie graded through one is
     additionally named in ``erc_coverage.checked_by_well_assertion`` (see
     :func:`_connectivity_coverage`), which a purely marker-driven selection
-    stays out of."""
+    stays out of.
+    """
+    via_roles = {via["name"]: via["between"] for via in vias}
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -1158,7 +1050,7 @@ def _validate_ties(
         names.append(name)
 
         well = _parse_well_declaration(entry, spec_path, i)
-        tap_layer = _parse_layer_datatype(
+        tap_layer = parse_layer_datatype(
             str(entry["tap_layer"]), spec_path, f"ties[{i}].tap_layer", ErcError
         )
 
@@ -1166,6 +1058,7 @@ def _validate_ties(
         tap_excludes = _parse_tap_excludes(entry, spec_path, i)
         tap_is_dedicated = _parse_tap_is_dedicated(entry, spec_path, i)
         tap_boxes = _parse_tap_boxes(entry, spec_path, i)
+        isolation_boxes = _parse_isolation_boxes(entry, spec_path, i)
 
         connect_to = str(entry["connect_to"])
         if connect_to not in stackup_names:
@@ -1187,10 +1080,13 @@ def _validate_ties(
                 "tap_excludes": tap_excludes,
                 "tap_is_dedicated": tap_is_dedicated,
                 "tap_boxes": tap_boxes,
+                "isolation_boxes": isolation_boxes,
                 "connect_to": connect_to,
+                "through": _tie_through(entry, connect_to, via_roles, spec_path, i),
                 "net": net,
             }
         )
+    validate_common_native_substrate(spec, spec_path, entries)
     return entries
 
 

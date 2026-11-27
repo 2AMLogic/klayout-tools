@@ -10,90 +10,32 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_dummy_marker_params,
+    declare_metal_label_present,
+    declare_mos_array_extra_params,
+    declare_mos_stack_params,
+    declare_mos_well_tie_params,
+    declare_ring_implant_params,
+    declare_ring_well_margin,
+    declare_voltage_flavor_mark_params,
+    declare_well_present,
+    union_box,
+)
+from ._mos_array_ring_mv import declare_ring_mv_params, mv_cover_box, ring_well_box_um
+from ._mos_array_shapes import (
+    _insert_mos_cap_mark,
+    _insert_unit_shapes,
+    _mos_cap_enabled,
+    _unit_role_boxes,
+)
+from ._ring_shapes import _draw_composed_guard_ring
 
 if TYPE_CHECKING:
     import klayout.db as kdb
-
-
-def _mos_cap_enabled(pcell: Any) -> bool:
-    """``pcell.mos_cap`` (the PCell params are dynamic attributes)."""
-    return bool(pcell.mos_cap)
-
-
-def _insert_mos_cap_mark(pcell: Any, info: dict[str, Any], dbu: float) -> None:
-    """Draw the MOS-capacitor marker (issue #3283) when ``pcell.mos_cap`` is
-    set: the same enclosing box as the voltage-flavor marker, so it covers
-    every unit device."""
-    if not _mos_cap_enabled(pcell):
-        return
-    from klayout_tools.gen import _insert_boxes
-
-    _insert_boxes(
-        pcell.cell,
-        pcell.layout.layer(pcell.mos_cap_mark_layer),
-        dbu,
-        [info["voltage_flavor_mark_box_um"]],
-    )
-
-
-def _mirror_boxes(
-    boxes: list[tuple[float, float, float, float]], total_len_um: float
-) -> list[tuple[float, float, float, float]]:
-    """Flip unit-local boxes about the unit's vertical axis (issue #3552)."""
-    return [(total_len_um - x1, y0, total_len_um - x0, y1) for x0, y0, x1, y1 in boxes]
-
-
-def _unit_role_boxes(
-    unit_boxes: dict[str, list[tuple[float, float, float, float]]],
-    role: str,
-    total_len_um: float,
-    mirrored: bool,
-) -> list[tuple[float, float, float, float]]:
-    """One role's unit-local boxes, flipped for a ``mirrored`` cell."""
-    boxes = unit_boxes[role]
-    return _mirror_boxes(boxes, total_len_um) if mirrored else boxes
-
-
-def _insert_unit_shapes(
-    cell: Any,
-    dbu: float,
-    role_layers: list[tuple[str, int]],
-    unit_boxes: dict[str, list[tuple[float, float, float, float]]],
-    placements: list[dict[str, Any]],
-    share_sd: bool,
-    total_len_um: float,
-) -> None:
-    """Draw each placed unit's per-role boxes (issue #3551).
-
-    Under ``share_sd`` adjacent units draw the shared S/D segment's
-    active/contact/metal at identical coordinates; insert each distinct shape
-    once rather than as stacked duplicates. A placement with ``mirrored`` set
-    (issue #3552) draws its boxes flipped about the unit's vertical axis."""
-    from klayout_tools.gen import _insert_boxes
-
-    drawn: set[tuple[str, int, int, int, int]] = set()
-    for c in placements:
-        for role, li in role_layers:
-            boxes = _unit_role_boxes(
-                unit_boxes, role, total_len_um, c.get("mirrored", False)
-            )
-            if not share_sd:
-                _insert_boxes(cell, li, dbu, boxes, c["x0_um"], c["y0_um"])
-                continue
-            for x0, y0, x1, y1 in boxes:
-                ox, oy = c["x0_um"], c["y0_um"]
-                shifted = (x0 + ox, y0 + oy, x1 + ox, y1 + oy)
-                key = (
-                    role,
-                    int(round(shifted[0] / dbu)),
-                    int(round(shifted[1] / dbu)),
-                    int(round(shifted[2] / dbu)),
-                    int(round(shifted[3] / dbu)),
-                )
-                if key not in drawn:
-                    drawn.add(key)
-                    _insert_boxes(cell, li, dbu, [shifted])
 
 
 def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -119,22 +61,18 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _draw_npc_over_poly_contacts,
         _draw_pcell_tap_pads,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
         _mos_array_layout,
         _pcell_tap_reach_um,
-        _shift_box,
     )
+    from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
 
     class _MosArrayPCell(kdb.PCellDeclarationHelper):
         """Matched MOS transistor array (spike section 4's family 1): a
         ``rows`` x ``cols`` grid of identical unit devices (see
         :func:`_mos_unit_layout`), with ``dummy`` extra unit-device columns
-        flanking each side and a ``topology``-selected port-numbering order
-        (see :func:`_centroid_order`). ``flavor="pfet"`` additionally
-        encloses every unit device (real and dummy) in a shared well on PDK
-        families whose curated deck checks one (see ``well_present``);
-        ``flavor="nfet"`` (the default) draws no well shape at all (#208).
+        flanking each side. The topology numbers ports via :func:`_centroid_order`.
+        PFETs enclose the real and dummy devices in a shared well when the
+        PDK supports it (``well_present``). NFETs draw no well (#208).
 
         ``finger_topology`` (#777) selects what a ``fingers > 1`` unit
         device *is*: ``"parallel"`` (the default) straps the alternating
@@ -176,6 +114,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         voltage_flavor_mark_margin_um: float
         voltage_flavor_extra_mark_layer: kdb.LayerInfo
         voltage_flavor_extra_mark_present: bool
+
+        device_well_enclosure_um: float  # Installed by KLayout as a PCell parameter.
 
         def __init__(self) -> None:
             super().__init__()
@@ -225,12 +165,12 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "voltage_flavor",
                 self.TypeString,
-                "Optional medium-voltage/thick-oxide device-class marker: "
-                "'' (default, no marker drawn) or a name the resolved PDK "
-                "family's role-layer table recognises (e.g. 'medium_voltage' "
-                "on gf180mcu, drawing its Dualgate marker). A name the family "
-                "doesn't recognise draws nothing and is reported via "
-                "drc_hints.notes, never silently dropped",
+                "Optional medium-voltage/thick-oxide device-class marker: '' "
+                "(default, no marker drawn) or a name the resolved PDK family's "
+                "role-layer table recognises (e.g. 'medium_voltage' on gf180mcu, "
+                "drawing its Dualgate marker; 'lvt' on sky130, drawing lvtn.drawing "
+                "for the low-Vt device). A name the family doesn't recognise draws "
+                "nothing and is reported via drc_hints.notes, never silently dropped",
                 default="",
             )
             self.param(
@@ -248,6 +188,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,  # type: ignore[attr-defined]
                 "PDK MOS-capacitor marker drawing layer (only used when mos_cap)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "gate_contact",
@@ -269,85 +210,27 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "(issue #2904)",
                 default=False,
             )
-            self.param(
-                "active_layer",
-                self.TypeLayer,
-                "Active/diffusion drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "poly_layer",
-                self.TypeLayer,
-                "Poly gate drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_mos_stack_params(self, kdb)
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "well_layer",
                 self.TypeLayer,
                 "Well drawing layer (only used when flavor is 'pfet' and well_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "well_present",
-                self.TypeBoolean,
-                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
-                default=False,
-            )
+            declare_well_present(self)
             self.param(
                 "dummy_layer",
                 self.TypeLayer,
                 "PDK dummy-device marker drawing layer, covering each dummy "
                 "unit device's gate footprint (only used when dummy_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "dummy_present",
-                self.TypeBoolean,
-                "Whether dummy_layer is a real layer this PDK's extraction "
-                "deck declares (see ExtractionDeck.dummy)",
-                default=False,
-            )
-            self.param(
-                "well_tap_implant_layer",
-                self.TypeLayer,
-                "Well-tie implant layer drawn over the well-tap pad (only "
-                "used when flavor is 'pfet', well_present, and "
-                "well_tap_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "well_tap_implant_present",
-                self.TypeBoolean,
-                "Whether the resolved PDK needs an implant mask to recognise "
-                "a tap pad on the shared active role as a well tie",
-                default=False,
-            )
-            self.param(
-                "metal_label_layer",
-                self.TypeLayer,
-                "Label layer the well-tap pad's fixed net-name text is drawn "
-                "on (only used when well_tap_implant_present and "
-                "metal_label_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_label_present",
-                self.TypeBoolean,
-                "Whether metal_label_layer is a real label layer for the resolved PDK",
-                default=False,
-            )
+            declare_dummy_marker_params(self)
+            declare_mos_well_tie_params(self, kdb)
+            declare_metal_label_present(self)
             self.param(
                 "voltage_flavor_mark_layer",
                 self.TypeLayer,
@@ -355,29 +238,9 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "layer, sized to enclose every unit device (only used when "
                 "voltage_flavor_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "voltage_flavor_mark_present",
-                self.TypeBoolean,
-                "Whether voltage_flavor_mark_layer is a real layer resolved "
-                "for params.voltage_flavor on this PDK family",
-                default=False,
-            )
-            self.param(
-                "voltage_flavor_extra_mark_layer",
-                self.TypeLayer,
-                "Second voltage_flavor marker layer drawn over the same box "
-                "(sky130 native-Vt: lvtn alongside hvi; only used when "
-                "voltage_flavor_extra_mark_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "voltage_flavor_extra_mark_present",
-                self.TypeBoolean,
-                "Whether voltage_flavor_extra_mark_layer is a real layer "
-                "resolved for params.voltage_flavor on this PDK family",
-                default=False,
-            )
+            declare_voltage_flavor_mark_params(self, kdb)
             self.param(
                 "voltage_flavor_mark_margin_um",
                 self.TypeDouble,
@@ -385,103 +248,11 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "beyond the array's own shared active footprint (see "
                 "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
+                hidden=True,
             )
-            self.param(
-                "ring_well_margin_um",
-                self.TypeDouble,
-                "Harness-resolved nwell enclosure of the n-tap guard ring "
-                "(see _PDK_RING_WELL_MARGIN_UM)",
-                default=WELL_ENCLOSURE_MARGIN_UM,
-            )
-            self.param(
-                "gate_pad_clearance_um",
-                self.TypeDouble,
-                "Harness-resolved clearance the gate-poly landing pad keeps "
-                "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
-                default=0.0,
-            )
-            self.param(
-                "contact_gate_offset_um",
-                self.TypeDouble,
-                "Harness-resolved extra S/D-contact-to-gate offset floor "
-                "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
-                default=0.0,
-            )
-            self.param(
-                "bottom_endcap_um",
-                self.TypeDouble,
-                "Harness-resolved gate-stripe bottom-edge endcap extension "
-                "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
-                default=0.0,
-            )
-            self.param(
-                "top_endcap_um",
-                self.TypeDouble,
-                "Harness-resolved gate-stripe top-edge endcap neck "
-                "(see _PDK_GATE_TOP_ENDCAP_UM)",
-                default=0.0,
-            )
-            self.param(
-                "sd_implant_layer",
-                self.TypeLayer,
-                "Source/drain implant drawing layer (only used when "
-                "sd_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "sd_implant_present",
-                self.TypeBoolean,
-                "Whether sd_implant_layer is a real layer this PDK family "
-                "needs over each unit device's own active body",
-                default=False,
-            )
-            self.param(
-                "sd_implant_margin_um",
-                self.TypeDouble,
-                "Harness-resolved margin the source/drain implant box grows "
-                "beyond each unit device's own active box (only used when "
-                "sd_implant_present)",
-                default=0.0,
-            )
-            # getattr: keeps this new hidden param out of the mypy type
-            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
-            self.param(
-                "sd_implant_min_space_um",
-                getattr(self, "TypeDouble"),  # noqa: B009
-                "Harness-resolved minimum spacing between separate source/"
-                "drain implant shapes; closer ones are merged (only used "
-                "when sd_implant_present)",
-                default=0.0,
-            )
-            # getattr: keeps these new hidden params out of the mypy type
-            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
-            self.param(
-                "npc_layer",
-                getattr(self, "TypeLayer"),  # noqa: B009
-                "npc drawing layer (only used when npc_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "npc_present",
-                getattr(self, "TypeBoolean"),  # noqa: B009
-                "Whether npc_layer is a real layer this PDK family needs "
-                "over each poly-contact licon",
-                default=False,
-            )
-            self.param(
-                "npc_margin_um",
-                getattr(self, "TypeDouble"),  # noqa: B009
-                "Harness-resolved margin npc grows beyond each poly-contact "
-                "licon (only used when npc_present)",
-                default=0.0,
-            )
-            self.param(
-                "npc_min_space_um",
-                getattr(self, "TypeDouble"),  # noqa: B009
-                "Harness-resolved minimum npc spacing; closer shapes merge "
-                "(only used when npc_present)",
-                default=0.0,
-            )
+            declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
+            declare_ring_mv_params(self)
+            declare_mos_array_extra_params(self, kdb)
             self.param(
                 "add_guard_ring",
                 self.TypeBoolean,
@@ -523,31 +294,9 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Guard ring tap drawing layer (only used when add_guard_ring is set)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "ring_implant_layer",
-                self.TypeLayer,
-                "Guard-ring implant drawing layer, tracking the tap ring's "
-                "own band with ring_implant_margin_um of extension beyond "
-                "every edge of it (only used when add_guard_ring and "
-                "ring_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "ring_implant_present",
-                self.TypeBoolean,
-                "Whether the resolved PDK needs an implant mask to recognise "
-                "the guard ring's own shape (see _ring_tap_implant_layer)",
-                default=False,
-            )
-            self.param(
-                "ring_implant_margin_um",
-                self.TypeDouble,
-                "Harness-resolved margin the ring implant extends beyond the "
-                "ring's own band on every edge (only used when "
-                "ring_implant_present)",
-                default=0.0,
-            )
+            declare_ring_implant_params(self, kdb)
             self.param(
                 "interior_channel_um",
                 self.TypeDouble,
@@ -586,6 +335,17 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "dogbone_terminals",
+                getattr(self, "TypeBoolean"),  # noqa: B009 -- see type baseline
+                "Allow w_um below the generator's enclosed-contact floor "
+                "(0.42um) down to the PDK's own active min width: each "
+                "source/drain terminal gets a locally widened active/contact "
+                "head while the channel keeps w_um (issue #4851). Not "
+                "supported with finger_topology='parallel' and fingers > 1. "
+                "False (default) = byte-for-byte unchanged",
+                default=False,
+            )
+            self.param(
                 "mirror",
                 getattr(self, "TypeBoolean"),  # noqa: B009 -- see type baseline
                 "Mirror every odd column about its vertical axis so facing "
@@ -595,26 +355,6 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "topology='array', fingers=1, mos_cap off. False (default) = "
                 "byte-for-byte unchanged",
                 default=False,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
-            )
-            self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
             )
 
         def display_text_impl(self) -> str:
@@ -665,11 +405,12 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.pitch_x_um,
                 self.pitch_y_um,
                 top_endcap_um=self.top_endcap_um,
+                well_enclosure_um=self.device_well_enclosure_um,
                 tap_reach_um=_pcell_tap_reach_um(self),
-                # Not a typed attribute (PCell params are set dynamically);
-                # `getattr` keeps the type baseline from growing per param.
+                # These PCell parameters are set dynamically.
                 share_sd=getattr(self, "share_sd"),  # noqa: B009
                 mirror=getattr(self, "mirror"),  # noqa: B009
+                dogbone_terminals=getattr(self, "dogbone_terminals"),  # noqa: B009
             )
             unit_boxes = info["unit"]["boxes_um"]
             _insert_unit_shapes(
@@ -755,36 +496,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # same way `diff_pair`/`esd_device`/`bjt_array` already compose
             # `_ring_layout`, sized off `well_box_um` (the array's own
             # shared-footprint box, computed above regardless of `flavor`).
+            ring_well_mark_box = None
             if info["ring"] is not None and self.add_guard_ring:
-                li_tap = self.layout.layer(self.tap_layer)
-                ox, oy = info["ring_offset_um"]
-                ring = info["ring"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
                 # The ring's own well tie (independent of the device-array
                 # well drawn above, which already merges with it on the same
                 # `well_layer` -- mirrors `_diff_pair_layout`'s identical
@@ -794,35 +507,24 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # in a well the way #421's diff_pair regression test guards
                 # against.
                 if self.well_present and self.flavor == "pfet":
-                    li_well = self.layout.layer(self.well_layer)
-                    margin = self.ring_well_margin_um
-                    ring_well_box = (
-                        -margin,
-                        -margin,
-                        ring["outer_w_um"] + margin,
-                        ring["outer_h_um"] + margin,
+                    ox, oy = info["ring_offset_um"]
+                    ring_well_mark_box = ring_well_box_um(
+                        self, info["ring"], ox, oy, dbu
                     )
                     _insert_boxes(
-                        self.cell, li_well, dbu, [_shift_box(ring_well_box, ox, oy)]
-                    )
-                if self.ring_implant_present:
-                    # Tracks the tap ring, extended `ring_implant_margin_um`
-                    # past every edge of it (issue #2369's NP.5b/PP.5b
-                    # extension-beyond-COMP fix to #1580's originally
-                    # coincident implant) -- still a ring, never a blanket
-                    # over the enclosed array (mirrors `well_island`'s own
-                    # `well_tap_implant` ring precedent).
-                    _insert_implant_ring(
                         self.cell,
-                        self.layout.layer(self.ring_implant_layer),
+                        self.layout.layer(self.well_layer),
                         dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                        self.mfg_grid_um,
+                        [ring_well_mark_box],
                     )
+                _draw_composed_guard_ring(
+                    self,
+                    self.layout.layer(self.tap_layer),
+                    li_metal,
+                    li_contact,
+                    dbu,
+                    info,
+                )
 
             # Tap pads (issue #3648): on a family with a tap-distance rule the
             # ring-less array still gets well/substrate taps of its tie's
@@ -830,34 +532,20 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             _draw_pcell_tap_pads(self, info["tap_pads"], li_metal, li_contact)
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
-            # sized to enclose every unit device (real and dummy) --
-            # independent of `flavor`, so a caller can request both a well
-            # (pfet) and a voltage-flavor marker (or either alone). Its own
-            # box (`voltage_flavor_mark_box_um`) is *not* the same box the
-            # well shape above encloses (issue #1577): gf180mcu's real
-            # signoff deck needs the marker to reach further than the well's
-            # own margin does -- see `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s
-            # own docstring.
-            if self.voltage_flavor_mark_present:
-                li_voltage_flavor_mark = self.layout.layer(
-                    self.voltage_flavor_mark_layer
-                )
-                _insert_boxes(
-                    self.cell,
-                    li_voltage_flavor_mark,
-                    dbu,
-                    [info["voltage_flavor_mark_box_um"]],
-                )
-            if (
-                self.voltage_flavor_mark_present
-                and self.voltage_flavor_extra_mark_present
-            ):
-                _insert_boxes(
-                    self.cell,
-                    self.layout.layer(self.voltage_flavor_extra_mark_layer),
-                    dbu,
-                    [info["voltage_flavor_mark_box_um"]],
-                )
+            # encloses every unit device (real and dummy), independent of
+            # `flavor`; its box is not the well's (#1577: gf180mcu needs a
+            # wider margin). Issue #6025: also grown over the guard ring's
+            # own well tie when one is drawn, so an HV-nwell enclosure rule
+            # (sky130 nwell.9) holds. Issue #6503: and past the guard ring's
+            # final Comp edge by the family's DV.6 margin (gf180mcu only).
+            _draw_voltage_flavor_marks(
+                self,
+                dbu,
+                union_box(
+                    union_box(info["voltage_flavor_mark_box_um"], ring_well_mark_box),
+                    mv_cover_box(self, info, dbu),
+                ),
+            )
 
             _insert_mos_cap_mark(self, info, dbu)
 

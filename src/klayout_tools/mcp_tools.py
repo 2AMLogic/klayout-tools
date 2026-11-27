@@ -1,23 +1,15 @@
 """Tool derivation and execution for the generic ``klt mcp serve`` bridge.
 
-Issue #2830 (Phase 5, "agent surface"). This module is deliberately free of
-any MCP-SDK import: it walks the argparse registry built by
-:func:`klayout_tools.cli.parser.create_parser`, derives one tool definition
-per leaf verb (``klt_<verb>``, or ``klt_<verb>_<subcommand>`` for the nested
-verbs such as ``pdk``/``deck``/``wave``/``kb``), and executes a call by
-running ``klt <verb> ... --format json`` in a subprocess. The SDK-facing
-glue lives in :mod:`klayout_tools.mcp_server`, so this half is unit-testable
-without the optional ``[mcp]`` extra.
+Each leaf of :func:`klayout_tools.cli.parser.create_parser` becomes a tool
+with CLI documentation links. The MCP SDK integration lives in :mod:`.mcp_server`
+and schema resources in :mod:`.mcp_resources`. This module needs no SDK.
 
 Design rules (see ``docs/guides/mcp-server.md``):
 
-* **The CLI is the contract.** There is no in-process import path that could
-  fork from ``klt``: a call is exactly the subprocess a human would run, so
-  the envelope and exit codes of ``docs/json-contract.md`` hold unchanged.
-* **Exit-code mapping follows the contract.** Exit ``1``/``2`` -> MCP
-  ``isError`` (no report was written); exit ``0`` and every code ``>= 3`` ->
-  a report is on stdout and is returned as the structured result, with the
-  raw code carried in ``_meta.klt_exit_code``.
+* Calls run ``klt <verb> ... --format json`` in a subprocess, preserving the
+  envelope and exit codes of ``docs/json-contract.md``. Codes 1 and 2 set
+  ``isError``. Code 0 and codes >= 3 return the report on stdout as the
+  structured result, with the raw code in ``_meta.klt_exit_code``.
 * **Safety defaults.** Fleet-dispatching verbs are hidden unless opted in
   (:data:`HIDDEN_BY_DEFAULT`); ``--backend remote|batch`` is refused unless
   fleet dispatch is allowed; every subprocess runs with the workspace root
@@ -35,9 +27,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-TOOL_PREFIX = "klt_"
+from ._jsonnum import is_int
+from .mcp_doc_links import cli_docs_url, link_cli_docs
 
-DOCS_BASE_URL = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli"
+TOOL_PREFIX = "klt_"
 
 #: Verbs that dispatch to a paid/remote fleet by design: not listed unless the
 #: operator opts in (``--enable-verb`` / ``--allow-fleet``).
@@ -90,7 +83,7 @@ def _help_text(parser: argparse.ArgumentParser, action: argparse.Action) -> str:
         return ""
     try:
         return parser._get_formatter()._expand_help(action)
-    except Exception:  # noqa: BLE001 -- never let a malformed help string drop a tool
+    except Exception:  # -- never let a malformed help string drop a tool
         return str(action.help)
 
 
@@ -106,7 +99,7 @@ def _scalar_schema(action: argparse.Action) -> dict[str, Any]:
         choices = list(action.choices)
         if all(isinstance(c, str) for c in choices):
             schema = {"type": "string", "enum": choices}
-        elif all(isinstance(c, int) and not isinstance(c, bool) for c in choices):
+        elif all(is_int(c) for c in choices):
             schema = {"type": "integer", "enum": choices}
     return schema
 
@@ -129,10 +122,7 @@ def _action_schema(action: argparse.Action) -> dict[str, Any]:
     if isinstance(action, argparse._CountAction):
         return {"type": "integer", "minimum": 0}
     scalar = _scalar_schema(action)
-    multi = isinstance(action, argparse._AppendAction) or action.nargs in (
-        "*",
-        "+",
-    )
+    multi = isinstance(action, argparse._AppendAction) or action.nargs in ("*", "+")
     if not multi and isinstance(action.nargs, int) and action.nargs > 1:
         multi = True
     if multi:
@@ -170,7 +160,7 @@ def _input_schema(
         schema = _action_schema(action)
         help_text = _help_text(parser, action)
         if help_text:
-            schema["description"] = help_text
+            schema["description"] = link_cli_docs(help_text)
         if (
             action.default is not None
             and action.default is not argparse.SUPPRESS
@@ -216,9 +206,8 @@ def _describe(
     verb_path: tuple[str, ...], parser: argparse.ArgumentParser, help_line: str
 ) -> str:
     body = (parser.description or help_line or "").strip()
-    body = re.sub(r"\s+", " ", body)
-    doc = f"{DOCS_BASE_URL}/{verb_path[0]}.md"
-    return f"klt {' '.join(verb_path)}: {body} (CLI docs: {doc})"
+    body = link_cli_docs(re.sub(r"\s+", " ", body))
+    return f"klt {' '.join(verb_path)}: {body} (CLI docs: {cli_docs_url(verb_path[0])})"
 
 
 def _walk(

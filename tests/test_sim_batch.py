@@ -26,10 +26,18 @@ from typing import Any
 import jsonschema
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import (
+    INPUTS_UPLOAD_ARGV,
+    fake_completed,
+    inputs_upload_of,
+    read_job_contract,
+    uploaded_input_bytes,
+    uploaded_request_of,
+)
 from klayout_tools import remote_launcher as rl
-from klayout_tools import sim
+from klayout_tools import sim, sim_batch_contract_worker
 from klayout_tools import sim_batch as sb
+from klayout_tools.sim_batch_contract_spec import _RELEASED_FEATURE_DETECTORS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "docs" / "schemas" / "batch-job-spec.schema.json"
@@ -46,11 +54,8 @@ class _FakeRunner:
     """Records every argv; returns canned responses keyed by a substring of
     the joined argv, in call order, falling back to a default success.
 
-    Mirrors `tests/test_remote_transport.py`'s `_FakeRunner`, with one
-    addition the S3 transport needs: an ``outputs`` payload the fake
-    materializes into the destination directory when it sees the
-    ``s3 cp ... outputs/ <dir> --recursive`` collect call, standing in for
-    what a real download would have written.
+    S3 reads serve an uncapped job contract by default and materialize
+    ``outputs`` in the destination directory on a recursive collect.
     """
 
     def __init__(self) -> None:
@@ -84,6 +89,8 @@ class _FakeRunner:
                 if isinstance(item, Exception):
                     raise item
                 return item
+        if joined.endswith("/job.json -"):
+            return read_job_contract(argv, {})
         return self.default
 
     def _outputs_for(self, s3_uri: str) -> dict[str, str]:
@@ -246,7 +253,6 @@ def test_build_batch_job_spec_shape(tmp_path):
         str(netlist),
         corner_count=5,
         timeout_s=120.0,
-        keep_artifacts=False,
     )
     document = spec.to_job_json()
 
@@ -283,7 +289,6 @@ def test_build_batch_job_spec_tool_echoes_ngspice_binary_override(tmp_path):
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert spec.to_job_json()["tool"] == "/opt/ngspice-custom"
 
@@ -295,7 +300,6 @@ def test_build_batch_job_spec_tool_falls_back_without_an_override(tmp_path):
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert spec.to_job_json()["tool"] == sb.BATCH_JOB_TOOL == "ngspice"
 
@@ -306,7 +310,6 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     # The redirect is load-bearing: the harness merges all stdout/stderr into
     # harness.log, so only $EDA_OUTPUT_DIR is a structured channel back.
@@ -322,7 +325,6 @@ def test_job_cmd_tees_stderr_into_outputs(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     # klt's --format json error envelope goes to stderr, so it must reach a
     # collected file -- while still being forwarded to harness.log.
@@ -345,7 +347,6 @@ def test_job_cmd_stderr_capture_runs_under_bash_c(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.0",
     )
     klt = (
@@ -366,7 +367,6 @@ def _exit_trap_spec(tmp_path, **request_extra):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.0",
     )
 
@@ -382,19 +382,15 @@ def test_job_cmd_is_valid_bash_syntax(tmp_path):
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash not available")
-    for keep in (False, True):
-        spec = sb._build_batch_job_spec(
-            {"models": {}},
-            str(_write_body(tmp_path)),
-            corner_count=1,
-            timeout_s=30.0,
-            keep_artifacts=keep,
-            client_version="0.7.0",
-        )
-        proc = subprocess.run(
-            [bash, "-n", "-c", spec.cmd], capture_output=True, text=True
-        )
-        assert proc.returncode == 0, proc.stderr
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        client_version="0.7.0",
+    )
+    proc = subprocess.run([bash, "-n", "-c", spec.cmd], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 def _bash_n(script):
@@ -426,22 +422,20 @@ def test_runner_preflight_with_required_features_is_valid_bash(features, enforce
 
 def test_job_cmd_with_gated_request_features_is_valid_bash(tmp_path):
     """Issue #3993: ngspice_init + measurement expr is the reporter's shape."""
-    for keep in (False, True):
-        spec = sb._build_batch_job_spec(
-            {
-                "models": {},
-                "options": {"ngspice_init": "x"},
-                "measurements": [{"name": "a", "expr": "1"}],
-                "analysis": {"kind": "op"},
-            },
-            str(_write_body(tmp_path)),
-            corner_count=1,
-            timeout_s=30.0,
-            keep_artifacts=keep,
-            client_version="0.7.1.dev2264+gcba5e957d9ed",
-        )
-        proc = _bash_n(spec.cmd)
-        assert proc.returncode == 0, proc.stderr
+    spec = sb._build_batch_job_spec(
+        {
+            "models": {},
+            "options": {"ngspice_init": "x"},
+            "measurements": [{"name": "a", "expr": "1"}],
+            "analysis": {"kind": "op"},
+        },
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        client_version="0.7.1.dev2264+gcba5e957d9ed",
+    )
+    proc = _bash_n(spec.cmd)
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
@@ -457,7 +451,6 @@ def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.1.dev2264+gcba5e957d9ed",
     )
     klt = '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
@@ -540,7 +533,6 @@ def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path)
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert '${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}' in spec.cmd
     # ...and it lands before the redirect, as a klt argument.
@@ -557,7 +549,6 @@ def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     flag = spec.cmd.split("--format json", 1)[1].split("--outdir", 1)[0].strip()
     probe = f'printf "%s|" {flag}'
@@ -581,35 +572,24 @@ def test_job_cmd_respects_an_explicit_request_max_workers(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert "--max-workers" not in spec.cmd
 
 
-def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
+def test_job_cmd_always_collects_artifacts_into_output_dir(tmp_path):
+    """Issue #4369: artifacts and engine logs must always be collected —
+    `--outdir` points inside $EDA_OUTPUT_DIR so a deck abort is diagnosable,
+    and it precedes the report redirect."""
     spec = sb._build_batch_job_spec(
         {"models": {}},
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
     )
     assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
     assert spec.cmd.index("--outdir") < spec.cmd.index(
         '> "$EDA_OUTPUT_DIR/report.json"'
     )
-
-
-def test_job_cmd_collects_engine_logs_without_keep_artifacts(tmp_path):
-    """Issue #4369: the log must be collected so a deck abort is diagnosable."""
-    spec = sb._build_batch_job_spec(
-        {"models": {}},
-        str(_write_body(tmp_path)),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-    assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
@@ -618,7 +598,6 @@ def test_job_json_omits_unset_optional_fields(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     document = spec.to_job_json()
     assert "pdk_variant" not in document
@@ -632,7 +611,6 @@ def test_job_json_round_trips_and_validates_against_schema(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=3,
         timeout_s=60.0,
-        keep_artifacts=True,
     )
     document = spec.to_job_json()
     assert json.loads(json.dumps(document)) == document
@@ -647,7 +625,6 @@ def test_job_json_inputs_are_not_part_of_the_contract(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
     assert "inputs" not in spec.to_job_json()
@@ -690,7 +667,6 @@ def test_build_batch_job_spec_stages_the_netlists_include_closure(tmp_path):
         str(_write_body_including_dut(tmp_path)),
         corner_count=5,
         timeout_s=120.0,
-        keep_artifacts=False,
     )
 
     by_name = {item.name: item for item in spec.inputs}
@@ -718,7 +694,6 @@ def test_build_batch_job_spec_refuses_an_unresolvable_include(tmp_path):
             str(netlist),
             corner_count=5,
             timeout_s=120.0,
-            keep_artifacts=False,
         )
     message = str(excinfo.value)
     assert "backend 'batch'" in message
@@ -740,7 +715,6 @@ def test_build_batch_job_spec_leaves_pdk_rooted_includes_to_the_job_instance(tmp
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
 
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
@@ -748,72 +722,9 @@ def test_build_batch_job_spec_leaves_pdk_rooted_includes_to_the_job_instance(tmp
     assert spec.inputs[0].local_path == str(netlist)
 
 
-def test_submit_uploads_every_staged_include_under_inputs(tmp_path):
-    runner = _FakeRunner()
-    config = _config(tmp_path)
-    spec = sb._build_batch_job_spec(
-        {"models": {"pdk": "sky130A"}},
-        str(_write_body_including_dut(tmp_path)),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-
-    sb.submit_job(config, "job-include", spec, runner=runner)
-
-    destinations = [call[-2] for call in runner.calls if "cp" in call]
-    assert any(d.endswith("/job-include/inputs/netlist.cir") for d in destinations)
-    assert any(
-        d.endswith("/job-include/inputs/07-reference.spice") for d in destinations
-    )
-    assert any(d.endswith("/job-include/job.json") for d in destinations)
-
-
 # --------------------------------------------------------------------------- #
 # Submit / launch / poll / collect (recorded-argv assertions)
 # --------------------------------------------------------------------------- #
-
-
-def test_submit_uploads_inputs_then_job_json_to_the_documented_keys(tmp_path):
-    runner = _FakeRunner()
-    config = _config(tmp_path)
-    netlist = _write_body(tmp_path)
-    spec = sb._build_batch_job_spec(
-        {"models": {"pdk": "sky130A"}},
-        str(netlist),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-
-    sb.submit_job(config, "job-1", spec, runner=runner)
-
-    destinations = [argv[-2] for argv in runner.calls]
-    assert destinations == [
-        f"s3://{FAKE_BUCKET}/jobs/job-1/inputs/netlist.cir",
-        f"s3://{FAKE_BUCKET}/jobs/job-1/inputs/request.json",
-        # job.json LAST: the object `launch` head-objects and the harness
-        # fetches first, so the submission is atomic from the fleet's view.
-        f"s3://{FAKE_BUCKET}/jobs/job-1/job.json",
-    ]
-    for argv in runner.calls:
-        assert argv[0] == "aws"
-        assert "--profile" in argv and sb.DEFAULT_BATCH_PROFILE in argv
-        assert "--region" in argv and "us-east-1" in argv
-
-
-def test_submit_failure_raises_batch_error(tmp_path):
-    runner = _FakeRunner()
-    runner.queue("inputs/netlist.cir", fake_completed(returncode=1, stderr="denied"))
-    spec = sb._build_batch_job_spec(
-        {"models": {}},
-        str(_write_body(tmp_path)),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-    with pytest.raises(sb.BatchError, match="denied"):
-        sb.submit_job(_config(tmp_path), "job-1", spec, runner=runner)
 
 
 def test_launch_shells_out_once_with_apply_and_profile(tmp_path):
@@ -885,7 +796,7 @@ def _queue_refusals(runner: _FakeRunner, count: int) -> None:
 
 
 def test_classify_launch_failure_only_matches_the_capacity_refusal():
-    assert sb._classify_launch_failure(_CAPACITY_REFUSAL) == "batch_no_capacity"
+    assert sb._classify_launch_failure(_CAPACITY_REFUSAL, 1) == "batch_no_capacity"
     assert sb.BATCH_NO_CAPACITY_CODE == "batch_no_capacity"
     for other in (
         "error: only 2 instance type(s) configured, floor is 3",
@@ -893,7 +804,7 @@ def test_classify_launch_failure_only_matches_the_capacity_refusal():
         "error: no job spec at s3://bucket/jobs/x/job.json",
         "",
     ):
-        assert sb._classify_launch_failure(other) is None
+        assert sb._classify_launch_failure(other, 1) is None
 
 
 #: Verbatim shape of 2am's concurrency-cap refusal (issue #2917).
@@ -912,20 +823,20 @@ _VCPU_REFUSAL = (
 
 
 def test_classify_launch_failure_matches_the_vcpu_budget_refusal():
-    assert sb._classify_launch_failure(_VCPU_REFUSAL) == "batch_no_capacity"
+    assert sb._classify_launch_failure(_VCPU_REFUSAL, 1) == "batch_no_capacity"
     both = f"{_CAP_REFUSAL}; {_VCPU_REFUSAL}"
-    assert sb._classify_launch_failure(both) == "batch_concurrency_cap"
-    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}") == (
+    assert sb._classify_launch_failure(both, 1) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}", 1) == (
         "batch_no_capacity"
     )
 
 
 def test_classify_launch_failure_matches_the_concurrency_cap_refusal():
-    assert sb._classify_launch_failure(_CAP_REFUSAL) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(_CAP_REFUSAL, 1) == "batch_concurrency_cap"
     assert sb.BATCH_CONCURRENCY_CAP_CODE == "batch_concurrency_cap"
     # Both markers present: the Spot refusal wins (checked first).
     both = f"{_CAPACITY_REFUSAL}; {_CAP_REFUSAL}"
-    assert sb._classify_launch_failure(both) == "batch_no_capacity"
+    assert sb._classify_launch_failure(both, 1) == "batch_no_capacity"
 
 
 def test_concurrency_cap_without_wait_is_one_attempt_with_a_code(tmp_path):
@@ -1215,7 +1126,7 @@ def test_poll_fails_fast_on_a_job_stuck_interrupted(tmp_path):
     assert excinfo.value.code == sb.BATCH_JOB_INTERRUPTED_CODE
     assert excinfo.value.last_state == "interrupted"
     assert excinfo.value.interrupted_s >= 100.0
-    assert "job-1" in str(excinfo.value)
+    assert "job-1" in str(excinfo.value) and "--resume" in str(excinfo.value)
     # Failed fast: nowhere near the 5400s poll budget.
     assert len(runner.argvs_matching("status.json")) < 20
 
@@ -1929,12 +1840,11 @@ def test_run_sim_batch_returns_per_corner_waveform_artifacts(tmp_path, monkeypat
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -1969,13 +1879,11 @@ def test_run_sim_batch_uploads_a_local_parallel_request_document(tmp_path, monke
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        joined = " ".join(argv)
-        if "inputs/request.json" in joined:
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -2000,12 +1908,11 @@ def test_run_sim_batch_forwards_cli_budget_s_to_the_uploaded_request(
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -2032,12 +1939,11 @@ def test_run_sim_batch_accepts_an_analysis_steps_request(tmp_path, monkeypatch):
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -2668,7 +2574,7 @@ def test_run_checked_classifies_on_the_unredacted_stderr():
             ["aws"],
             1.0,
             "step",
-            classify=lambda detail: "seen" if FAKE_BUCKET in detail else None,
+            classify=lambda detail, _rc: "seen" if FAKE_BUCKET in detail else None,
             redact=FAKE_BUCKET,
         )
 
@@ -3068,7 +2974,7 @@ def test_interrupted_grace_reports_distinct_unrun_corners(tmp_path, monkeypatch)
     for corner in corners:
         assert corner["status"] == "error"
         assert corner["diagnostics"][0]["code"] == "batch_job_interrupted"
-        assert "job-1" in corner["diagnostics"][0]["message"]
+        assert "job-1" in (m := corner["diagnostics"][0]["message"]) and "--resume" in m
     assert environment["job_id"] == "job-1"
     assert environment["state"] == "interrupted"
     assert environment["interrupted_s"] >= 0.0
@@ -3240,11 +3146,10 @@ def test_hosts_greater_than_one_submits_one_job_per_shard(tmp_path, monkeypatch)
         `_explicit_points` slice that job's uploaded request carries -- so
         the merge-order assertion below is deterministic no matter which
         shard finishes first."""
-        joined = " ".join(argv)
-        if "inputs/request.json" in joined:
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
-            runner.outputs_by_job[job_id_of(destination)] = {
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
+            runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}"
@@ -3300,12 +3205,11 @@ def test_every_shard_request_preserves_options_save_mode(tmp_path, monkeypatch):
     uploaded: list[dict] = []
 
     def _capture_request(argv, timeout_s):
-        joined = " ".join(argv)
-        if "inputs/request.json" in joined:
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
             uploaded.append(document)
-            runner.outputs_by_job[job_id_of(destination)] = {
+            runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}"
@@ -3370,16 +3274,11 @@ def test_a_lost_shard_never_aborts_its_siblings(tmp_path, monkeypatch):
     runner.outputs = {"report.json": _sim_report(corner_ids=("tt_1.800_0",))}
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
-    calls = {"n": 0}
-    real_launch = sb.launch_job
-
-    def _flaky_launch(config, job_id, *, runner=None):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise sb.BatchError("create-fleet refused every pool")
-        return real_launch(config, job_id, runner=runner)
-
-    monkeypatch.setattr(sb, "launch_job", _flaky_launch)
+    runner.queue("--apply", fake_completed())
+    runner.queue(
+        "--apply",
+        fake_completed(returncode=1, stderr="create-fleet refused every pool"),
+    )
 
     corners, _, environment = sb._run_batch_fleet(
         corner_points=_corner_points(2),
@@ -3568,16 +3467,19 @@ def _staged_batch_request(tmp_path: Path, **overrides) -> dict:
 
 
 def _capture_uploads(monkeypatch, runner: _FakeRunner) -> dict[str, bytes]:
-    """Read every `inputs/<name>` upload's bytes while the temp file exists."""
+    """Every uploaded input's bytes (plus `job.json`'s), keyed by basename,
+    read while the staged copies still exist. Since #5539 the inputs arrive
+    as one recursive upload of a staged tree, so one call yields them all.
+    """
     uploaded: dict[str, bytes] = {}
 
     def _capture(argv, timeout_s):
-        if "cp" in argv:
-            destination = argv[argv.index("cp") + 2]
-            if "/inputs/" in destination or destination.endswith("/job.json"):
-                key = destination.rsplit("/inputs/", 1)[-1].rsplit("/", 1)[-1]
-                with open(argv[argv.index("cp") + 1], "rb") as handle:
-                    uploaded[key] = handle.read()
+        staged = uploaded_input_bytes(argv)
+        if staged is not None:
+            for name, payload in staged.items():
+                uploaded[os.path.basename(name)] = payload
+        elif "cp" in argv and argv[argv.index("cp") + 2].endswith("/job.json"):
+            uploaded["job.json"] = Path(argv[argv.index("cp") + 1]).read_bytes()
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -3592,7 +3494,6 @@ def test_build_batch_job_spec_without_opt_in_uploads_no_model_inputs(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         request_dir=str(tmp_path),
     )
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
@@ -3619,7 +3520,7 @@ def test_run_sim_batch_uploads_the_staged_model_closure(tmp_path, monkeypatch):
         "psp103.osdi",
         "request.json",
     }
-    assert list(uploaded)[-1] == "request.json"  # still after every input
+    # Order among inputs is unobservable since #5539: one recursive transfer.
     assert uploaded["psp103.osdi"] == (tmp_path / "psp103.osdi").read_bytes()
     worker = json.loads(uploaded["request.json"])
     assert worker["models"] == {"lib": "top.lib"}
@@ -3809,9 +3710,7 @@ def test_sequential_single_unit_probes_adapt_to_the_collected_result(
         for i, a in enumerate(runner.calls)
         if "outputs/" in " ".join(a) and "--recursive" in a
     ]
-    uploads = [
-        i for i, a in enumerate(runner.calls) if "inputs/request.json" in " ".join(a)
-    ]
+    uploads = [i for i, a in enumerate(runner.calls) if inputs_upload_of(a) is not None]
     assert len(collects) == len(uploads) == 2
     assert collects[0] < uploads[1]
 
@@ -3951,12 +3850,12 @@ def test_mixed_version_shards_keep_each_runner_identity(tmp_path, monkeypatch):
     versions = {"0": _CLIENT_VERSION, "1": "0.4.2"}
 
     def _register(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
             points = document["_explicit_points"]
             first = int(points[0]["temperature_c"])
-            runner.outputs_by_job[job_id_of(destination)] = {
+            runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(p['temperature_c'])}" for p in points
@@ -4018,7 +3917,6 @@ def test_unusable_client_version_is_a_sim_error_not_a_traceback(tmp_path, versio
             str(_write_body(tmp_path)),
             corner_count=1,
             timeout_s=30.0,
-            keep_artifacts=False,
             client_version=version,
         )
 
@@ -4029,7 +3927,6 @@ def test_forwarded_request_keeps_ngspice_init_lines_unchanged(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version=_CLIENT_VERSION,
     )
     uploaded = next(i for i in spec.inputs if i.name == sb.BATCH_REQUEST_FILENAME)
@@ -4094,7 +3991,6 @@ def _init_spec(tmp_path, **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=_CLIENT_VERSION,
         **kwargs,
     )
@@ -4233,7 +4129,6 @@ def _gate_spec(tmp_path, client_version, **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=client_version,
         **kwargs,
     )
@@ -4890,20 +4785,6 @@ def test_pdk_stamp_mismatch_warns_only_when_comparable(tmp_path, monkeypatch):
         assert result == {"status": "not_comparable", "reason": reason}
 
 
-def test_pdk_stamp_not_comparable_without_a_local_stamp(tmp_path, monkeypatch):
-    monkeypatch.delenv("PDK_ROOT", raising=False)
-    env = _worker_env(
-        tmp_path,
-        monkeypatch,
-        {"worker_environment.json": _capture()},
-        request={"netlist": "body.spice", "models": {"pdk": "sky130A"}},
-    )
-    assert env["worker_environment"]["pdk_stamp_comparison"] == {
-        "status": "not_comparable",
-        "reason": "client_stamp_unavailable",
-    }
-
-
 def test_pdk_stamp_absent_capture_reports_worker_reason(tmp_path, monkeypatch):
     env = _worker_env(tmp_path, monkeypatch, {})
     assert env["worker_environment"]["capture"] == "absent"
@@ -4953,9 +4834,10 @@ def test_mixed_worker_identities_stay_per_shard(tmp_path, monkeypatch):
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     def _register(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            points = json.loads(Path(source).read_text())["_explicit_points"]
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
+            points = document["_explicit_points"]
             first = int(points[0]["temperature_c"])
             files = {
                 "report.json": _sim_report(
@@ -4966,7 +4848,7 @@ def test_mixed_worker_identities_stay_per_shard(tmp_path, monkeypatch):
             }
             if first == 0:  # the other shard is a legacy worker
                 files["worker_environment.json"] = _capture(cpu_model="CPU-A")
-            runner.outputs_by_job[job_id_of(destination)] = files
+            runner.outputs_by_job[job_id] = files
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _register)
@@ -5122,7 +5004,7 @@ def test_capture_program_version_probe_timeout_is_recorded(tmp_path, monkeypatch
     program = sb._WORKER_CAPTURE_PROGRAM.replace(
         f"{sb.WORKER_CAPTURE_PROBE_TIMEOUT_S}", "1", 1
     )
-    monkeypatch.setattr(sb, "_WORKER_CAPTURE_PROGRAM", program)
+    monkeypatch.setattr(sim_batch_contract_worker, "_WORKER_CAPTURE_PROGRAM", program)
     doc = _run_capture_program(tmp_path, ngspice_script="#!/bin/sh\nsleep 20\n")
     assert doc["simulator"]["version_probe"] == "timeout"
 
@@ -5418,7 +5300,6 @@ def test_cli_batch_set_accepts_resume_and_forwards_it(tmp_path, monkeypatch, cap
         ["--op-lint"],
         ["--submit-only"],
         ["--job-status", "job-1"],
-        ["--wait-for-capacity", "5"],
     ],
 )
 def test_cli_batch_set_still_refuses_other_single_request_flags(tmp_path, flags):
@@ -5471,12 +5352,11 @@ def test_run_sim_batch_carries_a_crossings_series_inline(tmp_path, monkeypatch):
     runner.default = fake_completed(_status("done"))
     runner.outputs = {"report.json": _crossings_report()}
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     _install_fake_batch_transport(monkeypatch, runner=runner)
@@ -5505,12 +5385,11 @@ def test_sharded_batch_run_merges_each_shards_crossings_series(tmp_path, monkeyp
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     def _register_shard_report(argv, timeout_s):
-        joined = " ".join(argv)
-        if "inputs/request.json" in joined:
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
             assert document["measurements"] == [_CROSSINGS_DECL]
-            runner.outputs_by_job[job_id_of(destination)] = {
+            runner.outputs_by_job[job_id] = {
                 "report.json": _crossings_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}"
@@ -5577,6 +5456,13 @@ def _publish_manifest(tmp_path: Path, monkeypatch, images: list[dict]) -> Path:
     path = tmp_path / "ami-manifest.json"
     path.write_text(json.dumps({"schema_version": 1, "images": images}))
     monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(path))
+    # These gate tests inject normalized candidates, including historical
+    # multi-image sets. The S3 reader itself is covered in test_sim_batch_image.
+    monkeypatch.setattr(
+        sb.sim_batch_image,
+        "read_batch_runner_images",
+        lambda pdk, region, *_: rl.published_runner_identities(pdk, region, path),
+    )
     return path
 
 
@@ -5744,30 +5630,6 @@ def test_prelaunch_unpinned_region_refuses_only_when_every_image_mismatches(
     assessment = sb._assess_published_runner(request, config)
     assert assessment["status"] == "mismatch"
     assert "0.5.0" in assessment["message"] and "0.6.2" in assessment["message"]
-
-
-def test_prelaunch_uses_the_latest_build_per_region(tmp_path, monkeypatch):
-    """An older entry for the same (pdk, region) is audit trail, exactly as
-    for `resolve_ami`: only the newest build is compared."""
-    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
-    old = _image(klt_version="0.7.0")
-    new = {**_image(klt_version="0.5.0"), "built_at": "2026-10-12T00:00:00Z"}
-    _publish_manifest(tmp_path, monkeypatch, [old, new])
-    assessment = sb._assess_published_runner(
-        {"models": {"pdk": "sky130A"}}, _config(tmp_path)
-    )
-    assert assessment["status"] == "mismatch"
-
-
-def test_prelaunch_missing_manifest_is_unknown_not_an_error(tmp_path, monkeypatch):
-    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
-    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "absent.json"))
-    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", tmp_path / "absent-user.json")
-    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", tmp_path / "absent-default.json")
-    assessment = sb._assess_published_runner(
-        {"models": {"pdk": "sky130A"}}, _config(tmp_path)
-    )
-    assert assessment["status"] == "unknown"
 
 
 def test_prelaunch_sharded_request_refuses_once_with_zero_calls(tmp_path, monkeypatch):
@@ -6060,7 +5922,6 @@ def _feature_spec(tmp_path, request, client="0.7.1.dev384+gf386aca", **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=client,
         **kwargs,
     )
@@ -6277,7 +6138,6 @@ def test_submit_progress_line_does_not_leak_the_bucket(tmp_path, capsys):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     sb.submit_job(_config(tmp_path), "job-1", spec, runner=_FakeRunner())
     err = capsys.readouterr().err
@@ -6315,9 +6175,8 @@ _PREDATED_REQUEST = {
 
 def test_released_registry_entries_all_have_detectors():
     for key, version in sb.REQUEST_FEATURE_MIN_RUNNER_VERSION.items():
-        assert (key.split(" (")[0] in sb._RUNNER_REQUEST_FEATURES) == (
-            version is not None
-        ), key
+        name = key.split(" (")[0]
+        assert (name in _RELEASED_FEATURE_DETECTORS) == (version is not None), key
 
 
 def test_request_features_detect_the_released_fields():
@@ -6640,11 +6499,11 @@ def _split_runner(monkeypatch):
     shard_sizes: list[int] = []
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            points = json.loads(Path(source).read_text())["_explicit_points"]
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            points = captured[0]["_explicit_points"]
             shard_sizes.append(len(points))
-            runner.outputs_by_job[job_id_of(destination)] = {
+            runner.outputs_by_job[captured[1]] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(p['temperature_c'])}" for p in points
@@ -6766,25 +6625,6 @@ def test_max_units_per_job_at_or_under_the_ceiling_limit_is_accepted(
     )
 
     assert max(shard_sizes) <= cap
-
-
-def test_max_units_per_job_over_the_ceiling_limit_is_rejected_before_s3(
-    tmp_path, monkeypatch
-):
-    runner = _FakeRunner()
-    with pytest.raises(sim.SimError) as excinfo:
-        _run_one_batch(
-            tmp_path,
-            monkeypatch,
-            runner,
-            units=63,
-            timeout_s=120.0,
-            max_units_per_job=40,  # 120 x 40 + 120 > 3600
-        )
-
-    assert runner.calls == []
-    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
-    assert "at most 29" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("bad", [0, -3, 2.5, "8", True])
@@ -6980,9 +6820,7 @@ def test_attach_to_done_job_collects_without_submitting_or_launching(tmp_path):
     assert [c["corner_id"] for c in corners] == ["tt_1.800_27"]
     assert environment["job_id"] == "job-1"
     assert runner.argvs_matching("launch") == []
-    assert [
-        a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)
-    ] == []
+    assert [a for a in runner.calls if inputs_upload_of(a) is not None] == []
 
 
 def test_attach_to_running_job_waits_then_collects(tmp_path):
@@ -7044,7 +6882,7 @@ def test_run_sim_attach_requires_batch_backend(tmp_path):
     request = _batch_request(tmp_path)
     request["backend"] = "local"
     path = _write_request(tmp_path, request)
-    with pytest.raises(sim.SimError, match="--attach requires backend 'batch'"):
+    with pytest.raises(sim.SimError, match="backend 'local'.*--backend batch"):
         sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
 
 
@@ -7097,7 +6935,9 @@ def test_pdk_variant_check_passes_when_listed_or_unknown(tmp_path, monkeypatch, 
         tmp_path, monkeypatch, [_image(pdk="gf180mcu", klt_version="0.7.0", **image)]
     )
     request = json.loads(path.read_text())
-    sb._validate_batch_pdk_variant(request, "us-east-1")  # does not raise
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path).runner_identities("gf180mcuC")
+    )  # does not raise
 
 
 def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
@@ -7105,7 +6945,9 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
 ):
     request = {"models": {"pdk": "gf180mcuC"}}
     monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "missing.json"))
-    sb._validate_batch_pdk_variant(request, None)
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path, region=None).runner_identities("gf180mcuC")
+    )
     _publish_manifest(
         tmp_path,
         monkeypatch,
@@ -7114,9 +6956,13 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
             _image(region="us-west-2", pdk="gf180mcu", pdk_variants=["gf180mcuC"]),
         ],
     )
-    sb._validate_batch_pdk_variant(request, None)  # any candidate lists it
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path, region=None).runner_identities("gf180mcuC")
+    )  # any candidate lists it
     with pytest.raises(sim.SimError):
-        sb._validate_batch_pdk_variant(request, "us-east-1")
+        sb._validate_batch_pdk_variant(
+            request, _config(tmp_path).runner_identities("gf180mcuC")
+        )
 
 
 # --- engine_build_comparison (issue #3095) ---------------------------------
@@ -7201,10 +7047,10 @@ def _shard_resume_fixture(tmp_path, monkeypatch):
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     def _register_shard_report(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
-            runner.outputs_by_job[job_id_of(destination)] = {
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
+            runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}"
@@ -7282,12 +7128,12 @@ def test_resume_reattaches_to_every_recorded_shard_without_resubmitting(
         e["index"]: e["job_id"] for e in json.loads(manifest_path.read_text())["shards"]
     }
     launches_before = len(_launches(runner))
-    uploads_before = len(runner.argvs_matching("inputs/request.json"))
+    uploads_before = len(runner.argvs_matching(INPUTS_UPLOAD_ARGV))
 
     corners, _, environment = fleet(resume=True)
 
     assert len(_launches(runner)) == launches_before
-    assert len(runner.argvs_matching("inputs/request.json")) == uploads_before
+    assert len(runner.argvs_matching(INPUTS_UPLOAD_ARGV)) == uploads_before
     assert [e["resumed"] for e in environment["fleet"]] == [True, True]
     assert [e["job_id"] for e in environment["fleet"]] == [jobs[0], jobs[1]]
     assert [c["corner_id"] for c in corners] == [c["corner_id"] for c in first]
@@ -7321,13 +7167,13 @@ def test_resume_refusal_names_fingerprint_difference(tmp_path, monkeypatch):
     assert "hosts:" not in str(err.value)
 
 
-def test_resume_refusal_names_hosts_difference(tmp_path, monkeypatch):
-    _, fleet, _ = _shard_resume_fixture(tmp_path, monkeypatch)
-    fleet()
-    with pytest.raises(sim.SimError) as err:
-        fleet(resume=True, hosts=1)
-    assert "hosts: map has 2, request has 1" in str(err.value)
-    assert "fingerprint:" not in str(err.value)
+def test_resume_with_a_different_hosts_count_is_not_refused(tmp_path, monkeypatch):
+    """Issue #4821: resume re-splits only remaining units, so shard count varies."""
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    first = [c["corner_id"] for c in fleet()[0]]
+    for hosts in (1, 2, 1):
+        assert [c["corner_id"] for c in fleet(resume=True, hosts=hosts)[0]] == first
+        assert json.loads(manifest_path.read_text())["hosts"] == hosts
 
 
 @pytest.mark.parametrize(
@@ -7376,9 +7222,8 @@ def _grade_shard_reports(runner, monkeypatch, *, fail_upload: int | None = None)
     uploads: list[str] = []
 
     def graded(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            destination = argv[argv.index("cp") + 2]
-            uploads.append(job_id_of(destination))
+        if inputs_upload_of(argv) is not None:
+            uploads.append(job_id_of(argv[argv.index("cp") + 2]))
             if fail_upload is not None and len(uploads) == fail_upload + 1:
                 runner.queue(
                     f"{uploads[-1]}/status.json",
@@ -7427,20 +7272,33 @@ def test_sim_set_resume_reattaches_finished_shards_and_resubmits_the_missing_one
     launches_before = len(_launches(runner))
     assert launches_before == 2
 
-    # The failed job is still failed on the fleet when the set is re-run.
+    # The failed job is still failed on the fleet when the set is re-run
+    # (persistently -- issue #5775's harvest reads the status once before
+    # the dispatch's own re-attach poll would).
     failed = json.loads(manifest_path.read_text())["shards"][1]["job_id"]
-    runner.queue(
-        f"{failed}/status.json", fake_completed(_status("failed", exit_code="1"))
-    )
+    graded = sb._run_subprocess
+
+    def still_failed(argv, timeout_s):
+        joined = " ".join(argv)
+        if joined.endswith("status.json -") and failed in joined:
+            return fake_completed(_status("failed", exit_code="1"))
+        return graded(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", still_failed)
     resumed = sim_set.run_sim_set(paths, outdir=outdir, resume=True)
 
-    assert len(_launches(runner)) == launches_before + 1
+    # Issue #5775: the finished shard's two units are harvested (reused, never
+    # re-billed); the failed shard's two re-dispatch as one-unit shards (hosts=2).
+    assert len(_launches(runner)) == launches_before + 2
     entry = resumed["requests"][0]
     assert entry["status"] == "pass"
     assert resumed["status"] == "pass"
     report = json.loads(Path(entry["report"]).read_text())
     fleet = report["environment"]["remote"]["fleet"]
-    assert [shard["resumed"] for shard in fleet] == [True, False]
+    # Issue #6423: harvested entry first, then dispatch order; failed shard: none.
+    assert [shard["resumed"] for shard in fleet] == [True, False, False]
+    assert report["environment"]["resume"]["resumed_corners"] == 2
+    assert all(c["status"] == "pass" for c in report["corners"])
     assert not manifest_path.exists()  # swept clean: nothing left to re-attach
 
 
@@ -7514,8 +7372,8 @@ def test_resume_resubmits_a_shard_whose_job_terminally_failed(tmp_path, monkeypa
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"shard_fingerprint": "fp-2"}, {"hosts": 4}],
-    ids=["request-changed", "hosts-changed"],
+    [{"shard_fingerprint": "fp-2"}],
+    ids=["request-changed"],
 )
 def test_resume_against_another_requests_shard_map_is_refused(
     tmp_path, monkeypatch, overrides
@@ -7580,20 +7438,12 @@ def test_shard_map_tracks_launch_state_and_is_self_describing(tmp_path, monkeypa
         assert all(entry[k] for k in ("submitted_at", "launched_at", "collected_at"))
 
 
-def test_failed_launch_leaves_the_shard_unlaunched_and_says_so(
+def test_applied_launch_timeout_leaves_the_shard_launching(
     tmp_path, monkeypatch, capsys
 ):
-    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
-    real_launch = sb.launch_job
-    launched: list[str] = []
-
-    def _launch(config, job_id, **kwargs):
-        if launched:
-            raise sb.BatchError("client died")
-        launched.append(job_id)
-        return real_launch(config, job_id, **kwargs)
-
-    monkeypatch.setattr(sb, "launch_job", _launch)
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    runner.queue("--apply", fake_completed())
+    runner.queue("--apply", subprocess.TimeoutExpired("launch", 60))
     fleet()
     states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
     assert states == ["collected", "launching"]
@@ -7691,25 +7541,6 @@ def test_split_reroute_without_a_checkpoint_writes_the_shard_map(tmp_path, monke
     document = json.loads((artifacts / sb.BATCH_SHARDS_FILENAME).read_text())
     assert document["fingerprint"] == "fp-split"
     assert [e["state"] for e in document["shards"]] == ["collected"] * 3
-
-
-@pytest.mark.parametrize("lose_a_corner", [False, True])
-def test_shard_map_is_removed_only_when_the_sweep_finishes(
-    tmp_path, monkeypatch, lose_a_corner
-):
-    path = _resume_request(tmp_path)
-    manifest_path = tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME
-    manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text("{}")
-    probe = _install_fake_batch(monkeypatch, fleet=True)
-    first = _run(path, tmp_path, hosts=2)
-    assert probe
-    if lose_a_corner:
-        manifest_path.write_text("{}")
-        lost = first["corners"][1]["corner_id"]
-        _install_fake_batch(monkeypatch, lost_ids={lost}, fleet=True)
-        _run(path, tmp_path, hosts=2)
-    assert manifest_path.exists() is lose_a_corner
 
 
 # --------------------------------------------------------------------------- #
@@ -8066,7 +7897,7 @@ def test_fleet_capacity_wait_budget_is_shared_across_shards(tmp_path, monkeypatc
         message = corner["diagnostics"][0]["message"]
         assert "batch_concurrency_cap" in message
         assert "capacity wait budget" in message
-    assert environment is None
+    assert environment["unlaunched_shards"] == 2  # issue #4856: resumable signal
     assert sum(clock.sleeps) == pytest.approx(100.0, abs=1.0)
 
 
@@ -8262,12 +8093,12 @@ def test_corner_axis_fields_are_registry_features():
 def test_expr_no_value_offhost_carries_runner_hint():
     report: dict = {}
     corners = [{"measurements": [{"name": "v", "value": None}]}]
-    sim._attach_expr_runner_hint(
+    sim._attach_runner_hints(
         report, [{"name": "v", "expr": "v(out)"}], corners, backend="batch"
     )
     assert report["diagnostics"][0]["code"] == "expr_runner_may_predate"
     local: dict = {}
-    sim._attach_expr_runner_hint(
+    sim._attach_runner_hints(
         local, [{"name": "v", "expr": "v(out)"}], corners, backend="local"
     )
     assert local == {}

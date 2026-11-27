@@ -169,6 +169,7 @@ Recognised today:
   family :class:`~klayout_tools.decks.CapacitorDevice` cannot represent --
   see "MoM capacitors" below and ``EXTRACTION_DECK``'s own
   ``mom_capacitors`` note for the full derivation.
+- **Spiral inductor** (#6726) -- ``inductor`` (``inductor2``), ``sg13g2_inductor.py``.
 
 Still unrecognised, each tracked as its own follow-on issue rather than left
 a silent gap (a device class this deck cannot recognise extracts as ordinary
@@ -184,7 +185,7 @@ device, never a wrong device with a plausible value):
   are now a standalone follow-on rather than a blocked one.
 - ``schottky_nbl1`` -- see "Schottky diode (``schottky_nbl1``) --
   investigated, declined" below -- plus the ``isolbox`` isolation device,
-  the ``sg13_hv_svaricap`` varactor, inductors, ESD devices, and the RF MOS
+  the ``sg13_hv_svaricap`` varactor, ``inductor3``, ESD devices, and the RF MOS
   variants, none of which is tracked yet. (ESD devices were investigated in
   issue #3858 and declined natively -- see ``UNMODELED_DEVICE_MARKERS``
   below: ``klt extract`` warns when ``Recog.esd`` 99/30 carries shapes, and
@@ -482,10 +483,15 @@ from . import (
     RuleProvenance,
     UnmodelledDeviceFamily,
 )
+from .sg13g2_inductor import INDUCTOR
+from .sg13g2_unmodeled import (  # noqa: F401  (size-split re-export, #5916)
+    UNMODELED_DEVICE_MARKERS,
+    UNMODELED_RULES,
+    UNMODELED_VOLTAGE_MARKERS,
+)
 
-# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module
-# -- the same "one repo/commit pin, per-rule source_path/rule_id" shape
-# `sky130.py`'s `_sky130_provenance`/`_sky130_lvs_provenance` helpers use.
+# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module:
+# one repo/commit pin, per-rule source_path/rule_id (as `sky130.py`'s helpers).
 _IHP_OPEN_PDK_REPO = "IHP-GmbH/IHP-Open-PDK"
 _IHP_OPEN_PDK_COMMIT = "5cccb161f7492697cfa52eb14dc03beb00bdca9e"  # v0.3.0 tag
 
@@ -619,9 +625,9 @@ DECK: list[DrcRule] = [
     #   * ThickGateOx/DigiBnd scoping selects whole Activ polygons; upstream
     #     clips with a boolean NOT. Only a polygon straddling a marker edge
     #     can differ.
-    #   * SVaricap, schottky_nbl1/nw1, scr1 (text-marker derived) exclusions
-    #     and `NWell_Nsram` (SRAM-marked NWell) are not modelled: those
-    #     structures are held to the ordinary threshold (stricter).
+    #   * schottky_nbl1/nw1, scr1 and `NWell_Nsram` (SRAM-marked NWell) are not
+    #     modelled: held to the ordinary (stricter) threshold. NW.c's SVaricap
+    #     carve-out *is* modelled -- see `sg13g2_svaricap.py`.
     #   * NW.e "tie surrounded entirely by NWell" is the enclosed check on
     #     N+ Activ: N+ Activ wholly outside NWell (NMOS S/D) is not flagged,
     #     one straddling a well edge is. Activ inside the well is the
@@ -970,17 +976,9 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_8_gatpoly.drc", "Gat.d"),
     ),
     # --- pSD (sg13g2_maximal.drc; issue #3787) -----------------------
-    # Unlike every other group here, pSD's width/space/area rules are
-    # defined only in the stricter top-level `sg13g2_maximal.drc` runset
-    # (`feol/5_10_psd.drc` implements just `pSD.c1`). They are transcribed
-    # so a stream drawing pSD (14/0) is not reported as a vacuous `clean`
-    # with `14/0` under `coverage.layers_in_stream_without_rules`.
-    #
-    # Not transcribed (out of scope, need multi-layer derived regions):
-    # `pSD.c`/`c1`/`d`/`d1` (enclosure/separation vs Activ/NWell/PWell) and
-    # `pSD.e`/`f`/`g`/`h` (abutted-tie rules). `UNCHECKED_RULES` is wired
-    # only for `sg13cmos5l` (`get_unchecked_rules`), so they are named here
-    # rather than registered.
+    # Width, space and area come from the maximal runset. UNCHECKED_RULES
+    # describes the implant-to-active checks omitted by the curated deck.
+    # The pSD.e/f/g/h abutted-tie rules also remain unimplemented.
     DrcRule(
         id="psd.width.1",
         description="minimum pSD width",
@@ -1128,6 +1126,22 @@ DECK: list[DrcRule] = [
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.d"),
     ),
+    # Curated upper landing (#2726, issue #5916): the conductor above Cont is
+    # Metal1 only, so the cut side is single-population. Upstream defines no
+    # Metal1-enclosure-of-Cont rule in the curated `main`-table decks, so no
+    # margin is invented (threshold 0, containment only, no provenance).
+    DrcRule(
+        id="metal1.enclosing.cont.1",
+        description="every Cont must lie fully inside Metal1 (upper landing)",
+        layer=(8, 0),  # Metal1.drawing
+        other_layer=(6, 0),  # Cont.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Covers every Cont shape, bars included: `CntB.*` is not
+        # transcribed, but a contact bar lands inside Metal1 like a square.
+        scope="Cont upper-landing containment (curated)",
+    ),
     # --- 5.16 Metal1 (beol/5_16_metal1.drc) ---------------------------
     DrcRule(
         id="metal1.width.1",
@@ -1187,12 +1201,26 @@ DECK: list[DrcRule] = [
         layer=(8, 0),  # Metal1.drawing
         other_layer=(19, 0),  # Via1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=10,  # 0.01 um
         # 5_19_via1.drc rule "V1.c": via1_nseal.enclosed(metal1_drw, 0.01um,
         # euclidian) -> "5.19. V1.c : Min. Metal1 enclosure of Via1 is 0.01 um"
         # (sg13g2_tech_default.json: drc_rules.V1_c == 0.01)
         scope="V1",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_19_via1.drc", "V1.c"),
+    ),
+    DrcRule(
+        id="metal2.enclosing.via1.1",
+        description="every Via1 must lie fully inside Metal2 (upper landing)",
+        layer=(10, 0),  # Metal2.drawing
+        other_layer=(19, 0),  # Via1.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726, #5916): a Via1 cut connects
+        # Metal1 to Metal2, so it must always sit on both; no upstream
+        # Metal2-side margin was verified, so none is invented.
+        scope="Via1 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal2 instance (beol/5_17_metaln.drc) -----------
     DrcRule(
@@ -1257,12 +1285,26 @@ DECK: list[DrcRule] = [
         layer=(10, 0),  # Metal2.drawing
         other_layer=(29, 0),  # Via2.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V2.c": via2_nseal.enclosed(metal2_drw, 0.005um,
         # euclidian) -> "5.20. V2.c : Min. Metal2 enclosure of Via2 is 0.005 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
         scope="V2",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.c"),
+    ),
+    DrcRule(
+        id="metal3.enclosing.via2.1",
+        description="every Via2 must lie fully inside Metal3 (upper landing)",
+        layer=(30, 0),  # Metal3.drawing
+        other_layer=(29, 0),  # Via2.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726, #5916): a Via2 cut connects
+        # Metal2 to Metal3, so it must always sit on both; no upstream
+        # Metal3-side margin was verified, so none is invented.
+        scope="Via2 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal3 instance (beol/5_17_metaln.drc) -----------
     # Issue #1243: extending the connectivity/DRC stack past Metal2, up
@@ -1342,12 +1384,26 @@ DECK: list[DrcRule] = [
         layer=(30, 0),  # Metal3.drawing
         other_layer=(49, 0),  # Via3.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V3.c": via3_nseal.enclosed(metal3_drw, 0.005um,
         # euclidian) -> "5.20. V3.c : Min. Metal3 enclosure of Via3 is 0.005 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
         scope="V3",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.c"),
+    ),
+    DrcRule(
+        id="metal4.enclosing.via3.1",
+        description="every Via3 must lie fully inside Metal4 (upper landing)",
+        layer=(50, 0),  # Metal4.drawing
+        other_layer=(49, 0),  # Via3.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726, #5916): a Via3 cut connects
+        # Metal3 to Metal4, so it must always sit on both; no upstream
+        # Metal4-side margin was verified, so none is invented.
+        scope="Via3 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal4 instance (beol/5_17_metaln.drc) -----------
     DrcRule(
@@ -1410,12 +1466,26 @@ DECK: list[DrcRule] = [
         layer=(50, 0),  # Metal4.drawing
         other_layer=(66, 0),  # Via4.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V4.c": via4_nseal.enclosed(metal4_drw, 0.005um,
         # euclidian) -> "5.20. V4.c : Min. Metal4 enclosure of Via4 is 0.005 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
         scope="V4",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.c"),
+    ),
+    DrcRule(
+        id="metal5.enclosing.via4.1",
+        description="every Via4 must lie fully inside Metal5 (upper landing)",
+        layer=(67, 0),  # Metal5.drawing
+        other_layer=(66, 0),  # Via4.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726, #5916): a Via4 cut connects
+        # Metal4 to Metal5, so it must always sit on both; no upstream
+        # Metal5-side margin was verified, so none is invented.
+        scope="Via4 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal5 instance (beol/5_17_metaln.drc) -----------
     # Metal5 is the top of `metaln.drc`'s own templated table
@@ -1498,6 +1568,7 @@ DECK: list[DrcRule] = [
         layer=(67, 0),  # Metal5.drawing
         other_layer=(125, 0),  # TopVia1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: MIM.c nests every MIM inside Metal5
         threshold_dbu=100,  # 0.10 um
         # 5_21_topvia1.drc rule "TV1.c":
         # topvia1_nseal.enclosed(metal5_drw, 0.10um, euclidian)
@@ -1512,6 +1583,7 @@ DECK: list[DrcRule] = [
         layer=(126, 0),  # TopMetal1.drawing
         other_layer=(125, 0),  # TopVia1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=420,  # 0.42 um
         # 5_21_topvia1.drc rule "TV1.d":
         # topvia1_nseal.enclosed(topmetal1_drw, 0.42um, euclidian)
@@ -1592,6 +1664,7 @@ DECK: list[DrcRule] = [
         layer=(126, 0),  # TopMetal1.drawing
         other_layer=(133, 0),  # TopVia2.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=500,  # 0.50 um
         # 5_24_topvia2.drc rule "TV2.c":
         # topvia2_nseal.enclosed(topmetal1_drw, 0.50um, euclidian)
@@ -1606,6 +1679,7 @@ DECK: list[DrcRule] = [
         layer=(134, 0),  # TopMetal2.drawing
         other_layer=(133, 0),  # TopVia2.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=500,  # 0.50 um
         # 5_24_topvia2.drc rule "TV2.d":
         # topvia2_nseal.enclosed(topmetal2_drw, 0.50um, euclidian)
@@ -1747,15 +1821,18 @@ DECK: list[DrcRule] = [
         # elsewhere in a layout are untouched for the same reason the
         # zero-overlap-escape term above is `.interacting`-scoped: a routing
         # TopVia1 nowhere near a MIM plate faces no MIM edge to measure
-        # against.
+        # against. Keeps the legacy `require_containment=False` (#5916):
+        # TopVia1 is shared between the MIM population (this rule) and
+        # ordinary routing, so containment in MIM would flag every via.
         scope="MIM",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
-
-# Foundry rules this curated deck knows about but cannot evaluate (issue
-# #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`
-# reports each one under `coverage.unchecked_rules` whenever its layer is
+DRC_RULE_SOURCES = ("sg13g2_cont_grid", "sg13g2_svaricap", "sg13g2_runset_notes")
+for _hook in DRC_RULE_SOURCES:
+    __import__(f"{__package__}.{_hook}", fromlist=["x"]).apply(DECK)
+# Known but unevaluated rules (#3571): `{rule id: (layer, description)}`.
+# DRC reports each under `coverage.unchecked_rules` whenever its layer is
 # present in the stream, so a `clean` verdict cannot be read as "this rule
 # was checked".
 UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
@@ -1766,6 +1843,11 @@ UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
         "check; wells on different nets closer than 1.80 um are not "
         "flagged. Only the geometric nwell.space.1 (0.62 um) ran.",
     ),
+    # sg13g2_maximal.drc (c, d, d1) and feol/5_10_psd.drc (c1).
+    "pSD.c": ((14, 0), "Minimum pSD enclosure of P+ Activ in NWell is 0.18 um."),
+    "pSD.c1": ((14, 0), "Minimum pSD enclosure of P+ Activ in PWell is 0.03 um."),
+    "pSD.d": ((14, 0), "Minimum pSD space to unrelated N+ Activ in PWell is 0.18 um."),
+    "pSD.d1": ((14, 0), "Minimum pSD spacing to N+ Activ in NWell is 0.03 um."),
 }
 
 LAYER_NAMES: dict[tuple[int, int], str] = {
@@ -1841,99 +1923,9 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (46, 21): "PWell.block",
 }
 
-# Voltage-domain marker layer this deck draws but does not *fully* model the
-# DRC/extraction scoping of (issue #552's `decks.get_unmodeled_voltage_markers`,
-# the same mechanism gf180mcu.py registers its own `Dualgate` marker under).
-# sg13g2's `general_derivations.lvs` splits every MOS device recognition rule
-# into a "-LV" (thin, default gate oxide) and "-HV" (thick gate oxide) pair
-# keyed off `thickgateox_drw` (44/0, see `ngate_lv_base`/`ngate_hv_base` in
-# that file): `ngate_lv_base = ngate.not(thickgateox_drw)`, `ngate_hv_base =
-# ngate.and(thickgateox_drw)` (and the PMOS analogues).
-#
-# What issue #1231 closed: `EXTRACTION_DECK` below now declares one
-# `mos_flavours` entry keyed on this same marker (see `MOSFlavour`'s own
-# docstring in `decks/__init__.py`), so a transistor drawn inside ThickGateOx
-# is recognised in its own extraction pass and binds the real
-# `sg13_hv_nmos`/`sg13_hv_pmos` models under `--pdk` instead of silently
-# taking the thin-oxide ("-LV") ones -- and `extract.py`'s own MOS
-# `voltage_domain_warnings` stops firing for this marker (it only ever warned
-# about that *MOS binding* gap). This mirrors exactly what #1111 did for
-# gf180mcu's `Dualgate`.
-#
-# What is NOT modelled, and is what this entry still warns about: every DRC
-# rule in `DECK` above applies the general-case FEOL thresholds regardless of
-# ThickGateOx's presence -- sg13g2's own DRM scopes several FEOL rules to the
-# thick-oxide domain (e.g. `Gat.a1`/`Gat.a2`'s channel-length-specific GatPoly
-# widths, themselves compound `ngate`/`pgate` derivations of GatPoly, Activ,
-# NWell *and* this marker -- see the module docstring's "Scope guard"), and
-# none of that is transcribed here. So the registry entry stays, with its
-# description narrowed to the DRC-rule residue.
-UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
-    (44, 0): (
-        "ThickGateOx (44/0) marks sg13g2's thick-gate-oxide ('-HV') MOS "
-        "voltage domain (see general_derivations.lvs's ngate_hv_base/"
-        "pgate_hv_base). EXTRACTION_DECK models it for MOS device "
-        "recognition/model binding (issue #1231: sg13_hv_nmos/sg13_hv_pmos "
-        "under --pdk); this curated deck's DRC rules still apply the "
-        "general-case ('-LV') thresholds to geometry regardless of "
-        "ThickGateOx's presence (e.g. the Gat.a1/Gat.a2 channel-length-"
-        "specific GatPoly widths, not transcribed in this deck yet)."
-    ),
-}
-
-# Device-recognition marker layers this deck draws but has no native
-# recognition for (issue #3858), surfaced as a `klt extract` `warnings[]`
-# entry via `decks.get_unmodeled_device_markers` so the omission is loud
-# rather than silent. Native recognition is declined, not forgotten:
-# - `esd_extraction.lvs` builds the ESD diodes (`diodevdd_*`/`diodevss_*`) as
-#   `bjt3(..., Esd3Term)` with *synthesized* terminals (`*_e.middle.sized(
-#   0.499.um)`, `.extents` of derived regions) -- the same size-filtered,
-#   per-instance dynamic-region gap that declined `schottky_nbl1` (#1234) and
-#   the SiGe HBTs (#1232); they are not a `DiodeDevice` junction-overlap case.
-# - the `nmoscl_2`/`nmoscl_4` clamps are keyed on a text label interacting
-#   with `Recog.esd` plus a gate-count threshold; the extraction engine has no
-#   text-label recognition predicate.
-# - `scr1` has no LVS extraction upstream at all (it only appears in the
-#   maximal DRC deck's exclusion terms), so "extracts as no device" matches
-#   the PDK's own runset.
-# Operator ruling #2864 routes such devices to the PDK's own runset-backed LVS
-# (`klt lvs` `"klayout-runset"`).
-UNMODELED_DEVICE_MARKERS: dict[tuple[int, int], str] = {
-    (99, 30): (
-        "Recog.esd (99/30) marks ESD structures (nmoscl_2/nmoscl_4 clamps, "
-        "scr1, diodevdd_*/diodevss_* protection diodes); this deck has no "
-        "native recognition for them, so they extract as no device. Use "
-        "`klt lvs` with the 'klayout-runset' backend (the PDK's own LVS "
-        "runset) to compare layouts containing them."
-    ),
-}
-
-#: Official ``sg13g2_maximal.drc`` rule ids this curated deck does not
-#: transcribe (issue #3854): the pad rules (``Pad.*``) and the latch-up rules
-#: (``LU.*``). They need layers outside the curated set (``dfpad``, EdgeSeal)
-#: and compound expressions ``DrcRule`` cannot evaluate. The ``*R`` pad ids
-#: are the runset's recommended-only rules (``$recommendedRules``); the
-#: ``LU.*`` ids are gated by ``$latchUpRules``. ESD structures have no rule id
-#: in the runset (only ``Recog.esd`` device recognition, absent from
-#: ``EXTRACTION_DECK``), so nothing ESD-related can be listed here.
-#: ``coverage.unmodeled_rules`` lists these so a clean verdict is not read as
-#: covering pads or latch-up. Remove an id here when its rule is added.
-UNMODELED_RULES: tuple[str, ...] = (
-    "LU.a",
-    "LU.c",
-    "LU.c1",
-    "LU.d",
-    "LU.d1",
-    "Pad.a1",
-    "Pad.aR",
-    "Pad.bR",
-    "Pad.d",
-    "Pad.d1R",
-    "Pad.dR",
-    "Pad.gR",
-    "Pad.jR",
-    "Pad.kR",
-)
+# The unmodeled registries (voltage-domain/device markers, untranscribed
+# rule ids) moved verbatim to `sg13g2_unmodeled.py` (file-size ceiling,
+# issue #5916) and are re-exported at this module's top.
 
 # --------------------------------------------------------------------------- #
 # `klt extract` connectivity + device-extraction deck
@@ -2105,14 +2097,14 @@ EXTRACTION_DECK = ExtractionDeck(
         (134, 25),  # TopMetal2.text
     ),
     # No distinct drawn tap layer (`tap` stays `None`) -- but `tap_nplus`/
-    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie
-    # region from these same implant layers (issue #1273, mirroring
-    # gf180mcu's #1084; see the module docstring note above this deck's
-    # definition for the full derivation, and for issue #2591's correction
-    # of the well-tie half against upstream).
+    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie region
+    # from these same implant layers (issue #1273, mirroring gf180mcu's #1084;
+    # module docstring note above: the derivation and #2591's well-tie correction).
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
+    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345)
+    substrate_isolation_needs_nwell_ring=True,  # #5359: needs a closing NWell ring
     # Issue #2591: upstream's own well-tie form -- Activ inside NWell with
     # *no* pSD over it (`nactiv = activ.not(psd_drw...)`), unioned with the
     # positive `tap_nplus` form above so either drawing convention extracts.
@@ -2396,18 +2388,15 @@ EXTRACTION_DECK = ExtractionDeck(
     # here the way they are for `cap_cmim` above, since the two ports can be
     # side by side *or* stacked on adjacent metals). `l`/`w` are read off the
     # marker's own bounding-box width/height -- not a plate-overlap area --
-    # and the extractor does **not** compute a capacitance value at all: its
-    # own source comment states "the LVS extractor does NOT compute C; LVS
-    # matches devices on topology; the value C_total =
-    # density[N]*active_area + Cfeed is supplied by the SPICE/Verilog-A
-    # model." `MomCapacitorDevice.metal_pins` therefore has one entry per
-    # `metals` level (`Metal1.pin` 8/2 through `Metal5.pin` 67/2, `None` for
-    # `TopMetal1`/`TopMetal2` -- upstream's own `cap_extraction.lvs` call
-    # only ever wires up `m1p`..`m5p`, never a `TopMetal1`/`TopMetal2` pin
-    # layer, since this device family lives entirely on the g2 thin-metal
-    # stack), and each entry reports only `w_um`/`l_um` in `devices[].params`
-    # -- no `c_f`/`area_um2`/`perimeter_um` keys, since none of those apply
-    # to a topologically-matched, dimension-only device (see
+    # and the extractor does **not** compute a capacitance value: its own
+    # source comment states "the LVS extractor does NOT compute C; LVS
+    # matches devices on topology; the value C_total = density[N]*active_area
+    # + Cfeed is supplied by the SPICE/Verilog-A model." `metal_pins`
+    # therefore has one entry per `metals` level (`Metal1.pin` 8/2 through
+    # `Metal5.pin` 67/2, `None` for `TopMetal1`/`TopMetal2`: upstream's
+    # `cap_extraction.lvs` only wires up `m1p`..`m5p`, this family living on
+    # the thin-metal stack), and reports only `w_um`/`l_um` in
+    # `devices[].params` -- no `c_f`/`area_um2`/`perimeter_um` keys (see
     # `docs/json-contract.md`'s "MoM capacitor devices" note).
     mom_capacitors=(
         MomCapacitorDevice(
@@ -2785,6 +2774,7 @@ EXTRACTION_DECK = ExtractionDeck(
             provenance=_sg13g2_lvs_provenance("diode_extraction.lvs", "dpantenna"),
         ),
     ),
+    inductors=(INDUCTOR,),  # `inductor2` (issue #6726)
     # Device families this deck deliberately does not recognise (issue
     # #3137): the SiGe HBT (see "SiGe HBTs -- investigated, declined" in the
     # module docstring). A drawn HBT's Activ matches the `dantenna` predicates

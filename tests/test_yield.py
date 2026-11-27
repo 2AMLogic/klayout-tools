@@ -2351,7 +2351,7 @@ def test_cli_json_success_is_the_flat_sample_set_payload(tmp_path, capsys):
     first = capsys.readouterr()
     assert first.err == ""
     payload = json.loads(first.out)
-    assert sorted(payload) == ["derivation", "measurements", "schema_version"]
+    assert set(payload) >= {"derivation", "measurements", "schema_version"}
     assert payload["schema_version"] == 1
     assert payload["measurements"] == _hand_authored_measurements("seeded defect")
     assert payload["derivation"]["negative_control"]["description"] == "seeded defect"

@@ -75,7 +75,11 @@ The artifact per item:
 - item 1: the design-source inventory;
 - item 2: the committed layout stream;
 - item 9: the testbench inventory;
-- item 10: the repo-hygiene inventory.
+- item 10: the repo-hygiene inventory (repo-owned files only, not
+  Loom/Repo-Skills resync-managed paths; listed files must be stable by
+  construction — living status belongs in an uninventoried file, not a
+  hygiene path; re-attesting is an owner action — see `docs/cli/signoff.md`
+  "Item 10: what belongs in a hygiene inventory").
 
 For items 1, 9 and 10 that envelope is **tool-produced**, not hand-rolled:
 `klt signoff --attest {1,9,10} --inventory <file>` (issue #2844) reads a
@@ -225,7 +229,13 @@ written to every block.
    nothing compares them against what the claim actually disclosed, so a
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
-   themselves.
+   themselves. **Opt-in exception (#5789)**: a manifest that sets
+   `require_coverage_disclosure: true` and enumerates its gaps on item 3's
+   evidence entry (`coverage_disclosed`) has the comparison graded — a
+   declaration that is not set-equal to the reported coverage renders the
+   item `unmet` / `coverage_undisclosed`. The default remains
+   claimant-enforced; the tool-enforced form is something a project opts
+   into per manifest.
    **Disclosed exception for unmodified foundry cells** (operator ruling
    2026-10-28): DRC violations inside an unmodified foundry-library cell
    (a stock I/O pad, a foundry SRAM macro) do not block `met`, provided all
@@ -265,7 +275,23 @@ written to every block.
    question was never asked; this item and `klt signoff` both read it as
    "does not apply here", never as "verified", so a fleet policy of "re-run
    LVS, look for `match`" is not by itself power-connectivity evidence
-   (#1985). And even where it does run it is *not* a geometric rail/grid
+   (#1985). A fourth `unchecked` case existed on the route that document
+   itself steers routed digital blocks through — `gate-level-verilog` **on a
+   FinFET deck** (issue #4462), where the stub-form pin-to-net check does not
+   apply. Since issue #5757 that route no longer stops at `unchecked`: after
+   the compare, the verdict is *derived* from the expanded-cell compare —
+   `"match"` when the compare matched and a requested supply net
+   (`options.supply_nets`, the same allowlist that scopes
+   supply-fragmentation findings) is proven on a matched
+   `net_correspondence` row, with the `reason` naming the derivation and
+   exactly the supplies the compare proved — and stays `"unchecked"` when
+   the compare mismatched, the check was opted out, the allowlist is empty
+   (`options.supply_nets: []` proves nothing), or no requested supply net
+   pairs (a reference whose expanded rails float on internal nets under
+   other names proves nothing about the top-level grid). A derived
+   `"match"` is this item's
+   `"match"` for every purpose below, including item 11's requirement. And
+   even where it does run it is *not* a geometric rail/grid
    continuity check: whether a rail is an unbroken annulus, and whether the
    grid carries the current, stay `klt ring-check`, `klt power`, and the DRC
    deck's business — see "Power/IR-drop + EM evidence" below for what is and
@@ -284,18 +310,26 @@ written to every block.
    same `--check` re-hash guarantees as a curated-deck report (layout hash,
    reference netlist hash, plus the runset hash); (3) the report names its
    engine, and `klt signoff` carries `engine` and the runset hash distinctly in
-   the check detail and the `met` citation; (4) every device is recognised — a
-   non-empty `coverage.declared_not_recognized`, or a `device_census` whose
-   per-class layout and reference counts differ, is a failure
+   the check detail and the `met` citation; (4) every device is recognised —
+   a `device_census` whose per-class layout and reference counts differ
+   (compared case-insensitively; issue #6902), a report without the
+   reference-source device evidence (`device_census.reference_source`,
+   emitted by `klt lvs` since #6902 — a pre-#6902 report fails closed), or a
+   source class with too few converted devices after accounting for
+   documented runset renames on the affected cards, is a failure
    (`runset_unrecognised_device`), never a warning, even when `status` reads
-   `match`. A report from a runset that is not in the allowlist is refused
+   `match`. Classes the runset declares with zero instances anywhere are not
+   graded — `coverage.declared_not_recognized` is disclosure only (issue
+   #6902: no real block instantiates every class a PDK runset declares; the
+   2026-10-08 ruling itself — every device recognised, nothing dropped — is
+   unchanged). A report from a runset that is not in the allowlist is refused
    `runset_not_pinned`; one whose runset file changed since the run,
    `runset_hash_mismatch`. **This does not change** the default: curated decks
    stay the route wherever they recognise every device in the block, and a
    block may not choose the runset to avoid a curated-deck finding. The
    allowlist (`signoff_runset.PINNED_RUNSETS`, listed by
    `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2,
-   SG13CMOS5L and gf180mcu `*.lvs` runsets as of 2026-10-27.
+   SG13CMOS5L, gf180mcu and sky130 `*.lvs` runsets as of 2026-11-21.
    **Adding an entry** is a reviewed trust decision, never a copy of a hash
    from a report: fetch the PDK's runset file from its upstream repo at a
    named commit, `sha256` it (the same digest `_provenance.sha256_file`
@@ -311,6 +345,10 @@ written to every block.
      declaring the full row set; the item is met only when every cited
      envelope passes and every declared row is covered, and rows no
      envelope can express are declared gaps that keep it unmet.
+     A row defined by an analytical/linear-model run may instead cite a
+     committed `model-run` envelope (same per-row coverage rule: a
+     passing measurement with a recognised, non-null `min`/`max` bound;
+     `klt` does not execute the model).
    - *Digital* — multi-corner static timing analysis (setup and hold
      across the PVT corner set) plus a bit-exact functional test suite,
      with per-corner and per-test pass/fail recorded. For the full-custom
@@ -364,13 +402,13 @@ written to every block.
    verb needs the `yield` extra.** Unlike every other T1 item's
    evidence verb (`drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
    `functional-verification`, `erc`, `place-and-route`), `klt yield`
-   requires the `klt_yield_native` Rust extension. Today that needs a repo
-   checkout with a Rust toolchain: the prebuilt `klt-yield-native` wheel
-   (Linux x86_64, macOS arm64) behind `pip install 'klayout-tools[yield]'` is
-   not yet on PyPI, so the extra resolves for no release to date and only for
-   releases published after the wheel is. A bare `pip install klayout-tools`
-   and the git-pinned form do not include it either. A consumer on another
-   platform likewise needs a repo checkout with a Rust toolchain; see
+   requires the `klt_yield_native` Rust extension: install it with the
+   `[yield]` extra (`pip install 'klayout-tools[yield]'`). As of 2026-11-06 the
+   prebuilt `klt-yield-native` 0.1.0 wheel (Linux x86_64, macOS arm64) is on
+   PyPI and the extra resolves for klayout-tools 0.9.1 and later. A bare
+   `pip install klayout-tools` and the git-pinned form do not include it. A
+   consumer on another platform (Linux aarch64, Windows, Intel macOS) needs a
+   repo checkout with a Rust toolchain; see
    `docs/cli/yield.md`'s "What the extra does and does not reach" callout and
    `docs/releasing-native.md`.
    **When "not applicable" is legitimate** (issue #2865): a block whose
@@ -387,6 +425,11 @@ written to every block.
    partition only; an analog partition (including the analog half of a
    mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
    reports it as `not_applicable`, never as `met`.
+   For a mixed-signal block sharing one ratified spec, `spec_rows."6.digital"`
+   scopes this statement and scan to the digital rows. Every spec row must be
+   assigned under `6.digital` or `6.analog`. A statistical row assigned to the
+   digital partition still prevents this outcome. Analog rows are graded
+   independently against their yield evidence.
    **Analog partitions** (issue #4183, operator ruling 2026-10-28): this
    restriction is intentional. Analog performance is inherently statistical
    (offset, mismatch, bias spread), so an analog spec with no statistical row
@@ -401,17 +444,34 @@ written to every block.
      mismatch is acceptable, labelled as such in the evidence.
    - **Declare item 6 a gap** for the analog partition.
    The digital partition of the same block may still use `not_applicable`.
+   **Declared gaps keep blocking T1** (issue #5858, operator ruling
+   2026-11-17): a settled, hash-justified gap does *not* satisfy the roll-up,
+   on any item or partition. `_T1_SATISFIED_STATUSES` is not widened and
+   ruling #4183 above is untouched, so `tier: "T1"` still means every
+   *applicable* row is evidenced. A gap is not a permanent state: a row that
+   cannot be evidenced today is a statement about today's tools and inputs,
+   and a request to build what is missing, either a klayout-tools feature or a
+   new EDA project. A declared gap therefore names the open issue that would
+   close it, and a gap with no such link is a signoff finding. A row that is
+   unevidenceable for a reason no tool could ever fix is a different case,
+   closer to `not_applicable`, and goes back to the operator rather than being
+   declared a gap. The hash-justified declaration and the separate count and
+   listing of declared gaps belong to #5599.
    **Several statistical rows, only some evidenced** (issue #2908): item 6
    is a claim about *every* statistical row, so a manifest may declare the
    row set under `spec_rows."6"` and cite one `klt yield` report per row set
    (`rows` on each citation). Item 6 grades `met` only when every declared
    row is covered by a passing citation against a ratified target. A row with
-   no citation (`uncovered_rows`), a row declared a `gap` because no evidence
-   can exist yet (`declared_gaps`), or a row declared `ratified: false`
-   (`unratified_rows`, evidence against a proposed limit is provisional)
-   grades `unmet` / `partial_coverage`, never `met`. Without a declaration
-   the item grades as before; a `not_applicable` entry contradicts a declared
-   row set and is `invalid_evidence`.
+   no citation (`uncovered_rows`), a row declared a `gap` (`declared_gaps` —
+   pending work that a named issue should close, never a permanent pass;
+   issue #5599 adds a justified form carrying a hash-bound rationale
+   artifact and the issue that would close the gap, and an operator ruling
+   on #5858, 2026-11-17 settled that a gap keeps blocking T1), or a row
+   declared `ratified: false` (`unratified_rows`, evidence against a
+   proposed limit is provisional) grades `unmet` / `partial_coverage`, never
+   `met`. Without a declaration the item grades as before; a
+   `not_applicable` entry contradicts a declared row set and is
+   `invalid_evidence`.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction
@@ -434,7 +494,16 @@ written to every block.
      proof" section) — every `delta[]` row is explainable directly from the
      extracted netlist's own added R/C, not merely reported, including the
      (measured, not assumed) no-degradation rows that canary's current
-     topology produces.
+     topology produces. For a block whose core device family only the PDK's
+     own LVS runset recognises (the case `klt pex --engine
+     klayout-runset` exists for, #6559), the citation must carry parasitics:
+     `klt signoff` refuses a `parasitics_carried: false` leg with
+     `no_parasitics` (#6606) — the merged route (`klt pex --engine
+     klayout-runset --deck <curated>`, which attaches the curated deck's
+     parasitics to the runset devices through the measured geometric net
+     correspondence of
+     `docs/design/runset-pex-net-correspondence.md`) is the runset-engine
+     shape that grades.
    - *Digital* — the functional test suite re-run against the post-route
      gate-level netlist with back-annotated SDF timing, not only the
      pre-layout RTL/gate simulation. The machine-checkable evidence is a
@@ -548,7 +617,13 @@ written to every block.
       `klt erc` spec's own stackup, and that same LVS report's
       `power_connectivity.status` is `"match"` — `"unchecked"` does **not**
       satisfy this item, unlike item 4 itself, where it means "the question
-      does not apply here". For a hand-captured full-custom digital
+      does not apply here". On the FinFET `gate-level-verilog` route the
+      `"match"` is the verdict derived from the expanded-cell compare
+      (issue #5757; the compare matched and a requested supply net —
+      `options.supply_nets` — paired in `net_correspondence`) — it
+      satisfies this item exactly as a
+      stub-form `"match"` does, and the report's own `reason` says which
+      form it took. For a hand-captured full-custom digital
       partition (no RTL, no synthesis, no P&R — see "Full-custom digital
       sub-case" above), this item is satisfied instead by the Analog
       column's artifacts, exactly as items 1, 2, and 5 are: there is no
@@ -573,6 +648,14 @@ written to every block.
       `erc.expected_short_missing` naming a declared supply — blocks this
       item in the short's place, so declaring the tie converts a false
       blocking finding into a real check rather than into no evidence.
+      **Supplies that share a substrate body are graded too** (issue
+      #5346): an `erc.supply_short` with `via: "substrate"` blocks this item
+      like a metal one, and a cited run that *disclosed* the substrate path
+      undecidable (`erc_coverage.inapplicable[erc.supply_short]`, reason
+      `substrate_isolation_undecidable`) is `unmet` with the same-named
+      reason and its `missing` list in `detail.power_delivery`; only an
+      evaluated-clean run (`erc.supply_short.substrate` in `checked`) is
+      `met`.
       **The severed-rail half of "exactly one island" is gradeable too,
       where the spec declares the roles a supply owns** (issue #2524).
       `erc.unconnected_net` counts islands *carrying the declared label*,
@@ -605,9 +688,11 @@ written to every block.
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
       reason `degenerate_tap_declaration`, issue #2199,
       `degenerate_well_assertion`, issue #2255,
-      `degenerate_well_selection`, issue #2339, or `empty_well_region`,
+      `degenerate_well_selection`, issue #2339, `empty_well_region`,
       issue #2377 — a drawn `well_layer` with no geometry at all in the
-      stream) returns zero for a
+      stream — or `degenerate_connect_target`, issue #7419 — a
+      through-less tie whose `connect_to` role touches none of its tap
+      sites, so it cannot pass by construction) returns zero for a
       reason that has nothing to do with taps, and renders
       `supply_spec_incomplete` rather than a met item — the same rule that
       already rejects a spec declaring no `ties[]` at all. **A stream with

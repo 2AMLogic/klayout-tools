@@ -31,13 +31,11 @@ Response shape (additive, no ``schema_version`` bump)
 
 from __future__ import annotations
 
-import math
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from ._jsonnum import is_number
+from . import sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Keys a ``stress`` object may carry. Anything else is refused by name.
@@ -51,14 +49,10 @@ _VECTOR_PREFIX = "__klt_vs_"
 #: commas that would break out of the `let` command.
 _NODE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.$#:/\[\]<>!+-]*$")
 
-#: Slack, as a fraction of the analysis window, when checking that a
-#: requested edge lies inside the saved samples.
-_EDGE_TOLERANCE = 1e-9
-
 
 def is_stress(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``stress``."""
-    return spec.get("stress") is not None
+    return sim_measurement_kind.declares(spec, "stress")
 
 
 def stress_measurements(
@@ -100,34 +94,13 @@ def validate_stress_spec(name: Any, body: Any) -> None:
             f"measurement '{name}': stress.b must be a circuit node name "
             f"(omit it to measure against ground; got {b!r})"
         )
-    start = _window_bound(name, body, "from")
-    stop = _window_bound(name, body, "to")
+    start = sim_window.window_bound(name, body, "from", form="stress")
+    stop = sim_window.window_bound(name, body, "to", form="stress")
     if start is not None and stop is not None and stop <= start:
         raise SimError(
             f"measurement '{name}': stress.to ({stop!r} s) must be after "
             f"stress.from ({start!r} s)"
         )
-
-
-def _window_bound(name: Any, body: dict[str, Any], key: str) -> float | None:
-    """``stress.from``/``.to`` in seconds: a number, or a SPICE time literal
-    such as ``"20n"``. ``None`` when absent."""
-    from .sim import _parse_spice_seconds
-
-    raw = body.get(key)
-    if raw is None:
-        return None
-    seconds: float | None = None
-    if is_number(raw):
-        seconds = float(raw)
-    elif isinstance(raw, str):
-        seconds = _parse_spice_seconds(raw)
-    if seconds is None or not math.isfinite(seconds):
-        raise SimError(
-            f"measurement '{name}': stress.{key} must be a time in seconds "
-            f'-- a number or a SPICE time literal such as "20n" (got {raw!r})'
-        )
-    return seconds
 
 
 def validate_stress_context(
@@ -136,37 +109,17 @@ def validate_stress_context(
     """A stress window is a transient quantity: refuse any other
     ``analysis.kind`` by name, and a window that is not inside the ``tran``
     analysis (``tstart``..``tstop``) when those tokens can be parsed."""
-    from .sim import _parse_spice_seconds
-
     declared = stress_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'stress', which "
-            "reduces a node-pair voltage over a time window and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
-    tokens = str(analysis.get("args") or "").split()
-    tstop = _parse_spice_seconds(tokens[1]) if len(tokens) > 1 else None
-    tstart = _parse_spice_seconds(tokens[2]) if len(tokens) > 2 else 0.0
-    if tstop is None or tstart is None:
-        return
-    for spec in declared:
-        for key in ("from", "to"):
-            bound = _window_bound(spec["name"], spec["stress"], key)
-            if bound is not None and not (
-                tstart - _EDGE_TOLERANCE * tstop
-                <= bound
-                <= tstop * (1 + _EDGE_TOLERANCE)
-            ):
-                raise SimError(
-                    f"measurement '{spec['name']}': stress.{key} ({bound!r} s)"
-                    f" is outside the transient analysis window "
-                    f"[{tstart!r}, {tstop!r}] s (analysis.args "
-                    f"{analysis.get('args')!r})"
-                )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="stress",
+        required="tran",
+        explanation="reduces a node-pair voltage over a time window",
+    )
+    sim_window.validate_window_inside_tran(declared, analysis, form="stress")
 
 
 # --------------------------------------------------------------------------- #
@@ -174,9 +127,13 @@ def validate_stress_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each stress measurement writes per corner.
+_RAWFILE_PREFIX = "stress"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where stress measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"stress_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -235,7 +192,9 @@ def reduce_stress(
         return StressOutcome(error="fewer than two samples")
     lo = scale[0] if start is None else start
     hi = scale[count - 1] if stop is None else stop
-    slack = _EDGE_TOLERANCE * max(abs(scale[count - 1] - scale[0]), abs(hi), 1e-30)
+    slack = sim_window.EDGE_TOLERANCE * max(
+        abs(scale[count - 1] - scale[0]), abs(hi), 1e-30
+    )
     if lo < scale[0] - slack or hi > scale[count - 1] + slack:
         return StressOutcome(
             error=(
@@ -274,47 +233,40 @@ def extract_corner_stress(
     one finished corner, read from the rawfiles :func:`control_lines` asked
     ngspice to write. Never raises: an unreadable or missing rawfile becomes
     that measurement's own ``error``."""
-    outcomes: dict[int, StressOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_stress(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_stress,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> StressOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["stress"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return StressOutcome(
-            error=(
-                f"measurement '{name}' produced no stress: node "
-                f"{body['a']!r} or {body.get('b')!r} did not resolve against "
-                "this transient's saved vectors (no rawfile was written) -- "
-                "check that the nodes exist in the deck"
-            )
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return StressOutcome(
-            error=f"measurement '{name}': could not read its stress rawfile: {exc}"
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 2 or not points:
-        return StressOutcome(
-            error=f"measurement '{name}' produced no stress: the voltage "
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=2,
+        missing_error=(
+            f"measurement '{name}' produced no stress: node "
+            f"{body['a']!r} or {body.get('b')!r} did not resolve against "
+            "this transient's saved vectors (no rawfile was written) -- "
+            "check that the nodes exist in the deck"
+        ),
+        empty_error=(
+            f"measurement '{name}' produced no stress: the voltage "
             "vector yielded no samples"
-        )
+        ),
+        rawfile_label="stress rawfile",
+    )
+    if columns is None:
+        return StressOutcome(error=error)
     outcome = reduce_stress(
-        [point[0] for point in points],
-        [point[1] for point in points],
-        start=_window_bound(name, body, "from"),
-        stop=_window_bound(name, body, "to"),
+        *columns,
+        start=sim_window.window_bound(name, body, "from", form="stress"),
+        stop=sim_window.window_bound(name, body, "to", form="stress"),
     )
     if outcome.error is not None:
         outcome.error = f"measurement '{name}': {outcome.error}"

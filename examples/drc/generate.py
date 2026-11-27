@@ -55,6 +55,13 @@ def build() -> kdb.Layout:
     top.shapes(diff).insert(kdb.Box(3000, 0, 3200, 200))
     top.shapes(licon).insert(kdb.Box(3015, 15, 3185, 185))
 
+    # li1.drawing (67/20) landing over the licon1: sky130's
+    # li1.enclosing.licon1.1 requires every licon1 to be covered (#5737), so a
+    # bare cut would report a third, unseeded violation.
+    li1 = layout.layer(67, 20)
+    layout.set_info(li1, kdb.LayerInfo(67, 20, "li1.drawing"))
+    top.shapes(li1).insert(kdb.Box(2900, -100, 3300, 300))
+
     # met1.drawing (68/20): a clean, wide bar -- passes every rule.
     met1 = layout.layer(68, 20)
     layout.set_info(met1, kdb.LayerInfo(68, 20, "met1.drawing"))

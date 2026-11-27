@@ -3,8 +3,7 @@
 Option parsing, the KLayout-internal-error-tolerant ``combine_devices()``
 wrapper, the parameter-conservation/correction helpers, series-fold
 disclosure, and the netlist flatten/purge helpers. Split out of ``lvs.py``
-(the same decomposition as ``lvs_power.py``/``lvs_mismatch.py``); the
-names are re-imported there, so ``klayout_tools.lvs`` keeps exposing them.
+(the same decomposition as ``lvs_power.py``/``lvs_mismatch.py``).
 """
 
 from __future__ import annotations
@@ -14,6 +13,15 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from ._jsonnum import is_int
+from .lvs_base import (
+    CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED,
+    CATEGORY_DEVICE_COMBINE_INCOMPLETE,
+    CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED,
+    CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED,
+    CATEGORY_TOPOLOGY_FLATTENED,
+    LvsError,
+)
 from .lvs_mismatch import _mismatch
 
 if TYPE_CHECKING:
@@ -113,8 +121,6 @@ def _parse_combine_devices(options: Mapping[str, Any]) -> bool | list[str]:
     more likely a mistake than an intent.
     """
 
-    from .lvs import LvsError
-
     value = options.get("combine_devices", False)
     if isinstance(value, bool):
         return value
@@ -159,12 +165,10 @@ def _parse_combine_devices_max_attempts(options: Mapping[str, Any]) -> int:
     whole point of exposing it.
     """
 
-    from .lvs import LvsError
-
     if "combine_devices_max_attempts" not in options:
         return _COMBINE_DEVICES_MAX_ATTEMPTS
     value = options["combine_devices_max_attempts"]
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise LvsError(
             "options.combine_devices_max_attempts must be a positive integer; "
             f"got {value!r}"
@@ -220,8 +224,6 @@ def _parse_combine_devices_per_circuit(
     ``options.combine_devices`` (enforced by ``run_lvs`` itself, not here,
     so the error names both option paths together).
     """
-
-    from .lvs import LvsError
 
     if "combine_devices_per_circuit" not in options:
         return None
@@ -288,8 +290,6 @@ def _unmatched_combine_devices_per_circuit_warnings(
     """Build the ``combine_devices_per_circuit.unmatched`` warning entries
     for ``unmatched_patterns`` (issue #1552) -- see
     :func:`_resolve_combine_devices_per_circuit_targets`."""
-
-    from .lvs import CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED
 
     return [
         _mismatch(
@@ -363,8 +363,6 @@ def _combine_circuit_devices_safely(
     combine_incomplete:`` gating (see ``run_lvs``).
     """
 
-    from .lvs import CATEGORY_DEVICE_COMBINE_INCOMPLETE
-
     warnings: list[dict[str, Any]] = []
     combined_circuit_names: list[str] = []
     other_side = "reference" if side == "layout" else "layout"
@@ -418,8 +416,7 @@ def _combine_circuit_devices_safely(
 
 
 def _validate_combine_device_classes(
-    class_names: list[str],
-    netlists: Mapping[str, kdb.Netlist],
+    class_names: list[str], netlists: Mapping[str, kdb.Netlist]
 ) -> None:
     """Reject a list-valued ``options.combine_devices`` naming a device class
     that exists on **neither** side (issue #1370).
@@ -440,8 +437,6 @@ def _validate_combine_device_classes(
     model), and restricting to it there is exactly the asymmetry a caller
     reaching for this option may be trying to express.
     """
-
-    from .lvs import LvsError
 
     known: dict[str, str] = {}
     for netlist in netlists.values():
@@ -500,30 +495,24 @@ def _combine_failure_identifiers(
     ``mismatches[]`` fields (issue #1370), resolving each against ``netlist``
     where the message alone is not enough.
 
-    The message embeds three fields --
-    ``name=<device>, circuit=<circuit>, terminal=<terminal>`` (see
-    :data:`_COMBINE_DEVICES_ERROR_FIELDS_RE`) -- which are parsed and then
-    resolved as far as the (partially combined) netlist allows:
-
-    * ``circuit`` -- taken straight from the message, on ``side``'s key.
-    * ``device`` -- the named device, when KLayout printed a name *and* that
-      device is still present in the named circuit; its ``class`` is that
-      device's device-class name.
-    * ``net`` -- the net wired to the reported terminal of that device.
+    The message embeds ``name=<device>, circuit=<circuit>,
+    terminal=<terminal>`` (see :data:`_COMBINE_DEVICES_ERROR_FIELDS_RE`),
+    parsed and resolved as far as the (partially combined) netlist allows:
+    ``circuit`` straight from the message; ``device`` the named device when
+    KLayout printed a name *and* it is still present in the named circuit
+    (its ``class`` that device's device-class name); ``net`` the net wired
+    to the reported terminal of that device.
 
     KLayout frequently reports an **empty** ``name=`` (the device is mid-
-    removal when the invariant trips, so there is nothing to print). In that
-    case the device's own name is unrecoverable, but the *class* usually is
-    not: if exactly one device class present in the named circuit declares a
-    terminal with the reported name, that class is the failing group's class,
-    and it is reported as ``device.class`` with both name keys ``null`` (the
-    same shape ``device.body_unverified`` already uses for a class-level,
-    instance-less finding). Anything that cannot be resolved this way stays
-    ``null`` -- never guessed.
+    removal when the invariant trips). The device name is then
+    unrecoverable, but the *class* usually is not: if exactly one device
+    class present in the named circuit declares a terminal with the
+    reported name, that class is reported as ``device.class`` with both
+    name keys ``null`` (the shape ``device.body_unverified`` uses).
+    Anything else stays ``null`` -- never guessed.
 
-    Returns the ``_mismatch`` keyword arguments as a dict, always including
-    a ``details`` block with the parsed terminal name and KLayout's raw
-    message, so a caller has the unparsed original too.
+    Returns the ``_mismatch`` keyword arguments, always with a ``details``
+    block carrying the parsed terminal name and KLayout's raw message.
     """
     match = _COMBINE_DEVICES_ERROR_FIELDS_RE.search(message)
     device_name = (match.group("device").strip() if match else "") or None
@@ -552,7 +541,13 @@ def _combine_failure_identifiers(
         if terminal_name:
             net = _net_for_terminal_or_none(device, terminal_name)
             if net is not None:
-                net_field = {side: net.expanded_name(), other: None}
+                # Issue #5833: pre-compare finding -- ids null (none recorded yet).
+                net_field = {
+                    side: net.expanded_name(),
+                    other: None,
+                    "layout_id": None,
+                    "reference_id": None,
+                }
     elif circuit is not None and terminal_name:
         class_names = _device_classes_declaring_terminal(circuit, terminal_name)
         if len(class_names) == 1:
@@ -855,8 +850,6 @@ def _combine_devices_safely(
     unchanged immediately (no retry), so an unrelated failure is never
     silently swallowed or masked as this issue's shape.
     """
-
-    from .lvs import CATEGORY_DEVICE_COMBINE_INCOMPLETE
 
     # Issue #2374: captured before attempt 0 mutates `netlist` in place, so
     # every *retry* below copies from the pristine pre-combine state rather
@@ -1283,8 +1276,6 @@ def _correct_combine_parameters(
 
     import klayout.db as kdb_module
 
-    from .lvs import CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
-
     rules = _combine_conservation_rules(kdb_module)
     expected = _combine_parameter_expectations(pre_combine_netlist, rules)
     survivors = _combine_group_survivors(netlist, rules, circuit_names)
@@ -1397,8 +1388,6 @@ def _series_fold_offset_absorbed_warnings(
     nothing).
     """
 
-    from .lvs import CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED
-
     offsets = {
         resistor.name.lower(): (resistor.fixed_offset_ohm, resistor.end_term_ohm_um)
         for resistor in deck.resistors
@@ -1469,7 +1458,9 @@ def _series_fold_offset_absorbed_warnings(
     return warnings
 
 
-def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
+def _flatten_netlist_safely(
+    netlist: kdb.Netlist, side: str, keep: list[str] | None = None
+) -> dict[str, Any] | None:
     """Call ``netlist.flatten()``, in-process, on ``side``'s netlist (issue
     #1085's ``options.flatten_reference``/``options.flatten_layout``).
 
@@ -1485,13 +1476,11 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     `reference.flatten`" section) -- not a partial result a caller can act
     on.
 
-    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten: "After
-    calling this method, only the top circuits will remain" -- every
-    subcircuit-call instance is substituted in-place, in-process. Called
-    here, before :func:`_select_circuit`, so a caller-declared ``top`` name
-    still resolves normally afterwards whenever it already named a genuine
-    top-level circuit (the common case -- the design's own top level, not
-    an interior leaf that flatten would have inlined away).
+    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten ("only the
+    top circuits will remain"): every subcircuit-call instance is
+    substituted in-place. Called here, before :func:`_select_circuit`, so a
+    caller-declared ``top`` still resolves if it named a genuine top
+    circuit. ``keep`` (#5322) globs spare matching circuits (lvs_flatten).
 
     Symmetric and opt-in on **both** sides (``options.flatten_reference``
     for the reference netlist, ``options.flatten_layout`` for the layout
@@ -1510,11 +1499,9 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     layout side), in which case there is nothing to disclose.
     """
 
-    from .lvs import CATEGORY_TOPOLOGY_FLATTENED
+    from .lvs_flatten import flatten_keeping
 
-    circuits_before = sum(1 for _ in netlist.each_circuit())
-    netlist.flatten()
-    circuits_after = sum(1 for _ in netlist.each_circuit())
+    circuits_before, circuits_after, kept_note = flatten_keeping(netlist, keep)
     if circuits_before == circuits_after:
         return None
     return _mismatch(
@@ -1525,49 +1512,9 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
         f"{circuits_after} top-level circuit(s), substituting every "
         "subcircuit-call instance in place -- this compare verified "
         "topology only after removing the original hierarchy boundaries on "
-        f'this side (see docs/cli/lvs.md, "topology.flattened")',
+        f'this side{kept_note} (see docs/cli/lvs.md, "topology.flattened")',
         side,
     )
-
-
-def _hierarchy_mismatch_warnings(
-    layout_netlist: kdb.Netlist,
-    reference_netlist: kdb.Netlist,
-    flatten_reference: bool,
-) -> list[dict[str, Any]]:
-    """Issue #4548: advisory ``topology.hierarchy_mismatch`` warning.
-
-    A flat layout netlist (``klt extract`` is flat-only) against a
-    hierarchical reference reports only per-circuit ``topology`` "could not
-    be matched" errors, which read like a connectivity problem. When the
-    layout side is a single circuit, the reference still has more than one
-    circuit (call after ``_prune_extra_top_circuits`` on both sides) and
-    ``options.flatten_reference`` is not set, disclose that the cause is
-    structural and name the option that compares the two. Returns a
-    one-entry list, else an empty one. Warning-only: never changes ``status``.
-    """
-
-    from .lvs import CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
-
-    if flatten_reference:
-        return []
-    layout_circuits = sum(1 for _ in layout_netlist.each_circuit())
-    reference_circuits = sum(1 for _ in reference_netlist.each_circuit())
-    if layout_circuits != 1 or reference_circuits <= 1:
-        return []
-    return [
-        _mismatch(
-            CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH,
-            "warning",
-            f"the layout netlist is flat (1 circuit) but the reference netlist is "
-            f"hierarchical ({reference_circuits} circuits); per-circuit topology "
-            "errors here may stem from that structural difference rather than a "
-            "connectivity defect -- retry with options.flatten_reference: true to "
-            "compare the flattened reference against the flat layout "
-            '(see docs/cli/lvs.md, "topology.hierarchy_mismatch")',
-            "reference",
-        )
-    ]
 
 
 def _purge_emptied_nets(netlist: kdb.Netlist) -> None:

@@ -1512,16 +1512,15 @@ EXTRACTION_DECK = ExtractionDeck(
     # are themselves symlinks into the pinned sibling `ihp-sg13g2` checkout,
     # see the module docstring, so this is the *same* derivation, not merely
     # an analogous one). Issue #1414 (the cmos5l sibling of sg13g2.py's own
-    # #1273 fix, mirroring gf180mcu's #1084): rather than leaving those
-    # well/substrate ties structurally unrecognisable, this deck declares
-    # `tap_nplus`/`tap_pplus` -- the `nSD` (7/0) / `pSD` (14/0) implant
-    # layers `mos_extraction.lvs` itself keys NMOS/PMOS source-drain off of
-    # (`nsd_fet`/`psd_fet`, cited by `nfet_provenance`/`pfet_provenance`
-    # above) -- so `extract.py` can *derive* an equivalent tap region: an
-    # `nSD`-covered Activ shape *inside* NWell is a well tie (ties the PMOS
-    # body to the well's real net -- opposite doping from the PMOS's own
-    # S/D, which is `pSD`-covered Activ inside the same NWell, so the two
-    # can never collide), and a `pSD`-covered Activ shape *outside* every
+    # #1273 fix, mirroring gf180mcu's #1084): rather than leaving those ties
+    # structurally unrecognisable, this deck declares `tap_nplus`/`tap_pplus` -- the
+    # `nSD` (7/0) / `pSD` (14/0) implant layers `mos_extraction.lvs` itself keys
+    # NMOS/PMOS source-drain off of (`nsd_fet`/`psd_fet`, cited by
+    # `nfet_provenance`/`pfet_provenance` above) -- so `extract.py` can *derive* an
+    # equivalent tap region: an `nSD`-covered Activ shape *inside* NWell is a well
+    # tie (ties the PMOS body to the well's real net -- opposite doping from the
+    # PMOS's own S/D, which is `pSD`-covered Activ inside the same NWell, so the
+    # two can never collide), and a `pSD`-covered Activ shape *outside* every
     # NWell is a substrate tie (ties the NMOS body to the substrate's real
     # net -- opposite doping from the NMOS's own S/D, which is `nSD`-covered
     # Activ outside NWell). A layout drawing no tie still extracts exactly
@@ -1533,12 +1532,13 @@ EXTRACTION_DECK = ExtractionDeck(
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
+    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345)
+    substrate_isolation_needs_nwell_ring=True,  # #5359: needs a closing NWell ring
     # Issue #3831: the PDK's own stdcells (`sg13cmos5l_inv_1`, ...) draw no
     # `nSD` (7/0) at all -- n+ is the family's default doping, so the well
-    # tie is an Activ inside NWell with no `pSD` over it. Same upstream form
-    # (`nactiv = activ.not(psd_drw...)`) and same shared-symlink derivation
-    # sg13g2.py's #2591 `tap_nplus_complement` already accepts; `tap_nplus`
-    # above stays so a layout drawing an explicit `nSD` extracts unchanged.
+    # tie is an Activ inside NWell with no `pSD` over it (same upstream form,
+    # `nactiv = activ.not(psd_drw...)`, as sg13g2.py's #2591
+    # `tap_nplus_complement`); `tap_nplus` above stays for explicit `nSD`.
     tap_nplus_complement=(14, 0),  # pSD.drawing -- absence marks an n+ well tie
     well_label=(31, 2),  # NWell.pin
     # Issue #1476 (the cmos5l sibling of sg13g2.py's own poly_label fix, same
@@ -1785,7 +1785,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rsil",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # PolyRes.drawing
+            marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
+            topology="abutting_heads",  # #3094 (as sg13g2 #2679): GatPoly = heads
             # `rsilG2_rspec` in cmos5l's own sg13cmos5l_tech.json (7.0;
             # `rsil_code.py` reads the `G2` key unconditionally, and the
             # non-G2 `rsil_rspec` carries the same 7.0 value, so this one
@@ -1812,8 +1813,7 @@ EXTRACTION_DECK = ExtractionDeck(
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
             # `9.0e-6/w + 7.0*l/(w + 1.0e-8)` (SI, w/l in metres).
-            # `end_term_ohm_um` and
-            # `width_offset_um` are the end-term and line-width-delta
+            # `end_term_ohm_um`/`width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=9.0,
             width_offset_um=0.01,
@@ -1824,7 +1824,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rppd",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # PolyRes.drawing
+            marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
+            topology="abutting_heads",  # #3094 (as sg13g2 #2679): GatPoly = heads
             # `rppdG2_rspec` in cmos5l's own sg13cmos5l_tech.json (260.0,
             # vs the non-G2 `rppd_rspec`'s 250.0 for the older SG13
             # flavour) -- selected because cmos5l's own `techName`,
@@ -1850,8 +1851,7 @@ EXTRACTION_DECK = ExtractionDeck(
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
             # `70.0e-6/w + 260.0*l/(w + 6.0e-9)` (SI, w/l in metres).
-            # `end_term_ohm_um` and
-            # `width_offset_um` are the end-term and line-width-delta
+            # `end_term_ohm_um`/`width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=70.0,
             width_offset_um=0.006,
@@ -1862,7 +1862,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rhigh",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # PolyRes.drawing
+            marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
+            topology="abutting_heads",  # #3094 (as sg13g2 #2679): GatPoly = heads
             # cmos5l's own sg13cmos5l_tech.json reproduces sg13g2's own
             # `rhigh` self-contradiction exactly: `rhigh_rspec` is 1300.0
             # while `rhighG2_rspec` is 1360.0, and the two PyCell readers
@@ -1909,8 +1910,7 @@ EXTRACTION_DECK = ExtractionDeck(
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
             # `1.6e-4/w + 1360.0*l/(w - 0.04e-6)` (SI, w/l in metres).
-            # `end_term_ohm_um` and
-            # `width_offset_um` are the end-term and line-width-delta
+            # `end_term_ohm_um`/`width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=160.0,
             width_offset_um=-0.04,

@@ -28,6 +28,7 @@ from typing import Any
 
 from . import sim_staging
 from ._provenance import sha256_file
+from .sim_errors import SimError
 
 _SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<name>\S+)", re.IGNORECASE)
 _ENDS_RE = re.compile(r"^\s*\.ends\b", re.IGNORECASE)
@@ -310,3 +311,28 @@ def apply_overrides(
     for entry in report:
         entry["stripped_sha256"] = sha256_file(copy_of[entry.pop("_path")])
     return copy_of.get(top, top), report
+
+
+def refuse_on_host_default(
+    report: Any,
+    *,
+    backend_is_offhost: bool,
+    backend: str,
+    backend_from_host_default: bool,
+    n_points: int,
+) -> None:
+    """Issue #3919: a multi-corner request with ``netlist_overrides`` cannot
+    follow a host-default off-host backend (the rewritten closure stays here)."""
+    if (
+        report is not None
+        and backend_from_host_default
+        and backend_is_offhost
+        and n_points > 1
+    ):
+        raise SimError(
+            "request.netlist_overrides cannot run on the host-default "
+            f"{backend!r} backend (the rewritten include closure is not "
+            "forwarded to remote/batch workers) and this request has "
+            f"{n_points} corners; run a single corner, or pass "
+            "--backend local explicitly"
+        )

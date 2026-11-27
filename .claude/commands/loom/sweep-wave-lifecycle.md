@@ -1,3 +1,6 @@
+---
+disable-model-invocation: true
+---
 # Sweep — Wave lifecycle (Modes A and B only — issue-set)
 
 > **Reference file for [`sweep.md`](sweep.md)**, the `/loom:sweep` dispatcher.
@@ -55,7 +58,7 @@ MAIN_CLEAN_BASELINE=".loom/sweep-checkpoint/main-clean-baseline-${RUN_ID}.txt"
 ./.loom/scripts/check-main-clean.sh --snapshot "$MAIN_CLEAN_BASELINE"
 ```
 
-Capture this **once, before wave 1 — never per-wave**. The baseline must reflect the pre-sweep state so that if an early wave contaminates main and the dirt is not reverted, every later wave's backstop still flags it (a per-wave re-snapshot would silently absorb that contamination into the "pre-existing" set). The baseline path is **keyed by this sweep's `RUN_ID`** (`main-clean-baseline-${RUN_ID}.txt`, not a fixed `main-clean-baseline.txt`) so that a **concurrent peer `/loom:sweep` never reads or clobbers this run's baseline** (#3768): before the RUN_ID keying, a second sweep re-snapshotting the shared fixed path mid-run of the first could silently absorb real contamination into the "pre-existing" set. The path is a per-sweep-run transient under `.loom/sweep-checkpoint/` whose lifetime is this sweep invocation — enforced by `sweep-run-registry.sh cleanup "$RUN_ID"` at sweep end (Step 0a), with `loom-daemon clean` as the bulk backstop for crashed runs (#4450); do not delete it mid-sweep. `.loom/sweep-checkpoint/` is gitignored in a current install, but a consumer repo's installed loom-managed `.gitignore` block can drift and omit it — so rather than depend on the consumer's `.gitignore` being up to date, `check-main-clean.sh` also excludes `.loom/sweep-checkpoint/` (and the other Loom-owned transient state paths) internally (#3778), so a stale consumer `.gitignore` no longer false-positives the backstop on it. `check-main-clean.sh` needs no change — it already accepts an arbitrary `--snapshot FILE` / `--baseline FILE` path; only this caller-side path construction is keyed by `RUN_ID`. If the snapshot step fails for any reason, proceed anyway — step 4's backstop falls back to the whole-status hard-fail when the baseline file is missing (fail-safe, never a silent pass).
+Capture this **once, before wave 1 — never per-wave**. The baseline must reflect the pre-sweep state so that if an early wave contaminates main and the dirt is not reverted, every later wave's backstop still flags it (a per-wave re-snapshot would silently absorb that contamination into the "pre-existing" set). The baseline path is **keyed by this sweep's `RUN_ID`** (`main-clean-baseline-${RUN_ID}.txt`, not a fixed `main-clean-baseline.txt`) so that a **concurrent peer `/loom:sweep` never reads or clobbers this run's baseline** (#3768): before the RUN_ID keying, a second sweep re-snapshotting the shared fixed path mid-run of the first could silently absorb real contamination into the "pre-existing" set. The path is a per-sweep-run transient under `.loom/sweep-checkpoint/` whose lifetime is this sweep invocation — enforced by `sweep-run-registry.sh cleanup "$RUN_ID"` at sweep end (Step 0a), with `loom-daemon clean` as the bulk backstop for crashed runs (#4450); do not delete it mid-sweep. `.loom/sweep-checkpoint/` is gitignored in a current install, but a consumer repo's installed loom-managed `.gitignore` block can drift and omit it — so rather than depend on the consumer's `.gitignore` being up to date, `check-main-clean.sh` also excludes `.loom/sweep-checkpoint/` (and the other Loom-owned transient state paths) internally (#3778), so a stale consumer `.gitignore` no longer false-positives the backstop on it. `check-main-clean.sh` needs no change — it already accepts an arbitrary `--snapshot FILE` / `--baseline FILE` path; only this caller-side path construction is keyed by `RUN_ID`. If the snapshot step fails for any reason, proceed anyway — step 4's backstop falls back to the whole-status hard-fail when the baseline file is missing (fail-safe, never a silent pass); with `--quarantine`, a missing baseline now refuses (exit 3) and lists the candidate paths instead of stashing them (#13535).
 
 ### Checkpoint-driven resume (#3373)
 
@@ -132,6 +135,7 @@ For each issue `N` in the wave, before any role skill is invoked:
      --jq '{state, labels: [.labels[].name], linked_prs: [.closedByPullRequestsReferences[].url]}'
    ```
    - If the issue is closed, skip it (log a warning). It does NOT contribute to this wave.
+   - **Split-parent skip (#13635).** Run `loom-daemon forge parent split-state --parent N` before claiming. Exit `0` (`SPLIT_ALL_CLOSED #a #b`: children exist and every one is closed) means the children carry the code: skip it, log "split parent, all children closed", and release any `loom:building` claim WITHOUT adding `loom:issue` (it re-enters intake/curation, where Curator closes it as already covered). Exit `1` (no children, or one is open) proceeds. Any other exit is unanswered, not an all-clear: treat it like exit `0` for the label rules above (never add `loom:issue` on its account). Does NOT contribute to this wave.
    - **`loom:epic` skip (#8881).** If the issue carries the label `loom:epic` — exact match; `loom:epic-phase` is a normal buildable unit and is NOT skipped — skip it: a tracking container has no buildable work. Log a warning with reason "needs decomposition (run Champion/Architect)". Does NOT contribute to this wave. (Conservative skip: under the `all` override above the taxonomy's fan-out row applies instead.) **This overrides Step 1a below**: an epic is skipped even when `--claim-owned` / `LOOM_SWEEP_CLAIM_OWNED` names `N`, and even when the operator listed `N` explicitly. It does not dispute that the claim is this session's own — it releases it. **NEVER add `loom:issue` to a skipped epic**: that re-arms the work finder, which re-claims it — a claim/release loop.
      ```bash
      # CLAIM_OWNED = the N of `--claim-owned N`, when passed.
@@ -142,7 +146,7 @@ For each issue `N` in the wave, before any role skill is invoked:
      fi
      ```
    - **Step 1a — daemon self-claim check (#3823, flag added #4111). MANDATORY: evaluate this FIRST, for every issue in the wave, before the claim-CAS probe immediately below — not only when a `loom:building` label happens to be noticed on `N`.** Two equivalent signals, either sufficient on its own:
-     - `--claim-owned N` was present in this invocation's `$ARGUMENTS` (stripped during argument classification — see "Optional flags"), where `N` is the issue currently being pre-flighted; OR
+     - `--claim-owned N` was present in this invocation's arguments (stripped during argument classification — see "Optional flags"), where `N` is the issue currently being pre-flighted; OR
      - the env var `LOOM_SWEEP_CLAIM_OWNED` is set and equals `N`.
 
      If either is true for `N`: `SweepRegistry::dispatch` flipped `loom:issue → loom:building` on the forge *immediately before spawning THIS session* (for immediate external visibility of the claim), and told this session so directly through two independent channels — the flag is literally part of the prompt this session is reading, the env var is in this session's own process environment. The `loom:building` label on `N` is therefore **this session's OWN daemon claim**, full stop. **Do NOT skip (sole exception: the `loom:epic` skip above). Do NOT run the claim-CAS probe below for this issue.** Proceed straight to step 2 as if you had just claimed `N` yourself, and do **not** reason further about `loom:building` label timing, `loom-daemon status` output, PID tables, or worktree presence to "double-check" whether another worker owns it — issue #4111 is precisely a daemon-dispatched child that built a plausible, evidence-citing case that it was racing a competing worker using those exact signals, while the conclusive `--claim-owned`/`LOOM_SWEEP_CLAIM_OWNED` marker for its own issue sat unread the entire time. Once either signal names `N`, no other signal can override that ownership.
@@ -413,7 +417,7 @@ If the builder failed (no PR opened), do NOT write a checkpoint — leave the ch
      ./.loom/scripts/record-noop-release.sh N --reason "$(head -c 200 .loom/worktrees/issue-N/.no-changes-needed)"
      ```
      This call is best-effort and defensive, mirroring `build-gate.sh`'s `dispatch-backoff record` arm (#6192): a missing, unreachable, or older `loom-daemon` makes it a silent no-op and never fails the sweep.
-  2. **Release the claim** back to `loom:issue` — do NOT close the issue (the marker records "nothing to do this pass," not "this issue is resolved"):
+  2. **Release the claim** back to `loom:issue` — do NOT close the issue (the marker records "nothing to do this pass," not "this issue is resolved"). **Exception — split parent (#13635):** if `loom-daemon forge parent split-state --parent N` exits `0` (children exist and all are closed) or `2` (children unreadable, fail closed), do NOT add `loom:issue`: only `gh issue edit N --remove-label "loom:building"`, and say in the comment that the children carry the code, so Curator can close it as already covered. Returning it to `loom:issue` is what let the same tracker be re-dispatched.
      ```bash
      gh issue edit N --remove-label "loom:building" --add-label "loom:issue"
      ./.loom/scripts/post-comment.sh N --body "Builder found no actionable changes this pass: $(head -c 200 .loom/worktrees/issue-N/.no-changes-needed). Releasing the claim; a self-reported no-op cooldown was recorded so this issue is not immediately re-offered (#6670)."
@@ -491,7 +495,14 @@ This section is the single home for the opt-in `--auto-stack` behavior. It is en
 # and EXCLUDES the `- [ ]` task-list form (not a stacking declaration).
 # Two-stage (#4508): select matching lines, tolerant of markdown emphasis/colon
 # before the first #N, then extract every #N on those lines.
-echo "$BODY" | grep -E '(Depends on|Requires)[*_:[:space:]]*#[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -u
+# The sed stage between them is the #14732/#14750 parent-reference rule, identical
+# to champion-common.md's extract_blocker_refs: a reference introduced by
+# `Part of` (case-insensitive, optionally followed by the one bounded word `Epic`)
+# names the issue's PARENT, not a stacking edge, and is masked before extraction —
+# keys off the introducing phrase, never the number, and admits no wider word run.
+echo "$BODY" | grep -E '(Depends on|Requires)[*_:[:space:]]*#[0-9]+' \
+  | sed -E 's/[Pp][Aa][Rr][Tt] [Oo][Ff][*_:.[:space:]]*([Ee][Pp][Ii][Cc][*_:.[:space:]]*)?([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+/ /g' \
+  | grep -oE '#[0-9]+' | tr -d '#' | sort -u
 ```
 
 A matched `#A` becomes a **stacking edge only when `#A` is also a member of this sweep invocation's own deduplicated candidate list.** A `Depends on #A` naming an issue **outside** the candidate set is left completely untouched — it is not an edge, it does not stack, and it flows through the existing `loom:blocked` handling exactly as today (this feature never touches out-of-set references). This "same-candidate-set only" restriction is load-bearing: it is what keeps auto-stack scoped to one sweep's own resolved set and prevents it from silently reaching out to arbitrary external issues.
@@ -564,7 +575,7 @@ post_wave_integration_gate()                    # step 8 — buildGate-against-m
 - Otherwise (`builder-done`, or no checkpoint yet because Builder just ran in this wave), run Judge normally.
 
 - Load and follow the instructions in `.claude/commands/loom/judge.md` for the PR.
-- **In-session Judge dispatch (#13222):** do not hand the Judge the orchestrator's run id as `LOOM_SWEEP_ID` — the gate reads the review start from a `step-judge-<pr>-<epoch>` id or the PR judge lease, and a run id that predates the Curator's body edit makes `post-verdict.sh` refuse every approval (exit 7).
+- **In-session Judge dispatch (#13222):** do not hand the Judge the orchestrator's run id as `LOOM_SWEEP_ID` — the gate reads the review start from a `step-judge-<pr>-<epoch>` id or the PR judge lease, and a run id that predates the Curator's body edit makes `post-verdict.sh` refuse every approval (exit 7). Brief the Judge to run `loom-daemon lease pr claim <pr> --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"` (and `release`) with that same `--watch-pid` value on every call (#13264): without it the claim records `pr-lease-unknown` and `post-verdict.sh` refuses the approval as a peer's lease (exit 10).
 - The judge uses `gh pr comment` (NOT `gh pr review --approve`) because GitHub's self-review API restriction applies — see `judge.md` for the full explanation.
 - Like the Builder above, the Judge files its own follow-up issues for out-of-scope discoveries via `./.loom/scripts/create-issue.sh` — see `judge.md` § "Creating Follow-up Issues"; the sweep orchestrator does not suppress this.
 - **If a previous Judge attempt for this PR died mid-flight without writing a fresh checkpoint** (rate limit, crash), re-verify forge state and complete only the missing steps before re-dispatching — see "Mid-phase-death recovery" above.
@@ -645,10 +656,10 @@ Overlapping PRs in a wave are thus **serialized-with-revalidation**; disjoint PR
 Use the merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
 
 ```bash
-LOOM_AUTO_MERGE_TIMEOUT=420 ./.loom/scripts/merge-pr.sh <PR_NUMBER> --auto
+./.loom/scripts/merge-pr.sh <PR_NUMBER> --auto
 ```
 
-**Give that call a 600000 ms Bash-tool timeout (#9395)**: the 420s pin must stay strictly under its caller's, or the tool kills the script and no exit code reaches the branches below. Raise neither alone. Why the pin but no `CHAMPION-MERGE-OUTCOME` sentinel (#9096): [exit codes](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
+That call waits on no checks (#12063), so the default Bash-tool timeout suffices. Why no `CHAMPION-MERGE-OUTCOME` sentinel (#9096): [exit codes](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
 
 It merges via the forge API and cleans the worktree. `--auto` waits for the head's check-runs to settle, re-validates `loom:pr` and the head SHA, then merges **in this process** — never via the server-side queue, which re-reads neither once armed (#8410). An already-settled head merges at once, so `--auto` is always safe to pass (#3820).
 

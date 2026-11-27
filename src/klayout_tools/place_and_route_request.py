@@ -2,13 +2,9 @@
 resolvers that take a request dict (or one of its sections) and return
 validated values or raise :class:`PlaceAndRouteError`.
 
-Split out of ``place_and_route.py`` (issue #3699), following the sibling-module
-precedent of ``place_and_route_sta.py`` (issue #1808). Nothing here invokes
-OpenROAD or emits a stage script -- that stays in ``place_and_route.py``. Every
-public-by-convention name here is re-exported from
-:mod:`klayout_tools.place_and_route`, so ``place_and_route.<name>`` (the CLI,
-:mod:`klayout_tools.eval`, the batch backend and the test suite) keeps
-resolving unchanged.
+The main :mod:`klayout_tools.place_and_route` module re-exports these validators
+for its CLI, batch backend, eval and test callers. Stage rendering lives in
+:mod:`klayout_tools.place_and_route_script`.
 
 :class:`PlaceAndRouteError` and the validation-only tables
 (``_MACRO_ORIENTATIONS``, ``_FLOORPLAN_METHOD_FIELDS``,
@@ -21,16 +17,43 @@ inside the validators that read them.
 
 from __future__ import annotations
 
-import math
 import os
 import re
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from . import macros as macro_spec
+from . import place_and_route_groups as groups_spec
+from ._dont_use import validate_patterns
+from ._jsonnum import is_finite_number, is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
+from .netlist_construct_scan import (
+    _NETLIST_BEHAVIOURAL_RE,
+    _NETLIST_SIGNED_DECL_RE,
+    _NETLIST_X_CONSTANT_RE,
+    _behavioural_statement_message,
+    _blank_verilog_comments,
+    _strip_verilog_comments,
+)
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .place_and_route_asap7 import RVT_LIBRARIES, RVT_LIBRARY_DEFAULTS
+from .place_and_route_base import STAGE_ORDER
+from .place_and_route_base import PlaceAndRouteError as PlaceAndRouteError
+from .place_and_route_cell_libraries import _NO_TAPCELL_LIBRARIES
+from .place_and_route_clock import ClockConstraints, validate_clock_constraints
+from .place_and_route_hints import NETLIST_HINT
+from .place_and_route_layers import (
+    _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
+)
+from .place_and_route_layers import (
+    _signal_layer_range,
+)
+from .place_and_route_layers import (
+    _signal_routing_layers as _signal_routing_layers,
+)
+from .place_and_route_macro_halo import validate_macro_margin
 
 #: Valid ``request.macros[].orientation`` values -- OpenROAD's own
 #: orientation vocabulary (the same set ``place_macro``/``place_cell``
@@ -48,82 +71,6 @@ _FLOORPLAN_METHOD_FIELDS: dict[str, tuple[str, ...]] = {
     "utilization": ("utilization_pct",),
     "explicit": ("die_area_um", "core_area_um"),
     "def": ("def_path",),
-}
-
-
-#: Per-cell-library **routing-layer stack**, bottom-up -- every layer the
-#: platform's own tech LEF declares ``TYPE ROUTING``, in stack order (issue
-#: #2473). :data:`_ROUTING_LAYER_RANGE` above names only the two endpoints of
-#: the *signal* range ``set_routing_layers -signal`` opens; this table is what
-#: lets :func:`_signal_routing_layers` expand that range into the concrete
-#: layer set, and therefore what lets :func:`_validate_io` reject an
-#: ``io.layer_h``/``io.layer_v`` naming a real routing layer the router is
-#: nevertheless never allowed to route signals on.
-#:
-#: Why that matters (issue #2473's own root cause): a top-level pin is only
-#: reachable if the router can draw *conductor of that layer* up to it.
-#: ``place_pins`` will happily place a port on a below-range layer, and
-#: OpenROAD then writes the port rectangle to that layer's LEF ``PIN``/
-#: ``LEFPIN`` purpose -- for sky130's ``li1`` that is GDS ``67/16``, not the
-#: ``67/20`` conductor an extraction deck reads -- while the actual routing
-#: reaches the cell pin from above through ``mcon``. The result is a DRC-clean
-#: GDS whose top-level pins do not electrically exist in ``klt extract``'s
-#: output, with `klt lvs` still reporting ``"match"`` because its structural
-#: comparer does not need pins. Rejecting the request is two minutes of
-#: routing cheaper than discovering that downstream.
-#:
-#: Same verified-not-guessed posture as every other reference table in this
-#: module, one source per entry:
-#:
-#: - ``sky130_fd_sc_hd`` -> ``li1``, ``met1``..``met5``. Verified live
-#:   against a real sky130A install (volare,
-#:   ``libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef``): its
-#:   six ``TYPE ROUTING`` layers are ``li1``, ``met1``, ``met2``, ``met3``,
-#:   ``met4``, ``met5``, declared in that order. ``li1`` sitting *below*
-#:   this library's own ``MIN_ROUTING_LAYER ?= met1`` is exactly what
-#:   :data:`_ROUTING_LAYER_RANGE`'s own docstring already records ("its
-#:   cells pin out on ``li1``, below ``met1`` entirely").
-#: - ``gf180mcu_fd_sc_mcu9t5v0``/``gf180mcu_fd_sc_mcu7t5v0`` -> ``Metal1``..
-#:   ``Metal5``, from the same platform tech LEF
-#:   (``lef/gf180mcu_5LM_1TM_9K_9t_tech.lef``) :data:`_ROUTING_LAYER_RANGE`
-#:   already cites for declaring "``Metal1``..``Metal5`` as its five ``TYPE
-#:   ROUTING`` layers", with ``Metal1`` deliberately left out of the signal
-#:   range for pin access.
-#: - ``sg13g2_stdcell`` -> ``Metal1``..``Metal5``, ``TopMetal1``,
-#:   ``TopMetal2``, from the same ``libs.ref/sg13g2_stdcell/lef/
-#:   sg13g2_tech.lef`` :data:`_ROUTING_LAYER_RANGE` already cites for
-#:   declaring "exactly seven routing layers", again with ``Metal1``
-#:   reserved for pin access.
-#:
-#: A ``cell_library`` absent from this table (or whose
-#: :data:`_ROUTING_LAYER_RANGE` endpoints are not both in its stack) simply
-#: skips the check -- an unverified library keeps the pre-#2473 behaviour
-#: rather than being rejected on a guess.
-_ROUTING_LAYER_STACK: dict[str, tuple[str, ...]] = {
-    "sky130_fd_sc_hd": ("li1", "met1", "met2", "met3", "met4", "met5"),
-    "gf180mcu_fd_sc_mcu9t5v0": (
-        "Metal1",
-        "Metal2",
-        "Metal3",
-        "Metal4",
-        "Metal5",
-    ),
-    "gf180mcu_fd_sc_mcu7t5v0": (
-        "Metal1",
-        "Metal2",
-        "Metal3",
-        "Metal4",
-        "Metal5",
-    ),
-    "sg13g2_stdcell": (
-        "Metal1",
-        "Metal2",
-        "Metal3",
-        "Metal4",
-        "Metal5",
-        "TopMetal1",
-        "TopMetal2",
-    ),
 }
 
 
@@ -248,10 +195,9 @@ _ROUTING_LAYER_STACK: dict[str, tuple[str, ...]] = {
 #:   docstring's own "Scope deliberately excluded" note).
 #:
 #: Each entry's ``cell_library`` is the standard-cell library the recipe was
-#: written for; a preset naming a different library than
-#: ``request.pdk.cell_library`` is rejected by
-#: :func:`_resolve_pdn_preset` rather than handed to ``pdngen``, where a
-#: ``Metal4`` strap on a sky130 stack would surface as an obscure engine
+#: written for; a preset naming a different library than ``request.pdk.cell_library``
+#: is rejected by :func:`_resolve_pdn_preset` rather than handed to ``pdngen``,
+#: where a ``Metal4`` strap on a sky130 stack would surface as an obscure engine
 #: error (or, worse, an empty grid the audit then grades ``"partial"``).
 _PDN_PRESETS: dict[str, dict[str, Any]] = {
     "gf180mcu_7t_6M": {
@@ -337,6 +283,7 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
     },
     "asap7sc7p5t": {
         "cell_library": "asap7sc7p5t_28",
+        "also_cell_libraries": RVT_LIBRARIES,
         "source": (
             "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
             "flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl "
@@ -362,9 +309,9 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
             # 0.513. The packaged deck's V4.M5.AUX.2 wants a V4 exactly as
             # wide as M5, and the tech LEF only ships a wide V4 bar for an M5
             # strap of width 0.216 (VIARULE M5_M4widePWR0p864), so M5 is 0.216
-            # wide. Widths + spacings, pitches and offsets are multiples of
-            # the deck's 24 nm (M5) / 32 nm (M6) edge grids; the M6 offset is
-            # measured against a core whose origin is a multiple of 0.96 um.
+            # wide. pdngen measures offsets from the snapped core origin.
+            # The first M5 edge is core_x + 312 - 108 nm (24 nm grid).
+            # The first M6 edge is core_y + 344 - 144 nm (32 nm grid).
             {
                 "layer": "M5",
                 "width_um": 0.216,
@@ -465,41 +412,6 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
-class PlaceAndRouteError(Exception):
-    """Raised when a place-and-route run cannot even reach the requested
-    ``target_stage``: a missing/malformed request file, an unresolvable/
-    unreadable netlist, an unresolvable ``pdk.cell_library``/``corner``/LEF,
-    a floorplan spec naming more than one method, or an OpenROAD engine
-    error partway through a stage.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching ``klt synthesize``'s ``SynthesizeError``. Per the
-    contract spike section 5's "Partial-completion design": a run that
-    reaches (or exceeds) the requested ``target_stage`` is *always* a
-    success (``exit 0``, ``stage_reached`` >= ``target_stage``) even when it
-    stopped short of a *later* stage the request never asked for -- this
-    exception is raised only when a run fails to reach the stage it was
-    actually asked to reach.
-
-    ``code``, ``job_id`` and ``details`` are optional and set only by the
-    ``batch`` backend (issue #3518, mirroring ``NetlistError``): a
-    machine-readable ``error.code`` for the CLI's error envelope, the batch
-    job id, and extra structured envelope fields.
-    """
-
-    def __init__(
-        self,
-        *args: object,
-        code: str | None = None,
-        job_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(*args)
-        self.code = code
-        self.job_id = job_id
-        self.details = details
-
-
 # --------------------------------------------------------------------------- #
 # Request validation
 # --------------------------------------------------------------------------- #
@@ -510,7 +422,7 @@ def _resolve_netlist(netlist: Any, request_dir: str) -> str:
         raise PlaceAndRouteError("request.netlist must be a non-empty string")
     path = netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
     if not os.path.isfile(path):
-        raise PlaceAndRouteError(f"netlist not found: {netlist}")
+        raise PlaceAndRouteError(f"netlist not found: {netlist} ({NETLIST_HINT})")
     try:
         with open(path, "rb"):
             pass
@@ -592,15 +504,15 @@ _TRACK_KEYS = ("x_offset_um", "x_pitch_um", "y_offset_um", "y_pitch_um")
 
 
 def _validate_floorplan_tracks(tracks: Any) -> None:
-    """Issue #4088: validate ``request.floorplan.tracks``, the optional
-    per-layer ``make_tracks`` definitions that replace the bare
-    ``make_tracks`` (which aborts on a tech LEF with a negative ``OFFSET``)."""
+    """Issue #4088/#5671: validate ``request.floorplan.tracks``, the per-layer
+    ``make_tracks`` definitions replacing the bare ``make_tracks`` (negative
+    ``OFFSET`` abort); a layer may repeat, only byte-identical entries error."""
 
     if not isinstance(tracks, list) or not tracks:
         raise PlaceAndRouteError(
             "request.floorplan.tracks must be a non-empty array of objects"
         )
-    seen: set[str] = set()
+    seen: dict[tuple[str, float, float, float, float], int] = {}
     for index, entry in enumerate(tracks):
         where = f"request.floorplan.tracks[{index}]"
         if not isinstance(entry, dict):
@@ -608,23 +520,19 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
         layer = entry.get("layer")
         if not isinstance(layer, str) or not layer:
             raise PlaceAndRouteError(f"{where}.layer must be a non-empty string")
-        if layer in seen:
-            raise PlaceAndRouteError(
-                f"request.floorplan.tracks names layer '{layer}' more than once"
-            )
-        seen.add(layer)
         for key in _TRACK_KEYS:
             value = entry.get(key)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-            ):
+            if not is_finite_number(value):
                 raise PlaceAndRouteError(f"{where}.{key} must be a finite number")
             if key.endswith("pitch_um") and value <= 0:
                 raise PlaceAndRouteError(f"{where}.{key} must be > 0")
             if key.endswith("offset_um") and value < 0:
                 raise PlaceAndRouteError(f"{where}.{key} must be >= 0")
+        if (sig := (layer, *(entry[k] for k in _TRACK_KEYS))) in seen:
+            raise PlaceAndRouteError(
+                f"{where} duplicates request.floorplan.tracks[{seen[sig]}]"
+            )
+        seen[sig] = index
 
 
 def validate_tech_lef_track_offsets(
@@ -659,43 +567,9 @@ def validate_tech_lef_track_offsets(
         )
 
 
-def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:
-    """Expand :data:`_ROUTING_LAYER_RANGE`'s ``"<low>-<high>"`` endpoints for
-    ``cell_library`` into the concrete, ordered set of layers
-    ``set_routing_layers -signal`` actually opens for signal routing (issue
-    #2473), using :data:`_ROUTING_LAYER_STACK` for the stack order.
-
-    ``None`` -- meaning "no opinion, skip any check built on this" -- when
-    either table has no entry for this library, or when the range's own
-    endpoints are not both present in the stack (a table drift this function
-    refuses to paper over by guessing). Never raises: this is a *narrowing*
-    guard's input, and an unverified library must keep behaving exactly as it
-    did before the guard existed.
-    """
-
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import _ROUTING_LAYER_RANGE
-
-    stack = _ROUTING_LAYER_STACK.get(cell_library)
-    layer_range = _ROUTING_LAYER_RANGE.get(cell_library)
-    if stack is None or layer_range is None:
-        return None
-    low, _, high = layer_range.partition("-")
-    if low not in stack or high not in stack:
-        return None
-    low_index = stack.index(low)
-    high_index = stack.index(high)
-    if low_index > high_index:
-        return None
-    return stack[low_index : high_index + 1]
-
-
-def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
-
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import _ROUTING_LAYER_RANGE
+def _validate_io(
+    io_spec: Any, cell_library: str, library: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
 
     if io_spec is None:
         return None
@@ -728,7 +602,7 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
     # left to OpenROAD's own loud error, and an unverified `cell_library`
     # (absent from either reference table) skips the check entirely -- so no
     # request that worked before can be rejected on a guess.
-    routable = _signal_routing_layers(cell_library)
+    routable = _signal_routing_layers(cell_library, library)
     if routable is not None:
         stack = _ROUTING_LAYER_STACK[cell_library]
         for field, value in (("layer_h", layer_h), ("layer_v", layer_v)):
@@ -737,7 +611,7 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
             raise PlaceAndRouteError(
                 f"request.io.{field} '{value}' is outside the signal routing "
                 f"range for cell_library '{cell_library}' "
-                f"({_ROUTING_LAYER_RANGE[cell_library]}): the router never "
+                f"({_signal_layer_range(cell_library, library)}): the router never "
                 f"draws signal conductor on '{value}', so a top-level pin "
                 f"placed there gets only a DEF PINS port rectangle on that "
                 f"layer's LEF PIN/LEFPIN purpose with no conductor under it "
@@ -754,27 +628,25 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
     return result
 
 
-def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+def _validate_instance_groups(raw: Any, stage: str = "route") -> list[dict[str, Any]]:
     """Shape-validate ``request.instance_groups`` (issue #4344)."""
     if raw is None:
         return []
     if not isinstance(raw, list):
         raise PlaceAndRouteError("request.instance_groups must be an array")
-    groups: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for index, entry in enumerate(raw):
-        groups.append(
-            _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
-        )
+    groups = [
+        _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
+        for index, entry in enumerate(raw)
+    ]
+    groups_spec.validate_fixed_members(groups, PlaceAndRouteError, stage)
     return groups
 
 
 def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise PlaceAndRouteError(f"{where} must be a JSON object")
-    unknown = sorted(set(entry) - {"name", "instances", "max_extent_um"})
-    if unknown:
-        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    groups_spec.reject_unknown_group_keys(entry, where, PlaceAndRouteError)
     name = entry.get("name")
     if not (isinstance(name, str) and name.strip()):
         raise PlaceAndRouteError(f"{where}.name must be a non-empty string")
@@ -795,16 +667,14 @@ def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str
     if bound is not None:
         _check_max_extent_um(bound, where)
         item["max_extent_um"] = bound
+    item.update(
+        groups_spec.validate_group_geometry(entry, instances, where, PlaceAndRouteError)
+    )
     return item
 
 
 def _check_max_extent_um(bound: Any, where: str) -> None:
-    if (
-        isinstance(bound, bool)
-        or not isinstance(bound, (int, float))
-        or not math.isfinite(bound)
-        or bound <= 0
-    ):
+    if not is_finite_number(bound) or bound <= 0:
         raise PlaceAndRouteError(f"{where}.max_extent_um must be a number > 0")
 
 
@@ -858,13 +728,7 @@ def _validate_pin_range(span: Any, where: str) -> list[Any]:
     if not (
         isinstance(span, list)
         and len(span) == 2
-        and all(
-            isinstance(v, (int, float))
-            and not isinstance(v, bool)
-            and math.isfinite(v)
-            and v >= 0
-            for v in span
-        )
+        and all(is_finite_number(v) and v >= 0 for v in span)
         and span[0] < span[1]
     ):
         raise PlaceAndRouteError(f"{where}.range_um must be [lo, hi] with 0 <= lo < hi")
@@ -905,7 +769,7 @@ def _resolve_pdn_preset(
     (when known): a ``gf180mcu_*`` recipe's ``Metal4``/``Metal5`` straps on a
     sky130 stack would otherwise reach ``pdngen`` as an obscure engine error
     or, worse, draw nothing at all and grade ``"partial"`` under issue
-    #2086's audit.
+    #2086's audit. ``also_cell_libraries`` (issues #6029, #4559) adds same-stack names.
     """
     preset_name = power.get("preset")
     if preset_name is None:
@@ -926,13 +790,13 @@ def _resolve_pdn_preset(
             "-- supply one or the other, not both"
         )
     preset = _PDN_PRESETS[preset_name]
-    if cell_library not in (None, preset["cell_library"]):
+    accepted = (preset["cell_library"], *preset.get("also_cell_libraries", ()))
+    if cell_library not in (None, *accepted):
         raise PlaceAndRouteError(
-            f"request.power.preset '{preset_name}' is a "
-            f"'{preset['cell_library']}' recipe ({preset['source']}), but "
-            f"request.pdk.cell_library is '{cell_library}' -- a preset may "
-            "only be used with the standard-cell library it was transcribed "
-            "for"
+            f"request.power.preset '{preset_name}' is a '{preset['cell_library']}'"
+            f" recipe ({preset['source']}), but request.pdk.cell_library is "
+            f"'{cell_library}' -- a preset may only be used with the transcribed "
+            f"standard-cell library (accepted: {', '.join(accepted)})"
         )
     if "connects" in power:
         # Issue #4348: an explicit `connects` list replaces the preset's
@@ -967,8 +831,8 @@ def _validate_power(
     """Validate the optional ``request.power`` block (issue #1091) -- power
     delivery net names and PDN strap geometry, driving ``tapcell``/
     ``add_global_connection``/``global_connect``/``pdngen``/
-    ``filler_placement`` -- see this module's own docstring "Power delivery"
-    section. ``None`` (the default, field omitted) preserves this module's
+    ``filler_placement``. See "Power delivery" in ``docs/cli/place-and-route.md``.
+    ``None`` (the default, field omitted) preserves this module's
     original v1 behavior byte-for-byte: no power-delivery Tcl is ever
     emitted, unchanged from before this field existed.
 
@@ -1017,29 +881,21 @@ def _validate_power(
             )
 
         width_um = strap.get("width_um")
-        if (
-            not isinstance(width_um, (int, float))
-            or isinstance(width_um, bool)
-            or width_um <= 0
-        ):
+        if not is_number(width_um) or width_um <= 0:
             raise PlaceAndRouteError(
                 f"request.power.straps[{i}].width_um is required and must be a "
                 "positive number"
             )
 
         pitch_um = strap.get("pitch_um")
-        if (
-            not isinstance(pitch_um, (int, float))
-            or isinstance(pitch_um, bool)
-            or pitch_um <= 0
-        ):
+        if not is_number(pitch_um) or pitch_um <= 0:
             raise PlaceAndRouteError(
                 f"request.power.straps[{i}].pitch_um is required and must be a "
                 "positive number"
             )
 
         offset_um = strap.get("offset_um", 0.0)
-        if not isinstance(offset_um, (int, float)) or isinstance(offset_um, bool):
+        if not is_number(offset_um):
             raise PlaceAndRouteError(
                 f"request.power.straps[{i}].offset_um must be a number when given"
             )
@@ -1056,11 +912,7 @@ def _validate_power(
         # required to have >= 2 straps: it describes this stripe's own
         # power/ground pairing, independent of any other strap.
         spacing_um = strap.get("spacing_um")
-        if spacing_um is not None and (
-            not isinstance(spacing_um, (int, float))
-            or isinstance(spacing_um, bool)
-            or spacing_um <= 0
-        ):
+        if spacing_um is not None and (not is_number(spacing_um) or spacing_um <= 0):
             raise PlaceAndRouteError(
                 f"request.power.straps[{i}].spacing_um must be a positive "
                 "number when given"
@@ -1137,9 +989,7 @@ def _validate_power(
 
             max_columns = connect.get("max_columns")
             if max_columns is not None and (
-                not isinstance(max_columns, int)
-                or isinstance(max_columns, bool)
-                or max_columns <= 0
+                not is_int(max_columns) or max_columns <= 0
             ):
                 raise PlaceAndRouteError(
                     f"request.power.connects[{i}].max_columns must be a "
@@ -1171,11 +1021,7 @@ def _validate_power(
                         "required and must be a non-empty string"
                     )
                 sc_width_um = split_cuts.get("width_um")
-                if (
-                    not isinstance(sc_width_um, (int, float))
-                    or isinstance(sc_width_um, bool)
-                    or sc_width_um <= 0
-                ):
+                if not is_number(sc_width_um) or sc_width_um <= 0:
                     raise PlaceAndRouteError(
                         f"request.power.connects[{i}].split_cuts.width_um is "
                         "required and must be a positive number"
@@ -1216,10 +1062,6 @@ def _validate_tapcell(
 ) -> int | float | None:
     """Validate ``request.power.tapcell`` (issue #3051); return its
     ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import _NO_TAPCELL_LIBRARIES
-
     if tapcell is None:
         return None
     if not isinstance(tapcell, dict):
@@ -1234,12 +1076,7 @@ def _validate_tapcell(
             "only distance_um is supported"
         )
     distance_um = tapcell.get("distance_um")
-    if (
-        not isinstance(distance_um, (int, float))
-        or isinstance(distance_um, bool)
-        or not math.isfinite(distance_um)
-        or distance_um <= 0
-    ):
+    if not is_finite_number(distance_um) or distance_um <= 0:
         raise PlaceAndRouteError(
             "request.power.tapcell.distance_um is required and must be a "
             "positive number"
@@ -1271,13 +1108,13 @@ def _validate_macros(
 ) -> list[dict[str, Any]]:
     """Validate the optional ``request.macros`` array (issue #438). Each
     entry fixes one hard-macro instance at a caller-given location during
-    the ``"floorplan"`` stage -- see this module's docstring "Hard-macro
-    placement" section. Returns ``[]`` when the field is omitted/``None``
-    (unchanged behavior -- purely additive).
+    the ``"floorplan"`` stage. See "Hard-macro placement" in
+    ``docs/cli/place-and-route.md``. Returns ``[]`` when the field is
+    omitted/``None`` (unchanged behavior -- purely additive).
 
     ``netlist_path`` (issue #464) additionally cross-checks each macro's LEF
     pins with no ``PORT`` geometry at all against the netlist's own wiring --
-    see this module's docstring "Macro-pin routability cross-check" section.
+    see "Macro-pin routability cross-check" in ``docs/cli/place-and-route.md``.
     ``None`` (the default, used by this module's own direct unit tests below
     that exercise validation in isolation, with no netlist in hand) skips
     that cross-check entirely -- it is purely additive to the pre-existing
@@ -1300,8 +1137,14 @@ def _validate_macros(
         halo, and -- when ``request.power`` is also given -- as a
         ``define_pdn_grid -macro ... -halo`` macro PDN grid. See
         :func:`_macro_blockage_lines` / :func:`_macro_pdn_grid_lines`, and
-        this module's docstring "Power delivery" section (whose v1 exclusion
-        of macro PDN grids this closes).
+        "Power delivery" in ``docs/cli/place-and-route.md`` for the original
+        v1 exclusion of macro PDN grids that this closes.
+    ``keepout`` (issue #5313)
+        Same shape and validation as ``halo``, but a *placement-only* keep-out:
+        it widens the ``create_blockage`` rectangle (per-side ``max(halo,
+        keepout)``) and never reaches ``define_pdn_grid``, so it can exceed
+        pdngen's halo limit and needs neither ``request.power`` nor a LEF
+        power pin.
     ``lib`` (alias ``liberty``)
         The macro's per-corner liberty map, exactly as ``klt synthesize``/
         ``klt sta`` take it. Read alongside the standard-cell liberty in
@@ -1358,9 +1201,7 @@ def _validate_macros(
             )
 
         for key in ("x_um", "y_um"):
-            if not isinstance(macro.get(key), (int, float)) or isinstance(
-                macro.get(key), bool
-            ):
+            if not is_number(macro.get(key)):
                 raise PlaceAndRouteError(
                     f"{label}.{key} is required and must be a number"
                 )
@@ -1394,7 +1235,16 @@ def _validate_macros(
                     request_dir=request_dir,
                     error_cls=PlaceAndRouteError,
                 ),
-                "halo": _validate_macro_halo(macro.get("halo"), label=label),
+                "halo": validate_macro_margin(
+                    macro.get("halo"), label=label, error_cls=PlaceAndRouteError
+                ),
+                # Issue #5313: placement-only keep-out, independent of `halo`.
+                "keepout": validate_macro_margin(
+                    macro.get("keepout"),
+                    label=label,
+                    error_cls=PlaceAndRouteError,
+                    field="keepout",
+                ),
                 "width_um": macro_record.get("width_um"),
                 "height_um": macro_record.get("height_um"),
                 "power_ground_layers": _macro_power_ground_layers(
@@ -1408,88 +1258,6 @@ def _validate_macros(
         raise PlaceAndRouteError("request.macros[].instance values must be unique")
 
     return validated
-
-
-#: The four sides a ``request.macros[].halo`` object may name, in the order
-#: OpenROAD's own ``define_pdn_grid -halo`` list takes them (verified live
-#: against OpenROAD 26Q3: ``PDN-0008``'s own "reduce the halo to at most
-#: ``<left> <bottom> <right> <top>``" diagnostic restates a rejected halo in
-#: exactly this order).
-_MACRO_HALO_SIDES = ("left", "bottom", "right", "top")
-
-
-def _validate_macro_halo(halo: Any, *, label: str) -> dict[str, float] | None:
-    """Validate one ``request.macros[].halo`` value (issue #2635), returning
-    ``{"left": f, "bottom": f, "right": f, "top": f}`` or ``None`` when the
-    field is omitted.
-
-    Accepts a bare number (uniform on all four sides -- the overwhelmingly
-    common case, and the shape every ORFS platform config uses) or an object
-    naming any subset of :data:`_MACRO_HALO_SIDES`, each side defaulting to
-    ``0``. An empty object is rejected rather than silently treated as
-    "omitted": a caller who wrote ``"halo": {}`` meant something, and
-    guessing which is worse than asking.
-
-    Negative values are rejected -- a "negative halo" would mean letting
-    standard cells *overlap* the macro, which no caller means and which
-    ``create_blockage`` has no way to express anyway.
-    """
-    if halo is None:
-        return None
-    if isinstance(halo, bool):
-        raise PlaceAndRouteError(
-            f"{label}.halo must be a number or an object naming any of: "
-            + ", ".join(_MACRO_HALO_SIDES)
-        )
-    if isinstance(halo, (int, float)):
-        return _validate_uniform_macro_halo(halo, label=label)
-    if isinstance(halo, dict):
-        return _validate_per_side_macro_halo(halo, label=label)
-    raise PlaceAndRouteError(
-        f"{label}.halo must be a number (uniform, in um) or an object "
-        "naming any of: " + ", ".join(_MACRO_HALO_SIDES)
-    )
-
-
-def _validate_uniform_macro_halo(halo: float, *, label: str) -> dict[str, float]:
-    """The bare-number half of :func:`_validate_macro_halo`: one value applied
-    to all four sides of :data:`_MACRO_HALO_SIDES`.
-    """
-    if halo < 0:
-        raise PlaceAndRouteError(f"{label}.halo must not be negative")
-    return dict.fromkeys(_MACRO_HALO_SIDES, float(halo))
-
-
-def _validate_per_side_macro_halo(
-    halo: dict[str, Any], *, label: str
-) -> dict[str, float]:
-    """The object half of :func:`_validate_macro_halo`: any subset of
-    :data:`_MACRO_HALO_SIDES`, each unnamed side defaulting to ``0``.
-
-    An empty object is rejected rather than silently treated as "omitted",
-    and an unrecognized side name is named back to the caller rather than
-    ignored -- a misspelled side that validated would silently drop the halo
-    the caller asked for.
-    """
-    if not halo:
-        raise PlaceAndRouteError(
-            f"{label}.halo must name at least one of: " + ", ".join(_MACRO_HALO_SIDES)
-        )
-    unknown = sorted(set(halo) - set(_MACRO_HALO_SIDES))
-    if unknown:
-        raise PlaceAndRouteError(
-            f"{label}.halo has unknown side(s) {', '.join(unknown)} -- "
-            "valid sides are: " + ", ".join(_MACRO_HALO_SIDES)
-        )
-    resolved: dict[str, float] = {}
-    for side in _MACRO_HALO_SIDES:
-        value = halo.get(side, 0)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise PlaceAndRouteError(f"{label}.halo.{side} must be a number")
-        if value < 0:
-            raise PlaceAndRouteError(f"{label}.halo.{side} must not be negative")
-        resolved[side] = float(value)
-    return resolved
 
 
 def _macro_power_ground_layers(
@@ -1547,89 +1315,25 @@ _MACRO_INSTANCE_RE_TEMPLATE = r"\b{cell}\b\s+\b{instance}\b\s*\("
 #: ``.Q1_1_G(net123)`` or ``.Q1_1_G()`` (left unconnected).
 _PORT_CONNECTION_RE = re.compile(r"\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([^()]*)\)")
 
-_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-
-
-def _strip_verilog_comments(text: str) -> str:
-    return _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
-
-
-def _blank_verilog_comments(text: str) -> list[str]:
-    """``text``'s lines with every comment blanked out but **line numbering
-    preserved** -- one output entry per input line, comment characters
-    replaced by spaces rather than deleted.
-
-    :func:`_strip_verilog_comments` deletes comments outright, which
-    collapses the line structure a multi-line ``/* ... */`` spans and makes
-    the result useless for reporting a line number.
-    :func:`_reject_unsupported_netlist_constructs` needs to name the exact
-    1-based netlist line its diagnostic points at (issue #1973 -- the whole
-    point is to beat OpenSTA's own ``line N, syntax error`` to the punch),
-    so it needs this shape instead.
-    """
-    out: list[str] = []
-    in_block = False
-    for line in text.splitlines():
-        chars = list(line)
-        i = 0
-        while i < len(chars):
-            if in_block:
-                if line.startswith("*/", i):
-                    chars[i] = chars[i + 1] = " "
-                    i += 2
-                    in_block = False
-                    continue
-                chars[i] = " "
-                i += 1
-            elif line.startswith("/*", i):
-                chars[i] = chars[i + 1] = " "
-                i += 2
-                in_block = True
-            elif line.startswith("//", i):
-                for j in range(i, len(chars)):
-                    chars[j] = " "
-                break
-            else:
-                i += 1
-        out.append("".join(chars))
-    return out
-
-
-#: A ``signed`` qualifier on a port/wire declaration in a structural-Verilog
-#: netlist -- ``output signed [15:0] sample;``, ``wire signed [7:0] mid;``,
-#: ``input wire signed [3:0] a;`` (issue #1973). Anchored to a preceding
-#: declaration keyword on purpose: an expression-level ``$signed(...)`` cast
-#: is accepted by every downstream reader (and is the RTL-side replacement
-#: this repo's own ``docs/guides/digital-review/rtl-style-guide.md``
-#: recommends for a ``signed`` port), so it must never be flagged -- and
-#: ``$signed(`` is never immediately preceded by one of these keywords plus
-#: whitespace.
-_NETLIST_SIGNED_DECL_RE = re.compile(
-    r"\b(?:input|output|inout|wire|reg|logic)\s+signed\b"
-)
-
-#: A bare ``x``-valued Verilog constant literal -- ``5'hxx``, ``2'bxx``,
-#: ``1'bx``, ``8'shX0`` (issue #1973). Requires at least one ``x``/``X``
-#: digit, so an ordinary resolved constant (``1'b0``, ``16'd100``,
-#: ``8'hbe``) never matches -- only the unresolved bits OpenSTA turns into
-#: an unroutable ``GROUND``-typed net.
-_NETLIST_X_CONSTANT_RE = re.compile(
-    r"\d+'[sS]?[bBoOdDhH][0-9a-fA-F_]*[xX][0-9a-fA-FxX_]*"
-)
-
 
 def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     """Raise :class:`PlaceAndRouteError` naming the construct, the 1-based
     line number, and the offending line when ``netlist_path`` carries a
-    ``signed`` port/wire qualifier or a bare ``x``-valued constant -- the
-    two constructs that deterministically fail a real OpenROAD run several
-    stages in, with a diagnostic pointing at a generated file the caller
-    never wrote (issue #1973; see this module's docstring "Netlist
-    pre-flight" section for the full rationale).
+    ``signed`` port/wire qualifier, a bare ``x``-valued constant, or a
+    behavioural ``reg``/``always``/``always_ff``/``always_comb``/
+    ``always_latch``/``initial`` statement -- the three constructs that
+    deterministically fail a real OpenROAD run several stages in, with a
+    diagnostic pointing at a generated file the caller never wrote (issues
+    #1973, #5792 and #6274). See "Netlist pre-flight" in
+    ``docs/cli/place-and-route.md`` for the rationale.
+
+    A behavioural statement's message -- construct clause plus an
+    evidence-gated cause clause -- is composed by
+    :func:`netlist_construct_scan._behavioural_statement_message`
+    (issue #6274).
 
     Reports the **first** offending line in file order, whichever construct
-    it is: both are already fatal, so there is nothing to gain from
+    it is: all are already fatal, so there is nothing to gain from
     enumerating every occurrence, and the first one is the one a reader will
     go fix. A netlist this cannot read is not an error here --
     :func:`_resolve_netlist` has already established the file exists and is
@@ -1642,7 +1346,8 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     except OSError:
         return
 
-    for lineno, line in enumerate(_blank_verilog_comments(text), start=1):
+    lines = _blank_verilog_comments(text)
+    for lineno, line in enumerate(lines, start=1):
         signed_match = _NETLIST_SIGNED_DECL_RE.search(line)
         if signed_match is not None:
             raise PlaceAndRouteError(
@@ -1663,10 +1368,18 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
                 "OpenSTA reads it as a constant and builds an empty "
                 "GROUND-typed net from it, which TritonRoute then refuses "
                 "with DRT-0305 (after floorplan, placement and CTS have all "
-                "already succeeded). Re-synthesize with `klt synthesize`, "
-                "which resolves x bits to concrete tie-cell-driven constants "
-                "(`setundef -zero` ahead of `hilomap`); a Verilog `function` "
-                "with a dangling argument is the usual source in RTL."
+                "already succeeded). `klt synthesize` resolves most x bits to tie "
+                "cells; if it already produced this netlist, its report "
+                "`warnings.netlist_x_constants` names these lines -- drive or "
+                "remove the undriven source signal in the RTL."
+            )
+
+        behavioural_match = _NETLIST_BEHAVIOURAL_RE.search(line)
+        if behavioural_match is not None:
+            raise PlaceAndRouteError(
+                _behavioural_statement_message(
+                    netlist_path, lineno, line, behavioural_match.group(1), lines
+                )
             )
 
 
@@ -1732,8 +1445,8 @@ def _reject_wired_port_less_pins(
     """Raise :class:`PlaceAndRouteError` when any of ``no_port_pin_names``
     (macro pins with no ``PORT`` geometry at all in the declared LEF) is
     actually wired to a real net in the netlist's own instantiation of this
-    macro -- see this module's docstring "Macro-pin routability cross-check"
-    section. A no-op when the netlist cannot be confidently parsed for this
+    macro. See "Macro-pin routability cross-check" in
+    ``docs/cli/place-and-route.md``. A no-op when parsing is inconclusive for this
     instance, or when every no-``PORT`` pin is left unconnected there."""
     connections = _macro_instance_port_connections(
         netlist_path, macro_cell_name, instance
@@ -1757,64 +1470,45 @@ def _reject_wired_port_less_pins(
             )
 
 
+_CONSTRAINT_KEYS = {
+    "clock_port",
+    "clock_period_ns",
+    "clocks",
+    "clock_groups",
+    "max_transition_ns",
+    "max_capacitance_pf",
+    "max_fanout",
+    "input_delay_ns",
+    "output_delay_ns",
+    "power_activity",
+    "multicycle_paths",
+}
+
+
 def _validate_constraints(
     constraints: Any,
 ) -> tuple[
-    str | None,
-    float | None,
+    ClockConstraints,
     float | None,
     float | None,
     float | None,
     float | None,
     float | None,
 ]:
-    """Validate ``request.constraints``.
-
-    Returns ``(clock_port, clock_period_ns, max_transition_ns,
-    max_capacitance_pf, max_fanout, input_delay_ns, output_delay_ns)``. The
-    first two are the pre-existing clock fields -- required together,
-    `None`/`None` when both are omitted (unchanged behavior). The three
-    design-rule-constraint fields (issue #1709) are each independently
-    optional regardless of clock presence: a caller may set e.g.
-    `max_fanout` alone, or alongside the clock fields, or not at all --
-    `None` per field when omitted, matching this function's own pre-existing
-    "omitted preserves prior behavior exactly" convention.
-
-    The last two (issue #1865) are the **I/O timing** constraints:
-    `input_delay_ns` is the arrival time of every non-clock input port
-    relative to the clock, `output_delay_ns` the required time at every
-    output port. Each is independently optional -- but, unlike the
-    design-rule fields, each *requires* `clock_port`/`clock_period_ns`,
-    since `set_input_delay`/`set_output_delay` are both defined relative to
-    a named clock and have no meaning without one.
-    """
+    """Normalize clocks and validate design-rule limits and primary-clock I/O delays."""
     if constraints is None:
-        return None, None, None, None, None, None, None
+        constraints = {}
     if not isinstance(constraints, dict):
         raise PlaceAndRouteError("request.constraints must be a JSON object")
-
-    clock_port = constraints.get("clock_port")
-    clock_period_ns = constraints.get("clock_period_ns")
-    if clock_port is not None or clock_period_ns is not None:
-        if not (isinstance(clock_port, str) and clock_port):
-            raise PlaceAndRouteError(
-                "request.constraints.clock_port must be a non-empty string"
-            )
-        if not (isinstance(clock_period_ns, (int, float)) and clock_period_ns > 0):
-            raise PlaceAndRouteError(
-                "request.constraints.clock_period_ns must be a positive number"
-            )
-        clock_period_ns = float(clock_period_ns)
-    else:
-        clock_port, clock_period_ns = None, None
+    if unknown := constraints.keys() - _CONSTRAINT_KEYS:
+        raise PlaceAndRouteError(
+            "request.constraints has unknown field(s): " + ", ".join(sorted(unknown))
+        )
+    clocks = validate_clock_constraints(constraints)
 
     max_transition_ns = constraints.get("max_transition_ns")
     if max_transition_ns is not None:
-        if not (
-            isinstance(max_transition_ns, (int, float))
-            and not isinstance(max_transition_ns, bool)
-            and max_transition_ns > 0
-        ):
+        if not (is_number(max_transition_ns) and max_transition_ns > 0):
             raise PlaceAndRouteError(
                 "request.constraints.max_transition_ns must be a positive number"
             )
@@ -1822,11 +1516,7 @@ def _validate_constraints(
 
     max_capacitance_pf = constraints.get("max_capacitance_pf")
     if max_capacitance_pf is not None:
-        if not (
-            isinstance(max_capacitance_pf, (int, float))
-            and not isinstance(max_capacitance_pf, bool)
-            and max_capacitance_pf > 0
-        ):
+        if not (is_number(max_capacitance_pf) and max_capacitance_pf > 0):
             raise PlaceAndRouteError(
                 "request.constraints.max_capacitance_pf must be a positive number"
             )
@@ -1834,35 +1524,27 @@ def _validate_constraints(
 
     max_fanout = constraints.get("max_fanout")
     if max_fanout is not None:
-        if not (
-            isinstance(max_fanout, (int, float))
-            and not isinstance(max_fanout, bool)
-            and max_fanout > 0
-        ):
+        if not (is_number(max_fanout) and max_fanout > 0):
             raise PlaceAndRouteError(
                 "request.constraints.max_fanout must be a positive number"
             )
         max_fanout = float(max_fanout)
 
-    # Issue #1865: I/O timing constraints. Both are plain non-negative
-    # numbers (0 is a meaningful, commonly-written value -- "the port is
-    # valid exactly at the clock edge" -- so unlike the design-rule fields
-    # above these are `>= 0`, not `> 0`), and both are relative to
-    # `clock_port`, so neither can be honoured without one.
+    # Both I/O delays are relative to the primary real or virtual clock.
     input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
     output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
     if (input_delay_ns is not None or output_delay_ns is not None) and (
-        clock_port is None
+        clocks.period_ns is None
     ):
         raise PlaceAndRouteError(
             "request.constraints.input_delay_ns/output_delay_ns require "
-            "request.constraints.clock_port/clock_period_ns -- set_input_delay/"
+            "request.constraints.clocks or clock_period_ns "
+            "-- set_input_delay/"
             "set_output_delay are defined relative to a named clock"
         )
 
     return (
-        clock_port,
-        clock_period_ns,
+        clocks,
         max_transition_ns,
         max_capacitance_pf,
         max_fanout,
@@ -1876,37 +1558,15 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     (issue #1865): optional, and a non-negative number when given."""
     if value is None:
         return None
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or value < 0
-        or value != value  # NaN
-        or value in (float("inf"), float("-inf"))
-    ):
+    if not is_finite_number(value) or value < 0:
         raise PlaceAndRouteError(
             f"request.constraints.{which}_delay_ns must be a non-negative number"
         )
     return float(value)
 
 
-_LIBRARY_KEYS = (
-    "cts_buffer",
-    "power_pins",
-    "wire_rc",
-    "route_layers",
-    "antenna_diode",
-    "tapcell",
-    "filler",
-)
-
-
 def _positive_number(value: Any, where: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
+    if not is_finite_number(value) or value <= 0:
         raise PlaceAndRouteError(f"{where} must be a positive number")
     return float(value)
 
@@ -2047,6 +1707,7 @@ def _validate_library_cts_buffer(buf: Any) -> str:
 
 _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
     "cts_buffer": _validate_library_cts_buffer,
+    "dont_use": partial(validate_patterns, error_cls=PlaceAndRouteError),
     "power_pins": _validate_library_power_pins,
     "wire_rc": _validate_library_wire_rc,
     "route_layers": _validate_library_route_layers,
@@ -2056,46 +1717,31 @@ _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
 }
 
 
-def _validate_library(library: Any) -> dict[str, Any] | None:
-    """Optional ``request.library`` (issue #4086): per-library inputs for a
-    standard-cell library the built-in tables
-    (``_CTS_BUFFER_CELLS``/``_POWER_PIN_PATTERNS``) do not cover, or an
-    override of a built-in entry. ``None`` (field omitted) leaves every
-    generated script byte-identical. Returns only the keys that were given:
-    ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
-    primary)``), ``wire_rc`` (``(resistance, capacitance)``),
-    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
-    the library has no antenna diode, so no antenna repair; issue #4274),
-    ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
-    has no tap cells) and ``filler`` (tuple of masters; issue #4127).
-    """
-    if library is None:
+def _validate_library(library: Any, cell_library: str = "") -> dict[str, Any] | None:
+    """Normalize effective library inputs for stage Tcl, STA and the power audit."""
+    if library is None and cell_library not in RVT_LIBRARIES:
         return None
-    if not isinstance(library, dict):
-        raise PlaceAndRouteError("request.library must be a JSON object")
-    unknown = sorted(set(library) - set(_LIBRARY_KEYS))
-    if unknown:
-        raise PlaceAndRouteError(
-            f"request.library has unknown key(s): {', '.join(unknown)}"
-        )
-    out: dict[str, Any] = {}
-    for key, validate in _LIBRARY_VALIDATORS.items():
-        if key in library:
-            out[key] = validate(library[key])
-    return out
+    raw = _library_object(
+        {} if library is None else library,
+        "request.library",
+        tuple(_LIBRARY_VALIDATORS),
+    )
+    if cell_library in RVT_LIBRARIES:
+        raw = RVT_LIBRARY_DEFAULTS | raw
+    return {
+        key: validate(raw[key])
+        for key, validate in _LIBRARY_VALIDATORS.items()
+        if key in raw
+    }
 
 
 def _validate_seed(seed: Any) -> int:
-    if isinstance(seed, bool) or not isinstance(seed, int):
+    if not is_int(seed):
         raise PlaceAndRouteError("request.seed must be an integer")
     return seed
 
 
 def _validate_target_stage(target_stage: Any) -> str:
-
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import STAGE_ORDER
 
     if target_stage not in STAGE_ORDER:
         raise PlaceAndRouteError(
@@ -2112,11 +1758,11 @@ def _validate_route_critical_nets_percentage(value: Any) -> int:
     ``sta::check_percent`` enforces). Omitted/``None`` defaults to ``0``,
     matching ``global_route``'s own default and this module's prior
     behaviour exactly -- the explicit A/B disable path this issue's
-    acceptance criteria require. See this module's own docstring, "Timing-
-    driven global routing + bounded antenna-repair iteration"."""
+    acceptance criteria require. See "Timing-driven/repair-iteration routing flags"
+    in ``docs/cli/place-and-route.md``."""
     if value is None:
         return 0
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.route_critical_nets_percentage must be an integer"
         )
@@ -2134,7 +1780,7 @@ def _validate_placement_density(value: Any) -> float:
     this command's prior fixed value, so the generated Tcl is unchanged."""
     if value is None:
         return 0.6
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise PlaceAndRouteError("request.placement_density must be a number")
     if not (0 < value <= 1):
         raise PlaceAndRouteError(
@@ -2149,7 +1795,7 @@ def _validate_route_congestion_iterations(value: Any) -> int | None:
     ``None`` emits no flag (OpenROAD's own default)."""
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.route_congestion_iterations must be an integer"
         )
@@ -2187,11 +1833,11 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
     bounded multi-pass generalisation of the ``"route"`` stage's existing
     single ``repair_antennas``+``detailed_route`` reroute pass (issue #759).
     Omitted/``None`` defaults to ``1``; ``0`` disables repair/reroute passes.
-    See this module's own docstring, "Timing-driven
-    global routing + bounded antenna-repair iteration"."""
+    See "Timing-driven/repair-iteration routing flags" in
+    ``docs/cli/place-and-route.md``."""
     if value is None:
         return 1
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.max_antenna_repair_iterations must be an integer"
         )
@@ -2206,9 +1852,9 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
 def _validate_sweep_corners(value: Any) -> list[str] | None:
     """Optional ``request.pdk.sweep_corners`` (issue #1092) -- scopes the
     post-route multi-corner sweep (issue #949, :func:`_run_corner_sweep`) to
-    a caller-named subset of the ``.lib`` corners ``request.pdk.cell_library``
-    ships, instead of always sweeping every shipped corner
-    (:func:`klayout_tools.pdk.list_lib_corners`'s own unfiltered return).
+    a caller-named subset of the library's available corners. The full set
+    comes from the PDK descriptor's corner keys for a mapped library, otherwise
+    from the unfiltered :func:`klayout_tools.pdk_cells.list_lib_corners` enumeration.
 
     A design has exactly one operating supply -- for a cell library shipping
     several (e.g. 15 ``.lib`` files spanning three nominal-supply families),
@@ -2222,9 +1868,8 @@ def _validate_sweep_corners(value: Any) -> list[str] | None:
     own empty-``corners``-list short-circuit), distinct from omitting the
     field entirely.
 
-    Each requested name is validated against the *unfiltered* shipped-corner
-    set once ``cell_library``/``pdk_info`` are resolved (see the ``"route"``
-    stage branch in :func:`run_place_and_route`) -- an unknown name raises
+    Once ``cell_library`` and ``pdk_info`` are resolved, the post-route sweep
+    checks each requested name against that corner set. An unknown name raises
     :class:`PlaceAndRouteError` naming every corner that *is* valid, matching
     this module's existing unresolvable-request-field convention (e.g.
     :func:`_validate_route_critical_nets_percentage`'s sibling validators).
@@ -2262,9 +1907,7 @@ def _validate_output_dbu_um(value: Any) -> float | None:
     time, when the native dbu is known."""
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PlaceAndRouteError("request.output_dbu_um must be a positive number")
-    if not 0 < value < float("inf"):
+    if not is_number(value) or not 0 < value < float("inf"):
         raise PlaceAndRouteError("request.output_dbu_um must be a positive number")
     return float(value)
 
@@ -2276,9 +1919,9 @@ def _validate_post_route_spef(value: Any) -> bool:
     ``klt extract --parasitics`` runs against the merged routed GDS, its
     output is written as SPEF, and a fresh OpenSTA session seeded from the
     ``"route"`` stage's own checkpoint re-reports slack/violation counts via
-    ``read_spef`` -- *alongside*, never replacing, that stage's existing
-    ``estimate_parasitics -global_routing``-derived top-level fields (see
-    this module's own docstring and :func:`_post_route_spef_metrics`).
+    ``read_spef`` alongside the top-level fields from
+    ``estimate_parasitics -global_routing``. See "Post-route SPEF STA"
+    in ``docs/cli/place-and-route.md`` and :func:`_post_route_spef_metrics`.
 
     Omitted/``None`` defaults to ``False`` -- this feature adds real
     wall-clock cost on top of every existing ``"route"``-stage caller (a
@@ -2352,7 +1995,7 @@ def _resolve_liberty(
     Raises :class:`PlaceAndRouteError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``synthesize.py`` and ``post_route_sta.py``'s own ``_resolve_liberty``

@@ -1,0 +1,1 @@
+- On ASAP7, the DEF→GDS merge repairs the router's off-grid M4 (`M4.AUX.1`/`AUX.2` track-grid and `M4.W.3` even-multiple-width markers) with a grow-only band per flagged polygon, reported in the new `m4_grid_repair` response field; a documented no-op (GDS byte-identical) on every other PDK (#7817).

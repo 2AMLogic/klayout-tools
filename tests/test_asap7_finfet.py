@@ -1306,7 +1306,7 @@ _SCAN_FLOP_SERIES_ORDER_CELLS = (
 _SERIES_ORDER_CELLS = frozenset(
     _COMBINATIONAL_SERIES_ORDER_CELLS + _SCAN_FLOP_SERIES_ORDER_CELLS
 )
-#: No devices: inline extraction yields an empty netlist, no circuit to compare.
+#: No devices: only labelled VDD/VSS rails (orphan pins, #5201) are extracted.
 _NO_DEVICE_CELLS = frozenset({"TAPCELL_ASAP7_75t_R"})
 _UNSUPPORTED_CELLS = _FOLDED_STACK_CELLS | _SERIES_ORDER_CELLS | _NO_DEVICE_CELLS
 
@@ -1558,7 +1558,7 @@ def test_corpus_full_rvt_library_via_klt_lvs_in_a_checked_subprocess(tmp_path):
     # The unsupported list must not go stale: each of these still fails.
     for cell in _FOLDED_STACK_CELLS | _SERIES_ORDER_CELLS:
         assert results[cell] == "mismatch", cell
-    assert results["TAPCELL_ASAP7_75t_R"].startswith("error: ")
+    assert results["TAPCELL_ASAP7_75t_R"] == "match"
 
 
 # --------------------------------------------------------------------------- #

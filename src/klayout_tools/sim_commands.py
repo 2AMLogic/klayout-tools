@@ -31,11 +31,9 @@ Trust model (the one :mod:`klayout_tools.signoff_generator_batch` settled for
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import posixpath
-import re
 import shlex
 import shutil
 import subprocess
@@ -47,7 +45,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from . import _batch_common, _provenance, netlist_batch, sim_batch
+from . import _batch_approvals, _batch_common, _provenance, netlist_batch, sim_batch
+from ._jsonnum import is_number
+from .sim_errors import SimError, request_options
 
 #: Top-level request field and report ``mode`` of a command-list request.
 COMMANDS_FIELD = "commands"
@@ -56,7 +56,7 @@ COMMANDS_MODE = "commands"
 #: Operator-side location of the approvals file, used when
 #: ``--command-approvals`` is not given. Never read from a request.
 APPROVALS_ENV = "KLT_SIM_COMMAND_APPROVALS"
-APPROVALS_SCHEMA_VERSION = 1
+APPROVALS_SCHEMA_VERSION = _batch_approvals.APPROVALS_SCHEMA_VERSION
 
 #: Unit-relative files the runner writes; no input or output may claim them.
 STDOUT_FILENAME = "stdout.bin"
@@ -82,9 +82,6 @@ _TAIL_BYTES = 4096
 _KILL_AFTER_S = 10
 _TIMEOUT_EXIT_CODE = 124
 
-_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_INTERPRETER_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
-_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _APPROVAL_KEYS = frozenset({"id", "interpreter", "allowed_arguments", "bound_inputs"})
 
 NOT_CHECKED = (
@@ -94,8 +91,6 @@ NOT_CHECKED = (
 
 
 def _error(message: str, code: str | None = None):
-    from .sim import SimError
-
     return SimError(message, code=code) if code else SimError(message)
 
 
@@ -114,66 +109,38 @@ class CommandApproval:
 
 def _relative_name(value: Any, where: str, code: str | None = None) -> str:
     """A unit-relative POSIX path that stays inside the unit directory."""
-    if not isinstance(value, str) or not value.strip() or "\0" in value:
-        raise _error(f"{where} must be a non-empty string", code)
-    normal = posixpath.normpath(value.replace("\\", "/"))
-    if (
-        value.startswith(("/", "\\"))
-        or os.path.isabs(value)
-        or normal in (".", "")
-        or normal == ".."
-        or normal.startswith("../")
-    ):
-        raise _error(
-            f"{where} must be relative and stay inside the unit ({value!r})", code
-        )
+    normal = _batch_approvals.validate_relative_posix(
+        value, where, scope="unit", make_error=lambda message: _error(message, code)
+    )
     if normal.split("/")[0] in _RESERVED_NAMES:
         raise _error(f"{where} ({value!r}) names a runner-owned file", code)
     return normal
 
 
+def _invalid_approval(message: str) -> SimError:
+    return SimError(message, code=CODE_APPROVALS_INVALID)
+
+
 def _parse_approval(index: int, raw: Any) -> CommandApproval:
-    label = f"approvals[{index}]"
-    if not isinstance(raw, Mapping):
-        raise _error(f"{label} must be an object", CODE_APPROVALS_INVALID)
-    unknown = sorted(set(raw) - _APPROVAL_KEYS)
-    if unknown:
-        raise _error(
-            f"{label} has unknown keys: {', '.join(unknown)}", CODE_APPROVALS_INVALID
-        )
-    ident = raw.get("id")
-    if not isinstance(ident, str) or not _ID_RE.match(ident):
-        raise _error(f"{label}.id must match [A-Za-z0-9._-]+", CODE_APPROVALS_INVALID)
-    interpreter = raw.get("interpreter")
-    if not isinstance(interpreter, str) or not _INTERPRETER_RE.match(interpreter):
-        raise _error(
-            f"{label}.interpreter must be a bare command name or path without "
-            "whitespace or shell metacharacters",
-            CODE_APPROVALS_INVALID,
-        )
-    allowed = raw.get("allowed_arguments", [[]])
-    if not isinstance(allowed, list) or not all(
-        isinstance(item, list) and all(isinstance(arg, str) for arg in item)
-        for item in allowed
-    ):
-        raise _error(
-            f"{label}.allowed_arguments must be a list of string lists",
-            CODE_APPROVALS_INVALID,
-        )
+    label, ident, interpreter = _batch_approvals.parse_approval_header(
+        index, raw, allowed_keys=_APPROVAL_KEYS, make_error=_invalid_approval
+    )
+    allowed = _batch_approvals.parse_allowed_arguments(raw, label, _invalid_approval)
     bound = raw.get("bound_inputs", {})
     if not isinstance(bound, Mapping) or not all(
-        isinstance(name, str) and isinstance(digest, str) and _SHA256_RE.match(digest)
+        isinstance(name, str)
+        and isinstance(digest, str)
+        and _batch_approvals.SHA256_RE.match(digest)
         for name, digest in bound.items()
     ):
-        raise _error(
+        raise _invalid_approval(
             f"{label}.bound_inputs must map unit input names to "
-            "sha256:<64 lowercase hex>",
-            CODE_APPROVALS_INVALID,
+            "sha256:<64 lowercase hex>"
         )
     return CommandApproval(
         id=ident,
         interpreter=interpreter,
-        allowed_arguments=tuple(tuple(item) for item in allowed),
+        allowed_arguments=allowed,
         bound_inputs=tuple(
             (
                 _relative_name(name, f"{label}.bound_inputs", CODE_APPROVALS_INVALID),
@@ -186,39 +153,9 @@ def _parse_approval(index: int, raw: Any) -> CommandApproval:
 
 def load_approvals(path: str) -> tuple[CommandApproval, ...]:
     """Read and strictly validate the trusted approvals file."""
-    try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-    except OSError as exc:
-        raise _error(
-            f"cannot read command approvals file {path}: {exc}", CODE_APPROVALS_INVALID
-        ) from exc
-    except ValueError as exc:
-        raise _error(
-            f"command approvals file {path} is not valid JSON: {exc}",
-            CODE_APPROVALS_INVALID,
-        ) from exc
-    if (
-        not isinstance(document, Mapping)
-        or document.get("schema_version") != APPROVALS_SCHEMA_VERSION
-        or not isinstance(document.get("approvals"), list)
-        or set(document) - {"schema_version", "approvals"}
-    ):
-        raise _error(
-            f"command approvals file {path} must be an object "
-            f'{{"schema_version": {APPROVALS_SCHEMA_VERSION}, "approvals": [...]}}',
-            CODE_APPROVALS_INVALID,
-        )
-    approvals = tuple(
-        _parse_approval(index, raw) for index, raw in enumerate(document["approvals"])
+    return _batch_approvals.load_approvals_file(
+        path, kind="command", parse_entry=_parse_approval, make_error=_invalid_approval
     )
-    ids = [approval.id for approval in approvals]
-    if len(set(ids)) != len(ids):
-        raise _error(
-            f"command approvals file {path} repeats an approval id",
-            CODE_APPROVALS_INVALID,
-        )
-    return approvals
 
 
 def resolve_approvals(approvals_path: str | None) -> tuple[CommandApproval, ...]:
@@ -233,13 +170,6 @@ def resolve_approvals(approvals_path: str | None) -> tuple[CommandApproval, ...]
             CODE_APPROVALS_MISSING,
         )
     return load_approvals(path)
-
-
-def _sha256_file(path: str) -> str:
-    digest = _provenance.sha256_file(path)
-    if digest is None:
-        raise FileNotFoundError(path)
-    return "sha256:" + digest
 
 
 def _match_step(
@@ -303,7 +233,13 @@ def _plan_inputs(
         if dest in seen:
             raise _error(f"{label} duplicates unit input name {dest!r}")
         seen.add(dest)
-        planned.append({"name": dest, "source": source, "sha256": _sha256_file(source)})
+        planned.append(
+            {
+                "name": dest,
+                "source": source,
+                "sha256": _provenance.content_hash_required(source),
+            }
+        )
     return planned
 
 
@@ -366,7 +302,7 @@ def _plan_unit(
     unit_id = entry.get("id")
     if (
         not isinstance(unit_id, str)
-        or not _ID_RE.match(unit_id)
+        or not _batch_approvals.ID_RE.match(unit_id)
         or unit_id.startswith(".")
     ):
         raise _error(f"{where}.id must match [A-Za-z0-9._-]+ and not start with '.'")
@@ -413,9 +349,7 @@ def plan_command_units(
     from .sim import DEFAULT_TIMEOUT_S
 
     commands = _validate_request_shape(request)
-    options = request.get("options") or {}
-    if not isinstance(options, dict):
-        raise _error("request.options must be a JSON object")
+    options = request_options(request)  # issue #7720
     default_timeout = _timeout(
         options.get("timeout_s"), "request.options.timeout_s", DEFAULT_TIMEOUT_S
     )
@@ -434,11 +368,9 @@ def plan_command_units(
 
 
 def _timeout(value: Any, where: str, default: float) -> float:
-    if value is None:
-        return float(default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if value is not None and (not is_number(value) or value <= 0):
         raise _error(f"{where} must be a positive number of seconds")
-    return float(value)
+    return float(default if value is None else value)
 
 
 # --------------------------------------------------------------------------- #
@@ -520,7 +452,6 @@ def _unit_report(
 
 
 def _build_report(
-    units: list[dict[str, Any]],
     reports: list[dict[str, Any]],
     *,
     backend: str,
@@ -575,7 +506,6 @@ def _failed_units_report(
         )
         reports[-1]["status"] = "error"
     return _build_report(
-        units,
         reports,
         backend="batch",
         outdir=outdir,
@@ -651,7 +581,7 @@ def _run_local(
     else:
         with ThreadPoolExecutor(max_workers=min(max_workers, len(units))) as pool:
             reports = list(pool.map(run, units))
-    return _build_report(units, reports, backend=backend, outdir=outdir)
+    return _build_report(reports, backend=backend, outdir=outdir)
 
 
 # --------------------------------------------------------------------------- #
@@ -724,39 +654,29 @@ def build_job_spec(
     version_check: str = "enforce",
     client_version: str | None = None,
 ) -> sim_batch.BatchJobSpec:
-    version = (
-        client_version if client_version is not None else _provenance._klt_version()
-    )
-    preflight = sim_batch._runner_preflight_script(
-        version, enforce=version_check == "enforce"
-    )
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
-            f'tar -xzf "$EDA_INPUT_DIR/{TREE_FILENAME}" -C "$w"',
-            'cd "$w"',
-        ]
-    )
-    command = (
-        preflight
-        + setup
-        + " && "
-        + "; ".join(_unit_script(u) for u in units)
-        + "; exit 0"
-    )
+    """The commands job: every unit's script run in sequence on one job.
+
+    Each unit redirects and publishes its own stdout/stderr/exit code, so the
+    job itself has no ``report.json`` and always exits 0 -- a failed unit is a
+    reported outcome, not a failed job.
+    """
     serial_worst_s = sum(u["timeout_s"] * len(u["steps"]) for u in units)
-    return sim_batch.BatchJobSpec(
+    command = _batch_common.build_job_command(
+        tree_member=TREE_FILENAME,
+        run="; ".join(_unit_script(u) for u in units),
+        err_cls=SimError,
+        stdout_target=None,
+        client_version=client_version,
+        version_check=version_check,
+    )
+    return _batch_common.build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=int(math.ceil(serial_worst_s)) + 120,
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=TREE_FILENAME, label="command inputs", local_path=tarball_path
-            ),
-        ),
+        tree_member=TREE_FILENAME,
+        tree_label="command inputs",
+        tarball_path=tarball_path,
+        timeout_s=serial_worst_s,
     )
 
 
@@ -823,7 +743,7 @@ def _run_batch(
             pdk=(request.get("models") or {}).get("pdk"),
             version_check=config.runner_version_check,
         )
-        environment: dict[str, Any] = {"provider": "aws-batch-fleet", "job_id": job_id}
+        environment = sim_batch._batch_job_environment(config, job_id)
         try:
             sim_batch.submit_job(config, job_id, spec)
             sim_batch.launch_job(config, job_id)
@@ -882,7 +802,6 @@ def _run_batch(
             )
         reports = _install_units(units, collected=collected, outdir=outdir)
     return _build_report(
-        units,
         reports,
         backend="batch",
         outdir=outdir,

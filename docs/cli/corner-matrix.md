@@ -38,8 +38,10 @@ expansion and named by its `corner_id`, so matrix and request cannot disagree.
 
 ## Modes
 
-- `--request`: expands the request's `corners`/`exclude` and diffs against the
-  matrix: `missing[]`, `extra[]`, `duplicate[]`.
+- `--request` expands the request's `corners` and `exclude` and reports
+  `missing[]` and `extra[]` against the matrix. If two request points resolve
+  to the same `corner_id`, expansion stops with exit 1 and
+  `request corners are invalid`.
 - `--report`: every matrix tuple must appear exactly once in `corners[]`.
   Also reported: `not_simulated[]` (corner status other than `pass`/`fail`,
   e.g. `error` incl. `lost_shard`, or `inconclusive`), `non_finite[]` (a
@@ -47,11 +49,44 @@ expansion and named by its `corner_id`, so matrix and request cannot disagree.
   status `fail`, read from the existing `measurements[].limits` result, not
   re-evaluated). Monte Carlo reports (`/mc<N>` corner ids) are not supported.
 
+In report mode, `errored[]` lists the entries in `not_simulated[]` with
+status `error` and evidence the engine attempted that corner. Evidence can
+be an integer engine exit code (including zero), a reported engine signal,
+or a solver diagnostic such as nonconvergence or a singular matrix. Lost
+shard placeholders stay outside `errored[]`. A retained log path alone
+cannot establish an attempt. The IDs follow matrix order.
+
+A characterization caller can require `coverage_complete` and check that
+every ID in `not_simulated` is in `errored` to distinguish recorded failures
+from missing work. Measurement limits remain a separate policy decision.
+
 ## Output
 
 Shared envelope fields (`docs/json-contract.md`) plus: `mode`, `source`,
-`matrix`, `complete`, `matrix_size`, `observed_count`, and the lists above
-(`not_simulated`/`non_finite`/`out_of_bounds` only in `--report` mode).
+`matrix`, `complete`, `coverage_complete`, `matrix_size`, `observed_count`,
+and the lists above (`not_simulated`/`errored`/`non_finite`/`out_of_bounds` only in
+`--report` mode).
+
+The two booleans answer two different questions:
+
+- `coverage_complete` — *did the run exercise the declared matrix, once
+  each?* True iff `missing[]`, `extra[]` and `duplicate[]` are all empty.
+  Both modes include `duplicate[]`. Only `--report` can populate it, when
+  the finished report repeats a `corner_id`. Gate coverage automation on
+  `coverage_complete`.
+- `complete` — coverage **and** outcome quality: it additionally requires
+  every matrix corner to have been simulated (`not_simulated[]` empty),
+  with finite measurements (`non_finite[]` empty) and in-limit results
+  (`out_of_bounds[]`, which lists every corner whose status is `fail`,
+  empty). A characterization sweep that legitimately records a failing
+  corner is `coverage_complete: true` with `complete: false` — the exit
+  status follows `complete`, so it cannot serve as a coverage gate.
+
+`coverage_complete` is emitted in both modes; in `--request` mode it equals
+`complete` (request mode has no outcome-quality checks). In `--format text`,
+a run that is not `complete` also prints a `coverage: complete|INCOMPLETE`
+line so the two cases stay distinguishable without JSON; a `complete` run
+prints no coverage line (`complete` implies `coverage_complete`).
 
 ## Exit codes
 

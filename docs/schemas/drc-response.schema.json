@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://2amlogic.com/klayout-tools/schemas/drc-response.schema.json",
-  "title": "klt drc --format json success response, version 2",
-  "description": "Success payload of `klt drc`. Three shapes carry the top-level `schema_version`: a verdict report (3) (curated engine, or `--engine klayout`) carrying `status`/`violations`/`coverage`, and the non-verdict `--list-rules` listing (`mode: \"list_rules\"`, 2), which carries neither, and the `--engine both` cross-check (`mode: \"crosscheck\"`), which embeds two verdict reports unchanged under `reports` plus a `comparison` block. Error envelopes are governed by the shared error contract (docs/json-contract.md) and are out of scope. The `coverage` block `$ref`s coverage.schema.json (the shared work records); resolve it through the sibling file or a schema registry. See docs/cli/drc.md.",
+  "title": "klt drc --format json success response",
+  "description": "Success payload of `klt drc`. Four shapes carry the top-level `schema_version`: a verdict report (3) (curated engine, or `--engine klayout`) carrying `status`/`violations`/`coverage`; the non-verdict `--list-rules` listing (`mode: \"list_rules\"`, 2), which carries none of those; the non-verdict `--engine klayout --list-rule-categories` listing (`mode: \"list_rule_categories\"`, 3, issue #5444), which carries none of those either; and the `--engine both` cross-check (`mode: \"crosscheck\"`), which embeds two verdict reports unchanged under `reports` plus a `comparison` block. Error envelopes are governed by the shared error contract (docs/json-contract.md) and are out of scope. The `coverage` block `$ref`s coverage.schema.json (the shared work records); resolve it through the sibling file or a schema registry. See docs/cli/drc.md.",
   "type": "object",
   "required": ["schema_version"],
   "properties": {
@@ -11,6 +11,7 @@
   "oneOf": [
     {"$ref": "#/$defs/verdict_report"},
     {"$ref": "#/$defs/list_rules_report"},
+    {"$ref": "#/$defs/list_rule_categories_report"},
     {"$ref": "#/$defs/crosscheck_report"}
   ],
   "additionalProperties": true,
@@ -32,7 +33,9 @@
           }
         },
         "deck": {"type": "string", "description": "Curated engine: the deck name (e.g. `sky130`). `--engine klayout`: the deck script's own path."},
+        "top": {"type": "string", "description": "Present only when `--top` named the cell to check (issue #7000): the exact requested top-cell name, recorded verbatim — including on a single-top stream — so `klt drc --check --rerun` replays the recorded scope. Absent on an unscoped run; a report without it reruns with the engine's default scope."},
         "engine": {"type": "string", "enum": ["curated", "klayout"], "description": "`klayout` on a `--engine klayout` report; the curated engine omits it."},
+        "environment": {"type": "object", "description": "`--engine klayout` reports only (the curated engine omits it); always present for that engine (issues #4950/#5844), including a run that tolerated a failed deck via `--allow-deck-errors`: `klayout_binary` is the resolved override path when `--klayout-binary`/`$KLT_KLAYOUT_BINARY` was in force, else the PATH-resolved absolute path of the `klayout` that ran (the bare name when nothing on PATH resolves).", "properties": {"klayout_binary": {"type": "string"}}, "additionalProperties": true},
         "dbu_um": {"type": "number", "description": "Database unit in micrometres; violation coordinates are integers in this unit."},
         "status": {"$ref": "#/$defs/status"},
         "violation_count": {"type": "integer", "minimum": 0},
@@ -62,11 +65,25 @@
         "tile": {"$ref": "#/$defs/tile"},
         "engine_deck_errors": {"$ref": "#/$defs/engine_deck_errors"},
         "coverage_assertion": {"$ref": "#/$defs/coverage_assertion"},
+        "deck_output": {"$ref": "#/$defs/deck_output"},
+        "native_deck": {
+          "type": "object",
+          "description": "`--engine klayout`/`both` without `--deck-file`, when the PDK's family main script (gf180mcu `tech/drc/gf180mcu.drc`) was resolved (issue #4002). Absent otherwise.",
+          "required": ["kind", "variant", "deck_file", "deck_vars_defaulted", "min_klayout_version", "min_klayout_version_defaulted"],
+          "properties": {
+            "kind": {"const": "pdk_main_script"},
+            "variant": {"type": "string"},
+            "deck_file": {"type": "string"},
+            "deck_vars_defaulted": {"type": "object", "additionalProperties": {"type": "string"}, "description": "`-rd` globals klt supplied because the caller did not (e.g. `variant`)."},
+            "min_klayout_version": {"type": "string"},
+            "min_klayout_version_defaulted": {"type": "boolean"}
+          }
+        },
         "provenance": {"$ref": "#/$defs/provenance"}
       },
       "if": {"required": ["engine"], "properties": {"engine": {"const": "klayout"}}},
       "then": {
-        "description": "Native-KLayout report: no `metrics`; `coverage` additionally lists the RDB `rule_categories`. `engine_deck_errors` appears only when --allow-deck-errors tolerated a failed deck run; `coverage_assertion` only when --expect-rule-categories(-file) was given.",
+        "description": "Native-KLayout report: no `metrics`; `coverage` additionally lists the RDB `rule_categories`. `engine_deck_errors` appears only when --allow-deck-errors tolerated a failed deck run; `coverage_assertion` only when --expect-rule-categories(-file) was given; current producers include `deck_output` (issue #6613) on every native report as execution evidence. Older reports may omit it.",
         "properties": {
           "coverage": {"required": ["rule_categories"]},
           "rule_selection": false,
@@ -79,6 +96,7 @@
         "properties": {
           "engine_deck_errors": false,
           "coverage_assertion": false,
+          "deck_output": false,
           "violations_truncated": false,
           "violations_serialized": false
         }
@@ -102,7 +120,8 @@
             "layout_content_hash": {"type": ["string", "null"]},
             "pdk": {"type": ["object", "null"]},
             "klt_version": {"type": ["string", "null"]},
-            "klayout_version": {"type": ["string", "null"]},
+            "klayout_version": {"type": ["string", "null"], "description": "KLayout version of the curated engine (the pip wheel)."},
+            "native_klayout_version": {"type": ["string", "null"], "description": "KLayout version of the native engine (the standalone binary's own `-v`); may differ from klayout_version."},
             "curated_deck": {"type": ["object", "null"]},
             "native_deck": {"type": ["object", "null"]}
           },
@@ -113,6 +132,11 @@
           "required": ["state", "groups", "unmapped"],
           "properties": {
             "state": {"type": "string", "enum": ["agree_clean", "agree_violations", "disagreement", "not_comparable", "native_unavailable", "engine_failed"]},
+            "reason": {
+              "type": "string",
+              "enum": ["mapping_empty", "group_not_covered", "unmapped_rules_ran"],
+              "description": "Which `not_comparable` cause applies (issue #5720): `mapping_empty` (no group defined for this deck), `group_not_covered` (a mapped group's rules did not all run on both sides), `unmapped_rules_ran` (groups covered, but rules outside the mapping ran on either side). Present on `state: \"not_comparable\"` only; precedence most-fundamental first. See docs/cli/drc.md."
+            },
             "granularity": {"type": "string"},
             "error": {"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}},
             "groups": {
@@ -174,6 +198,50 @@
       },
       "additionalProperties": true
     },
+    "list_rule_categories_report": {
+      "description": "`--engine klayout --list-rule-categories` (issue #5444): the rule categories the native deck declares, derived by running it under `deck_vars` against a tool-generated EMPTY layout -- independent of any layout being signed off, so it is non-circular input for `--expect-rule-categories-file`. Non-verdict: no `status`, `violations` or `coverage`, and `klt signoff` refuses it as evidence.",
+      "type": "object",
+      "required": ["schema_version", "mode", "engine", "deck_file", "deck_vars", "basis", "rule_category_count", "rule_categories", "limitations", "provenance"],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 3},
+        "mode": {"type": "string", "const": "list_rule_categories"},
+        "engine": {"type": "string", "const": "klayout"},
+        "deck_file": {"type": "string", "description": "The resolved deck script path the listing was made from."},
+        "deck_vars": {
+          "type": "object",
+          "description": "The effective `-rd` script globals the deck ran under, including any defaulted by `--pdk` family resolution. The listing is valid only for this set.",
+          "additionalProperties": {"type": "string"}
+        },
+        "basis": {"type": "string", "const": "empty_layout_run", "description": "How the set was derived. A stable token, so a consumer can tell this derivation from any future one without parsing `limitations`."},
+        "rule_category_count": {"type": "integer", "minimum": 1, "description": "`len(rule_categories)`. Never 0: a report declaring no category fails closed (exit 1)."},
+        "rule_categories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Sorted, deduplicated category names, exactly as `--expect-rule-categories-file` wants them.",
+          "items": {"type": "string"}
+        },
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "description": "What this listing does NOT establish -- notably that a category declared only inside a geometry-dependent branch is absent. Fixed per release, never derived from the deck, so a consumer can rely on it being present.",
+          "items": {
+            "type": "object",
+            "required": ["category", "text"],
+            "properties": {
+              "category": {"type": "string"},
+              "text": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "warnings": {"type": "array", "description": "Same shape a run emits (issue #3816): present only when the deck reads caller-supplied `-rd` globals and no `--deck-var` supplied any of them -- the one way this listing is silently wrong in the same direction a run is.", "items": {"type": "object"}},
+        "environment": {"type": "object", "description": "Always present for this engine (issues #4950/#5844): `klayout_binary` is the resolved override path when `--klayout-binary`/`$KLT_KLAYOUT_BINARY` was in force, else the PATH-resolved absolute path of the `klayout` that ran (the bare name when nothing on PATH resolves).", "properties": {"klayout_binary": {"type": "string"}}, "additionalProperties": true},
+        "native_deck": {"type": "object", "description": "Same additive block a run records (issue #4002) when the PDK's family main script was resolved."},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      },
+      "additionalProperties": true
+    },
     "status": {
       "description": "Verdict token (coverage rollup). `clean`/`clean_partial` exit 0, `violations` exits 3, `not_checked`/`coverage_unknown` exit 4. `malformed_coverage` is mapped by the rollup table but not reachable from a producer that builds its coverage block through the shared helper.",
       "type": "string",
@@ -205,6 +273,12 @@
           },
           "additionalProperties": true
         },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"},
+          "description": "Verbatim non-geometry RDB item values in document order, including any KLayout tags. Omitted when the finding has none. Rerun comparison includes these evidence strings."
+        },
         "polygon": {
           "type": ["array", "null"],
           "items": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
@@ -221,6 +295,15 @@
         "layers_in_stream_without_rules": {"$ref": "#/$defs/strings"},
         "rules_checked": {"$ref": "#/$defs/strings"},
         "rules_skipped": {"$ref": "#/$defs/strings"},
+        "implant_warnings": {
+          "description": "SG13G2 selected cells with unimplanted source/drain active under the curated well checks.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cell", "description"],
+            "properties": {"cell": {"type": "string"}, "description": {"type": "string"}}
+          }
+        },
         "voltage_domain_warnings": {
           "type": "array",
           "items": {
@@ -282,7 +365,20 @@
       "required": ["exit_status", "error_lines"],
       "properties": {
         "exit_status": {"type": "integer"},
-        "error_lines": {"$ref": "#/$defs/strings"}
+        "error_lines": {"$ref": "#/$defs/strings"},
+        "decks_executed": {"$ref": "#/$defs/strings", "description": "Deck names klayout logged as started (`Executing deck <name>`), in order; the last one aborted. Absent when none were logged."},
+        "abort": {
+          "type": "object",
+          "description": "Structured abort cause parsed from klayout's output (issue #5091); each key present only when derivable.",
+          "properties": {
+            "deck": {"type": "string"},
+            "deck_file": {"type": "string"},
+            "message": {"type": "string"},
+            "symbol": {"type": "string"},
+            "location": {"type": "string"}
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     },
@@ -316,6 +412,17 @@
       ],
       "additionalProperties": true
     },
+    "deck_output": {
+      "description": "The deck's own captured stdout, kept as additive execution evidence on every `--engine klayout` run that produced a report (issue #6613) -- citable, never a verdict change. `stdout` holds the whole log (work-dir paths scrubbed to a placeholder) or, past the 500-line cap, its tail; `line_count` counts the whole captured stdout, so `truncated: true` means `line_count - 500` lines were dropped. Excluded from the `--rerun` diff.",
+      "type": "object",
+      "required": ["stdout", "truncated", "line_count"],
+      "properties": {
+        "stdout": {"type": "string"},
+        "truncated": {"type": "boolean"},
+        "line_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
     "listed_rule": {
       "type": "object",
       "required": ["id", "description", "check", "layer", "layer_name", "other_layer", "other_layer_name", "derived_layer", "scope"],
@@ -343,12 +450,13 @@
       "additionalProperties": true
     },
     "provenance": {
-      "description": "Shared reproducibility block. `klayout_version_mismatch` is emitted on verdict reports only.",
+      "description": "Shared reproducibility block. `klayout_version_mismatch` is emitted on verdict reports only. For `--engine klayout`, `klayout_version` is the standalone application that ran the deck and `klayout_module_version` (additive, issue #5660) is the pip wheel in klt's own env; for every other engine `klayout_version` is the wheel and `klayout_module_version` is absent.",
       "type": "object",
       "required": ["klt_version", "klayout_version", "pdk", "deck", "input"],
       "properties": {
         "klt_version": {"type": ["string", "null"]},
-        "klayout_version": {"type": ["string", "null"]},
+        "klayout_version": {"type": ["string", "null"], "description": "The KLayout engine that produced this run: the standalone application's own `-v` version for `--engine klayout` (issue #5660), else `klayout.__version__` (the pip wheel, which is the engine for `--engine curated`/`klt lvs`). `null` when unresolvable (no wheel importable, or a soft-failed binary probe with no `--min-klayout-version` declared)."},
+        "klayout_module_version": {"type": ["string", "null"], "description": "Additive (issue #5660), `--engine klayout` only: `klayout.__version__`, the pip wheel in klt's own environment -- recorded so the wheel's version is not lost, without presenting it as the engine that ran the deck."},
         "pdk": {
           "type": ["object", "null"],
           "required": ["name", "source", "version"],

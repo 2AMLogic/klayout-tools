@@ -14,10 +14,10 @@ changed here — one entry per resource, with impact links — is indexed in
 **`cli/` reflects `main`, not necessarily the latest PyPI release.** A verb
 documented under `cli/` can land on `main` before it ships in a tagged
 release — check [`RELEASING.md`](../RELEASING.md)'s "Release cadence"
-section for the policy bounding that gap, and
-[`CHANGELOG.md`](../CHANGELOG.md)'s `## Unreleased` section for exactly
-what has landed since the latest tag, before assuming a `cli/` page
-describes what `pip install`/`uv tool install klayout-tools` gives you today.
+section for the policy bounding that gap. Pending changes are recorded in
+[`changelog.d/`](../changelog.d/) and in existing `## Unreleased` entries in
+[`CHANGELOG.md`](../CHANGELOG.md). Release preparation folds both into the
+new version's `CHANGELOG.md` section.
 
 ## Layout
 
@@ -30,6 +30,7 @@ docs/
   cli/                   # per-verb CLI reference
     arith-gen.md
     artifact.md
+    cell-hash.md
     cells.md
     characterize.md
     clip.md
@@ -51,6 +52,7 @@ docs/
     gen.md
     kb.md
     array-check.md
+    fill.md
     keepout-check.md
     layers.md
     layout-metrics.md
@@ -66,6 +68,7 @@ docs/
     power.md
     power-intent.md
     precheck.md
+    route.md
     render.md
     report.md
     reset-coverage.md
@@ -101,6 +104,7 @@ docs/
     digital-fleet-unit-abstraction-decision.md
     em-field-sim-spike.md
     em-site-export-format.md
+    em-validation.md
     extract-fidelity-roadmap.md
     fastcap-oracle.md
     flute-congestion-precheck-results.md
@@ -146,6 +150,7 @@ docs/
     siliconcompiler-core-survey.md
     sim-corner-reached-s.md
     sim-evidence-discipline-spike.md
+    site-eslint-evaluation.md
     sky130-modexp-canary-openroad-ground-truth.md
     sky130-modexp-canary-signoff-status.md
     spice-corner-runner-spike.md
@@ -192,4 +197,6 @@ docs/
     remote-evidence-runs.md
     rtl-mutation-testing.md
     waveform-first-debugging.md
+  reports/               # measured run records: outcomes, provenance, cost
+    tt-gf180mcu-corpus-run.md
 ```

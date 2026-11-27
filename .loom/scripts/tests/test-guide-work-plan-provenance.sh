@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# test-guide-work-plan-provenance.sh - Regression test for issue #13923
+#
+# On a shared host, one repo's Guide docs tick published another repo's
+# WORK_PLAN.md render (observed on a consumer repo): unpinned `gh` queries,
+# literal /tmp scratch paths, and no check that the rendered `#N` are this
+# repo's. Verifies (stubbed `gh`, hermetic):
+#   1. no unpinned `$GH_READ ... list` remains in the docs-maintenance steps,
+#      and `_work_log_search_total_count` no longer reads the cwd remote.
+#   2. verify_plan_provenance() ACCEPTS a body whose titles match the pinned
+#      repo, REJECTS a foreign body whose numbers all exist under other titles,
+#      fails closed when the title lookup fails, and passes a body with no #N.
+#      Every ` *(x)*` suffix render_plan_body() can emit (read from its source,
+#      so a new one cannot be added without the gate learning it) is accepted,
+#      alone and combined with ` *(held)*` (#13908); a wrong order, an unknown
+#      suffix and a held bullet under a foreign title are rejected.
+#   3. splice_plan_body() writes through a per-tick scratch dir (removed after),
+#      replaces only the marker region, and leaves the file untouched when the
+#      markers are missing.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+if [[ -f "$REPO_ROOT/.claude/commands/loom/guide.md" ]]; then
+    GUIDE_MD="$REPO_ROOT/.claude/commands/loom/guide.md"
+else
+    GUIDE_MD="$REPO_ROOT/defaults/.claude/commands/loom/guide.md"
+fi
+source "$SCRIPT_DIR/lib/assert.sh"
+
+extract() { awk -v re="^$1\\\\(\\\\) \\\\{" '$0 ~ re {f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD"; }
+
+VPP="$(extract verify_plan_provenance)"
+SPB="$(extract splice_plan_body)"
+HELPERS="$(extract open_pr_linkage_rows; extract open_pr_annotation)"
+[[ -n "$VPP" && -n "$SPB" && -n "$HELPERS" ]] || { echo "FATAL: helpers not found in guide.md"; exit 1; }
+# #14785: verify_plan_provenance() gates the open-PR listing through the
+# same open_pr_linkage_rows()/open_pr_annotation() helpers the render uses,
+# so they must be in scope wherever the gate runs.
+eval "$HELPERS"
+pass "helpers extracted from $GUIDE_MD"
+
+echo "Test 1: queries are pinned"
+# Docs-maintenance region: from Step 1's repo derivation to check_readme.
+REGION="$(awk '/^GUIDE_REPO=/{f=1} f{print} /^check_readme_staleness\(\)/{if(f) exit}' "$GUIDE_MD")"
+grep -q '^export GH_REPO="\$GUIDE_REPO"' <<<"$REGION" && pass "GH_REPO pinned to the docs-worktree repo for all list queries" || fail "GH_REPO not exported from GUIDE_REPO"
+CNT="$(extract _work_log_search_total_count)"
+if grep -q 'git remote get-url origin' <<<"$CNT"; then fail "_work_log_search_total_count still reads the cwd remote"; else pass "_work_log_search_total_count does not read the cwd remote"; fi
+
+# Stub: forge titles for the pinned repo; FAIL_LOOKUP=1 simulates an API failure.
+STUB_DIR="$(mktemp -d)"
+trap 'rm -rf "$STUB_DIR"' EXIT
+# Hermetic stand-in for the splice half of `loom-daemon guide` (#15219): the
+# role file's splice_plan_body() wrapper pipes the body into the real verb;
+# this shim implements the same documented contract (marker check, marker
+# region replaced, per-tick scratch removed) so the extracted wrapper still
+# executes end to end without a built daemon. The real verb's behaviour is
+# pinned by loom-daemon/src/cli/guide_work_plan_tests.rs.
+mkdir -p "$STUB_DIR/bin"
+cat >"$STUB_DIR/bin/loom-daemon" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "guide" && "${2:-}" == "work-plan-splice" ]]; then
+  wt=""
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --docs-worktree) wt="$2"; shift 2 ;;
+      *) echo "shim: unexpected argument: $1" >&2; exit 2 ;;
+    esac
+  done
+  plan="$wt/WORK_PLAN.md"
+  grep -q '<!-- guide:plan-body:start -->' "$plan" 2>/dev/null \
+    && grep -q '<!-- guide:plan-body:end -->' "$plan" 2>/dev/null || exit 1
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/guide-plan.XXXXXX")" || exit 1
+  rc=0
+  cat > "$scratch/body.md" \
+    && awk -v body="$scratch/body.md" '
+      /<!-- guide:plan-body:start -->/ { print; while ((getline l < body) > 0) print l; skip=1; next }
+      /<!-- guide:plan-body:end -->/   { skip=0 }
+      !skip { print }' "$plan" > "$scratch/plan.new" \
+    && cat "$scratch/plan.new" > "$plan" || rc=1
+  rm -rf "$scratch"
+  exit "$rc"
+fi
+echo "shim: unsupported invocation: $*" >&2
+exit 2
+EOF
+chmod +x "$STUB_DIR/bin/loom-daemon"
+export PATH="$STUB_DIR/bin:$PATH"
+GH_STUB="$STUB_DIR/gh"
+: > "$GH_STUB.calls"
+cat >"$GH_STUB" <<'EOF'
+#!/usr/bin/env bash
+[[ "${FAIL_LOOKUP:-}" == 1 ]] && exit 1
+if [[ "$2" == list ]]; then
+  # #14785: render_plan_body()/the gate fetch ONE unlabelled open-PR
+  # inventory (`pr list --state open`); the gate's Approved closing-refs
+  # check keeps its own `--label "loom:pr"` query. Both serve the fixture
+  # rows (state-filtered when --state is passed; rows without a state field
+  # count as open, matching the pre-#14785 fixtures). The ready query serves
+  # #1 "Add widget" so the render's open-PR listing section has a row.
+  state=""
+  prev=""
+  for a in "$@"; do
+    if [[ "$prev" == "--state" ]]; then state="$a"; fi
+    prev="$a"
+  done
+  if [[ "$1 $3 $4" == "pr --label loom:pr" || "$1 $3 $4" == "pr --state open" ]]; then
+    fields="${!#}"
+    filter='.'
+    if [[ "${*: -2:1}" == --jq ]]; then
+      fields="${*: -3:1}"
+      filter="${!#}"
+    fi
+    rows="$APPROVED_PRS"
+    if [[ -n "$state" ]]; then
+      rows="$(printf '%s' "$rows" | jq --arg s "$state" '[.[] | select((.state // "open") == $s)]')"
+    fi
+    if [[ ",$fields," != *,title,* ]]; then
+      echo lookup >> "$0.calls"
+      [[ "${FAIL_REFS:-}" == 1 ]] && exit 1
+      # #14575: a successful lookup that emits no JSON value (jq 1.6 exits 0
+      # on empty input without consuming a value) must not pass a bare title.
+      [[ "${EMPTY_REFS:-}" == 1 ]] && exit 0
+      [[ "${WS_REFS:-}" == 1 ]] && { printf '  \n\t '; exit 0; }
+      rows="${VERIFY_PRS:-$APPROVED_PRS}"
+      if [[ -n "$state" ]]; then
+        rows="$(printf '%s' "$rows" | jq --arg s "$state" '[.[] | select((.state // "open") == $s)]')"
+      fi
+    fi
+    # Apply the requested field projection before the actual gh --jq filter.
+    jq -r --arg fields "$fields" \
+      'map(with_entries(select(.key as $key | ($fields | split(",") | index($key))))) | '"$filter" \
+      <<< "$rows"
+  elif [[ "$1 $3 $4" == "issue --label loom:issue" ]]; then
+    printf '%s' '[{"number":1,"title":"Add widget","labels":[{"name":"loom:issue"}]}]'
+  else
+    jq -r "${!#}" <<< '[]'
+  fi
+  exit $?
+fi
+case "$2" in
+  repos/owner/mine/issues/1) echo "Add widget" ;;
+  repos/owner/mine/issues/2) echo "Fix gizmo" ;;
+  repos/owner/mine/issues/3) echo "Odd title *(held)*" ;;
+  repos/owner/mine/issues/4) echo "Title — closes #42" ;;
+  repos/owner/mine/issues/5) echo "Frozen pull request" ;;
+  repos/owner/mine/issues/9) echo "Partial widget work" ;;
+  repos/owner/mine/issues/13582) echo "fix: honour a trusted loom:issue adoption in the promotion author gate" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$GH_STUB"
+export GH_READ="$GH_STUB" GUIDE_REPO="owner/mine"
+eval "$VPP"
+
+echo "Test 2: verify_plan_provenance"
+verify_plan_provenance $'## Ready\n\n- **#1**: Add widget\n- **#2**: Fix gizmo *(curated)*' 2>/dev/null \
+  && pass "matching titles accepted" || fail "matching titles rejected"
+verify_plan_provenance $'- **#1**: Some other repo\x27s title\n- **#2**: Fix gizmo' 2>/dev/null \
+  && fail "foreign titles (numbers exist) accepted" || pass "foreign titles rejected even though #N exist"
+FAIL_LOOKUP=1 verify_plan_provenance '- **#1**: Add widget' 2>/dev/null \
+  && fail "failed lookup accepted" || pass "failed title lookup fails closed"
+verify_plan_provenance $'## None\n\n_None._' 2>/dev/null \
+  && pass "body with zero #N accepted" || fail "zero-#N body rejected"
+
+echo "Test 2b: every suffix render_plan_body() emits is accepted (#13908 lockstep)"
+ok() { verify_plan_provenance "$1" 2>/dev/null && pass "accepted: ${2:-$1}" || fail "rejected: ${2:-$1}"; }
+no() { verify_plan_provenance "$1" 2>/dev/null && fail "accepted: ${2:-$1}" || pass "rejected: ${2:-$1}"; }
+# The suffix set comes from render_plan_body()'s own source, never a list kept
+# here: a suffix added to the render without teaching the gate fails this test.
+RPB="$(extract render_plan_body)"
+TAGS="$(grep -v '^ *#' <<<"$RPB" | grep -oE ' \*\([a-z-]+\)\*' | sort -u | sed -E 's/^ \*\(|\)\*$//g')"
+grep -qx held <<<"$TAGS" && pass "render emits the *(held)* suffix" || fail "render no longer emits *(held)* (test assumptions stale)"
+for want_tag in curated architect hermit; do
+  grep -qx "$want_tag" <<<"$TAGS" && pass "render emits *($want_tag)*" || fail "render no longer emits *($want_tag)*"
+done
+ok '- **#1**: Add widget *(held)*'
+while IFS= read -r t; do
+  [[ "$t" == held ]] && continue
+  ok "- **#1**: Add widget *($t)*"
+  ok "- **#1**: Add widget *($t)* *(held)*"
+  no "- **#1**: Add widget *(held)* *($t)*"
+  no "- **#1**: Foreign title *($t)* *(held)*"
+done <<<"$TAGS"
+ok $'## Very Important\n\n- **#1**: Add widget *(held)*\n- **#2**: Fix gizmo *(curated)* *(held)*\n- **#2**: Fix gizmo'
+ok '- **#3**: Odd title *(held)*'
+ok '- **#3**: Odd title *(held)* *(held)*'
+no '- **#1**: Foreign title *(held)*'
+no '- **#1**: Add widget *(held)* *(held)*'
+no '- **#1**: Add widget *(curated)* *(hermit)*'
+no '- **#1**: Add widget *(bogus)*'
+no '- **#1**: Add widget extra'
+no '- **#1**: Add'
+FAIL_LOOKUP=1 verify_plan_provenance '- **#1**: Add widget *(held)*' 2>/dev/null \
+  && fail "failed lookup accepted for a held bullet" || pass "failed lookup still fails closed for a held bullet"
+
+echo "Test 2c: verify the rendered Approved section against forge closing refs"
+# #13582 is the reported PR (title and closing ref captured with gh pr view).
+# The other rows exercise unsorted refs and a literal title with no annotation.
+# #14785: every row now carries its labels (approved_json is a filter of the
+# broadened inventory, not a pre-filtered `--label loom:pr` query), and PR #9
+# partially closes #1 — the ready query serves #1, so the render's open-PR
+# listing section has a row for the gate to verify.
+export APPROVED_PRS='[
+  {"number":13582,"title":"fix: honour a trusted loom:issue adoption in the promotion author gate","labels":[{"name":"loom:pr"}],"closingIssuesReferences":[{"number":13578}]},
+  {"number":1,"title":"Add widget","labels":[{"name":"loom:pr"}],"closingIssuesReferences":[{"number":42},{"number":7}]},
+  {"number":4,"title":"Title — closes #42","labels":[{"name":"loom:pr"}],"closingIssuesReferences":[]},
+  {"number":5,"title":"Frozen pull request","labels":[{"name":"loom:pr"},{"name":"loom:frozen"}],"closingIssuesReferences":[{"number":12}]},
+  {"number":9,"title":"Partial widget work","labels":[{"name":"loom:pr"}],"closingIssuesReferences":[{"number":1}]}
+]'
+eval "$RPB"
+RENDERED="$(render_plan_body)"
+approved_body="$(awk '/^## / {approved=($0 == "## Approved (Awaiting Merge)")} approved' <<<"$RENDERED")"
+openpr_body="$(awk '/^## Issues with Open PRs/{f=1;next} /^## /{f=0} f' <<<"$RENDERED")"
+assert_contains "$approved_body" 'Add widget — closes #7, #42' "rendered both refs in numeric order"
+assert_contains "$approved_body" 'gate — closes #13578' "rendered the reported single-ref row"
+assert_contains "$approved_body" '- **#4**: Title — closes #42' "rendered literal closes title"
+ok "$approved_body" "genuine Approved rows"
+assert_eq 1 "$(wc -l < "$GH_STUB.calls" | tr -d ' ')" "one refs lookup for all Approved rows"
+if [[ "$approved_body" == *"Frozen pull request"* ]]; then
+  fail "renderer included a frozen PR in Approved"
+else
+  pass "renderer omits a frozen PR from Approved"
+fi
+no "$approved_body"$'\n- **#5**: Frozen pull request — closes #12' \
+  "frozen Approved row with matching title and closing ref"
+for changed in ' — closes #7, #43' ' — closes #7' '' ' — closes #7, #42, #43' ' — closes #7 #42' ' *(bogus)*'; do
+  no "${approved_body/Add widget — closes #7, #42/Add widget$changed}" "altered closing annotation [$changed]"
+done
+no "${approved_body/Add widget/Foreign title}" "wrong title with correct refs"
+FAIL_REFS=1 no "$approved_body" "unavailable refs"
+VERIFY_PRS='[]' no "$approved_body" "missing PRs"
+VERIFY_PRS="$(jq 'map(if .number == 4 then del(.closingIssuesReferences) else . end)' <<<"$APPROVED_PRS")" \
+  no "$approved_body" "missing refs field on a plain-title row"
+
+echo "Test 2d (#14785): verify the rendered open-PR listing through the same helpers"
+assert_contains "$openpr_body" '- **#1**: Add widget — open PR #9 (approved)' \
+  "rendered the linked ready issue with its PR and stage"
+ok "$RENDERED" "the full render (Approved + open-PR listing together) passes the gate"
+for changed in ' — open PR #9 (in review)' ' — open PR #9' ' — open PRs #9 (approved)' \
+  ' — open PR #8 (approved)' ' *(held)* — open PR #9 (approved)'; do
+  no "${RENDERED/- **#1**: Add widget — open PR #9 (approved)/- **#1**: Add widget$changed}" \
+    "altered open-PR annotation [$changed]"
+done
+no "${RENDERED/- **#1**: Add widget — open PR #9 (approved)/- **#1**: Foreign title — open PR #9 (approved)}" \
+  "open-PR row with a foreign title"
+# An annotation the fresh inventory does not derive must be refused, even
+# when the title itself is genuine.
+VERIFY_PRS="$APPROVED_PRS" no "${RENDERED/- **#1**: Add widget — open PR #9 (approved)/- **#1**: Add widget — open PR #9 (approved), #4 (approved)}" \
+  "invented extra linking PR in the annotation"
+# #14575: a single bare Approved row needs closing-reference evidence even when
+# the forge lookup succeeds — a zero-byte or whitespace-only response carries no
+# JSON value for the matching PR (jq 1.6 exits 0 on it). A jq 1.6 emulator on
+# PATH makes the regression real on hosts whose jq >= 1.7 already exits 4.
+JQ16_DIR="$STUB_DIR/jq16"
+mkdir -p "$JQ16_DIR"
+REAL_JQ="$(command -v jq)"
+cat >"$JQ16_DIR/jq" <<EOF
+#!/usr/bin/env bash
+# Emulate jq 1.6: a filter over stdin that carries no JSON value exits 0 with
+# no output instead of 4 ("no valid result was ever produced").
+input="\$(cat)"
+if [[ -z "\${input//[[:space:]]/}" ]]; then exit 0; fi
+exec "$REAL_JQ" "\$@" <<<"\$input"
+EOF
+chmod +x "$JQ16_DIR/jq"
+BARE_ROW=$'## Approved (Awaiting Merge)\n\n- **#1**: Add widget'
+PATH="$JQ16_DIR:$PATH" EMPTY_REFS=1 no "$BARE_ROW" "zero-byte refs lookup accepted for a bare row (jq 1.6)"
+PATH="$JQ16_DIR:$PATH" WS_REFS=1 no "$BARE_ROW" "whitespace-only refs lookup accepted for a bare row (jq 1.6)"
+# Positive: the forge explicitly returns an empty closingIssuesReferences array
+# for the PR — the bare row is correct and must pass.
+VERIFY_PRS="$(jq -c 'map(if .number == 1 then .closingIssuesReferences = [] else . end)' <<<"$APPROVED_PRS")" \
+  ok "$BARE_ROW" "explicit empty closingIssuesReferences accepted for a bare row"
+# A held PR may appear in both sections, with refs only in Approved.
+ok "$approved_body"$'\n## Operator Attention: Merge-Risk-Hold Pileup\n- **#1**: Add widget' "same PR in Approved and operator hold sections"
+no $'## Ready\n- **#1**: Add widget — closes #7, #42'
+
+echo "Test 3: splice_plan_body"
+eval "$SPB"
+DOCS_WT="$STUB_DIR"
+printf 'head\n<!-- guide:plan-body:start -->\nOLD\n<!-- guide:plan-body:end -->\ntail\n' >"$DOCS_WT/WORK_PLAN.md"
+BEFORE="$(ls -d "${TMPDIR:-/tmp}"/guide-plan.* 2>/dev/null | wc -l)"
+splice_plan_body $'NEW1\nNEW2' && pass "splice succeeded" || fail "splice failed"
+assert_eq "$(cat "$DOCS_WT/WORK_PLAN.md")" $'head\n<!-- guide:plan-body:start -->\nNEW1\nNEW2\n<!-- guide:plan-body:end -->\ntail' "only marker region replaced"
+AFTER="$(ls -d "${TMPDIR:-/tmp}"/guide-plan.* 2>/dev/null | wc -l)"
+assert_eq "$AFTER" "$BEFORE" "per-tick scratch dir removed"
+printf 'no markers\n' >"$DOCS_WT/WORK_PLAN.md"
+splice_plan_body 'X' && fail "splice without markers succeeded" || pass "missing markers refused"
+assert_eq "$(cat "$DOCS_WT/WORK_PLAN.md")" "no markers" "file untouched when markers missing"
+
+echo
+echo "Tests run: $TESTS_RUN, passed: $TESTS_PASSED, failed: $TESTS_FAILED"
+[[ "$TESTS_FAILED" -eq 0 ]] || exit 1
+echo "All tests passed"

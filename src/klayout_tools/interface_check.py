@@ -8,7 +8,8 @@ Headless invariant: uses only the pip ``klayout`` package's batch database API
 (``klayout.db``) -- no GUI, no Qt.
 
 Model: each stream contributes text labels whose string fully matches the
-``--pins`` regex. A label's *pad* is the merged polygon on the pin layer that
+``--pins`` regex, narrowed per side by ``--pins-a`` / ``--pins-b`` when
+given. A label's *pad* is the merged polygon on the pin layer that
 contains the label point (edge-touching counts), or the nearest one by
 bounding-box distance when none contains it. Both streams are flattened; B is
 translated by ``(dx, dy)`` micrometres into A's frame in memory -- no assembled
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from ._layout import load_layout, resolve_top_cell
@@ -39,8 +41,9 @@ _UM_DIGITS = 6
 
 class InterfaceCheckError(Exception):
     """Raised when the interface cannot be checked: unreadable stream, bad
-    ``--place`` / ``--pins`` / layer argument, or no matching pin in either
-    stream. The CLI turns this into a clean stderr message + exit code 1."""
+    ``--place`` / ``--pins`` / per-side pin filter / layer argument, or no
+    matching pin in either stream. The CLI turns this into a clean stderr
+    message + exit code 1."""
 
 
 def parse_place(spec: str) -> tuple[float, float]:
@@ -62,13 +65,88 @@ def parse_place(spec: str) -> tuple[float, float]:
     return dx, dy
 
 
-def parse_layer(spec: str, flag: str) -> tuple[int, int]:
-    """Parse ``"L/D"`` into a ``(layer, datatype)`` pair."""
+def parse_pair(spec: str) -> tuple[str, str]:
+    """Parse ``"A_REGEX=B_TEMPLATE"`` (split on the last ``=``) and validate it.
+
+    The template is a :meth:`re.Match.expand` template (``\\1``, ``\\g<n>``).
+    """
+    regex, sep, template = spec.rpartition("=")
+    if not sep or not regex:
+        raise InterfaceCheckError(
+            f"--pair must look like 'A_REGEX=B_TEMPLATE', got: {spec}"
+        )
     try:
-        layer, datatype = spec.split("/")
-        return int(layer), int(datatype)
-    except ValueError:
-        raise InterfaceCheckError(f"{flag} must look like L/D, got: {spec}") from None
+        compiled = re.compile(regex)
+    except re.error as exc:
+        raise InterfaceCheckError(
+            f"--pair regex is not valid ({spec}): {exc}"
+        ) from None
+    try:
+        # Validate the template (e.g. nonexistent group) without needing a match.
+        _check_template(compiled, template)
+    except (re.error, IndexError) as exc:
+        raise InterfaceCheckError(
+            f"--pair template is not valid ({spec}): {exc}"
+        ) from None
+    return regex, template
+
+
+def _check_template(compiled: re.Pattern[str], template: str) -> None:
+    """Raise if ``template`` references a group ``compiled`` does not have."""
+    for ref in re.finditer(r"\\(\d+)|\\g<([^>]*)>", template):
+        group = ref.group(1) or ref.group(2)
+        if group.isdigit():
+            if int(group) > compiled.groups:
+                raise IndexError(f"invalid group reference {group}")
+        elif group not in compiled.groupindex:
+            raise IndexError(f"unknown group name {group!r}")
+
+
+def _compile_pin_pattern(regex: str, flag: str) -> re.Pattern[str]:
+    """Compile a ``--pins`` regex; ``regex`` is required."""
+    try:
+        return re.compile(regex)
+    except re.error as exc:
+        raise InterfaceCheckError(f"{flag} is not a valid regex: {exc}") from None
+
+
+def _compile_optional_pin_pattern(
+    regex: str | None, flag: str
+) -> re.Pattern[str] | None:
+    """Compile a ``--pins-a`` / ``--pins-b`` regex; ``None`` (flag not given)
+    stays ``None``."""
+    if regex is None:
+        return None
+    return _compile_pin_pattern(regex, flag)
+
+
+def _apply_pairs(
+    side_a: dict[str, dict[str, Any]], pairs: list[tuple[str, str]]
+) -> dict[str, tuple[str, dict[str, Any]]]:
+    """``{B-side key: (A name, A item)}``. The first pair whose regex fully
+    matches an A label's base name wins; unmapped labels keep their name. The
+    ``#k`` occurrence suffix is carried over to the renamed key."""
+    compiled = [(re.compile(rx), tpl) for rx, tpl in pairs]
+    mapped: dict[str, tuple[str, dict[str, Any]]] = {}
+    for key, item in side_a.items():
+        base, hash_, occ = key.partition("#")
+        target = key
+        for rx, tpl in compiled:
+            match = rx.fullmatch(base)
+            if match is not None:
+                try:
+                    target = match.expand(tpl) + hash_ + occ
+                except (re.error, IndexError) as exc:
+                    raise InterfaceCheckError(
+                        f"--pair template failed on {base!r}: {exc}"
+                    ) from None
+                break
+        if target in mapped:
+            raise InterfaceCheckError(
+                f"--pair maps both {mapped[target][0]!r} and {key!r} to {target!r}"
+            )
+        mapped[target] = (key, item)
+    return mapped
 
 
 def run_interface_check(
@@ -82,6 +160,9 @@ def run_interface_check(
     tol_um: float = 0.0,
     top_a: str | None = None,
     top_b: str | None = None,
+    pairs: list[tuple[str, str]] | None = None,
+    pins_a: str | None = None,
+    pins_b: str | None = None,
 ) -> dict[str, Any]:
     """Check that the pins of ``a_path`` mate with those of ``b_path`` when B
     is placed at ``place`` (micrometres, in A's frame).
@@ -90,6 +171,14 @@ def run_interface_check(
     / ``pin_layer_b`` give the layer the pads are drawn on; when ``None`` a
     label's own layer is used (labels drawn on the pad layer itself).
 
+    ``pins_a`` / ``pins_b`` narrow one side within ``pins``: a label is in a
+    side's scope iff it fully matches ``pins`` and, when that side's pattern
+    is given, also fully matches it. ``pins`` keeps its meaning (the shared
+    universe of pin labels); a per-side pattern can only shrink its own side.
+    This is what lets the same stream be passed as both ``a_path`` and
+    ``b_path`` for a one-seam abutment check on a repeated block: scope A to
+    its facing edge, B to its own, and pair the two with ``pairs``.
+
     Returns a dict::
 
         {
@@ -97,6 +186,8 @@ def run_interface_check(
             "a": <a_path>, "b": <b_path>,
             "place_um": [dx, dy],
             "pins_pattern": <pins>,
+            "pins_pattern_a": <pins_a> | None,
+            "pins_pattern_b": <pins_b> | None,
             "tolerance_um": <tol_um>,
             "dbu_um": {"a": <float>, "b": <float>},
             "status": "pass" | "fail",
@@ -114,29 +205,62 @@ def run_interface_check(
     A pin name that occurs several times in one stream is paired by
     occurrence, ordered bottom-to-top then left-to-right in A's frame; the
     occurrence index is appended as ``name#k`` (k >= 1) only for such names.
+
+    ``pairs`` is an optional list of ``(a_regex, b_template)``: an A label that
+    fully matches ``a_regex`` is paired with the B label named by the expanded
+    template (complementary names, e.g. ``n_out[0]`` <-> ``s_in[0]``). Entries
+    are reported under A's name; ``b_name`` is the B-side name. The declared
+    pairs are echoed as ``"pairs": [{"a", "b"}]``. Both names must match
+    ``pins``, each within its own side's scope (``pins_a`` / ``pins_b``
+    narrow one side). Without ``pairs`` labels are paired by identical
+    string.
     """
     if tol_um < 0 or not math.isfinite(tol_um):
         raise InterfaceCheckError(f"--tol-um must be >= 0, got: {tol_um}")
-    try:
-        pattern = re.compile(pins)
-    except re.error as exc:
-        raise InterfaceCheckError(f"--pins is not a valid regex: {exc}") from None
+    pattern = _compile_pin_pattern(pins, "--pins")
+    pattern_a = _compile_optional_pin_pattern(pins_a, "--pins-a")
+    pattern_b = _compile_optional_pin_pattern(pins_b, "--pins-b")
 
     layout_a = load_layout(a_path, InterfaceCheckError)
     layout_b = load_layout(b_path, InterfaceCheckError)
     cell_a = resolve_top_cell(layout_a, top_a, InterfaceCheckError, path=a_path)
     cell_b = resolve_top_cell(layout_b, top_b, InterfaceCheckError, path=b_path)
 
-    side_a = _collect_side(layout_a, cell_a, pattern, pin_layer_a, (0.0, 0.0))
-    side_b = _collect_side(layout_b, cell_b, pattern, pin_layer_b, place)
+    patterns_a = (pattern,) if pattern_a is None else (pattern, pattern_a)
+    patterns_b = (pattern,) if pattern_b is None else (pattern, pattern_b)
+    side_a = _collect_side(layout_a, cell_a, patterns_a, pin_layer_a, (0.0, 0.0))
+    side_b = _collect_side(layout_b, cell_b, patterns_b, pin_layer_b, place)
 
-    if not side_a and not side_b:
+    if (
+        not side_a
+        and not side_b
+        and _pins_alone_matches_nothing(
+            layout_a,
+            cell_a,
+            layout_b,
+            cell_b,
+            pattern,
+            (pattern_a, pattern_b),
+            pin_layer_a,
+            pin_layer_b,
+            place,
+        )
+    ):
         raise InterfaceCheckError(f"--pins {pins!r} matches no label in either stream")
+    # Per-side guards come before any both-sides-empty blame: when --pins matched
+    # but the per-side filters emptied their sides, the filter is what is wrong.
+    if pattern_a is not None and not side_a:
+        raise InterfaceCheckError(f"--pins-a {pins_a!r} matches no label in stream A")
+    if pattern_b is not None and not side_b:
+        raise InterfaceCheckError(f"--pins-b {pins_b!r} matches no label in stream B")
 
-    entries = [
-        _pin_entry(name, side_a.get(name), side_b.get(name), tol_um)
-        for name in sorted(set(side_a) | set(side_b), key=_natural_key)
-    ]
+    mapped = _apply_pairs(side_a, pairs or [])
+    entries = []
+    for key in sorted(set(mapped) | set(side_b), key=_natural_key):
+        a_name, a_item = mapped.get(key, (key, None))
+        entry = _pin_entry(a_name, a_item, side_b.get(key), tol_um)
+        entry["b_name"] = key
+        entries.append(entry)
     counts = {
         status: sum(1 for e in entries if e["status"] == status) for status in STATUSES
     }
@@ -146,6 +270,8 @@ def run_interface_check(
         "b": b_path,
         "place_um": [place[0], place[1]],
         "pins_pattern": pins,
+        "pins_pattern_a": pins_a,
+        "pins_pattern_b": pins_b,
         "tolerance_um": tol_um,
         "dbu_um": {"a": layout_a.dbu, "b": layout_b.dbu},
         "status": "pass" if counts["ok"] == len(entries) else "fail",
@@ -153,6 +279,7 @@ def run_interface_check(
         "ok_count": counts["ok"],
         "misaligned_count": counts["misaligned"],
         "no_partner_count": counts["no_partner"],
+        "pairs": [{"a": rx, "b": tpl} for rx, tpl in (pairs or [])],
         "pins": entries,
     }
 
@@ -166,17 +293,43 @@ def _round(value: float) -> float:
     return round(value, _UM_DIGITS) + 0.0  # + 0.0 turns -0.0 into 0.0
 
 
+def _pins_alone_matches_nothing(
+    layout_a: Any,
+    cell_a: Any,
+    layout_b: Any,
+    cell_b: Any,
+    pattern: re.Pattern[str],
+    per_side: tuple[re.Pattern[str] | None, re.Pattern[str] | None],
+    pin_layer_a: tuple[int, int] | None,
+    pin_layer_b: tuple[int, int] | None,
+    place: tuple[float, float],
+) -> bool:
+    """True when ``--pins`` is what emptied both sides (blame it, not a filter).
+
+    Without per-side filters the sides were collected with ``--pins`` alone, so
+    both being empty already answers it; with one, re-collect without the
+    narrowing to see whether ``--pins`` on its own matched anything.
+    """
+    if per_side[0] is None and per_side[1] is None:
+        return True
+    return not _collect_side(
+        layout_a, cell_a, (pattern,), pin_layer_a, (0.0, 0.0)
+    ) and not _collect_side(layout_b, cell_b, (pattern,), pin_layer_b, place)
+
+
 def _collect_side(
     layout: Any,
     cell: Any,
-    pattern: re.Pattern[str],
+    patterns: Sequence[re.Pattern[str]],
     pin_layer: tuple[int, int] | None,
     shift: tuple[float, float],
 ) -> dict[str, dict[str, Any]]:
     """``{pin name: {"layer", "label", "pad"}}`` for one stream, in A's frame.
 
-    ``label`` is ``(x, y)`` um; ``pad`` is the pad's ``(l, b, r, t)`` bbox um
-    or ``None`` when the pin layer carries no geometry.
+    A label is in scope when its string fully matches every pattern in
+    ``patterns`` -- the shared ``--pins`` regex plus that side's narrowing
+    filter. ``label`` is ``(x, y)`` um; ``pad`` is the pad's ``(l, b, r, t)``
+    bbox um or ``None`` when the pin layer carries no geometry.
     """
     import klayout.db as kdb
 
@@ -185,7 +338,7 @@ def _collect_side(
     for layer_index in layout.layer_indexes():
         info = layout.get_info(layer_index)
         for text in kdb.Texts(cell.begin_shapes_rec(layer_index)).each():
-            if pattern.fullmatch(text.string):
+            if all(p.fullmatch(text.string) for p in patterns):
                 labels.append(
                     (
                         text.string,

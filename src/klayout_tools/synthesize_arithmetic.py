@@ -62,55 +62,37 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from . import env_provenance
+from ._jsonnum import is_int
 from ._verilog_params import chparam_lines, read_verilog_line
-from .arith_gen import (
-    ARCHITECTURES as ADDER_ARCHITECTURES,
-)
+from .arith_gen import ARCHITECTURES as ADDER_ARCHITECTURES
 from .arith_gen import (
     ArithGenError,
     emit_techmap_verilog,
     generate_adder,
     normalize_architecture,
 )
+from .synthesize_abc import FastMode
+from .synthesize_abc_stages import run_mapping
+from .synthesize_abc_timing import plan_abc_stats_capture
 
 
+@dataclass(slots=True, kw_only=True)
 class _EngineOptions:
-    """The per-library Yosys/ABC knobs a trial synthesis needs to reproduce
-    the real run's engine configuration exactly.
+    """Engine settings shared by the final synthesis and arithmetic candidates."""
 
-    Bundled into one object purely so :func:`_measure_candidate` does not
-    take nine positional look-alikes; every field is resolved once, in
-    :func:`run_synthesize`, from the same tables the real run uses.
-    """
-
-    __slots__ = (
-        "liberty_path",
-        "cell_library",
-        "delay_target_ps",
-        "dont_use_globs",
-        "tie_cells",
-        "constr_inputs",
-    )
-
-    def __init__(
-        self,
-        *,
-        liberty_path: str,
-        cell_library: str,
-        delay_target_ps: int | None,
-        dont_use_globs: tuple[str, ...],
-        tie_cells: tuple[tuple[str, str], tuple[str, str]] | None,
-        constr_inputs: tuple[str, float] | None,
-    ) -> None:
-        self.liberty_path = liberty_path
-        self.cell_library = cell_library
-        self.delay_target_ps = delay_target_ps
-        self.dont_use_globs = dont_use_globs
-        self.tie_cells = tie_cells
-        self.constr_inputs = constr_inputs
+    liberty_path: str
+    cell_library: str
+    delay_target_ps: int | None
+    dont_use_globs: tuple[str, ...]
+    tie_cells: tuple[tuple[str, str], tuple[str, str]] | None
+    constr_inputs: tuple[str, float] | None
+    abc_fast: FastMode = None
+    abc_script_path: str | None = None
+    abc_timeout_s: float | None = None
 
     @property
     def target_period_ns(self) -> float | None:
@@ -156,7 +138,7 @@ def _resolve_arithmetic(request: dict[str, Any]) -> dict[str, Any] | None:
             raise SynthesizeError(f"request.arithmetic.adders: {exc}") from exc
 
     min_width = arithmetic.get("min_width", DEFAULT_ADDER_MIN_WIDTH)
-    if isinstance(min_width, bool) or not isinstance(min_width, int) or min_width < 2:
+    if not is_int(min_width) or min_width < 2:
         raise SynthesizeError(
             "request.arithmetic.min_width must be an integer >= 2 "
             f"(default {DEFAULT_ADDER_MIN_WIDTH})"
@@ -708,19 +690,8 @@ def _measure_candidate(
     parameters: dict[str, int | str] | None = None,
     defines: dict[str, str | None] | None = None,
 ) -> dict[str, Any] | None:
-    """Run one full trial synthesis for a candidate architecture and report
-    what it measured.
-
-    Uses exactly the engine configuration the real run will use (same
-    liberty, same ``-constr``/``-D``/``-dont_use``/``hilomap`` knobs), into
-    its own ``.klt/synthesize/<run_id>/arith/<label>/`` directory so every trial's
-    script, netlist, stats and ABC log survive as debuggable artifacts --
-    "measured, not guessed" is only a real claim if the measurement is
-    reproducible afterwards.
-
-    Returns ``None`` when this candidate's trial synthesis fails outright,
-    which disqualifies it from selection without failing the whole run: one
-    architecture Yosys cannot map is not a reason to abandon the other four.
+    """Measure one architecture in its own directory. An engine failure
+    disqualifies this candidate while leaving the other trials eligible.
     """
     from .synthesize import (
         SynthesizeError,
@@ -728,7 +699,6 @@ def _measure_candidate(
         _read_produced_netlist,
         _read_sta_timing,
         _read_stats,
-        _run_yosys,
         _write_constr,
         _write_script,
     )
@@ -750,7 +720,17 @@ def _measure_candidate(
         abc_log_path = os.path.join(trial_dir, f"{hdl_toplevel}_abc.log")
         _write_constr(constr_path, *engine_options.constr_inputs)
 
-    _write_script(
+    capture = plan_abc_stats_capture(
+        trial_dir,
+        constrained=constr_path is not None,
+        user_script=engine_options.abc_script_path,
+        abc_fast=engine_options.abc_fast,
+        delay_target_ps=engine_options.delay_target_ps,
+    )
+    scripts = _write_script(
+        abc_timeout_s=engine_options.abc_timeout_s,
+        abc_fast=engine_options.abc_fast,
+        abc_script_path=engine_options.abc_script_path,
         script_path=script_path,
         sources=resolved_sources,
         hdl_toplevel=hdl_toplevel,
@@ -766,22 +746,24 @@ def _measure_candidate(
         adder_techmap_path=adder_techmap_path,
         parameters=parameters,
         defines=defines,
+        stats_capture=capture,
     )
 
     try:
-        _run_yosys(script_path)
+        run_mapping(scripts, cwd=trial_dir if capture else None)
         _read_produced_netlist(netlist_path)
-        module_stats = _read_stats(stats_path, hdl_toplevel)
+        module_stats = _read_stats(
+            stats_path, hdl_toplevel, abc_script_path=engine_options.abc_script_path
+        )
         abc_timing = _read_produced_abc_timing(
-            abc_log_path, engine_options.delay_target_ps
+            abc_log_path,
+            engine_options.delay_target_ps,
+            stats_path=capture.stats_path if capture else None,
         )
     except SynthesizeError:
         return None
 
-    # `_read_sta_timing` returns `(sta, sta_unavailable_reason)` since issue
-    # #2628; a candidate's `measured` block reports only the number. The
-    # reason is identical for every trial in this run (same extension, same
-    # liberty) and is reported once, at the response's own top level.
+    # The top-level report already gives the shared STA unavailability reason.
     sta, _sta_unavailable_reason = _read_sta_timing(
         netlist_path, engine_options.liberty_path, hdl_toplevel
     )
@@ -794,9 +776,7 @@ def _measure_candidate(
         target_period_ns=engine_options.target_period_ns,
     )
     measurement["label"] = label
-    # Issue #1844: only the values reported back in `candidates[].measured`
-    # are normalized -- `netlist_path`/`script_path` above stay the real
-    # absolute paths used for this trial's own I/O throughout this function.
+    # Normalize reported paths after all trial I/O (#1844).
     measurement["netlist_path"] = env_provenance.repo_relative_path(
         netlist_path, repo_root=repo_root
     )

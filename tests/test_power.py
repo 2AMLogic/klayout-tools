@@ -2415,10 +2415,10 @@ def test_cli_json_ir_drop_map_shape(tmp_path, capsys):
     assert set(ir_drop["nets"][0]["islands"][0]["edges"][0].keys()) == {
         "id",
         "current_a",
-        # Added additively by #2345: the derived current density on the
-        # same edge that carries the solved current (null when it does
-        # not apply -- a via edge, or no solved current).
+        # Additive: #2345's per-row density (null for a via edge or no
+        # solved current); #6525's pooled drawn-section density.
         "current_density_a_per_um",
+        "cross_section_density_a_per_um",
     }
     assert data["worst_case_droop_mv"] == pytest.approx(1.0)
 

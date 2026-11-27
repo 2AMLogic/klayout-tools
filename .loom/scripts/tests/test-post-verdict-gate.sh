@@ -60,6 +60,9 @@ done
 if [[ "${1:-}" == "api" ]]; then
   # the #10485 final head compare reads exactly pulls/<N> (not /reviews, /comments)
   if [[ "$method" == GET && "$path" =~ ^repos/owner/repo/pulls/[0-9]+$ ]]; then cat "$D/cur-sha"; exit 0; fi
+  # #13927: a wedged formal-reviews read — the reconciliation gate's fetch
+  # never writes and never exits on its own.
+  [[ -f "$D/rev-hang" && "$path" == *"/reviews"* ]] && sleep 30
   case "$method $path" in
     "GET repos/owner/repo/issues/"*/comments)
       cat "$D/comments.json"; exit 0 ;;
@@ -427,6 +430,19 @@ state "$OP_COMMENT" loom:review-requested loom:reviewing
 pv 12614 changes-requested "$HEAD" --body "Changes requested: see the spec." --review-started "$PAST_T"
 check "changes-requested is never refused by it" 0 "$RC"
 
+# #13134: --acknowledged-comment is forwarded and excuses only the listed id.
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --acknowledged-comment 4242
+check "acknowledged comment id: exit 0" 0 "$RC"
+check "acknowledged comment id: posted" 12614 "$POSTED"
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --acknowledged-comment 9999
+check "acknowledging a different id still refuses: exit 7" 7 "$RC"
+contains "refusal names the remedy flag" "$OUT" "--acknowledged-comment"
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --acknowledged-comment 4242 --issue-body-sha "50=$(printf %s 'stale body' | sha256sum | cut -d' ' -f1)"
+check "acknowledged id never excuses a body-hash mismatch: exit 7" 7 "$RC"
+
 # #12714: the start comes from the dispatch, so omitting or lying about the flag cannot hide a comment.
 DISPATCH_T="$(($(date +%s) - 3600))"
 state "$OP_COMMENT" loom:review-requested loom:reviewing
@@ -446,11 +462,29 @@ pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-
 check "issue body unchanged: exit 0" 0 "$RC"
 check "issue body unchanged: posted" 12614 "$POSTED"
 
+# #13600: a hash of the raw `gh --jq .body` output (trailing newline kept) is accepted.
+NL_HASH="$(printf '%s\n' 'the design as reviewed' | sha256sum | cut -d' ' -f1)"
+state "[]" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$NL_HASH"
+check "trailing-newline body hash: exit 0" 0 "$RC"
+check "trailing-newline body hash: posted" 12614 "$POSTED"
+
+# #13992: a body that itself ends in a newline makes `gh api --jq .body |
+# sha256sum` hash TWO trailing newlines; that form is accepted too.
+echo '{"body":"the design as reviewed\n"}' > "$STUB_DIR/issue-50.json"
+NL2_HASH="$(printf '%s\n\n' 'the design as reviewed' | sha256sum | cut -d' ' -f1)"
+state "[]" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$NL2_HASH"
+check "double-newline body hash (body itself ends in newline): exit 0" 0 "$RC"
+check "double-newline body hash: posted" 12614 "$POSTED"
+
 echo '{"body":"rescoped to a daemon-only design"}' > "$STUB_DIR/issue-50.json"
 state "[]" loom:review-requested loom:reviewing
 pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$OLD_HASH"
 check "issue body rescoped: exit 7" 7 "$RC"
 contains "names the issue" "$OUT" "issue #50's body changed"
+contains "refusal says what was hashed" "$OUT" "trailing newlines trimmed"
+contains "refusal shows the recipe" "$OUT" "sha256sum"
 check "issue body rescoped: nothing posted" "" "$POSTED"
 
 echo '{"body":"the design as reviewed"}' > "$STUB_DIR/issue-50.json"
@@ -468,6 +502,27 @@ state "[]" loom:review-requested loom:reviewing
 pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$OLD_HASH"
 check "unreadable PR/issue state fails closed: exit 7" 7 "$RC"
 rm -f "$STUB_DIR/issue-50-read-fail"
+
+echo "== a hung review read refuses with distinct timeout wording (#13927) =="
+# The gate's formal-reviews fetch wedges (never returns). The approval must be
+# refused promptly with wording that names the TIMEOUT — distinct from a
+# generic UNKNOWN — and --reviews-reconciled must not be offered as a way past
+# it (nothing was read, so there is nothing to disposition).
+state "[]" loom:review-requested loom:reviewing
+printf %s "$HEAD" > "$STUB_DIR/cur-sha"
+touch "$STUB_DIR/rev-hang"
+set +e
+OUT="$(LOOM_FORGE_REVIEW_READ_TIMEOUT=1 "$POST_VERDICT" 10578 approved "$HEAD" --body "Approved: covered by the new tests." 2>&1)"
+RC=$?
+set -e
+rm -f "$STUB_DIR/rev-hang"
+POSTED="$(cat "$STUB_DIR/posted.log" 2>/dev/null || true)"
+LABELS="$(tr '\n' ' ' < "$STUB_DIR/labels.txt")"
+check "exit 3" 3 "$RC"
+contains "refusal names the timeout" "$OUT" "TIMED OUT"
+contains "refusal says it is not dispositionable" "$OUT" "--reviews-reconciled cannot disposition"
+check "nothing posted" "" "$POSTED"
+contains "claim labels kept" "$LABELS" "loom:review-requested"
 
 echo ""
 echo "test-post-verdict-gate: $PASSED passed, $FAILED failed"

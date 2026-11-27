@@ -85,13 +85,12 @@ Representative tools by category:
 **Terminal tools**:
 - `list_terminals` - List all active terminals
 - `get_terminal_output` - Read terminal output
-- `get_selected_terminal` - Get current terminal info
 - `send_terminal_input` - Execute commands in terminals
 - `create_terminal` / `configure_terminal` / `restart_terminal` - Manage terminal sessions
 
 **UI / state tools**:
-- `get_ui_state` - Comprehensive UI state (workspace, config, terminals) — this
-  replaced the removed per-file readers
+- `get_ui_state` - Comprehensive UI state (workspace, config, engine liveness) —
+  this replaced the removed per-file readers
 - `get_heartbeat` - Check whether the Loom app is running
 
 **Durable watches**: `register_watch` / `list_watches` / `remove_watch` — operator
@@ -118,6 +117,7 @@ see #3345):
 | Command | Role | Purpose |
 |---------|------|---------|
 | `/loom:sweep` | Sweep | Drives one issue through the full Curator → Builder → Judge → Doctor → Merge lifecycle |
+| `/loom:accelerate` | Accelerate | Session-only loop of `/loom:sweep all` and `all --prs`, sized to this machine, to add local capacity alongside the fleet |
 | `/loom:builder` | Builder | Implements features for `loom:issue` issues and creates PRs |
 | `/loom:judge` | Judge | Reviews PRs with `loom:review-requested` label |
 | `/loom:curator` | Curator | Enhances issues and marks them as `loom:curated` |
@@ -212,7 +212,7 @@ resolved through the model-selection precedence chain (role JSON
 `suggestedModel`, workspace override, or explicit dispatch param), not the stub.
 See CLAUDE.md → "Model Selection Strategy".
 
-> **Note**: the `loom-shepherd` subagent was removed in v0.10.0 along with the `/shepherd` slash command — see [the migration guide](https://github.com/rjwalters/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md). Use `/loom:sweep <issue>` (Tier 1) for the equivalent lifecycle. The `loom-daemon` subagent is preserved and now documents the Rust `loom-daemon` binary's MCP dispatch surface (`mcp__loom__dispatch_sweep` / `mcp__loom__list_sweeps` …) rather than the deleted Python brain.
+> **Note**: the `loom-shepherd` subagent was removed in v0.10.0 along with the `/shepherd` slash command — see [the migration guide](https://github.com/2AMLogic/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md). Use `/loom:sweep <issue>` (Tier 1) for the equivalent lifecycle. The `loom-daemon` subagent is preserved and now documents the Rust `loom-daemon` binary's MCP dispatch surface (`mcp__loom__dispatch_sweep` / `mcp__loom__list_sweeps` …) rather than the deleted Python brain.
 
 ### How Subagents Work
 

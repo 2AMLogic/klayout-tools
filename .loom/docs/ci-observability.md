@@ -1,8 +1,8 @@
 # CI Observability: every build and CI run is captured in SigNoz
 
-> Standing policy, issue [#8827](https://github.com/rjwalters/loom/issues/8827)
+> Standing policy, issue [#8827](https://github.com/2AMLogic/loom/issues/8827)
 > (phase 4 of the build/CI-in-SigNoz set under epic
-> [#8522](https://github.com/rjwalters/loom/issues/8522)). This page is the
+> [#8522](https://github.com/2AMLogic/loom/issues/8522)). This page is the
 > policy and an operating map — it states what must be captured and links the
 > detail docs that say how. It is not a duplicate of them, and it should stay
 > a map as they grow.
@@ -81,18 +81,18 @@ hop is specified:
 | Record kinds, envelope, local-journal conventions | [`telemetry-schema.md`](telemetry-schema.md) |
 | OTLP exporter, response classification, retry/drop policy | [`otlp-transport.md`](otlp-transport.md) |
 | Exporter config, fan-out, "is it actually flowing" | [`observability.md`](observability.md) §1, §3, §3b |
-| Gateway: allowlist, privacy stance, contract tests | [`defaults/observability/collector/README.md`](https://github.com/rjwalters/loom/blob/main/defaults/observability/collector/README.md) |
-| SigNoz trial: deploy, saved views, retention mechanics | [`defaults/observability/signoz/README.md`](https://github.com/rjwalters/loom/blob/main/defaults/observability/signoz/README.md) |
+| Gateway: allowlist, privacy stance, contract tests | [`defaults/observability/collector/README.md`](https://github.com/2AMLogic/loom/blob/main/defaults/observability/collector/README.md) |
+| SigNoz trial: deploy, saved views, retention mechanics | [`defaults/observability/signoz/README.md`](https://github.com/2AMLogic/loom/blob/main/defaults/observability/signoz/README.md) |
 | Why CI is measured at all | [`ci-principles.md`](ci-principles.md) |
 
 ## Phases
 
 | Phase | Delivers | Issue | Status |
 |---|---|---|---|
-| 1 | `loom-daemon ci-telemetry` poller: `ci.run`/`ci.job` records, duration histograms, run→job traces, dedup ledger, local journal, `status` | [#8824](https://github.com/rjwalters/loom/issues/8824) | Landed — see [Phase 1 reference](#phase-1-reference-runs-and-jobs-8824) |
-| 2 | Full completed-job logs as chunked `ci.job.log` records, with secret redaction enforced at the gateway | [#8825](https://github.com/rjwalters/loom/issues/8825) | Landed — see [Phase 2 reference](#phase-2-reference-completed-job-logs-8825) |
-| 3 | SigNoz retro surfaces (`ci-queries.sql`, six saved views) and the trial's metrics ≥30d retention split | [#8826](https://github.com/rjwalters/loom/issues/8826) | Queries, drift guard and trial retention policy landed — see [Standing queries](#standing-queries) and [Retention](#retention). Creating the saved views in the trial org and the logs/traces 7-day API step need the org login: [#8946](https://github.com/rjwalters/loom/issues/8946) |
-| 4 | This policy doc and its wiring | [#8827](https://github.com/rjwalters/loom/issues/8827) | This doc |
+| 1 | `loom-daemon ci-telemetry` poller: `ci.run`/`ci.job` records, duration histograms, run→job traces, dedup ledger, local journal, `status` | [#8824](https://github.com/2AMLogic/loom/issues/8824) | Landed — see [Phase 1 reference](#phase-1-reference-runs-and-jobs-8824) |
+| 2 | Full completed-job logs as chunked `ci.job.log` records, with secret redaction enforced at the gateway | [#8825](https://github.com/2AMLogic/loom/issues/8825) | Landed — see [Phase 2 reference](#phase-2-reference-completed-job-logs-8825) |
+| 3 | SigNoz retro surfaces (`ci-queries.sql`, six saved views) and the trial's metrics ≥30d retention split | [#8826](https://github.com/2AMLogic/loom/issues/8826) | Queries, drift guard and trial retention policy landed — see [Standing queries](#standing-queries) and [Retention](#retention). Creating the saved views in the trial org and the logs/traces 7-day API step need the org login: [#8946](https://github.com/2AMLogic/loom/issues/8946) |
+| 4 | This policy doc and its wiring | [#8827](https://github.com/2AMLogic/loom/issues/8827) | This doc |
 
 Each phase adds its own reference section (config keys, dedup contract,
 journal schema, chunking contract, standing queries) to this page when it
@@ -112,7 +112,7 @@ scheduled.
 
 - **Scope is a list of owners, not a repo list.** The `owners` key of the
   `autonomous.ciTelemetry` config block (default `["2amlogic"]`) names the
-  captured organizations **and user accounts** (#9188 — `rjwalters/loom` is
+  captured organizations **and user accounts** (#9188 — `2AMLogic/loom` is
   user-owned); repo discovery walks each on every poll. There is no allowlist
   of repos to keep in sync. See [Owners](#owners-orgs-and-users-9188).
 - **Metrics and run/job records are unconditional.** Durations, outcomes
@@ -140,10 +140,10 @@ scheduled.
 ## Retention
 
 > **Trial-only policy.** The 7-day / 30-day split below describes the SigNoz
-> **trial** deployment ([#8826](https://github.com/rjwalters/loom/issues/8826),
+> **trial** deployment ([#8826](https://github.com/2AMLogic/loom/issues/8826),
 > `defaults/observability/signoz/`), not the live harness-ops store Loom exports
 > to, which keeps logs 3650 days and traces/metrics 10 years
-> ([#10195](https://github.com/rjwalters/loom/issues/10195)). Native-HTTPS-only
+> ([#10195](https://github.com/2AMLogic/loom/issues/10195)). Native-HTTPS-only
 > kinds are governed by the loom-ui telemetry store's own retention issues.
 
 | Signal | Retention | Why |
@@ -167,19 +167,19 @@ never a run id — so the 30-day horizon can say *which job* regressed and
 Mechanics, verified against effective ClickHouse DDL rather than the settings
 page: set logs 7 / traces 7 / metrics 30 days in SigNoz General Settings →
 Retention, then re-run the trial's
-[`retention.sql`](https://github.com/rjwalters/loom/blob/main/defaults/observability/signoz/retention.sql),
+[`retention.sql`](https://github.com/2AMLogic/loom/blob/main/defaults/observability/signoz/retention.sql),
 which sets the auxiliary tables the pinned API leaves at stale TTLs to the same
 split. Both steps, and the DDL check, are in the signoz README's "Retention and
 operation" section; the observed DDL is recorded in its `evidence.md`. As of
 #8826, the running trial's metrics are verified at 30 days. Its API-owned
 log/trace tables are still at the upstream 15 days until the settings step is
 applied with the org login
-([#8946](https://github.com/rjwalters/loom/issues/8946)).
+([#8946](https://github.com/2AMLogic/loom/issues/8946)).
 
 ## Standing queries
 
 The retro is
-[`ci-queries.sql`](https://github.com/rjwalters/loom/blob/main/defaults/observability/signoz/ci-queries.sql):
+[`ci-queries.sql`](https://github.com/2AMLogic/loom/blob/main/defaults/observability/signoz/ci-queries.sql):
 numbered, parameterized sections, run in one pass from the trial's private
 bundled `clickhouse-client` (invocation in the signoz README's "CI retro
 queries"). Every section except 7 and 8 has a matching saved view in the
@@ -194,7 +194,7 @@ sources and are `clickhouse-client`-only).
 | 4 | **What took long right now?** The longest individual jobs, with `run_id` / `job_id` | `ci.job` records (7 days) |
 | 5 | **Which runs failed, and why?** Each failed run, its non-successful jobs, how much of each job's log was captured, and the exact Logs Explorer filter to read it | `ci.run` / `ci.job` / `ci.job.log` (7 days) |
 | 6 | **Where did a slow run's time go?** Run wall-clock vs its longest job, job count and summed job time | `ci.run` / `ci.job` records (7 days) |
-| 7 | **Per issue, where did the time go — Builder, CI, Judge, merge?** (#9007) Joins `loom_analytics.raw_ship_outcome` (apply `cycle-time-extract.sql` first) to the `ci.run` triggered by that issue's `feature/issue-N` branch, on the issue number recovered from `loom.ci.ref`. Reports Builder/Judge/merge-phase seconds beside the CI run's queue time (`ci_queued_s`, from `loom.ci.queued_ms`) and its running time (`ci_wall_s`). The queue split is a #9007 follow-up; `ci_queued_s` is NULL for runs recorded before it. One thing it deliberately does **not** claim: "lead time" is the sweep's own `total_duration_sec`, not issue-filed-to-merged (no forge issue-open timestamp reaches this stream — see [`cycle-time-questions.md`](https://github.com/rjwalters/loom/blob/main/defaults/observability/cycle-time-questions.md) §"What this question set cannot answer") | `sweep.outcome` rollup + `ci.run` records (7-day CI horizon; sweep-side per the rollup's own retention) |
+| 7 | **Per issue, where did the time go — Builder, CI, Judge, merge?** (#9007) Joins `loom_analytics.raw_ship_outcome` (apply `cycle-time-extract.sql` first) to the `ci.run` triggered by that issue's `feature/issue-N` branch, on the issue number recovered from `loom.ci.ref`. Reports Builder/Judge/merge-phase seconds beside the CI run's queue time (`ci_queued_s`, from `loom.ci.queued_ms`) and its running time (`ci_wall_s`). The queue split is a #9007 follow-up; `ci_queued_s` is NULL for runs recorded before it. One thing it deliberately does **not** claim: "lead time" is the sweep's own `total_duration_sec`, not issue-filed-to-merged (no forge issue-open timestamp reaches this stream — see [`cycle-time-questions.md`](https://github.com/2AMLogic/loom/blob/main/defaults/observability/cycle-time-questions.md) §"What this question set cannot answer") | `sweep.outcome` rollup + `ci.run` records (7-day CI horizon; sweep-side per the rollup's own retention) |
 | 8 | **How much CI time went to re-date bumps vs new code vs re-runs?** (#9337) Run count, running time and queue time per repo per `loom.ci.trigger_reason` — `stale_main_bump` is the time lost to #8508 re-date commits after `main` moved. `unrecorded` = runs captured before #9337 | `ci.run` records (7 days) |
 | 9 | **How long do jobs wait for a runner?** (#9089) P50/P90/max `loom.ci.queued_ms` per repo + workflow + job, per bucket — the per-job analogue of section 1, so a runner-queue-cap burst localizes to one job family; alert when p90 exceeds 60s | `ci.job` records (7 days) |
 | 10 | **Are a run's matrix legs balanced?** (#9089) Per run attempt, the spread between the slowest and fastest leg sharing one `loom.ci.shard.kind` — the rebalancing signal `run-ci-suites.sh`/nextest partitioning tuning needs | `ci.job` records (7 days) |
@@ -460,8 +460,7 @@ at `intervalSecs`; `feedFloorIntervalSecs` and its env override are ignored.
 runs-listing request per repo. The runs listing is not a conditional request,
 so it always counts. Discovery pages are ETag-cached and are ignored here.
 Each newly finished run costs one jobs listing. With `R` eligible repos and `F`
-finished runs per hour, and ignoring job logs, suite artifacts and story
-lookups:
+finished runs per hour, and ignoring job logs and suite artifacts:
 
 | Mode | Requests/hour | `R = 118`, `F = 100` |
 |---|---|---|
@@ -535,7 +534,7 @@ gitignored (the managed block ignores all of `.loom/state/*`, #9592).
   daemon poller from racing each other on one host.
 - **Multiple hosts: fleet-captain gated (#8901).** The daemon-integrated
   poller (`spawn_task`, in
-  [`loom-daemon/src/ci_telemetry/mod.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/ci_telemetry/mod.rs))
+  [`loom-daemon/src/ci_telemetry/mod.rs`](https://github.com/2AMLogic/loom/blob/main/loom-daemon/src/ci_telemetry/mod.rs))
   is this repo's first real consumer of the singleton-job captain gate
   (`fleet_captain`, [Fleet captain (#8848)](daemon-reference.md#fleet-captain-8848)):
   every tick re-evaluates `fleet_captain::arm_singleton_job("ci-telemetry-poll",
@@ -589,7 +588,7 @@ enabled. Only complete lines are read.
 > **Memory attribution (#11114).** A dated Linux investigation of daemon memory
 > with CI telemetry off/on, the streamed export, the poll cycle and the dedupe
 > ledger is in
-> [`docs/notes/ci-telemetry-memory-attribution-11114.md`](https://github.com/rjwalters/loom/blob/main/docs/notes/ci-telemetry-memory-attribution-11114.md).
+> [`docs/notes/ci-telemetry-memory-attribution-11114.md`](https://github.com/2AMLogic/loom/blob/main/docs/notes/ci-telemetry-memory-attribution-11114.md).
 > The poll cycle is bounded; the ledger's memory grows with history (#11159,
 > #11160).
 
@@ -653,6 +652,15 @@ producers use:
   unchanged. Throughput is about one backfill limit per tick if the sender
   drains between ticks; raise `observability.queueCapacity` to speed a large
   replay, not to hide loss.
+- **The bulk lane has a reserved share (#13688).** Each pass reads the queue's
+  free backfill headroom once. The fast lane (run/job facts) may admit at most
+  the larger half of it; the rest is held for the bulk lane, whose cursor
+  drives rotation. A fast-lane backlog bigger than the backfill limit can
+  therefore no longer starve the bulk cursor at 0. Headroom the bulk lane does
+  not use (nothing to offer below the fast lane's offset) goes back to the fast
+  lane in the same pass. The share is a constant, not a config key. Raising
+  `observability.queueCapacity` is still the way to speed a large replay: it
+  scales both lanes, but it is not needed for the bulk cursor to advance.
 
 **Pressure counters.** Each entry of `observability_exports` in
 `loom-daemon status --json` carries a `queue` object, per exporter:
@@ -692,10 +700,9 @@ The attribute and label vocabulary is declared once, in
   `pull_requests[].number` (`pull_request`-triggered runs) or, as a fallback,
   from `feature/issue-N` in `head_branch` — but needs no allowlist entry of
   its own, since it is already in `bounded_attributes()`'s generic
-  always-admitted key list and the collector's span `keep_keys`. Since #9088
-  a run that belongs to an issue is also copied into that issue's story trace
-  (see [Story stitching](#story-stitching-9088)); the per-run trace itself
-  is still joined to sweeps by attribute only. Since #9089 the job span also
+  always-admitted key list and the collector's span `keep_keys`. The per-run trace
+  is joined to sweeps by attribute only (see "How a later join works" in
+  [tracing](tracing.md)). Since #9089 the job span also
   carries `loom.ci.queued_ms` (its own `started_at − created_at`).
 - Both lists also carry `loom.ci.trigger_reason` (#9337), and the run span
   carries `loom.ci.run_attempt` so a `flaky_retry` is auditable from the span.
@@ -724,7 +731,7 @@ The attribute and label vocabulary is declared once, in
 ### Trigger attribution (#9337)
 
 When one PR runs CI several times, `loom.ci.trigger_reason` on each
-`loom.ci.run` span (and its story-trace copy, which is a clone) and `ci.run`
+`loom.ci.run` span and `ci.run`
 record says why. It is a pure function of the one `/actions/runs` row, so
 replay and a second host attribute identically — no cross-run state.
 Rules, first match wins:
@@ -899,7 +906,7 @@ writes the same data as JSON and `ci.yml` uploads it.
 | Artifact | `ci-suite-timings-<shard>`, uploaded `if: always()` with `if-no-files-found: ignore`. The poller downloads **only** artifacts whose name starts with `ci-suite-timings`, so renaming it silently stops suite spans |
 | Transport | `gh run download` (`GithubApi::download_artifact`). `/actions/artifacts/{id}/zip` answers a zip, which every other method's `String::from_utf8_lossy` body path would corrupt; delegating the transfer *and* the unzip to `gh` avoids adding a zip reader for one small JSON file |
 | Cost gate | **Zero requests** unless the run has at least one *not-yet-emitted* `shell-suite-shard` job. A repo that does not shard shell suites pays nothing, not even the artifacts listing, and a re-listed run whose jobs are all already seen re-downloads nothing |
-| Pairing | the unique `shell-suite-shard` job of that run whose `(index, total)` equals the record's `shard`. Zero matches or several is `NoUniqueJob` — never guessed, the same rule [story stitching](#story-stitching-9088) follows for an ambiguous candidate. A `nextest-partition` leg with the same `(k/N)` is **not** a match |
+| Pairing | the unique `shell-suite-shard` job of that run whose `(index, total)` equals the record's `shard`. Zero matches or several is `NoUniqueJob` — never guessed. A `nextest-partition` leg with the same `(k/N)` is **not** a match |
 | Span id | derived from `(repo, job_id, sanitized suite name)`. The **name** is the identity here, unlike a step's number, because a suite's position within a shard is not stable — `ci-wired.txt` order and the `LOOM_CI_SHARD` round robin both shift every entry when one suite is added, and an ordinal-derived id would fork on every manifest edit and make "this suite's duration over the last week" unanswerable |
 | Window | the suite's own instants, **clamped inside the job's** GitHub-reported window. A child span outside its parent renders as a detached bar, and GitHub's window is the authority, not the runner's `date +%s` |
 | Status | the **suite's** own outcome (`pass` → Ok, `fail`/`missing`/`no-result` → Error, `skip`/unrecognised → Unset), never its job's conclusion — the fixture leg concludes `success` while one of its suites failed |
@@ -936,9 +943,6 @@ What is deliberately **not** emitted, and what a failure costs:
   `ci.run`/`ci.job` records hostage to a side artifact would be the worse
   failure. Only a rate limit or a rejected credential escapes — those are
   properties of the host and abort the whole cycle wherever they happen.
-- **Suite spans never reach a story trace.** They are appended after the
-  [story stitching](#story-stitching-9088) pass, so a per-issue story trace is
-  not swamped by one leg's ~118 suite spans.
 
 `ci-queries.sql` sections 12 (slowest suites, with retry and failure counts)
 and 13 (per-leg suite time and slowest suite, the "what to move" counterpart to
@@ -976,7 +980,7 @@ for the file.
 | Artifact | `ci-test-timings-<family>-<k>-<N>`, uploaded `if: always()` with `if-no-files-found: ignore`. **The name is the entire pairing key** — JUnit XML carries no run id, no shard and no job name, so unlike a suite-timings record there is nothing inside the file to pair on. `<family>` is the leg's display name with its `(k/N)` suffix stripped and slugified (`Rust Unit Tests (1/3)` → `rust-unit-tests`), which keeps the key unambiguous: `ci.yml` has one nextest-partition family today (`Rust Unit Tests`, since #10823), but the family slug stays in the name so a second family sharding `1..3` cannot make `(kind, k, N)` match two jobs. Renaming the artifact — or renaming the job without renaming the artifact — silently stops test spans, which `ci_telemetry::tests::test_spans` asserts against `ci.yml` itself |
 | Transport | the same `gh run download` path as a suite-timings artifact, and the same single artifacts listing: one listing serves both families, so a run with both pays one request, not two |
 | Cost gate | **Zero requests** unless the run has at least one *not-yet-emitted* `nextest-partition` job. The gate is **per family**: a run with only nextest legs never downloads a suite-timings artifact, and vice versa |
-| Pairing | the unique `nextest-partition` job of that run with the same family and `(index, total)`. Zero matches or several is `NoUniqueJob` — never guessed, the same rule [suite spans](#suite-spans-9089) and [story stitching](#story-stitching-9088) follow |
+| Pairing | the unique `nextest-partition` job of that run with the same family and `(index, total)`. Zero matches or several is `NoUniqueJob` — never guessed, the same rule [suite spans](#suite-spans-9089) follows |
 | Span id | derived from `(repo, job_id, sanitized binary id, sanitized test name)`. The **stable name** is the identity, never the ordinal, and for a sharper version of the suite-span reason: `--partition count:k/N` is a hash over the test list, so adding ONE test reshuffles which leg runs many of the others, and an ordinal-derived id would fork on every suite edit — making "this test's duration over the last week" unanswerable, which is the whole point. `classname` is part of the key because a test path is only unique within its binary |
 | Window | the test's own `timestamp` + `time`, **clamped inside the job's** GitHub-reported window, for the same reason a suite span's is |
 | Status | the **test's** own outcome (`pass`/`flaky` → Ok, `fail`/`error` → Error, `skip` → Unset), never its job's conclusion. A `flaky` test ultimately *passed*, so its span is Ok and only `loom.ci.test.outcome` distinguishes it from a clean pass |
@@ -1066,8 +1070,6 @@ What is deliberately **not** emitted, and what a failure costs:
   that run, counted in the cycle's `test_artifact_failures` and logged, and is
   never retried. Only a rate limit or a rejected credential escapes and aborts
   the cycle.
-- **Test spans never reach a story trace**, for the same reason suite spans do
-  not: a per-issue story trace must not be swamped by one leg's slow tail.
 
 `ci-queries.sql` sections 16 (slowest tests, with flake and failure counts) and
 17 (per-leg slow-tail time and slowest named test, the nextest counterpart to
@@ -1100,43 +1102,6 @@ Still future work, tracked separately from what shipped here: per-**test**
 spans from nextest JUnit output (`[profile.ci.junit]`), which would give the
 `nextest-partition` legs what suite spans give the shell-suite legs.
 
-### Story stitching (#9088)
-
-A completed run that belongs to exactly one issue N is **also** emitted into
-N's story trace (story key v1, see [tracing](tracing.md)): an extra
-`loom.ci.run` span with trace ID `story_context(repo_id, N).trace_id`,
-parented to the story root span, and an extra `loom.ci.job` span per job
-under it. Code: `loom-daemon/src/ci_telemetry/story.rs`.
-
-- **Which issue.** The candidates are the union of every closing reference of
-  every PR in the run's `pull_requests[]` (GraphQL `closingIssuesReferences`)
-  and `N` from a `feature/issue-N` head branch. Exactly one same-repo issue
-  stitches. Zero or several candidates, a cross-repo or truncated reference
-  list, unreadable references, or an unresolvable `repo_id` (the #9068
-  resolver; there is no name-derived fallback) leave the run unstitched. Each
-  outcome is counted in the cycle summary (`story_runs_stitched`,
-  `story_runs_no_candidate`, `story_runs_ambiguous`, `story_runs_unresolved`)
-  and logged. Nothing is guessed.
-- **Ids.** The story run span's ID derives from `(repo_id, run_id, attempt)`
-  and a story job span's from `(repo_id, job_id)`. They ride in the same
-  ledger units as the per-run records, so they are exactly-once like
-  everything else here, and a re-poll or another host derives the same IDs.
-- **The per-run trace is unchanged.** Same IDs, same records. Each per-run
-  span and its story copy link to each other (both directions, run and job).
-- **Attributes.** The story copy adds `loom.story` (`owner/repo#N`),
-  `loom.story.key_version` (`v1`) and `loom.issue`. It carries
-  `loom.pr_number` only when GitHub associated exactly one PR with the run,
-  never the branch-derived issue number.
-- **API cost.** Nothing for a repo whose unemitted runs have no PR and no
-  `feature/issue-N` branch. Otherwise one `repo_id` probe per repo per hour,
-  cached, and at most one batched GraphQL request per repo per cycle (50 PRs
-  each), with each PR's references cached for 10 minutes. A GraphQL rate
-  limit only stops lookups for the rest of the cycle. It is not fed to the
-  org-wide REST backoff.
-- **Single emitter.** Loom's poller is the story emitter for CI. The
-  harness-ops CI poller (harness-ops#193) must not also stitch, because SigNoz
-  does not deduplicate rows.
-
 ### Non-goals (phase 1)
 
 - No job-log download. `logCaptureEnabled` is refused by name. (Phase 2 lifts
@@ -1152,7 +1117,7 @@ under it. Code: `loom-daemon/src/ci_telemetry/story.rs`.
 `GET /repos/{o}/{r}/actions/jobs/{job_id}/logs` answers `302` to a signed blob
 URL whose body is **plain `text/plain`**: one UTF-8 stream, BOM first, one
 `<RFC3339 timestamp> <text>` line per line, `##[group]` / `##[endgroup]`
-markers and ANSI escapes inline. Verified live against `rjwalters/loom` job
+markers and ANSI escapes inline. Verified live against `2AMLogic/loom` job
 `103352058104` on 2026-09-25 — `Content-Type: text/plain`,
 `Content-Length: 29637`, served by `Windows-Azure-Blob/1.0`.
 
@@ -1275,7 +1240,7 @@ job log back out of **SigNoz Logs Explorer** (query `loom.ci.run_id` +
 polling a captured org, and recording that observation in
 `defaults/observability/signoz/evidence.md`. That needs a running SigNoz, which
 the trial documented there no longer is — it is tracked as
-[#8913](https://github.com/rjwalters/loom/issues/8913), with the rule that a
+[#8913](https://github.com/2AMLogic/loom/issues/8913), with the rule that a
 secret family a real log exposes and the scrub list misses is added to the
 list, the config **and** the test in the same PR.
 

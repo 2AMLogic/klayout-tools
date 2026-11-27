@@ -1,0 +1,1 @@
+- **`klt signoff` identifies the file or store manifest used to check an evidence pin** (#6558, 2026-11-20). A stale evidence-file pin names the file to re-hash. An empty `artifact_manifest` path marks the affected item as `invalid_evidence`.

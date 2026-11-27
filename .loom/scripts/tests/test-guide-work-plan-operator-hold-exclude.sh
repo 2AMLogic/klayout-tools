@@ -76,6 +76,7 @@ fi
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# Local assert_eq kept: takes (actual, expected, msg); shared assert_eq is (expected, actual, msg).
 assert_eq() {
     local actual="$1" expected="$2" msg="$3"
     if [[ "$actual" == "$expected" ]]; then pass "$msg"; else fail "$msg (got '$actual', expected '$expected')"; fi
@@ -90,6 +91,9 @@ fi
 # `}` is the first line starting at column 0 after the opening line (its
 # nested `section()`/`count()` helpers are indented).
 RPB_BODY="$(awk '/^render_plan_body\(\) \{/{flag=1} flag{print} /^\}/{if(flag){exit}}' "$GUIDE_MD")"
+# #14785: render_plan_body() calls the shared open-PR linkage helpers, so
+# they ride along in every eval of the extracted body.
+HELPERS_BODY="$(awk '/^open_pr_linkage_rows\(\) \{/{f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD"; awk '/^open_pr_annotation\(\) \{/{f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD")"
 
 if [[ -z "$RPB_BODY" ]]; then
     fail "could not extract render_plan_body() body from guide.md"
@@ -236,7 +240,7 @@ printf '#!/usr/bin/env bash\n[ "$1 $2 $3 ${5:-}" = "labels list --property --wit
     "$TMPROOT" >"$TMPROOT/bin/loom-daemon"
 chmod +x "$TMPROOT/bin/loom-daemon"
 
-RENDER="$(PATH="$TMPROOT/bin:$PATH" LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+RENDER="$(PATH="$TMPROOT/bin:$PATH" LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
 
 if [[ -z "$RENDER" ]]; then
     fail "render_plan_body() produced no output against the fixtures (harness broken)"

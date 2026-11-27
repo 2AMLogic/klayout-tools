@@ -216,7 +216,8 @@ class DerivedLayer:
     "inside ThickGateOx but outside DigiBnd", and ``near`` then ``near`` its
     exact complement within ``near``. Stage 2 requires stage 1, and is
     validated like it (``context2`` and ``context2_layers`` set together).
-    Absent layers are empty regions (``near``: nothing, ``far``: all); no skip.
+    Absent layers contribute an empty region (``near`` yields nothing,
+    ``far`` keeps everything) and never cause the rule to be skipped.
     """
 
     base: tuple[int, int]
@@ -229,7 +230,6 @@ class DerivedLayer:
     context2_layers: tuple[tuple[int, int], ...] = ()
     context2_sized_by_um: float = 0.0
     context2: str | None = None
-    exclude_holed: bool = False  # #2835: not_interacting only; drop ring polygons
 
 
 @dataclass(frozen=True)
@@ -347,26 +347,16 @@ class CompCoverageSpec:
 
 @dataclass(frozen=True)
 class TapDistanceSpec:
-    """Descriptor for ``DrcRule(check="tap_distance")`` (issue #3607): gf180mcu's
-    ``DF.13`` / ``DF.14`` -- every active polygon must lie within
-    ``max_distance_um`` of a tap. The checked layer (``DrcRule.layer``) is
-    ``comp``; the other layers this rule reads are named here so the deck, not
-    the evaluator, owns the layer numbers.
+    """Deck-owned layer and distance inputs for ``tap_distance`` (#3607).
 
-    ``well_domain="inside"`` is ``DF.13`` (PCOMP inside a well, measured to
-    NCOMP well taps by ``step_um`` octagon steps clipped to ``nwell``);
-    ``"outside"`` is ``DF.14`` (NCOMP outside any well, measured to PCOMP
-    substrate taps by a diamond candidate filter plus Euclidean separation).
-    ``voltage="lv"`` selects active touching neither ``v5_xtor`` nor
-    ``dualgate``; ``"mv"`` selects active overlapping ``dualgate``. Selection
-    is of *whole polygons* that do not interact with the tap reach region --
-    see ``docs/design/gf180mcu-comp-checks-spike.md`` sections 3, 5 and 7 for
-    the upstream derivation and the recorded discrepancies.
+    ``inside`` (DF.13) uses ``step_um`` octagon steps clipped to Nwell.
+    ``outside`` (DF.14) uses a diamond filter and Euclidean separation.
+    The check selects whole active polygons outside tap reach. See the
+    voltage selectors and limitations in ``docs/cli/drc.md`` and the upstream
+    derivation in ``docs/design/gf180mcu-comp-checks-spike.md`` (§§3, 5, 7).
 
-    Every non-``comp`` layer may be absent from a stream and is then read as an
-    empty region (zero taps with active present *is* the violation).
-    Malformed descriptors raise :class:`ValueError` at construction, i.e. when
-    the deck module is imported.
+    Missing non-COMP layers are empty regions. Active with no taps is a
+    violation. Invalid descriptors raise :class:`ValueError` at construction.
     """
 
     well_domain: str
@@ -475,11 +465,10 @@ class DrcRule:
     source rule whose real semantics is "isolated"/"distinct polygon"
     spacing (as opposed to "space", which also bounds intra-polygon
     notches) -- see ``sky130.py``'s ``nwell.space.1`` for a worked example.
-    ``threshold_dbu`` is the
-    rule's distance threshold expressed in database units of the deck's own
-    *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM`` constant — e.g.
-    sky130 and gf180mcu are both authored against ``dbu_um = 0.001``, i.e.
-    1 nm per unit).
+    ``threshold_dbu`` is the rule's distance threshold expressed in database
+    units of the deck's own *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM``
+    constant — e.g. sky130 and gf180mcu are both authored against ``dbu_um = 0.001``,
+    i.e. 1 nm per unit).
 
     For ``"enclosing"`` (``layer`` encloses ``other_layer``) and ``"enclosed"``
     (``layer`` is enclosed by ``other_layer``), ``run_drc()`` reports more than
@@ -755,22 +744,15 @@ class DrcRule:
     (2) outside Nwell and DNWELL" -- both resolve to the *same* 0.16um
     value, so ``nplus.enclosing.comp.1`` needs no equivalent gate). Setting
     ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``) on
-    ``pplus.enclosing.comp.1`` matches this exactly: a layout that draws
-    neither anywhere has no shape this rule's 0.16um threshold can
-    correctly apply to, so the whole rule is skipped (not silently
-    evaluated at the wrong, stricter threshold) rather than reported
-    against an empty-but-still-flat-0.16um checked region. A layout that
-    draws *either* layer anywhere keeps today's unchanged (and still
-    approximate -- butting edges, ``euclidian`` vs. ``projection``, see the
-    rule's own comment in ``decks/gf180mcu.py``) flat 0.16um behaviour,
-    since this gate cannot further narrow *which* ``PCOMP`` shapes within
-    that layout are in which DRM sub-case without the same unsupported
-    three-input derivation.
-
-    Defaults to ``None`` (every pre-existing rule), under which this gate
-    never applies and a rule behaves exactly as it did before this field
-    existed -- skipped only by the pre-existing missing-``layer``/
-    ``other_layer``/``derived_layer`` input checks.
+    ``pplus.enclosing.comp.1`` matches this exactly: a layout drawing
+    neither has no shape this rule's 0.16um threshold can correctly apply
+    to, so the whole rule is skipped rather than evaluated at the wrong,
+    stricter threshold; one drawing *either* keeps the unchanged (still
+    approximate -- butting edges, ``euclidian`` vs. ``projection``; see the
+    rule's own comment in ``decks/gf180mcu.py``) flat 0.16um behaviour, the
+    gate being unable to narrow *which* ``PCOMP`` shapes are in which DRM
+    sub-case without the same unsupported three-input derivation. Defaults
+    to ``None``: no gate, so a rule skips only on a missing input layer.
 
     ``voltage_independent`` (issue #2369) opts a rule out of
     ``run_drc()``'s ``coverage.voltage_domain_warnings`` gate (issue #552/
@@ -809,8 +791,8 @@ class DrcRule:
     sg13g2's ``Cnt.a``/``Cnt.b``): contact bars, and rows of abutting
     contacts that merge into a strip, are left to the ``CntB.*`` family
     rather than measured as one oversized contact. ``None`` (the default)
-    checks the full drawn layer as before; it cannot be combined with
-    ``derived_layer``.
+    checks the full drawn layer. Sky130 ordinary-cut selectors apply the licon.1
+    and ct.1_a/b exemptions (#2835). All selectors exclude ``derived_layer``.
 
     ``report_escapes`` (issue #3001) controls the #318 zero-overlap escape
     term of an ``"enclosing"``/``"enclosed"`` rule. ``True`` (the default,
@@ -822,6 +804,17 @@ class DrcRule:
     the enclosing one in other directions (gf180mcu's ``SB.10``: poly must
     extend 0.22um past the SAB edge, while the SAB routinely overhangs the
     poly sideways). Meaningless, and ignored, for every other check kind.
+
+    ``approximations`` (#5805) declares known fidelity gaps as ``{"class",
+    "description"}`` records. ``coverage.approximated_rules`` includes them for
+    checked rules, even with zero violations. ``runset_note`` is reported for
+    rules that produced a finding. ``None`` declares no approximations.
+
+    ``other_layer_subtract`` (#7954) names layers carved out of the
+    ``other_layer`` region before the check, escape term included: gf180mcu's
+    ``comp.enclosing.contact.1`` checks ``Contact`` minus ``SramCore`` (108/5),
+    the foundry ``contact.not(sramcore)``. An absent layer is an empty region
+    and never skips the rule; without ``other_layer`` it is a ``DrcError``.
     """
 
     id: str
@@ -854,6 +847,9 @@ class DrcRule:
     # `runset_correspondence` in a report only when the rule fires. Keys:
     # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
     runset_note: dict[str, Any] | None = None
+    text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
+    approximations: list[dict[str, str]] | None = None
+    other_layer_subtract: tuple[tuple[int, int], ...] = ()
 
 
 class UnknownDeckError(Exception):

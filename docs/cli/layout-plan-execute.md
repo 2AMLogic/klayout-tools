@@ -97,6 +97,12 @@ except LayoutPlanExecuteError as exc:  # Phase C execution failure
 raise SystemExit(exit_code_for(response))
 ```
 
+A schematic-flow (simulation-form, `X`-card) netlist needs the conversion
+options on the request's `netlist` object — `netlist.form: "subckt-call"`,
+`netlist.deck` (`"sky130"`/`"gf180mcu"`) and optionally `netlist.device_map` —
+not `klt lvs`'s `reference.*` keys. See the `netlist.*` rows of the
+[request table](layout-plan.md#request).
+
 - `execute_layout_plan(request, digest, *, request_dir=None, work_dir=None)`
   — the pure-ish function: `digest` is a
   [`build_netlist_digest()`](../../src/klayout_tools/netlist_digest.py)
@@ -220,11 +226,88 @@ terminals' suffixes.
 | `res_array` | `A`, `B` | `_A`, `_B` |
 | `cap_array` | `A`, `B` | `_BOT`, `_TOP` |
 
-A terminal absent from a generator's own row above (MOS `B`/bulk, BJT
-`C`/collector) is **deliberately** unmapped — both conventionally tie to a
-shared substrate/well tap a `guard_ring`/collector ring already owns, not
-to a per-device port. `guard_ring`, `bond_pad`, and `resistor_strip` have no
-row at all — no per-device port concept to map onto (see "Parameter
+**`diff_pair` legs must be electrically distinct (#5765).** Differential
+inputs need distinct gate and drain nets. With `params.mirror: true`, a
+current mirror may share its gate when one device is diode-connected and
+the other has a distinct drain. The reference netlist in
+`examples/signoff/schematic.spice` connects both gates and the input
+device's drain to `VIN` and the output drain to `VOUT`. A shared drain,
+a repeated device or a shared differential input produces an application
+error (exit 1) naming both devices and the shared terminal and net.
+
+The usual way to hit this is a **folded MOS**: a `form: "subckt-call"`
+digest expands `XM1 ... nf=2` into per-finger devices `1_F0` and `1_F1`
+(each carrying the per-finger `W`; issue #1487) and offers no device named
+`1` at all — so a folded schematic instance cannot be declared as one leg.
+Declaring two fingers *of the same instance* (`["1_F0", "1_F1"]`) is the
+shorted-pair error above, not a pair. Two declarations do work:
+
+- Write the reference netlist's matched pair with no `nf` (or `nf=1`) and
+  let `params.splits` do the folding, so each leg is one digest device.
+- Drive [`klt gen-compose`](gen-compose.md) directly with explicit
+  `connectivity[]`.
+
+A `splits > 1` `diff_pair` also wires only one sub-instance per leg today
+(the generator draws each leg as several unstrapped sub-instances); that
+wiring gap and its generator-side strapping fix are tracked in #5557. A
+shared-gate `mos_array` group is unaffected — a bias rail is legitimate
+there; the check is scoped to `diff_pair`.
+
+**Tap/ring nets (`device_groups[].net`, #5095).** A `guard_ring` group may
+declare an optional `net` naming a digest net (e.g. `"VSS"`). The ring's
+first generated port (`TAP_N`; the four `TAP_*` ports sit on one closed ring,
+so one stands for the conductor) joins that net's pin set exactly like a
+device terminal would, so the net gets a `connectivity[]` entry (when it has
+two or more pins) and is no longer reported in `unmapped_netlist_nets[]`. `net`
+on any other generator, or a net absent from the netlist digest, is an
+application error (exit 1). Plans without `net` are unchanged.
+
+**Body/bulk nets (#5546).** A MOS `B`/bulk terminal has no row above
+because a body tie is a property of the *group*, not of a device: one well
+(pfet) or substrate (nfet) contact shared by every unit in the array, with
+no `_B`-suffixed per-device port to bind. It is therefore bound
+group-level, automatically, with no request field. For each `mos_array` /
+`diff_pair` / `esd_device` group, the `B` net its declared devices sit on
+gets **one** pin on that group's own tie port — the first `TAP_PAD<k>` pad a
+ring-less array draws on a family with a tap-distance rule (gf180mcu), the
+shared `WELL_TAP` port a ring-less pfet array draws on a family whose deck
+derives the tie from an in-well implant tap (sg13cmos5l, #1473/#5948), or,
+when the group draws its own guard ring instead (`params.add_guard_ring`,
+which suppresses the pads), that ring's first `TAP_<side>` port. The pin
+then flows through `connectivity[]` / `pins[]` /
+`unmapped_netlist_nets[]` exactly like a device-terminal pin.
+
+Two cases do not bind:
+
+- **The group's declared devices disagree about their body net** and the
+  group has a tie port: an application error (exit 1) naming the group and
+  the conflicting nets, rather than the silent short one shared tie would
+  draw between them. Split the group so each body net gets its own.
+- **The group has no tie port at all** — a ring-less array on a family with
+  no tap-distance rule (sky130), or either flavor on a family whose only
+  drawn tie is the pfet well tap (sg13cmos5l's nfet). Nothing is bound and
+  one `warnings[]` entry names the group and the untied net, so the gap is a
+  same-run signal instead of a later LVS surprise. The warning is suppressed
+  when a `guard_ring` group's own `net` (above) already names that net.
+
+**This is a behaviour change for gf180mcu and sg13cmos5l plans.** A plan
+whose MOS bodies used to be left untied now gains a pin per MOS group on its
+bulk net, which the router has to reach. A plan that exited `0` before can
+exit `3` with the bulk net in `unrouted_nets[]` and a reason in
+`unrouted_reasons[]` — an honest report of a tie that was previously missing,
+not a regression. A group whose own ring encloses its devices usually needs
+its tie to route on a metal above the primary plane to get out past the gate
+pad, and so does a sg13cmos5l `WELL_TAP` tie (#5948): the tap sits just past
+the array's outermost diffusion on the same metal1 line as the source/drain
+pads, so a same-layer route from a source pad to it crosses that drain pad
+and the behind-the-pin guard (#1895) refuses. For the sg13cmos5l well
+tie, configure a metal2/via stack with `routing.cross_block_layer_role`
+to clear the same-block crossing (#5948).
+
+A BJT `C`/collector terminal is still **deliberately** unmapped — it
+conventionally ties to a shared substrate tap a `guard_ring`/collector ring
+already owns, not to a per-device port. `guard_ring`, `bond_pad`, and
+`resistor_strip` have no row at all — no per-device port concept to map onto (see "Parameter
 resolution" above for the last one). A device index past the end of a
 suffix's own candidate list (every unit-arity mismatch, including
 `mos_array`'s `finger_topology: "series"` mode, whose per-finger port names
@@ -338,6 +421,7 @@ execution's terminal step *is* a composition:
   ],
   "pins": [],
   "unrouted_nets": [],
+  "unrouted_reasons": [],
   "unmapped_netlist_nets": [],
   "drc_hints": { "min_spacing_um": null, "matched_groups": [], "notes": [] },
   "warnings": []
@@ -351,15 +435,137 @@ execution's terminal step *is* a composition:
 | `device_groups[]` | array\<object\> | Replaces `gen-compose`'s `blocks[]` — per group: `id`, `generator`, `devices` (fully qualified, from Phase B), `resolved_params` (see "Parameter resolution"), `offset_um`, `bbox_um` (the latter two straight from `compose()`'s own `blocks[]`). |
 | `nets[]` | array\<object\> | Straight from `gen-compose.compose()` — `net`, `pins[]`, `routed`, `route_length_um`, `status` (`"routed"`/`"partial"`/`"unrouted"`, issue #1169), `legs[]` (a 2-pin net is the degenerate one-leg case of the same shape a bundle net uses). |
 | `unrouted_nets[]` | array\<string\> | Straight from `gen-compose.compose()` — every placed group, but this net's pins could not all be connected (includes both `status: "partial"` and `status: "unrouted"` nets, #1169 — see [`gen-compose.md`](gen-compose.md) for the distinction). |
-| `unmapped_netlist_nets[]` | array\<string\> | **The one field with no `gen-compose` analogue.** Every digest net that resolved to *zero* `device_groups[]` ports — including a deliberately unrouted supply/bulk net (`VDD`/`VSS`-style, or a MOS bulk/BJT collector terminal, both deliberately unmapped — see "Connectivity derivation"). Always present, empty when every netlist net touching a declared group's devices resolved to at least one port. No `netlist.ignore_nets[]`-style opt-out exists — a caller judges an entry here benign or not; nothing is silently dropped. |
-| `warnings[]` | array\<string\> | Netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, connectivity-derivation degradations (an index past a suffix's candidate list), a resolved-generator-output-vs-declared-`device_class` mismatch (issue #1731 — see "Scope decisions" below), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
+| `unrouted_reasons[]` | array\<object\> | Additive (#4966): one `{"net", "reason"}` per `unrouted_nets[]` entry, parsed from `compose()`'s `drc_hints.notes` `net '<n>' could not be routed: <reason>` lines, so a caller sees *why* a net failed. Always present, empty when nothing is unrouted. |
+| `unmapped_netlist_nets[]` | array\<string\> | **The one field with no `gen-compose` analogue.** Every digest net that resolved to *zero* `device_groups[]` ports — including a deliberately unrouted supply net (`VDD`/`VSS`-style) or a BJT collector terminal, which stays deliberately unmapped — a MOS bulk net is bound group-level since #5546, so it only lands here when its group reported no tie port; see "Connectivity derivation". Always present, empty when every netlist net touching a declared group's devices resolved to at least one port. No `netlist.ignore_nets[]`-style opt-out exists — a caller judges an entry here benign or not; nothing is silently dropped. |
+| `warnings[]` | array\<string\> | A netlist port with no mapped device port (no pin label written, #4966), netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, connectivity-derivation degradations (an index past a suffix's candidate list), a resolved-generator-output-vs-declared-`device_class` mismatch (issue #1731 — see "Scope decisions" below), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
+
+## Pin labels and supported scope (mixed-device sky130 blocks)
+
+**Port labels (#4966).** Each netlist subckt port (a digest net with `is_pin`)
+is promoted through `compose()`'s `pins[]` to a top-level label on its first
+resolved device port, so the output GDS carries one label per port name for
+`klt lvs`. A port the router already wires (`connectivity[]`) is promoted
+without a duplicate label. A port that resolves to no device port (for
+example a BJT-collector-only net, which is deliberately unmapped, or a MOS
+bulk net whose group reported no tie port) gets a `warnings[]` entry and no
+label. A bound MOS body tie (#5546) *is* a resolved port, so a bulk net now
+carries a label on a family that draws taps. The labels appear in the response's `pins[]`.
+
+**`gate_contact` derivation (#5093).** For `mos_array`, `diff_pair` and
+`esd_device` groups, `execute` sets `params.gate_contact: true` when any
+declared device's gate terminal is on a net with two or more terminal
+connections or on a subckt port, because the router cannot reach a bare-poly
+gate. An explicit `device_groups[].params.gate_contact` (true or false) always
+wins. The derived choice shows in the group's `resolved_params` and as one
+`warnings[]` entry; plans with no such gate net resolve as before.
+
+**`strap_splits` derivation (#5557).** For `diff_pair` groups, `execute` sets
+`params.strap_splits: true` when the group's resolved `splits` is greater
+than one *and* the resolved unit `w_um` (netlist-derived `w_um` divided by
+the resolved `splits`, or an explicit `params.w_um` override taken as
+already-unit) is at least the strap's track floor — an unstrapped
+`splits > 1` group leaves every sub-instance but one per device floating,
+and `gen-compose` cannot strap the interleaved splits itself (measured,
+issue #5557). A plan whose width cannot fit the strap derives nothing and
+keeps the unstrapped sub-instance-level binding rather than failing a
+request the caller never made — but that binding leaves `splits - 1`
+sub-instances per device floating, so `execute` says so in one `warnings[]`
+entry naming the resolved unit `w_um`, the floor (`STRAP_MIN_W_UM`, 2.35 µm)
+and how many sub-instances stay unbound (a decline is never silent). A
+caller who wants the strap regardless sets
+`params.strap_splits` explicitly and hears about an unmet width from the
+generator's own validation. An explicit `device_groups[].params.strap_splits`
+override always wins, with the same divergence warning any other
+derived-param override gets. The derived choice shows in the group's
+`resolved_params` and as one `warnings[]` entry; the group's connectivity
+then binds the generator's device-level `Q1_S`-style ports with no change to
+the k-th-device ↔ k-th-candidate binding rule itself.
+
+**Scope.** Routing runs between the generated groups' ports exactly as in
+`gen-compose`; there is no "row of unlike devices" topology, and each
+single-device `mos_array`/`res_array`/`cap_array` group is one unit.
+
+**Automatic plane climb (#6920).** A leg the fixed one-jog backbone cannot
+route on the plan's routing plane — the behind-the-pin (#1895) class a
+same-facing port pair in a row always produces, a crossing of a placed
+block's drawn metal, or a collision with an already-routed net — is retried
+on each higher metal of the PDK's own stack before the net is reported
+unroutable. The higher planes are empty for row-of-generators blocks (each
+generator draws its pads on local interconnect), every routability check and
+the route-vs-route gate re-run in full against the candidate plane, and a
+leg draws at that plane's own deck-minimum width when the plan's
+`routing.width_um` is narrower. An automatic via ladder needs clear landing
+pads on every intervening layer at both ends. On the source layer the pad
+may touch the conductor under the declared port. A GF180A climb stops below
+the 30K top metal because its ordinary via ladder cannot ensure the required
+thick-metal array and enclosure. On GF180B the top-metal landing must cover
+at least 0.75 µm per side. On B, C and D the top backbone is at least 0.44 µm
+wide. Nets that name their own plane
+(`routing.nets[<net>].layer_role`, #1655) and caller-supplied `waypoints_um`
+paths are never climbed — "explicit wins". Since #6912 the climb also lifts
+the self-net pad-crossing classes (#433/#453/#1527 — each layer-guarded at
+the point of the check, so the climbed retry re-evaluates against the
+candidate plane's own geometry) and the guard/collector-ring classes
+(#199 case 2 / #434 — plane-conditional since #1960: a backbone at least
+one via above the ring's own conductor, with every via-drop landing pad
+clear of the ring's trace, shares no conductor with the loop), which is
+what lets an own-ringed `mos_array` group's inner ports route without
+cutting a `ring_gap_*` opening. Still-unavailable levers: a
+per-group port-side hint (placing a group's supply pins on the side that
+faces the channel rather than the generator's fixed side) and a general
+mixed-device row topology — e.g. parallel unit groups whose S and D pads sit
+collinearly in one row still contend on the shared row line, which the climb
+does not untangle.
+
+*Largest mixed-device sky130 block verified to route, LVS-match and run
+DRC-clean end to end* (recorded 2026-11-23 by #6912's fixture,
+`tests/test_layout_plan_mixed_sky130_block.py`, at klt commit `2cc0e29`
+plus that issue's PR): the chip `glitch_filter` block — one xhigh
+`res_array` (`sky130_fd_pr__res_xhigh_po_1p41`, flavor derived from the
+declared class per #6919) + one MIM `cap_array` + two `pfet` and two `nfet`
+`hvi` `mos_array` units (flavors derived from the declared `PFET`/`NFET`
+classes, #6912) + the `pfet` groups' own tie rings + a `guard_ring
+net=VDD33` well tie and a `guard_ring net=GND, add_well: false` substrate
+tie — routes every net under default routing (no `waypoints_um`, no `legs`,
+no `cross_block_layer_role`; the tie-ring rows included, #6920's climb plus
+#6912's ring-class extension), `klt lvs` against the block's own netlist
+reports `match` as a four-terminal compare (the resistor extracts as the
+declared `res_xhigh_po` with its well tie on `GND`, the pfet bodies on
+`VDD33`, the nfet bodies on `GND`, body check `verified` — nothing ignored
+or waived), and `klt drc --deck sky130` is `clean` as drawn with no rule
+waived (the xhigh end-head rule #5704's 2.16 µm heads landed). The previous
+record — the three-NFET shared-gate rail in
+`tests/test_layout_plan_gate_contact.py` (`_GATE_RAIL_NETLIST`, three
+one-unit `mos_array` groups in one row, shared gate net `VBIAS`, recorded
+2026-11-06 at base commit `3d2c74e`) — still routes with the derived
+`gate_contact`; with `gate_contact: false` forced, `VBIAS` stays unrouted
+("bare-poly gate").
+MOS bulk is
+no longer part of that gap (#5546) on a family that draws taps — but sky130
+arrays draw none, so a sky130 block's LVS bulk compare needs the tie drawn
+where the bodies live: the pfet groups' own `add_guard_ring` rings tie
+their (flavor-derived) wells to the routed bulk net (#5546 binds the ring's
+`TAP_*` port automatically), and a `guard_ring` group with `net` supplies
+the substrate side only with `params.add_well: false` (#6912) — its default
+`add_well: true` well enclosure makes every tap a *well* tie, so a `net:
+"GND"` ring left at the default leaves the NFET bodies and a precision
+resistor's `W` terminal on the deck's synthesized `vsubs` global instead of
+`GND`.
+Treat an all-nets-unrouted result as a **placement-only floorplan**, read
+`unrouted_reasons[]` for the cause, and file a router issue for a capability
+gap.
+
+**Class-qualified device references.** A device name is only unique within its
+class, so `device_groups[].devices[]` entries are class-qualified. The MIM
+capacitor class is `SKY130_FD_PR__MODEL__CAP_MIM` (easy to miss when writing
+`device_class`).
 
 ## Exit codes
 
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Every device group generated, every row/abutment placed, every resolvable net routed, and `unmapped_netlist_nets[]` is empty. |
-| `1` | `LayoutPlanExecuteError` (or a propagated `klayout_tools.layout_plan.LayoutPlanError` from Phase B's own validation) — an unresolvable PDK, a generation failure (an invalid resolved `params` value), an empty `device_groups[]` (nothing to build), a `device_groups[]` entry with no `rows[]`/`abutment[]` path to a placed position, or a `gen-compose.compose()` failure. |
+| `1` | `LayoutPlanExecuteError` (or a propagated `klayout_tools.layout_plan.LayoutPlanError` from Phase B's own validation) — an unresolvable PDK, a generation failure (an invalid resolved `params` value), an empty `device_groups[]` (nothing to build), a `device_groups[]` entry with no `rows[]`/`abutment[]` path to a placed position, a `diff_pair` group whose declared devices are not electrically distinct legs (#5765), or a `gen-compose.compose()` failure. |
 | `2` | Reserved for a future CLI subcommand's own argparse usage-error layer — this phase adds none. |
 | `3` | Partial success — `partial_success(response)` is `True`: every group placed, but `unrouted_nets[]` and/or `unmapped_netlist_nets[]` is non-empty. `exit_code_for(response)` returns this. |
 
@@ -406,21 +612,63 @@ than only in a PR description:
   the full mechanics. This module only validates its shape (a positive
   number); `gen-compose.compose()` re-validates it against the cross-block
   layer's own deck minimum and defaults it to that layer's own minimum when
-  omitted. An unrecognised `request.routing` key is a usage error, mirroring
-  `request.pdk`/`request.netlist`'s own unknown-key rejection.
+  omitted. `nets` (issue #5094) is a further optional field: an object
+  `{net_name: {layer_role?, width_um?, waypoints_um?, legs?}}` copied onto the matching derived
+  `connectivity[]` entry (`gen-compose`'s per-net override, issue #1655), the
+  one lever on a "pin reached from behind" / "crosses already-routed net"
+  rejection other than reordering rows. `waypoints_um` (issue #5108) takes the
+  same shape as `gen-compose`'s `connectivity[].waypoints_um` (`[x_um, y_um]`
+  pairs, or `[x_um, y_um, "layer_role"]` to change routing plane at that
+  point), is validated by the same parser and is forwarded unchanged; it is
+  only valid for a 2-pin net. `legs` (issue #5110) is the lever for a net
+  with three or more pins: an array of
+  `{from_pin: {block, port}, to_pin: {block, port}, waypoints_um?,
+  layer_role?, width_um?}` forwarded unchanged onto the derived
+  `connectivity[].legs` (`gen-compose`'s per-leg steering, issue #1529) and
+  validated by the same parser against that net's own derived pins. A pin is
+  `{"block": <device_groups[].id>, "port": <generated port name>}`; the port
+  name is the generator's (`<unit>_S/_D/_G` for `mos_array`, `_A/_B` for
+  `res_array`, `_BOT/_TOP` for `cap_array`; e.g. `U0_G`). Unknown pins, the
+  same pin twice, or unknown keys are an error naming
+  `request.routing.nets['<net>'].legs`. `legs` is also valid on a 2-pin
+  net, and `legs` together with `waypoints_um` on one net is an error. A leg
+  without `waypoints_um` only forces that pin pair into the net's spanning
+  tree; supply waypoints that approach each pin from its facing side to get
+  past a "reaches the pin from behind" rejection. A MOS group's own body tie is
+  bound automatically since #5546 (see "Connectivity derivation"); a
+  `guard_ring` group's `net` (issue #5095) remains the way to tie a bulk net
+  on a family whose arrays draw no taps — add a tap-ring group, set its
+  `net` to the digest net the bulk ties to, and that ring's port joins the
+  net in a mixed-device block (the substrate side needs
+  `params.add_well: false`, per the bulk-tie notes above). Still not
+  available: a
+  per-group port-side hint and a mixed-device row topology (one group per
+  device is the workaround). Each entry must set at least one
+  key; a net name matching no derived entry (unmapped, fewer than 2 pins,
+  or nonexistent) adds a `warnings[]` entry and is otherwise ignored; unlisted
+  nets are unchanged. An unrecognised `request.routing` key is a usage error,
+  mirroring `request.pdk`/`request.netlist`'s own unknown-key rejection.
 - **Resolved-generator-vs-declared-`device_class` consistency (issue
   #1731).** Phase B only checks a `device_groups[].devices[].device_class`
   against what the netlist digest itself declares for that device name — it
   has no way to also confirm that the `flavor`/`metal_level` this phase
   resolves for the group's generator call actually draws a device of that
-  same class. A metal-layer resistor `device_class` (e.g. `gf180mcu`'s
+  same class. A `res_array` group with neither `params.flavor` nor
+  `params.metal_level` uses the first resistor class mapped by its PDK.
+  For example, sky130 `RES_XHIGH_PO` and `RES_HIGH_PO` select `xhigh`
+  and `high`. The report records the derived flavor in `resolved_params`
+  and `warnings[]`. A generic resistor keeps the default. Mixed mapped
+  classes produce a disagreement warning. An explicit flavor or metal
+  level wins and the post-generation mismatch check still applies.
+  A metal-layer resistor `device_class` (e.g. `gf180mcu`'s
   `rm1`/`rm2`/`rm3`, or sky130's `res_generic_m1`..`m5`) routed through
   `res_array` with no explicit `metal_level` override used to silently draw
   the poly-body default instead, with no diagnostic. This phase now checks
   every group right after its `generate()` call succeeds (via a small,
   explicit per-generator lookup — today only `res_array`, whose `flavor`/
-  `metal_level` are the only `klt gen` request params that select between
-  distinct recognised device classes) and appends a `warnings[]` entry for
+  `metal_level` are the only `klt gen` request params with a static
+  per-PDK prediction selecting between distinct recognised device classes)
+  and appends a `warnings[]` entry for
   every mismatching device — never a hard rejection, since this is a
   netlist-vs-resolved-params disagreement, not the structurally-invalid-value
   case `klt gen` itself already hard-rejects. Two cases are deliberately
@@ -431,6 +679,20 @@ than only in a PR description:
   a `form: "plain-element"` netlist's bare `R1 A B 1k` digests to) — a
   primitive element names a device *kind*, never a PDK device class, so it
   can neither confirm nor contradict what the generator drew.
+- **MOS `flavor` derivation (#6912).** A `mos_array`/`diff_pair`
+  group whose `params` do not name a `flavor` derives it from
+  its declared `device_class` — `PFET` draws `pfet` (the flavor that draws
+  its own well), `NFET` draws `nfet` — exactly the `res_array` pattern
+  above (#6919): pre-derivation, a `device_class: "PFET"` group silently
+  drew the `nfet` default (no well, wrong polarity — a layout that can
+  never LVS-match its netlist). The derivation is recorded in
+  `resolved_params` and one `warnings[]` entry; an explicit
+  `params.flavor` still wins, and devices in one group disagreeing on
+  their MOS class warn and use the first, as a mixed-material `res_array`
+  group already does. Any other declared class name derives nothing.
+  `esd_device` is excluded: it has no `flavor` param (it is always an
+  NMOS-style device), so nothing is derived or injected for it, whatever
+  its declared class.
 
 ## See also
 

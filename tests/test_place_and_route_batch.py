@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run, replay_upload
 from klayout_tools import _provenance, place_and_route, sim_batch
 from klayout_tools import place_and_route_batch as par_batch
 from klayout_tools.cli import main
@@ -111,12 +111,12 @@ class _FakeRunner:
         elif "cp" in argv:
             source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
             if destination.startswith("s3://"):
-                self._upload_file(source, destination)
+                replay_upload(argv, source, destination, self._upload_file)
             else:
                 return self._download(source, destination)
         return fake_completed()
 
-    def _upload_file(self, source: str, destination: str) -> None:
+    def _upload_file(self, source: str | Path, destination: str) -> None:
         job_id, _, rest = destination.split("/", 4)[-1].partition("/")
         kept = self.upload(job_id, rest.removeprefix("inputs/"))
         kept.parent.mkdir(parents=True, exist_ok=True)
@@ -163,14 +163,14 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
         liberty, _c, _i = place_and_route._resolve_liberty(
             "sky130_fd_sc_hd", corner, variant=None, root=None
         )
-        deck_hash[corner] = _provenance._content_hash(liberty)
+        deck_hash[corner] = _provenance.content_hash(liberty)
     runner = _FakeRunner(keep, deck_hash)
     monkeypatch.setattr(sim_batch, "_run_subprocess", runner)
 
     def _no_openroad(cmd, **kwargs):
         raise AssertionError(f"OpenROAD launched on the batch path: {cmd}")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", _no_openroad)
+    patch_openroad_run(monkeypatch, _no_openroad)
     runner.request_path = request_path  # type: ignore[attr-defined]
     return runner
 
@@ -211,14 +211,6 @@ def test_host_default_batch_yields_to_local_for_a_single_unit(monkeypatch):
     assert par_batch.resolve_backend(None, {}, units=1) == "local"
 
 
-def test_explicit_batch_on_a_single_unit_is_refused(monkeypatch):
-    monkeypatch.delenv(par_batch.BACKEND_ENV, raising=False)
-    with pytest.raises(PlaceAndRouteError, match="at least two corners"):
-        par_batch.resolve_backend("batch", {}, units=1)
-    with pytest.raises(PlaceAndRouteError, match="at least two corners"):
-        par_batch.resolve_backend(None, {"backend": "batch"}, units=1)
-
-
 def test_unsupported_backend_is_refused(monkeypatch):
     monkeypatch.delenv(par_batch.BACKEND_ENV, raising=False)
     with pytest.raises(PlaceAndRouteError, match="unsupported backend 'remote'"):
@@ -241,7 +233,7 @@ def test_env_batch_with_one_element_list_runs_locally(tmp_path, monkeypatch):
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    assert "environment" not in report
+    assert report["corner_runs"][0]["environment"]["threads"] == 1
 
 
 def test_flag_local_beats_env_batch(fake, monkeypatch):
@@ -444,8 +436,7 @@ def test_manifest_with_only_a_pre_backend_runner_refuses_before_any_cloud_call(
     fake, monkeypatch
 ):
     monkeypatch.setattr(
-        sim_batch,
-        "published_runner_identities",
+        "klayout_tools.sim_batch.BatchConfig.runner_identities",
         lambda *a, **k: [_image("0.7.1.dev1000")],
     )
 
@@ -461,7 +452,8 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
     fake, monkeypatch, version
 ):
     monkeypatch.setattr(
-        sim_batch, "published_runner_identities", lambda *a, **k: [_image(version)]
+        "klayout_tools.sim_batch.BatchConfig.runner_identities",
+        lambda *a, **k: [_image(version)],
     )
 
     report = _run(fake)
@@ -472,8 +464,7 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
 
 def test_mixed_manifest_falls_through_to_the_runner_side_check(fake, monkeypatch):
     monkeypatch.setattr(
-        sim_batch,
-        "published_runner_identities",
+        "klayout_tools.sim_batch.BatchConfig.runner_identities",
         lambda *a, **k: [_image("0.7.1.dev1000"), _image("0.7.1.dev1200")],
     )
 

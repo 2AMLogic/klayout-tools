@@ -96,24 +96,6 @@ loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
     "merge-pr post-merge-cleanup" "merge-pr delete-branch"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-YELLOW='\033[0;33m'  # retired() below
-
-# An assertion that CANNOT survive the port to Rust, retired under the
-# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
-# deleted: a reader must be able to see what was removed, why, and what proves
-# the property now. Counted as run so the totals stay honest.
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
-
-refute_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then fail "$msg (unexpectedly matched: $pattern)"; else pass "$msg"; fi
-}
 
 [[ -x "$MERGE_PR" ]] || { echo "ERROR: $MERGE_PR not executable" >&2; exit 1; }
 
@@ -138,7 +120,7 @@ retired \
     "loom-daemon's only_a_landed_verdict_may_escalate_to_force_delete unit test (branch_delete/tests.rs), plus behavioral case (a) below, which still proves force-delete actually happens on a tip match"
 assert_grep "success \"Remote branch '\\\$PR_BRANCH' deleted\"" "$MERGE_PR" \
     "remote-branch success line is disambiguated as 'Remote branch' (was 'Branch')"
-refute_grep "success \"Branch '\\\$PR_BRANCH' deleted\"" "$MERGE_PR" \
+assert_no_grep "success \"Branch '\\\$PR_BRANCH' deleted\"" "$MERGE_PR" \
     "the old ambiguous 'Branch ... deleted' (without Remote/Local) line is gone"
 assert_grep "Would delete local branch '\\\$PR_BRANCH'" "$MERGE_PR" \
     "--dry-run previews the local branch it would delete"

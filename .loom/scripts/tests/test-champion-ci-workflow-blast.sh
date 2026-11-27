@@ -47,6 +47,14 @@ assert_contains "$(cat "$SRC")" "ci_workflow_blast_eval() {" "ci_workflow_blast_
 # The fixtures and cases shared with test-champion-standing-authorization.sh (#12988).
 FIXTURE_DIR="$TEST_DIR/fixtures/champion-workflows"
 
+# The shell shard has no daemon build. Rust tests cover the native parser;
+# LOOM_TEST_REAL_DAEMON opts into running the same cases against that parser.
+workflow_permission_check() {
+    [ "$*" = "forge workflow-write-all-check" ] || return 2
+    cat >/dev/null
+    return "${WORKFLOW_WRITE_ALL_RC:-0}"
+}
+
 # entry <filename> <patch> [previous_filename] -> one files-API object
 entry() {
     if [ -n "${3:-}" ]; then
@@ -66,6 +74,7 @@ run() {
         PR_NUMBER=1
         LABELS="$labels"
         DIFF_JSON=""
+        LOOM_DAEMON_BIN="${LOOM_TEST_REAL_DAEMON:-workflow_permission_check}"
         gh() {
             [ "$api" = "FAIL" ] && return 1
             case " $* " in
@@ -145,9 +154,14 @@ while IFS=$'\t' read -r id pr_path fixture line expected note; do
     assert_eq "$want" "$(CONTENT="$fixture" run "[$(entry "$pr_path" "$patch")]" green "loom:pr")" "fixture $id ($pr_path, $fixture): $expected -- $note"
 done <"$FIXTURE_DIR/cases.tsv"
 
+echo "Workflow write-all capability (#14648)"
+assert_eq green "$(CONTENT=ci-write-all-test-name.yml run "[$CI_WF]" green "loom:pr")" "a harmless write-all test name and command are clear"
+assert_eq red "$(CONTENT=ci-write-all-permission.yml WORKFLOW_WRITE_ALL_RC=1 run "[$CI_WF]" green "loom:pr")" "a write-all job permission is held even when the diff does not touch it"
+assert_eq red "$(LOOM_TEST_REAL_DAEMON="$FIXTURE_DIR/missing-daemon" run "[$CI_WF]" green "loom:pr")" "an unavailable permission check fails closed"
+
 echo "Forbidden lines"
 # shellcheck disable=SC2016  # literal workflow text
-for line in '  permissions:' '      id-token: write' '  token: ${{ secrets.PAT }}' '  pull_request_target:' '  workflow_run:' \
+for line in '      id-token: write' '  permissions: read-all' '  permissions: {contents: read}' '  "permissions":' '  token: ${{ secrets.PAT }}' '  pull_request_target:' '  workflow_run:' \
     '      secrets: inherit' '  token: ${{ secrets["PAT"] }}' '  env: ${{ toJSON(secrets) }}' '  token: ${{ SECRETS.PAT }}' \
     '  "permissions": {contents: write}' '  permissions : write-all' '      - run: gh pr merge --admin --merge "$PR"' \
     '      - run: npm publish' '      - run: gh release create v1' '      - run: wrangler deploy' \
@@ -155,6 +169,19 @@ for line in '  permissions:' '      id-token: write' '  token: ${{ secrets.PAT }
     patch=$(printf '@@ -1 +1,2 @@\n x\n+%s' "$line")
     assert_eq red "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "added '$line' -> red"
 done
+echo "Read-only permissions header (#13291)"
+for line in 'permissions:' '  permissions:' '      permissions:' $'\tpermissions:' $'permissions:\r' 'permissions: {}' '    permissions:  '; do
+    patch=$(printf '@@ -1 +1,2 @@\n x\n+%s' "$line")
+    assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "added header '$line' -> green"
+done
+patch=$(printf '@@ -1,2 +1,4 @@\n x\n+permissions:\n+  contents: read')
+assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "workflow-level permissions + contents: read -> green"
+patch=$(printf '@@ -1,2 +1,4 @@\n x\n+    permissions:\n+      contents: read')
+assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "job-level permissions + contents: read -> green"
+patch=$(printf '@@ -1,2 +1,4 @@\n x\n+permissions:\n+  contents: write')
+assert_eq red "$(CONTENT=ci-adds-contents-write.yml run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "permissions header + contents: write child (head contents) -> red"
+patch=$(printf '@@ -1,2 +1,4 @@\n x\n+permissions:\n+  contents: write-all')
+assert_eq red "$(CONTENT=ci-adds-contents-write.yml run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "permissions header + write-all child -> red"
 patch=$(printf '@@ -1,2 +1 @@\n x\n-  permissions:')
 assert_eq red "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "removed 'permissions:' -> red"
 patch=$(printf '@@ -1,2 +1,2 @@\n permissions:\n-  x: 1\n+  x: 2')

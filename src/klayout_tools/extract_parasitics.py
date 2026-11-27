@@ -2,17 +2,12 @@
 
 Split out of ``extract.py`` (issue #1572, following the #1195/PR #1200
 precedent that split SPEF export into ``extract_spef.py``): the geometry
-helpers that measure a net's resistive squares and area/perimeter
-(:func:`_n_squares` and the per-fragment/current-direction layer above it --
-:func:`_region_n_squares`, :func:`_directed_squares`,
-:func:`_fragment_port_points_um`, :func:`_polygon_extents_um`,
-:func:`_port_axis_points`, :func:`_drawn_region`, :func:`_metal_port_region`
--- plus :func:`_instance_drawn_mask`, :func:`_net_area_perim_um`,
-:func:`_bbox_overlap`, :func:`_net_pair_key`), the lumped R/C model itself
-(:func:`_compute_parasitics`, 543 lines) and its dead-metal cross-check
+helpers for inter-layer ports, masks and net area/perimeter, the fragment
+square measurements in :mod:`klayout_tools.extract_fragment_resistance`, the lumped
+R/C model (:func:`_compute_parasitics`) and its dead-metal cross-check
 (:func:`_detect_dead_metal`), the star/distributed-ladder topology helpers
-(:func:`_terminal_star_positions_um`, :func:`_terminal_star_weights`,
-:func:`_distributed_rc_order`, :func:`_distributed_rc_segments`), the writer
+(moved to :mod:`klayout_tools.extract_terminal_topology` by issue #6899,
+which pays for its reduced-network emission growth with the move), the writer
 that turns a computed model into netlist devices
 (:func:`_inject_parasitics`, 518 lines), the per-net emitted-network
 integrity record that writer feeds
@@ -40,120 +35,83 @@ calls :func:`_inject_parasitics`) and ``_extract_netlist`` (which calls
 :func:`_compute_parasitics` and :func:`_detect_dead_metal`), the three call
 sites this subsystem's whole interface narrows down to.
 
-A handful of functions below (:func:`_detect_dead_metal`,
-:func:`_inject_parasitics`, :func:`_tie_substrate_nets_to_ground`) still need
-a few names that remain defined in ``extract.py`` itself
-(:func:`~klayout_tools.extract._bbox_um_rounded`, the
-``_PARAM_PRECISION_UM``/``_MIN_PARASITIC_R_OHM``/``_SPICE_GLOBAL_GROUND_NODE``/
-``SUBSTRATE_DC_TIE_RESISTANCE_OHM`` tunables, and
-:func:`~klayout_tools.extract._is_synthesized_substrate_net_name`) -- each has
-other callers or definitions living in ``extract.py``, so it stays there
-rather than moving along with this subsystem. Those imports are deferred
-(``from .extract import ...`` *inside* the function body, not at this
-module's top level) because ``extract.py`` imports *this* module at its own
-top level (the same "``from .extract_parasitics import ...``" pattern
-``extract_spef.py``/``extract_abstract.py`` already established) -- a
-module-level import back the other way would be a circular import evaluated
-mid-load; deferring it to call time, by which point both modules have
-finished importing, avoids that entirely.
+Shared SPICE naming, substrate-tie constants and geometry formatting live
+in ``extract_base``.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import region as _region
 from .decks import ExtractionDeck, ParasiticsDeck
 from .extract_abstract import _sanitize_instance_name
+from .extract_base import (
+    _MIN_PARASITIC_R_OHM,
+    _PARAM_PRECISION_UM,
+    _SPICE_GLOBAL_GROUND_NODE,
+    SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+    _bbox_um_rounded,
+    substrate_tie_mode,
+    substrate_tie_written_ohms,
+)
+from .extract_base import SPICE_HIERARCHY_SEPARATOR as SPICE_HIERARCHY_SEPARATOR
+from .extract_base import SPICE_SAFE_HIERARCHY_JOIN as SPICE_SAFE_HIERARCHY_JOIN
+from .extract_base import spice_safe_net_name as spice_safe_net_name
+from .extract_cut_resistance import CutResistanceResolver, cut_resistance_resolver
+from .extract_detect_substrate_label import _is_synthesized_substrate_net_name
+from .extract_fragment_resistance import _n_squares as _n_squares
+from .extract_fragment_resistance import _region_n_squares
+from .extract_graph_ports import (
+    PinSite,
+    _boundary_sides,
+    _cut_edge_boxes,
+    add_promoted_pin_port,
+    promoted_pin_site,
+)
+from .extract_parasitic_body import (
+    ALL_NETS as ALL_NETS,
+)
+from .extract_parasitic_body import (
+    PARASITIC_VARIANT_GRAMMAR as PARASITIC_VARIANT_GRAMMAR,
+)
+from .extract_parasitic_body import ParasiticVariants as ParasiticVariants
+from .extract_parasitic_body import (
+    body_adjusted_star_weights as body_adjusted_star_weights,
+)
+from .extract_parasitic_body import (
+    body_terminal_flags as body_terminal_flags,
+)
+from .extract_parasitic_body import (
+    parse_parasitic_variants as parse_parasitic_variants,
+)
+from .extract_parasitic_body import (
+    star_hub_only_indices as star_hub_only_indices,
+)
+from .extract_resistance_network import reduced_network_plan
+from .extract_terminal_topology import (
+    _distributed_rc_order,  # noqa: F401 -- re-export; tests import it from here
+    _distributed_rc_segments,
+    _terminal_star_positions_um,
+)
+from .extract_terminal_topology import (
+    _terminal_star_weights as _terminal_star_weights,
+)
+from .extract_terminal_topology import (
+    emit_reduced_network as _emit_reduced_network,
+)
 from .parasitic_integrity import (
     GROUND_OWNER,
     IntegrityRecordBuilder,
     ParasiticNetworkRecord,
     check_parasitic_network,
 )
-from .pdk_models import equivalent_rectangle_um
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping
 
     import klayout.db as kdb
 
-
-@dataclass(frozen=True)
-class ParasiticVariants:
-    """Parsed ``--parasitic-variant`` request (issue #3056).
-
-    ``drop_r``/``drop_c_ground`` hold escaped net names (the spelling the
-    report uses) or :data:`ALL_NETS` for the ``*`` wildcard. ``raw`` is the
-    request as given, echoed back verbatim in the report.
-    """
-
-    raw: tuple[str, ...] = ()
-    drop_r: frozenset[str] = frozenset()
-    drop_c_ground: frozenset[str] = frozenset()
-    drop_c_coupling: bool = False
-
-    def drops_r(self, net: str) -> bool:
-        return ALL_NETS in self.drop_r or net in self.drop_r
-
-    def drops_c_ground(self, net: str) -> bool:
-        return ALL_NETS in self.drop_c_ground or net in self.drop_c_ground
-
-    def named_nets(self) -> frozenset[str]:
-        return (self.drop_r | self.drop_c_ground) - {ALL_NETS}
-
-
-#: ``*`` wildcard of the ``drop-r:``/``drop-c-ground:`` variant verbs.
-ALL_NETS = "*"
-
-#: Closed grammar of ``--parasitic-variant`` (issue #3056).
-PARASITIC_VARIANT_GRAMMAR = "drop-r:NET|*, drop-c-ground:NET|*, drop-c-coupling"
-
-
-def parse_parasitic_variants(
-    raw: Sequence[str] | None, error: type[Exception]
-) -> ParasiticVariants | None:
-    """Parse repeated ``--parasitic-variant`` values (issue #3056); ``None``
-    when none were given. Anything outside the closed grammar raises
-    ``error`` (the calling command's own error class)."""
-    if not raw:
-        return None
-    drop_r: set[str] = set()
-    drop_c_ground: set[str] = set()
-    drop_c_coupling = False
-    for item in raw:
-        verb, sep, net = item.partition(":")
-        if verb == "drop-c-coupling" and not sep:
-            drop_c_coupling = True
-        elif verb == "drop-r" and sep and net:
-            drop_r.add(net)
-        elif verb == "drop-c-ground" and sep and net:
-            drop_c_ground.add(net)
-        else:
-            raise error(
-                f"unknown --parasitic-variant {item!r} -- expected one of: "
-                f"{PARASITIC_VARIANT_GRAMMAR}"
-            )
-    return ParasiticVariants(
-        raw=tuple(raw),
-        drop_r=frozenset(drop_r),
-        drop_c_ground=frozenset(drop_c_ground),
-        drop_c_coupling=drop_c_coupling,
-    )
-
-
-#: ngspice's own hierarchy separator (issue #2145). A node token containing
-#: it is parsed as a *path expression* (``XBIAS.vb1`` = instance ``XBIAS``,
-#: node ``vb1``) wherever a node reference is read, so a flat net whose name
-#: carries an instance path -- what ``klt place-and-route``'s DEF net names
-#: and hierarchy-qualified drawn labels both produce -- is unaddressable by
-#: its own written name in ``v()``/``.meas``/``.ic``. Only *net/node* tokens
-#: are rewritten: SPICE dot-commands (``.SUBCKT``/``.ENDS``/``.GLOBAL``) and
-#: numeric literals (``L=0.28U``) are a different lexical class entirely and
-#: are never routed through :func:`spice_safe_net_name`.
-SPICE_HIERARCHY_SEPARATOR = "."
 
 #: Integer revision of the ``--parasitics`` R/C extraction model (issue #2957).
 #: Emitted as ``parasitics.model_revision``. Bump it whenever a change alters
@@ -163,16 +121,6 @@ SPICE_HIERARCHY_SEPARATOR = "."
 #: per merged net); ``2`` is 0.7.0's (squares counted per conductor fragment,
 #: #2392).
 PARASITICS_MODEL_REVISION = 2
-
-#: What :data:`SPICE_HIERARCHY_SEPARATOR` is rewritten to (issue #2145).
-#: ``_`` is an ordinary identifier character in every SPICE dialect and is
-#: the join several other extractors already use; ``/`` was rejected because
-#: ngspice's expression parser reads it as division inside ``v()``/``B``
-#: source expressions. Not injective on its own (``a.b`` and a pre-existing
-#: ``a_b`` both spell ``a_b``) -- no dot-free-preserving rewrite can be --
-#: so collisions are resolved per-netlist, not per-name, by ``extract.py``'s
-#: ``_rewrite_dotted_net_names``.
-SPICE_SAFE_HIERARCHY_JOIN = "_"
 
 
 #: ``kdb.Net`` property key tagging every node :func:`_inject_parasitics`
@@ -203,294 +151,6 @@ PARASITIC_ORIGIN_PROPERTY = "klt_parasitic_origin"
 #: capacitor), so it is also the node a sliced sub-circuit promotes to a pin
 #: when the net crosses the slice boundary.
 PARASITIC_HUB_PROPERTY = "klt_parasitic_hub"
-
-
-def _n_squares(area_um2: float, perimeter_um: float) -> float:
-    """Estimate the number of resistive *squares* of **one connected
-    conductor fragment** from its area and perimeter.
-
-    First-order geometric approximation: model the fragment as one equivalent
-    rectangle with the same area ``A`` and perimeter ``P``, whose side
-    lengths ``L`` and ``W`` are the roots of ``t^2 - (P/2) t + A = 0``; the
-    square count is then ``L / W`` (``>= 1``). This is exact for a single
-    rectangular wire and reduces to ``1`` for a square. When the shape is
-    "rounder" than any rectangle allows (negative discriminant -- e.g. a
-    single square-ish pad), it clamps to ``1``.
-
-    Deliberately simple and fixed (issue #216: "a single, fixed, first-order
-    lumped model -- no fast/accurate mode selector"); it over-counts squares
-    for L-shaped and other non-convex fragments, which biases the resulting
-    series resistance conservatively high rather than low.
-
-    **This is the fragment kernel, not the net-level entry point** (issue
-    #2359). Feeding it a *net's* merged area/perimeter -- the sum over
-    electrically disjoint fragments -- is what this function must never be
-    asked to do: summing two 0.42 x 1.0 um stubs' A and P fits a 2.505 x
-    0.335 um rectangle and reports 7.47 squares where the two stubs together
-    hold under one. :func:`_region_n_squares` is the caller that owns the
-    per-fragment split (and the current-direction correction below); every
-    call site in this module goes through it.
-    """
-    if area_um2 <= 0.0 or perimeter_um <= 0.0:
-        return 0.0
-    dims = equivalent_rectangle_um(area_um2, perimeter_um)
-    if dims is None:
-        # "Rounder" than any rectangle allows (negative discriminant -- e.g. a
-        # single square-ish pad): clamp to one square.
-        return 1.0
-    length, width = dims
-    return max(1.0, length / width)
-
-
-#: How completely a fragment must fill the axis-aligned box formed by its own
-#: extents along the port axis (and across it) before :func:`_directed_squares`
-#: is willing to treat it as a rectangle current crosses in a known direction
-#: (issue #2359). ``1.0`` is an exact rectangle; a straight wire, a contacted
-#: resistor head, a via landing pad and a plate all sit at or very near it,
-#: while an L-shaped or T-shaped run fills well under half of it and is
-#: therefore left on :func:`_n_squares`'s conservative whole-fragment fit --
-#: a straight-line port-to-port measurement would *under*-count a conductor
-#: whose current path bends, and under-counting resistance is the one
-#: direction this model has always refused to err in.
-_RECTANGULAR_FILL_TOLERANCE = 0.9
-
-#: Cap on how many port points :func:`_directed_squares` compares pairwise
-#: when looking for a fragment's current axis. A power strap can carry
-#: thousands of vias; beyond this many the set is first reduced to its
-#: extreme points along a fixed fan of directions (:func:`_port_axis_points`),
-#: which preserves the diameter's direction to within half the fan's angular
-#: step while keeping the pairwise scan bounded.
-_MAX_PORT_SAMPLES = 24
-
-
-def _port_axis_points(
-    points: list[tuple[float, float]],
-) -> list[tuple[float, float]]:
-    """Reduce ``points`` to at most :data:`_MAX_PORT_SAMPLES` candidates for
-    the farthest-apart pair, by keeping only the extreme point along each of
-    a fixed fan of directions.
-
-    The exact diameter of a point set needs an ``O(n^2)`` scan (or a convex
-    hull); the *direction* of that diameter is all :func:`_directed_squares`
-    consumes, and an extreme point along the fan direction closest to the
-    true diameter is itself an endpoint of a near-diameter. Returns
-    ``points`` untouched when it is already small enough, so the common case
-    (a handful of contacts/vias on a fragment) is exact.
-    """
-    if len(points) <= _MAX_PORT_SAMPLES:
-        return points
-    half = _MAX_PORT_SAMPLES // 2
-    kept: dict[tuple[float, float], None] = {}
-    for step in range(half):
-        angle = math.pi * step / half
-        ux, uy = math.cos(angle), math.sin(angle)
-        lo = min(points, key=lambda p: p[0] * ux + p[1] * uy)
-        hi = max(points, key=lambda p: p[0] * ux + p[1] * uy)
-        kept[lo] = None
-        kept[hi] = None
-    return list(kept)
-
-
-def _polygon_extents_um(
-    polygon: kdb.Polygon, dbu: float, ux: float, uy: float
-) -> tuple[float, float]:
-    """``(along, across)`` -- the fragment's extent (in um) along the unit
-    vector ``(ux, uy)`` and along its perpendicular.
-
-    Measured over the polygon's outer hull only: holes never extend a
-    shape's silhouette, so they cannot change either extent.
-    """
-    min_along = min_across = math.inf
-    max_along = max_across = -math.inf
-    for point in polygon.each_point_hull():
-        x = point.x * dbu
-        y = point.y * dbu
-        along = x * ux + y * uy
-        across = -x * uy + y * ux
-        min_along = min(min_along, along)
-        max_along = max(max_along, along)
-        min_across = min(min_across, across)
-        max_across = max(max_across, across)
-    if math.isinf(min_along):  # a degenerate, point-less polygon
-        return 0.0, 0.0
-    return max_along - min_along, max_across - min_across
-
-
-def _directed_squares(
-    polygon: kdb.Polygon,
-    dbu: float,
-    area_um2: float,
-    ports: list[tuple[float, float]],
-) -> float | None:
-    """Square count of one fragment measured **along the direction current
-    actually crosses it**, or ``None`` when the geometry does not support
-    that measurement (issue #2359).
-
-    ``ports`` are the um-space points where current can enter or leave this
-    fragment -- contact/via landings, and the cut edges where the fragment
-    abuts a device body that was removed from the net's conductor region (see
-    :func:`_fragment_port_points_um`). The two farthest-apart ports define
-    the current axis ``u``; the fragment's extent ``L`` along ``u`` is the
-    path length and ``A / L`` is its effective width, so the square count is
-    ``L / (A / L) = L^2 / A``.
-
-    Returned only when the fragment fills at least
-    :data:`_RECTANGULAR_FILL_TOLERANCE` of the ``L x W`` box its own extents
-    span -- i.e. when it really is (near enough) a rectangle traversed in a
-    straight line, the case where ``L^2 / A`` is exact. For an exactly
-    rectangular fragment contacted at opposite ends this reproduces
-    :func:`_n_squares`'s answer to the digit; what it changes is the case
-    :func:`_n_squares` cannot see, a short/wide fragment whose current
-    crosses its *short* axis (a contacted resistor head, a via landing, a
-    jumper pad), where ``L / W`` along the long axis is the reciprocal of the
-    truth. Anything less rectangle-like (an L, a T, a comb) returns ``None``
-    and stays on the conservative whole-fragment fit.
-    """
-    if len(ports) < 2 or area_um2 <= 0.0:
-        return None
-    candidates = _port_axis_points(ports)
-    best_d2 = 0.0
-    axis: tuple[float, float] | None = None
-    for index, (ax, ay) in enumerate(candidates):
-        for bx, by in candidates[index + 1 :]:
-            dx = bx - ax
-            dy = by - ay
-            d2 = dx * dx + dy * dy
-            if d2 > best_d2:
-                best_d2 = d2
-                axis = (dx, dy)
-    if axis is None or best_d2 <= 0.0:
-        # Every port resolves to the same point (e.g. a via landing directly
-        # on top of the contact below it): no direction is implied.
-        return None
-    norm = math.sqrt(best_d2)
-    ux, uy = axis[0] / norm, axis[1] / norm
-    along, across = _polygon_extents_um(polygon, dbu, ux, uy)
-    if along <= 0.0 or across <= 0.0:
-        return None
-    if area_um2 < _RECTANGULAR_FILL_TOLERANCE * along * across:
-        return None
-    return along * along / area_um2
-
-
-def _fragment_port_points_um(
-    fragment: kdb.Region,
-    dbu: float,
-    port_region: kdb.Region | None,
-    drawn_region: kdb.Region | None,
-) -> list[tuple[float, float]]:
-    """Where current can enter or leave one conductor fragment, in um
-    (issue #2359). Two sources, both already on hand during Pass 1:
-
-    - **Inter-layer landings** -- ``port_region`` is *this net's* contact/via
-      geometry on the layers that join this role to its neighbours above and
-      below. Each connected landing inside the fragment contributes its
-      bounding-box centre.
-    - **Device interfaces** -- ``drawn_region`` is the role's full *drawn*
-      layer. A fragment edge that lies strictly **inside** that region (as
-      opposed to on its boundary) is a cut: the geometry on the other side of
-      it belongs to the layout but not to this net's conductor region, which
-      on a conductor layer means a device claimed it -- a transistor gate
-      subtracted for issue #226, or a drawn resistor's marked body. Current
-      leaves the fragment through exactly that face, so each such edge
-      contributes its midpoint. Edges on the drawn layer's own outer boundary
-      are the fragment's free ends and contribute nothing.
-
-    Either source may be ``None``/empty (a caller with no via index to hand,
-    a role with no drawn-layer counterpart), in which case it simply
-    contributes no points and the fragment falls back to the whole-fragment
-    fit.
-    """
-    points: list[tuple[float, float]] = []
-    if port_region is not None and not port_region.is_empty():
-        for polygon in (port_region & fragment).merged().each():
-            centre = polygon.bbox().center()
-            points.append((centre.x * dbu, centre.y * dbu))
-    if drawn_region is not None and not drawn_region.is_empty():
-        for edge in fragment.edges().inside_part(drawn_region).each():
-            points.append(
-                (
-                    0.5 * (edge.p1.x + edge.p2.x) * dbu,
-                    0.5 * (edge.p1.y + edge.p2.y) * dbu,
-                )
-            )
-    return points
-
-
-def _region_n_squares(
-    region: kdb.Region,
-    dbu: float,
-    port_region: kdb.Region | None = None,
-    drawn_region: kdb.Region | None = None,
-) -> float:
-    """Square count of a net's conductor on one role -- the net-level entry
-    point every lumped-R call site in this module uses (issue #2359).
-
-    Splits ``region`` into its **connected fragments** and sums each
-    fragment's own square count, instead of fitting one equivalent rectangle
-    to the whole net's merged area and perimeter. The sum is the series
-    combination: a net's conductor on one role is measured as the run of
-    material a current would traverse, which is what a single lumped series
-    ``R`` per net per role can represent. Two electrically disjoint fragments
-    are joined through *some other* layer (a strap, a via stack), so their
-    own squares add -- they do not form one long thin rectangle of their
-    summed area and perimeter, the artefact that made the internal node of a
-    two-unit poly-resistor chain read ~9x high.
-
-    Each fragment is measured by :func:`_directed_squares` when its ports
-    imply a current direction and it is rectangle-like, and by
-    :func:`_n_squares` otherwise; the smaller of the two is taken when both
-    are available, so the directed measurement can only ever *remove* the
-    long-axis artefact, never add resistance the whole-fragment fit did not
-    already charge. A single-fragment net with no port information therefore
-    reports exactly what it reported before this function existed.
-
-    **Where the "biases conservatively high" framing still holds, and where
-    it no longer does.** It still holds per fragment: nothing here reports
-    more squares than :func:`_n_squares` would for that same fragment. It
-    never held *across* fragments -- an absolute over-estimate on each net
-    still distorts the *ratio* between two legs of a divider when they have
-    different fragment counts, which is precisely the failure this split
-    repairs (see issue #2359 and ``docs/cli/extract.md``).
-
-    **A net's total can move either way**, and that is deliberate. A net of
-    a few similar fragments drops, often sharply -- the two-head resistor
-    node loses the long-thin artefact outright. A net whose fragments differ
-    *widely in aspect ratio* rises instead: the merged fit averages a big
-    plate's area together with several thin straps' perimeter into one
-    intermediate rectangle that resembles neither (a 30 x 30 um plate plus
-    ten 10 x 0.2 um straps fits 26.5 squares, against 501 counted fragment by
-    fragment), which understates every strap. Neither number is a path
-    length; the star split (:func:`_terminal_star_weights`) apportions the
-    total across the net's terminals with weights summing to ``1.0``.
-    Fragments that are genuinely in *parallel* are still charged in series --
-    an acknowledged limitation this split does not address, see
-    ``docs/design/extract-fidelity-roadmap.md`` Stage 3.
-    """
-    import klayout.db as kdb
-
-    # `.merged()` unconditionally: `Region.is_merged()` can read `True` on a
-    # region that still holds separate abutting polygons, which would split
-    # one physical conductor into several "fragments" and over-count squares.
-    merged = region.merged()
-    total = 0.0
-    for polygon in merged.each():
-        fragment = kdb.Region(polygon)
-        area_um2 = fragment.area() * dbu * dbu
-        perim_um = fragment.perimeter() * dbu
-        if area_um2 <= 0.0 or perim_um <= 0.0:
-            continue
-        squares = _n_squares(area_um2, perim_um)
-        directed = _directed_squares(
-            polygon,
-            dbu,
-            area_um2,
-            _fragment_port_points_um(fragment, dbu, port_region, drawn_region),
-        )
-        if directed is not None:
-            squares = min(squares, directed)
-        total += squares
-    return total
 
 
 def _drawn_region(
@@ -534,9 +194,9 @@ def _drawn_region(
     return kdb.Region(top_cell.begin_shapes_rec(layer_index)).merged()
 
 
-def _metal_port_region(
+def _metal_port_regions(
     contacts: kdb.Region | None, vias: list[kdb.Region], level: int
-) -> kdb.Region:
+) -> list[kdb.Region]:
     """One net's inter-layer landings on metal ``level`` (issue #2359): the
     contacts underneath level ``0``, plus the via layers immediately below
     and above it (``vias[level - 1]`` and ``vias[level]``, index-aligned with
@@ -544,19 +204,20 @@ def _metal_port_region(
 
     These are the points a lumped series current can actually enter or leave
     this net's conductor on this level through -- everything else on the
-    fragment is a stub, not a terminal. Returns an empty ``Region`` when the
-    caller supplied no contact/via geometry, which simply leaves every
-    fragment on the whole-fragment fit.
+    fragment is a stub, not a terminal. Returned **one region per landing
+    layer**, never pre-merged (issue #7028): a li1 pad joining a licon row
+    to an mcon row has two distinct interfaces, and combining them into one
+    point cloud lets the rows' own span pick the current axis. Returns an
+    empty list when the caller supplied no contact/via geometry, which
+    simply leaves every fragment on the whole-fragment fit.
     """
-    import klayout.db as kdb
-
-    ports = kdb.Region()
+    ports: list[kdb.Region] = []
     if level == 0 and contacts is not None:
-        ports += contacts
+        ports.append(contacts)
     if 0 <= level - 1 < len(vias):
-        ports += vias[level - 1]
+        ports.append(vias[level - 1])
     if 0 <= level < len(vias):
-        ports += vias[level]
+        ports.append(vias[level])
     return ports
 
 
@@ -625,49 +286,6 @@ def _net_port_regions(
     return contacts, vias
 
 
-def _cut_edge_boxes(region: kdb.Region, drawn: kdb.Region | None) -> list[kdb.Box]:
-    """Axis-aligned boxes (zero width or height) for the merged runs of
-    ``region``'s edges lying strictly inside ``drawn`` -- the device-body cut
-    edges :func:`_fragment_port_points_um` reads as points, kept here as the
-    edge runs a graph port attaches along (issue #2982). Non-axis-aligned runs
-    are skipped: the graph builder rejects non-Manhattan geometry anyway."""
-    if drawn is None or drawn.is_empty():
-        return []
-    import klayout.db as kdb
-
-    boxes: list[kdb.Box] = []
-    for edge in region.merged().edges().inside_part(drawn).merged().each():
-        if edge.p1.x == edge.p2.x or edge.p1.y == edge.p2.y:
-            boxes.append(kdb.Box(edge.p1, edge.p2))
-    return boxes
-
-
-def _boundary_sides(box: kdb.Box, region: kdb.Region) -> list[kdb.Box]:
-    """The sides of ``box`` (as zero-width boxes, longest first, ties
-    left/right/bottom/top) that lie entirely on ``region``'s outline.
-
-    A contact/via with such a side shared by all its roles attaches along it
-    (Stage 3.D4's end-edge ports, issue #2982); one with none is attached by
-    its full bounding box instead (issue #4061)."""
-    import klayout.db as kdb
-
-    outline = region.merged().edges()
-    sides = [
-        kdb.Box(box.left, box.bottom, box.left, box.top),
-        kdb.Box(box.right, box.bottom, box.right, box.top),
-        kdb.Box(box.left, box.bottom, box.right, box.bottom),
-        kdb.Box(box.left, box.top, box.right, box.top),
-    ]
-    on_outline = [
-        side
-        for side in sides
-        if (side.width() or side.height())
-        and (kdb.Edges(kdb.Edge(side.p1, side.p2)) & outline).length()
-        == max(side.width(), side.height())
-    ]
-    return sorted(on_outline, key=lambda side: -max(side.width(), side.height()))
-
-
 def _graph_port_name(kind: str, box: kdb.Box, dbu: float) -> str:
     return f"{kind}@{box.center().x * dbu:.4f},{box.center().y * dbu:.4f}"
 
@@ -677,7 +295,7 @@ def _graph_landings_and_ports(
     contacts: kdb.Region | None,
     vias: list[kdb.Region],
     dbu: float,
-    r_cut_ohm: float | None,
+    r_cut_for: CutResistanceResolver,
 ) -> tuple[list[Any], list[Any]]:
     """The ``LandingInput`` / terminal ``PortInput`` lists for one net.
 
@@ -687,9 +305,10 @@ def _graph_landings_and_ports(
     coefficient for), so it becomes a terminal on that side. Device-body cut
     edges (drawn-layer interfaces) are terminals too. Every ordering is by
     integer geometry, so repeated equivalent requests are byte-identical.
-
-    A contact/via with no side on the conductor outline (a landing in the
-    interior of a strap) is attached by its whole bounding box."""
+    ``r_cut_for`` resolves each landing's per-cut resistance from the deck
+    (or a uniform override) by its ``(lower_role, upper_role)``; a cut with
+    no side on the conductor outline (a landing in the interior of a strap)
+    is attached by its whole bounding box."""
     import klayout.db as kdb
 
     from .extract_resistance_graph import LandingInput, PortInput
@@ -733,7 +352,7 @@ def _graph_landings_and_ports(
                         upper,
                         patch,
                         max(polygon.area() * dbu * dbu, 1e-12),
-                        r_cut_ohm,
+                        r_cut_for(lower, upper),
                     )
                 )
             else:
@@ -769,9 +388,29 @@ class _ResistanceGraphCollector:
     method is a no-op when ``enabled`` is false, so the caller stays
     branch-free and the default path does no graph work and adds no key."""
 
-    def __init__(self, enabled: bool, r_cut_ohm: float | None = None) -> None:
+    def __init__(
+        self,
+        l2n: kdb.LayoutToNetlist,
+        enabled: bool,
+        r_cut_ohm: float | None = None,
+        deck: ParasiticsDeck | None = None,
+        *,
+        caps: Mapping[str, int] | None = None,
+    ) -> None:
+        self._l2n = l2n
+        self._label_layers = (
+            {
+                l2n.layer_index(name): name.removesuffix("_label")
+                for name in l2n.layer_names()
+                if name.endswith("_label")
+            }
+            if enabled
+            else {}
+        )
         self._enabled = enabled
         self._r_cut_ohm = r_cut_ohm
+        self._deck = deck
+        self._caps = caps
         self._roles: dict[
             Any, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
         ] = {}
@@ -804,6 +443,9 @@ class _ResistanceGraphCollector:
                 dbu,
                 entry["resistance_ohm"],
                 self._r_cut_ohm,
+                deck=self._deck,
+                pin_site=promoted_pin_site(self._l2n, net, self._label_layers),
+                caps=self._caps,
             )
 
 
@@ -817,11 +459,10 @@ def _with_selected_resistance(report: dict[str, Any]) -> dict[str, Any]:
     """Add the additive scalar-selection provenance (issue #2983).
 
     The graph result is selected only when the net has exactly two terminals,
-    the solve is ``ok`` and the pair resistance is a number. Anything else
-    (``unsupported``, ``skipped``, three or more terminals, a disconnected
-    pair) keeps the legacy scalar, and ``resistance_source_reason`` says why.
-    ``resistance_ohm`` itself is never changed; this only reports which value
-    a caller that wants the topology-aware scalar should read."""
+    the solve is ``ok`` and the pair resistance is a number; anything else
+    (``unsupported``, ``skipped``, 3+ terminals, a disconnected pair) keeps
+    the legacy scalar and ``resistance_source_reason`` says why.
+    ``resistance_ohm`` itself is never changed."""
     terminals = report["terminals"]
     pair = report["pair_resistance_ohm"]
     selected: float | None = None
@@ -851,35 +492,31 @@ def _resistance_graph_report(
     dbu: float,
     legacy_resistance_ohm: float,
     r_cut_ohm: float | None = None,
+    deck: ParasiticsDeck | None = None,
+    pin_site: PinSite | None = None,
+    *,
+    caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    """The additive ``parasitics.nets[].resistance_graph`` object for one net
-    (issue #2982, Stage 3.D5 increment 3).
+    """Build a per-net resistance graph and render its terminal-pair matrix.
 
-    ``roles`` is ``(role name, sheet resistance, net region, drawn region)``
-    per conductor role the net has geometry on. This only converts the
-    per-net geometry :func:`_compute_parasitics` already holds into the graph
-    builder's inputs and renders the builder's and solver's results; it adds
-    no geometry or solving logic. ``status``, ``terminals``,
-    ``pair_resistance_ohm`` and the diagnostics are taken from
-    :class:`~klayout_tools.extract_resistance_graph.TerminalResistanceMatrix`
-    as-is; ``legacy_resistance_ohm`` is the unchanged series-sum scalar.
-
-    ``r_cut_ohm`` is the per-cut via/contact resistance; the shipped decks
-    curate none, so ``_compute_parasitics`` passes ``None`` and a net whose
-    graph contains a landing reports ``via_resistance_unknown``
-    (``status: "unsupported"``) instead of an assumed ideal via."""
+    The legacy scalar stays in the report for comparison and fallback.
+    An explicit per-cut resistance overrides the deck's nominal value for
+    each landing. A landing without either value is unsupported. Explicit
+    caps override the corresponding builder defaults (issue #6964)."""
     from .extract_resistance_graph import (
         RoleInput,
         build_resistance_graph,
         terminal_resistance_matrix,
     )
 
-    landings, ports = _graph_landings_and_ports(roles, contacts, vias, dbu, r_cut_ohm)
+    resolver = cut_resistance_resolver(r_cut_ohm, deck)
+    landings, ports = _graph_landings_and_ports(roles, contacts, vias, dbu, resolver)
     role_inputs = [
         RoleInput(name, sheet_res, tuple(region.merged().each()))
         for name, sheet_res, region, _drawn in roles
     ]
-    graph = build_resistance_graph(role_inputs, ports, landings, dbu)
+    add_promoted_pin_port(ports, role_inputs, pin_site, dbu)
+    graph = build_resistance_graph(role_inputs, ports, landings, dbu, **(caps or {}))
     matrix = terminal_resistance_matrix(graph, dbu=dbu)
     # An unsupported graph's matrix just repeats the graph's diagnostics.
     reported = (
@@ -1086,6 +723,7 @@ def _compute_parasitics(
     capacitor_top_regions: dict[str, kdb.Region] | None = None,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -1124,16 +762,16 @@ def _compute_parasitics(
     abuts a device body that is not part of the net's conductor region.
     Both are optional: without ``via_index``, or without
     ``layout``/``top_cell``, every fragment falls back to the whole-fragment
-    long/short fit, which for a single-fragment net is exactly this
-    function's pre-#2359 answer.
+    long/short fit -- exactly this function's pre-#2359 answer for a
+    single-fragment net.
 
     Roles map to the registered geometry layers: ``poly`` the poly region with
     the transistor gate regions subtracted out (issue #226 -- gate capacitance
     lives in the device model), and ``metals[i]`` each metal-stack layer
-    (index-aligned with the deck's ``metals``). The optional ``diffusion`` role
-    (NMOS+PMOS source/drain) is left unset by the shipped decks: the M cards'
-    ``AS``/``AD``/``PS``/``PD`` already feed the device model's junction
-    capacitance, so a diffusion cap term would double-count it.
+    (index-aligned with the deck's ``metals``). The optional ``diffusion``
+    role (NMOS+PMOS source/drain) is left unset by the shipped decks: the M
+    cards' ``AS``/``AD``/``PS``/``PD`` already feed the device model's
+    junction capacitance, so a diffusion cap term would double-count it.
 
     **Vertical-overlap coupling (issue #760):** for each adjacent pair of
     metal levels ``(i, i+1)`` with a curated ``parasitics_deck.metal_overlaps``
@@ -1141,8 +779,8 @@ def _compute_parasitics(
     of levels, the area of ``net_a``'s shapes on level ``i`` intersected with
     ``net_b``'s shapes on level ``i+1`` (a plain ``Region & Region`` boolean,
     KLayout's own already-registered per-net regions -- no halo/neighbour
-    search) becomes a coupling capacitance between ``net_a`` and ``net_b``
-    (``overlap_area_um2 * metal_overlaps[i]``), and is subtracted from
+    search) becomes a coupling capacitance ``overlap_area_um2 *
+    metal_overlaps[i]`` between ``net_a`` and ``net_b``, subtracted from
     *both* nets' ground area term on their own respective level (``net_a``'s
     on level ``i``, ``net_b``'s on level ``i+1``) -- charge is *moved*, never
     duplicated. The per-level deduction is the **geometric union** of every
@@ -1153,8 +791,8 @@ def _compute_parasitics(
     destroyed rather than moved. Same-net overlap (a via stack tying one net's
     own two levels together) is excluded by construction: coupling is only
     ever computed between two *distinct* nets, so a net's own via stack
-    contributes nothing
-    here (it is ordinary connectivity, already merged into one net upstream).
+    contributes nothing here (it is ordinary connectivity, already merged
+    into one net upstream).
 
     **Recognised capacitors are not double-counted (issue #3021):**
     ``capacitor_top_regions`` maps each recognised ``CapacitorDevice``'s name
@@ -1179,10 +817,10 @@ def _compute_parasitics(
     is the roadmap's own "medium cost" Stage 2b (a real neighbour-search
     cost across every same-layer pair on a routed block, not the cheap
     bounding-box-prefiltered ``Region & Region`` boolean vertical overlap
-    uses -- see ``docs/design/extract-fidelity-roadmap.md``'s Stage 2b cost
-    estimate). Scoping the search to a caller-declared "nets that matter"
-    set (Epic #709 Phase 2's own framing: high-impedance nodes, a SAR ADC's
-    CDAC top plate, a PLL loop filter) keeps this increment's cost bounded
+    uses -- see the roadmap's Stage 2b cost estimate). Scoping the search to
+    a caller-declared "nets that matter" set (Epic #709 Phase 2's own
+    framing: high-impedance nodes, a SAR ADC's CDAC top plate, a PLL loop
+    filter) keeps this increment's cost bounded
     to exactly the nets a caller cares about while still closing the gap
     ``PARASITIC_MODEL_SCOPE["coupling"]`` names.
 
@@ -1193,18 +831,15 @@ def _compute_parasitics(
     pre-#1700 behaviour. The membership test is the identical
     ``spice_safe_net_name(_net_identity_name(net)) in <frozenset>`` check the
     lateral pass already applies to ``critical_nets`` (issue #1162's escaped
-    spelling), reused rather than introducing a second net-classification
-    mechanism. Pass 1 is where the per-net ``polygons_of_net`` /
+    spelling). Pass 1 is where the per-net ``polygons_of_net`` /
     ``_net_area_perim_um`` calls live, so skipping a net there is the actual
     saving; the consequence is that an unnamed net also contributes no
     ``metal_regions`` entry, and therefore can neither give nor receive
-    *coupling* capacitance -- only a pair of both-named nets can couple under
-    a scoped run. That is deliberate and is the point: a coupling term
-    computed against a partner whose own ground model was never built would
-    be attributing charge to a net that does not appear in the output at all.
-    Unlike ``critical_nets``, which only ever *adds* a pass, this one
-    subtracts work, so a caller trading completeness for runtime must say so
-    explicitly.
+    *coupling* capacitance -- only a pair of both-named nets can couple
+    under a scoped run, deliberately: a coupling term against a never-
+    measured partner would attribute charge to a net absent from the
+    output. Unlike ``critical_nets``, which only ever *adds* a pass, this
+    one subtracts work: a caller trading completeness for runtime says so.
 
     **Top-cell-only hierarchy split, ground terms only (issue #1704, the
     implementation half of the spike in #1702 --
@@ -1215,10 +850,9 @@ def _compute_parasitics(
     sub-block, reported as the additive ``resistance_ohm_top_cell``/
     ``capacitance_ff_top_cell`` ground-entry fields below. ``None``/``False``
     (the default) computes neither field and runs no extra ``Region`` work
-    at all -- byte-identical to this function's pre-#1704 behaviour.
-
-    Built once per curated layer (poly, diffusion's constituent SD indices,
-    each ``metals[i]``), **not** once per net or per instance -- via
+    at all -- byte-identical to this function's pre-#1704 behaviour. Built
+    once per curated layer (poly, diffusion's constituent SD indices, each
+    ``metals[i]``), **not** once per net or per instance -- via
     :func:`_instance_drawn_mask`, the merged union of that role's *drawn*
     layer (``deck.poly``/``deck.active``/``deck.metals[i]``, **not** the
     ``layer_index``/``metal_index`` values this function otherwise reads --
@@ -1233,10 +867,7 @@ def _compute_parasitics(
     strap routed over a std cell's own pin, the normal case rather than a
     corner case) is charged to the **instance** side -- the only form that
     keeps "subtract what I already extracted for this sub-block separately"
-    arithmetically sound (spike doc section 3.3). The top-cell portion is
-    fed through the exact same ``cap_area_ff_um2``/``cap_perim_ff_um``/
-    ``sheet_res_ohm_sq`` + ``_n_squares`` formulas Pass 1 already applies to
-    the raw (pre-coupling-deduction) totals.
+    arithmetically sound (spike doc section 3.3).
 
     **Known limitation, documented rather than fixed: the split is exact in
     area but not in perimeter.** A conductor that genuinely straddles the
@@ -1249,9 +880,9 @@ def _compute_parasitics(
     likewise C) comes out **slightly larger** than this net's own
     ``resistance_ohm``/``capacitance_ff`` total -- proportional to the
     number and length of such crossings. This is expected, not a bug: a net
-    lying wholly on one side of the boundary (fully top-cell-drawn, or fully
-    inside one instance) stays exactly additive; only a genuinely spanning
-    net's split needs a tolerance rather than exact equality.
+    lying wholly on one side of the boundary stays exactly additive; only a
+    genuinely spanning net's split needs a tolerance rather than exact
+    equality.
 
     **Terminal-aware resistance graph (issue #2982, opt-in):**
     ``resistance_graph=True`` (``klt extract --resistance-graph``) attaches a
@@ -1259,15 +890,16 @@ def _compute_parasitics(
     :func:`_resistance_graph_report` from the per-net geometry Pass 1 already
     holds. It is purely additive: ``resistance_ohm`` and every other field
     keep their legacy value, and with ``False`` (the default) no key is added
-    and no graph work runs.
+    and no graph work runs. Each landing's per-cut resistance resolves from
+    the deck (issue #6917; see :func:`cut_resistance_resolver`), so a net
+    whose landing types are curated solves without ``--resistance-graph-r-cut``.
 
     For each metal level ``i`` with a curated
     ``parasitics_deck.metal_sidewalls[i]`` coefficient and
     ``parasitics_deck.metal_sidewall_lookback_um[i]`` lookback distance, and
     each qualifying pair of *distinct* nets with geometry on that level,
     ``net_a``'s region and ``net_b``'s region are checked with KLayout's own
-    ``Region.separation_check`` (the same primitive ``drc.py`` already uses
-    for ``check="separation"`` DRC rules) at that lookback distance; the
+    ``Region.separation_check`` at that lookback distance; the
     summed length of the facing edge pairs it reports
     (``EdgePairs.first_edges().length()``) becomes a coupling capacitance
     between the two nets (``facing_length_um * metal_sidewalls[i]``). Unlike
@@ -1285,18 +917,15 @@ def _compute_parasitics(
       output): ``{"net", "net_id", "resistance_ohm", "capacitance_ff",
       "by_layer", "resistance_ohm_top_cell", "capacitance_ff_top_cell"}`` for
       every net with non-zero *raw* (pre-coupling-deduction)
-      ground-eligible geometry --
-      including a net whose ground capacitance was fully moved to coupling
-      by the correction above (``capacitance_ff`` can be ``0.0`` in that
-      case; the net still needs a star/hub so a coupling ``C`` card has
-      somewhere to attach). A net with no eligible interconnect geometry at
-      all is omitted, exactly as before this feature existed. ``by_layer``
+      ground-eligible geometry -- including a net whose ground capacitance
+      was fully moved to coupling by the correction above (it still needs a
+      star/hub so a coupling ``C`` card has somewhere to attach). A net with
+      no eligible interconnect geometry at all is omitted. ``by_layer``
       (issue #1701) is a per-role/per-metal-level breakdown -- see the "Pass
-      3" comment above `results.append` for the exact shape and the
-      sum-equals-total invariant it satisfies. ``resistance_ohm_top_cell``/
-      ``capacitance_ff_top_cell`` (issue #1704) are ``None`` unless
-      ``parasitics_top_cell_only`` was given -- see this docstring's
-      "Top-cell-only hierarchy split" paragraph above.
+      3" comment above `results.append` for the shape and the
+      sum-equals-total invariant it satisfies.
+      ``resistance_ohm_top_cell``/``capacitance_ff_top_cell`` (issue #1704)
+      are ``None`` unless ``parasitics_top_cell_only`` was given.
     - Coupled-pair list (sorted by ``(net_a, net_b)`` for deterministic
       output): ``{"net_a", "net_b", "capacitance_ff", "levels",
       "lateral_levels"}`` for every distinct net pair with non-zero
@@ -1311,11 +940,10 @@ def _compute_parasitics(
       coupling (issue #760, empty if none); ``lateral_levels`` (issue #976)
       is the sorted list of same-``metal_index`` levels that contributed
       lateral coupling (empty if none, and always empty when
-      ``critical_nets`` is not given -- byte-identical to this field's
-      pre-#976 absence). Empty when neither ``parasitics_deck.metal_overlaps``
-      nor (``critical_nets``-scoped) ``parasitics_deck.metal_sidewalls``
-      curate a coefficient, or the layout has no qualifying coupling
-      geometry between distinct nets.
+      ``critical_nets`` is not given). Empty when neither
+      ``parasitics_deck.metal_overlaps`` nor (``critical_nets``-scoped)
+      ``parasitics_deck.metal_sidewalls`` curates a coefficient, or the
+      layout has no qualifying coupling geometry between distinct nets.
 
     ``net_id`` is ``net.cluster_id`` -- the id ``LayoutToNetlist`` already
     uses internally to key a net to its layout cluster (see the
@@ -1341,8 +969,8 @@ def _compute_parasitics(
     same hub, making the "coupling capacitor" a self-loop that would inflate
     the reported total while contributing nothing electrically; and overlap
     between two *different* names accumulates into one pair however many net
-    objects on each side contributed, matching the one hub per name that the
-    card attaches to.
+    objects on each side contributed, matching the one hub per name the card
+    attaches to.
 
     That name-keying is *this* pass's own aggregation choice, not something
     forced on it from downstream. Since issue #765 the ground entries above
@@ -1352,7 +980,7 @@ def _compute_parasitics(
     injection step nor the emitted netlist collapses same-labelled islands
     into one node. Coupling is therefore modelled one level coarser than the
     per-net ground terms; a per-net-object coupling model is a named
-    follow-on, not a behaviour this function claims today.
+    follow-on.
     """
     if circuit is None:
         return [], []
@@ -1512,11 +1140,9 @@ def _compute_parasitics(
     # strictly inside it is a cut against a gate or a drawn resistor body);
     # `via_index` supplies the inter-layer half, read back per net through
     # the same `polygons_of_net` Pass 1 already uses. Both are optional: with
-    # neither, every fragment gets the whole-fragment long/short fit, which
-    # for a single-fragment net is exactly the pre-#2359 answer.
-    #
-    # Built once per role here, never per net -- one `_drawn_region` call per
-    # conductor role, independent of net count.
+    # neither, every fragment gets the whole-fragment long/short fit, exactly
+    # the pre-#2359 answer for a single-fragment net. Built once per role
+    # here, never per net.
     drawn = _role_drawn_regions(
         layout,
         top_cell,
@@ -1526,10 +1152,12 @@ def _compute_parasitics(
         num_metals,
     )
     contact_layer_index = layer_index.get("contact")
-    # `resistance_graph` (issue #2982): each net's per-role geometry and
-    # landings, kept only when the opt-in flag is on.
     graph_collector = _ResistanceGraphCollector(
-        resistance_graph, resistance_graph_r_cut_ohm
+        l2n,
+        resistance_graph,
+        resistance_graph_r_cut_ohm,
+        parasitics_deck,
+        caps=resistance_graph_caps,
     )
 
     for net in nets:
@@ -1609,7 +1237,7 @@ def _compute_parasitics(
                 continue
             net_metal_area_um2[(net, i)] = area_um2
             net_metal_perim_um[(net, i)] = perim_um
-            metal_ports = _metal_port_region(net_contacts, net_vias, i)
+            metal_ports = _metal_port_regions(net_contacts, net_vias, i)
             metal_drawn = drawn.get(f"metal{i}")
             metal_r_ohm = layer_rc.sheet_res_ohm_sq * _region_n_squares(
                 region, dbu, port_region=metal_ports, drawn_region=metal_drawn
@@ -2033,16 +1661,6 @@ def _detect_dead_metal(
     """
     import klayout.db as kdb
 
-    # Deferred (call-time) import, not a module-level one: `extract.py`
-    # imports this module at its own module scope (mirroring the
-    # `extract_spef.py`/`extract_abstract.py` precedent), so a module-level
-    # `from .extract import ...` here would be a circular import evaluated
-    # during that very load. `_bbox_um_rounded`/`_PARAM_PRECISION_UM` stay in
-    # `extract.py` (both have other callers there) -- this defers the
-    # back-reference until `_detect_dead_metal` is actually called, by which
-    # point `extract.py` has finished importing.
-    from .extract import _PARAM_PRECISION_UM, _bbox_um_rounded
-
     nets = (
         [net for net in circuit.each_net() if net.cluster_id != 0]
         if circuit is not None
@@ -2087,165 +1705,6 @@ def _detect_dead_metal(
         )
     )
     return dead_metal
-
-
-def _terminal_star_positions_um(terminal_refs: list[Any]) -> list[tuple[float, float]]:
-    """The approximate ``(x_um, y_um)`` location of each of ``terminal_refs``,
-    read from its owning device's ``Device.trans`` (already reported in real
-    micrometres -- unlike most of this module, no ``dbu`` scaling is needed).
-
-    This is a **coarse** proxy for a terminal's true physical location
-    (issue #592): KLayout's connectivity extraction records one placement
-    transform per *device* (typically the center of its recognition shape),
-    not a distinct position per terminal, so every terminal on the same
-    device instance shares that device's single location. Good enough to
-    rank a net's terminals by their approximate spread for the star-topology
-    resistance split; not a substitute for true per-segment routing
-    measurement (out of scope -- issue #592's deferred Option 2)."""
-    positions: list[tuple[float, float]] = []
-    for ref in terminal_refs:
-        disp = ref.device().trans.disp
-        positions.append((disp.x, disp.y))
-    return positions
-
-
-def _terminal_star_weights(positions: list[tuple[float, float]]) -> list[float]:
-    """Normalized (sum to ``1.0``) per-terminal resistance-split weights for
-    the star topology: proportional to each position's Euclidean distance
-    from the centroid of ``positions``, so a terminal placed farther from a
-    net's other terminals is assigned more of that net's total resistance --
-    a coarse, position-aware stand-in for "farther terminals see more
-    interconnect" without a full per-segment routing model (issue #592).
-
-    Degenerates to an equal ``1/N`` split when every position coincides
-    (including ``N == 1``, where the lone terminal necessarily sits at the
-    "centroid") -- this is what makes a single-terminal net's star reduce to
-    exactly the pre-#592 Gamma-shunt's one lumped resistor: same total value,
-    not a smaller or larger one."""
-    n = len(positions)
-    if n == 0:
-        return []
-    cx = sum(p[0] for p in positions) / n
-    cy = sum(p[1] for p in positions) / n
-    distances = [math.hypot(x - cx, y - cy) for x, y in positions]
-    total = sum(distances)
-    if total <= 0.0:
-        return [1.0 / n] * n
-    return [d / total for d in distances]
-
-
-def _distributed_rc_order(positions: list[tuple[float, float]]) -> list[int]:
-    """An index permutation of ``positions`` approximating a physical tap
-    order along a net's dominant spread axis (``--distributed-rc``, issue
-    #977, Epic #709 Phase 2b): a ladder needs a linear chain, not an
-    unordered set, so terminals must be placed in *some* sequence before
-    :func:`_distributed_rc_segments` can derive adjacent-pair segment R/C.
-
-    Finds the pair of positions with the greatest pairwise Euclidean
-    distance (the same coarse "how spread out is this net" signal
-    :func:`_terminal_star_weights` already leans on), projects every
-    position onto the axis between that pair, and sorts by the projection
-    -- a deterministic, position-only proxy for "which end is which" that
-    needs no routing/skeleton geometry (:func:`_terminal_star_positions_um`'s
-    own docstring: terminal position is a device-placement proxy, not true
-    routed geometry).
-
-    Degenerates to the input order (``[0, 1, ..., n - 1]``) for ``n <= 2``
-    (nothing to order between two points) and whenever every position
-    coincides (the projection axis is undefined) -- harmless, since every
-    segment length is then ``0.0`` too and :func:`_distributed_rc_segments`'s
-    equal-split fallback takes over regardless of order.
-    """
-    n = len(positions)
-    if n <= 2:
-        return list(range(n))
-
-    best_pair = (0, 1)
-    best_dist = -1.0
-    for i in range(n):
-        xi, yi = positions[i]
-        for j in range(i + 1, n):
-            xj, yj = positions[j]
-            dist = math.hypot(xj - xi, yj - yi)
-            if dist > best_dist:
-                best_dist = dist
-                best_pair = (i, j)
-    if best_dist <= 0.0:
-        return list(range(n))
-
-    ai, aj = best_pair
-    ax, ay = positions[ai]
-    bx, by = positions[aj]
-    ux, uy = bx - ax, by - ay
-    norm = math.hypot(ux, uy)
-    ux, uy = ux / norm, uy / norm
-    projections = [
-        ((x - ax) * ux + (y - ay) * uy, idx) for idx, (x, y) in enumerate(positions)
-    ]
-    projections.sort(key=lambda item: (item[0], item[1]))
-    return [idx for _, idx in projections]
-
-
-def _distributed_rc_segments(
-    positions: list[tuple[float, float]],
-    r_total_ohm: float,
-    c_total_ff: float,
-) -> tuple[list[int], list[float], list[float]]:
-    """Break one net's total lumped resistance/capacitance into a chain
-    ("ladder") along ``positions``' approximate physical order, for
-    ``--distributed-rc`` (issue #977, Epic #709 Phase 2b) -- the multi-
-    segment alternative to :func:`_inject_parasitics`'s star topology.
-
-    Returns ``(order, segment_r_ohm, node_c_ff)``, all keyed to
-    ``positions``' own indices:
-
-    - ``order``: :func:`_distributed_rc_order`'s index permutation (length
-      ``N``, one entry per terminal) -- the ladder's node sequence.
-    - ``segment_r_ohm``: ``N - 1`` per-segment series resistances, one
-      between each adjacent pair in ``order``. Each segment's share of
-      ``r_total_ohm`` is proportional to that pair's Euclidean distance
-      (its approximate physical length), so the segments always sum back
-      to exactly ``r_total_ohm`` -- the same "legs sum back to the net's
-      total" invariant :func:`_terminal_star_weights` already guarantees
-      for the star topology.
-    - ``node_c_ff``: ``N`` per-terminal ground capacitances, in ``order``'s
-      sequence. Each terminal's share of ``c_total_ff`` is the *average* of
-      its one or two adjacent segments' length share (an interior node
-      touches two segments, an end node touches one) -- the standard "half
-      the capacitance of each adjoining segment" lumped-element
-      discretization of a distributed RC line. Node capacitances also sum
-      back to exactly ``c_total_ff``.
-
-    Degenerates to an equal split (``r_total_ohm / (N - 1)`` per segment,
-    ``c_total_ff / N`` per node) when every position coincides -- the same
-    "no spatial signal available" fallback :func:`_terminal_star_weights`
-    already uses, and still conserves both totals.
-
-    ``positions`` must have at least 2 entries -- a distributed ladder needs
-    at least one segment; a net with 0 or 1 terminal has nothing to chain
-    and stays on the star/Gamma-shunt path in :func:`_inject_parasitics`.
-    """
-    order = _distributed_rc_order(positions)
-    n = len(order)
-    ordered = [positions[i] for i in order]
-    seg_lengths = [
-        math.hypot(ordered[i + 1][0] - ordered[i][0], ordered[i + 1][1] - ordered[i][1])
-        for i in range(n - 1)
-    ]
-    total_length = sum(seg_lengths)
-
-    if total_length <= 0.0:
-        segment_r_ohm = [r_total_ohm / (n - 1)] * (n - 1)
-        node_c_ff = [c_total_ff / n] * n
-        return order, segment_r_ohm, node_c_ff
-
-    segment_r_ohm = [r_total_ohm * (length / total_length) for length in seg_lengths]
-    node_c_ff = []
-    for i in range(n):
-        adjacent_lengths = seg_lengths[max(i - 1, 0) : min(i + 1, n - 1)]
-        share = sum(adjacent_lengths) / (2.0 * total_length)
-        node_c_ff.append(c_total_ff * share)
-    return order, segment_r_ohm, node_c_ff
 
 
 def _tag_slice_origin(node: kdb.Net, origin_id: int, enabled: bool) -> None:
@@ -2299,7 +1758,6 @@ def _record_substrate_ties(
     identities are substrate references, not modeled nets, and nothing in
     the per-net checks should claim them.
     """
-    from .extract import _SPICE_GLOBAL_GROUND_NODE
 
     zero_uid = integ.add_node(_SPICE_GLOBAL_GROUND_NODE, GROUND_OWNER)
     for tied in substrate_dc_tie["nets"]:
@@ -2374,6 +1832,7 @@ def _inject_parasitics(
     variants: ParasiticVariants | None = None,
     substrate_tie_ohms: float | None = None,
     emit_selected_resistance: bool = False,
+    emit_resistance_network: bool = False,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -2389,6 +1848,19 @@ def _inject_parasitics(
     block, or a ``--mom-rlc-resistance-ohm`` override) keeps
     ``resistance_ohm``. ``False`` (the default, and what ``klt extract``
     always passes) is the legacy-scalar netlist.
+
+    ``emit_resistance_network`` (issue #6899, internal -- only ``klt pex
+    --resistance-network`` sets it, which also sets
+    ``emit_selected_resistance``) writes the Kron-reduced terminal network
+    of :func:`klayout_tools.extract_resistance_network` in place of the star
+    for every net whose graph solved ``ok`` with three or more terminals
+    and whose device terminals map one-to-one onto its graph terminals; two
+    terminal graph nets keep the ``emit_selected_resistance`` scalar, and
+    every other net keeps the star/Gamma-shunt model, reported per net in
+    the additive ``resistance_graph.network`` block. Requires
+    ``resistance_graph=True`` and refuses ``--spef`` (the SPEF writer
+    models the star/ladder only). ``False`` (the default) is byte-identical
+    to before.
 
     ``mom_rlc_inductor`` (``(net_name, inductance_nh)``, issue #988, Epic
     #709 Phase 3a) -- ``None`` unless ``--mom-rlc-net`` was given together
@@ -2456,10 +1928,16 @@ def _inject_parasitics(
     emits the network exactly as described. Otherwise: ``drop-r`` leaves a
     lumped net's device terminals on the hub (no leg nets, no series
     resistor; the Gamma-shunt fallback gets no resistor either) and counts
-    zero resistance for it; ``drop-c-ground`` omits the net's ground
-    capacitor (and any ``--mom-rlc-inductance-nh`` inductor in series with
-    it); ``drop-c-coupling`` omits every ``cc_*`` card. A net on the
-    distributed ladder is left untouched by ``drop-r``/``drop-c-ground``.
+    zero resistance for it; ``drop-r-body`` (issue #7317) leaves only the
+    net's *body-class* terminals on the hub (class-aware, see
+    :func:`klayout_tools.extract_parasitic_body.body_terminal_flags`; a net
+    whose terminals are all body-class keeps the full star) and re-splits
+    its total R across the signal terminals, so the leg sum is unchanged;
+    ``drop-c-ground`` omits the net's ground capacitor (and any
+    ``--mom-rlc-inductance-nh`` inductor in series with it);
+    ``drop-c-coupling`` omits every ``cc_*`` card. A net on the
+    distributed ladder is left untouched by ``drop-r``/``drop-r-body``/
+    ``drop-c-ground``.
 
     After every ``parasitic_nets`` entry has its hub established, one
     two-terminal ``C`` card is created per ``coupled_pairs`` entry, directly
@@ -2515,12 +1993,6 @@ def _inject_parasitics(
     syntax and ignores these tags (verified against a live writer run) -- the
     flag exists only so a run that never asks for a slice pays nothing.
     """
-    # Deferred (call-time) import -- see `_detect_dead_metal`'s identical
-    # comment above for why this can't be a module-level import.
-    # `_MIN_PARASITIC_R_OHM` stays in `extract.py` (it is that module's
-    # own tunable constant).
-    from .extract import _MIN_PARASITIC_R_OHM
-
     res_class = kdb.DeviceClassResistor()
     cap_class = kdb.DeviceClassCapacitor()
     ind_class = kdb.DeviceClassInductor()
@@ -2657,6 +2129,10 @@ def _inject_parasitics(
             _lumped_resistance_ohm(entry, emit_selected_resistance),
             _MIN_PARASITIC_R_OHM,
         )
+        # What the emitted netlist actually carries for this net (issue
+        # #6899): the lumped scalar on every pre-existing path, the summed
+        # pair resistors on the reduced-network path below.
+        emitted_r_ohm = r_total_ohm
         c_farad = entry["capacitance_ff"] * 1e-15
         net_escaped = spice_safe_net_name(entry["net"])
         drop_r = variants is not None and variants.drops_r(net_escaped)
@@ -2665,6 +2141,26 @@ def _inject_parasitics(
         # Snapshot before mutating: moving a terminal off `net` below changes
         # what `net.each_terminal()` would yield mid-iteration.
         terminal_refs = list(net.each_terminal())
+
+        # `--resistance-network` (issue #6899): the per-net plan for the
+        # graph-reduced terminal network, and its additive report block
+        # (both built in `_reduced_network_plan`/`_reduced_network_report`,
+        # keeping this complexity-baselined function's own branching flat).
+        # A `drop-r`/`drop-c-ground` variant or a `--mom-rlc-net` R override
+        # keeps the net on the star path below (the override/variant must
+        # win), so only a clean plan takes the reduced branch.
+        # `drop-r`/`drop-r-body` (issues #3056/#7317): which terminals
+        # stay on the hub -- all of them under `drop-r`, only the
+        # body-class ones under `drop-r-body`, none otherwise.
+        hub_only = star_hub_only_indices(variants, net_escaped, drop_r, terminal_refs)
+        network, mapping = reduced_network_plan(
+            entry,
+            terminal_refs,
+            emit_resistance_network=emit_resistance_network,
+            variant_dropped_r=drop_r or bool(hub_only),
+            variant_dropped_c=drop_c,
+            emit_selected_resistance=emit_selected_resistance,
+        )
 
         terminal_reports: list[dict[str, Any]] = []
         segment_reports: list[dict[str, Any]] = []
@@ -2800,16 +2296,53 @@ def _inject_parasitics(
             # `entry["net"]`, exactly the star topology's own convention.
             hub = legs[mid_index]
             hub_name = leg_names[mid_index]
+        elif network is not None:
+            # Graph-reduced terminal network (issue #6899): the Kron
+            # reduction of the net's solved resistance graph, one resistor
+            # per surviving terminal pair between per-terminal leg nets --
+            # see `_emit_reduced_network`'s docstring for the topology.
+            # `mapping` and the graph report are non-None whenever a plan
+            # succeeded, by `reduced_network_plan`'s own construction.
+            rc_model = "reduced"
+            (
+                hub,
+                hub_name,
+                leg_uids,
+                terminal_reports,
+                device_count,
+                emitted_r_ohm,
+            ) = _emit_reduced_network(
+                circuit,
+                res_class,
+                cap_class,
+                ground,
+                ground_uid,
+                integ,
+                entry,
+                net,
+                net_uid,
+                terminal_refs,
+                entry["resistance_graph"],
+                network,
+                mapping,
+                existing_names,
+                instance_name,
+                origin_id,
+                record_slice_topology,
+            )
+            net_c_count = device_count - len(network.resistors)
+            total_r_count += len(network.resistors)
         elif terminal_refs:
             hub = net
             hub_name = entry["net"]
             positions = _terminal_star_positions_um(terminal_refs)
-            weights = _terminal_star_weights(positions)
+            weights = body_adjusted_star_weights(positions, hub_only)
             for i, (term_ref, weight) in enumerate(
                 zip(terminal_refs, weights, strict=True)
             ):
-                if drop_r:
-                    # `drop-r` (issue #3056): the terminal stays on the hub.
+                if i in hub_only:
+                    # `drop-r` (issue #3056) / `drop-r-body` (issue #7317):
+                    # the terminal stays on the hub.
                     terminal_reports.append(
                         {
                             "device": term_ref.device().expanded_name(),
@@ -2946,7 +2479,7 @@ def _inject_parasitics(
         r_dropped = drop_r and rc_model == "lumped"
         c_dropped = drop_c and rc_model == "lumped"
         emitted_c_ff = 0.0 if c_dropped else entry["capacitance_ff"]
-        total_r += 0.0 if r_dropped else r_total_ohm
+        total_r += 0.0 if r_dropped else emitted_r_ohm
         total_c_ff += emitted_c_ff
         total_c_count += net_c_count
         # Issue #2764: declare this net's emitted topology to the integrity
@@ -3219,19 +2752,6 @@ def _tie_substrate_nets_to_ground(
     detect the node-scoping guarantee programmatically instead of reading
     the generated SPICE for a ``.GLOBAL`` card.
     """
-    # Deferred (call-time) import -- see `_detect_dead_metal`'s identical
-    # comment above for why this can't be a module-level import.
-    # `_is_synthesized_substrate_net_name`/`_SPICE_GLOBAL_GROUND_NODE`/
-    # `SUBSTRATE_DC_TIE_RESISTANCE_OHM` stay in `extract.py` (each has other
-    # callers/definitions there).
-    from .extract import (
-        _SPICE_GLOBAL_GROUND_NODE,
-        SUBSTRATE_DC_TIE_RESISTANCE_OHM,
-        _is_synthesized_substrate_net_name,
-        substrate_tie_mode,
-        substrate_tie_written_ohms,
-    )
-
     requested_ohms = (
         SUBSTRATE_DC_TIE_RESISTANCE_OHM
         if substrate_tie_ohms is None
@@ -3283,84 +2803,6 @@ def _tie_substrate_nets_to_ground(
         # still accurately described as "global" for this build).
         "node_scope": "global",
     }
-
-
-def spice_safe_net_name(name: str) -> str:
-    """Rewrite a KLayout ``Net.expanded_name()`` string to the exact spelling
-    the written SPICE file uses for that net's *node* references in its
-    ``.SUBCKT``/instance lines (issue #696, issue #1162, issue #2145).
-
-    Three independent rewrites. The first two mirror escaping
-    ``NetlistSpiceWriter`` already applies when it writes a net as a node
-    reference (as opposed to the raw form it keeps in its own leading
-    ``* pin ...``/``* net ...`` comments); the third mirrors a rewrite this
-    repo applies to the *real* ``kdb.Net`` name before handing the netlist
-    to the writer (``extract.py``'s ``_rewrite_dotted_net_names``), because
-    ``NetlistSpiceWriter`` has no escape of its own for that character:
-
-    1. **Merged labels (issue #696).** ``Net.expanded_name()`` joins every
-       distinct text label found on one electrical net with ``,`` (see
-       :func:`_detect_merged_net_labels`'s docstring, issue #470) -- but a
-       SPICE node token cannot contain a comma (a common argument
-       separator), so ``NetlistSpiceWriter`` writes the *same* joined net
-       using ``|`` instead wherever it appears as an actual node reference.
-    2. **Anonymous nets (issue #1162).** A net with no drawn label at all
-       gets KLayout's auto-generated ``$<n>`` placeholder as its
-       ``expanded_name()`` (e.g. ``$2``) -- but ngspice (and the wider
-       SPICE3/HSPICE-descended dialect family) treats a token that *starts*
-       with ``$`` as an inline-comment marker, silently truncating the rest
-       of the card. ``NetlistSpiceWriter`` backslash-escapes a leading ``$``
-       (``\\$2``, confirmed against a live ``NetlistSpiceWriter`` run: a
-       node named ``$weird`` writes as ``\\$weird``, while a *mid-token*
-       ``$`` such as ``mid$dle`` is left alone -- only the leading
-       character triggers the ngspice comment hazard) wherever it appears
-       as a node reference; this function does the same.
-    3. **Hierarchical names (issue #2145).** A net whose name came from a
-       composed/routed cell's own hierarchy -- a ``klt place-and-route``
-       DEF net name replayed by ``--def-net-names``, or a drawn label
-       carrying an instance path -- spells that path with ``.``
-       (``XBIAS.vb1``). ``.`` is ngspice's *own* hierarchy separator, so
-       such a token is read as a path expression (instance ``XBIAS`` ->
-       node ``vb1``) wherever a node reference is parsed: the node is
-       unaddressable by its written name in ``v()``/``.meas``/``.ic``, and
-       the same token means two different things depending on its position
-       on the card. ``NetlistSpiceWriter`` does *not* escape it (confirmed
-       against a live writer run: a net named ``XBIAS.vb1`` writes as
-       ``XBIAS.vb1``), so ``extract.py``'s ``_rewrite_dotted_net_names``
-       renames the real net to ``_`` instead before the netlist is written,
-       and this function applies the same ``.`` -> ``_`` rewrite so a name
-       that reaches a report *without* passing through that pass (a
-       reference netlist's nets in ``klt lvs``, say) is still reported in
-       the one SPICE-addressable spelling.
-
-    Before this function existed (for case 1) and before issue #1162 (for
-    case 2), every net name this module put into the JSON response
-    (``nets[].name``, ``devices[].nets[...]``, ``merged_net_labels[].net``,
-    ``parasitics.nets[].net``, ``parasitics.nets[].terminals[].leg_net``)
-    used the *unescaped* form, while the written netlist used the escaped
-    form -- the same net, spelled two different ways depending which
-    artifact you read it from, with no way for a caller to know the two
-    strings named the same node short of hard-coding the substitutions
-    themselves (and, for the anonymous-net case, a caller that copied the
-    unescaped JSON spelling verbatim into a hand-authored SPICE card would
-    reproduce the very comment-truncation hazard ``NetlistSpiceWriter``
-    itself already avoids). Calling this on every net name before it enters
-    the response makes it byte-identical to the netlist's own spelling
-    everywhere it is reported (also applied by ``klt lvs``'s
-    ``net_correspondence``/``mismatches[].net`` via ``lvs.py``'s
-    ``_name_or_none``, sourced from the same ``Net.expanded_name()``
-    convention).
-
-    A no-op for the overwhelming majority of net names, which contain
-    neither a comma, nor a dot, nor a leading ``$``. Idempotent: its own
-    output contains none of the three, so re-applying it changes nothing.
-    """
-    escaped = name.replace(",", "|").replace(
-        SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN
-    )
-    if escaped.startswith("$"):
-        escaped = "\\" + escaped
-    return escaped
 
 
 def _net_identity_name(net: kdb.Net) -> str:

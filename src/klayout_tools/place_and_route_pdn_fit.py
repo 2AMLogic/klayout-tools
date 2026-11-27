@@ -297,7 +297,7 @@ def standard_cell_area_um2(
     if top is None:
         return None
     total = 0.0
-    for instance in top["instances"]:  # type: ignore[index]
+    for instance in top["instances"]:
         size = macro_sizes.get(str(instance["cell"]))
         if size is None:
             return None
@@ -377,7 +377,6 @@ def _spacing_phrase(strap: Mapping[str, Any], spacing_um: float) -> str:
 
 def pdn_fit_error(
     power: Mapping[str, Any],
-    floorplan: Mapping[str, Any],
     *,
     core: CoreExtent,
     tech: TechContext,
@@ -449,7 +448,7 @@ def check_request(
     core = core_extent_um(floorplan, cell_area_um2=cell_area)
     if core is None:
         return None
-    return pdn_fit_error(power, floorplan, core=core, tech=read_tech_context(tech_lef))
+    return pdn_fit_error(power, core=core, tech=read_tech_context(tech_lef))
 
 
 __all__ = [

@@ -11,18 +11,15 @@ from __future__ import annotations
 import cmath
 import json
 import math
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as real_ngspice
 from klayout_tools import sim, sim_passes, sim_raw
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
-real_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice not installed"
-)
 
 # v(o) = (Vac_a / R1 + Vac_b / R2) / (1/R1 + 1/R2 + 1/R3 + j w C)
 _R1, _R2, _R3, _C = 1e3, 2e3, 1e3, 1e-7
@@ -109,6 +106,12 @@ def _deck(tmp_path: Path, passes) -> list[str]:
         ([{"name": "a", "alter": [{"target": "VA", "value": True}]}], "finite number"),
         (
             [{"name": "a", "alter": [{"target": "VA", "value": float("inf")}]}],
+            "finite number",
+        ),
+        # A 400-digit int literal parses to an int too large for a float
+        # (issue #5994): refused as the SimError envelope, not an OverflowError.
+        (
+            [{"name": "a", "alter": [{"target": "VA", "value": 10**400}]}],
             "finite number",
         ),
         ([{"name": "a", "alter": [{"target": "VA", "value": 1, "x": 1}]}], "unknown"),
@@ -235,7 +238,14 @@ def test_expr_scalar_is_solved_in_an_op_plot_before_the_first_pass(tmp_path):
     lines = sim_passes.control_lines(
         analysis, str(tmp_path), [{"name": "vbias", "expr": "v(o)"}]
     )
-    assert lines[:4] == ["set filetype=ascii", "op", "let vbias = v(o)", "print vbias"]
+    assert lines[:6] == [
+        "set filetype=ascii",
+        "op",
+        "echo klt_expr_begin vbias",
+        "let vbias = v(o)",
+        "print vbias",
+        "echo klt_expr_end",
+    ]
     assert lines.index("op") < lines.index("alter VA ac = 1")
     # No scalar declared: the deck is exactly the pre-#3771 one.
     assert "op" not in sim_passes.control_lines(analysis, str(tmp_path))
@@ -394,3 +404,38 @@ def test_a_failed_pass_is_reported_not_inherited(tmp_path):
     assert corner["status"] == "error"
     assert [p["status"] for p in corner["passes"]] == ["error", "error"]
     assert {d["code"] for d in corner["diagnostics"]} >= {"pass_failed"}
+
+
+@pytest.mark.parametrize("form", ["pass", "step"])
+@pytest.mark.parametrize("declaration", ["missing", "included", "unresolved"])
+def test_ac_target_lookup_respects_include_evidence(tmp_path, form, declaration):
+    """Both request forms reject a missing source only on conclusive evidence."""
+    base = {"kind": "ac", "args": _ARGS}
+    if form == "pass":
+        passes = [
+            {"name": name, "alter": [{"target": "VDRIVE", "value": value}]}
+            for name, value in (("first", 1), ("second", 2))
+        ]
+        analysis = {"analysis": {**base, "passes": passes}}
+    else:
+        analysis = {
+            "analysis_steps": [
+                {"name": name, "alter": {"VDRIVE.ac": value}, "analysis": base}
+                for name, value in (("first", 1), ("second", 2))
+            ]
+        }
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps({"netlist": "body.spice", **analysis}))
+    body = "R1 out 0 1k\n"
+    if declaration != "missing":
+        body += '.include "sources.spice"\n'
+    if declaration == "included":
+        (tmp_path / "sources.spice").write_text("vdrive out 0 DC 0 AC 1\n")
+    (tmp_path / "body.spice").write_text(body)
+    if declaration == "missing":
+        with pytest.raises(
+            sim.SimError, match=rf"{form} 'first'.*VDRIVE.*names no element"
+        ):
+            sim.run_sim(str(path), dry_run=True)
+    else:
+        assert sim.run_sim(str(path), dry_run=True)["status"] == "valid"

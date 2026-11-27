@@ -214,17 +214,20 @@ Three tiers:
    `expected_disagreement`. Gated `skipif` on both a real `klayout` binary
    on `$PATH` **and** a resolvable sky130A install (mirrors
    `tests/test_drc_klayout_engine.py`'s own `HAVE_KLAYOUT_BINARY` gate) --
-   skips cleanly, never fails, in an environment with neither. gf180mcu's own
-   `--engine klayout` **DRC** cross-check remains explicitly deferred as of
-   issue #904 -- re-verified unchanged: gf180mcu's native *DRC* deck still
-   has no single runnable file (see `docs/cli/drc.md`'s "Engine" ->
-   "klayout" limitation); tiers 1 and 2 cover all 46 of its rules in full.
-   **Unlike the DRC side, gf180mcu's native *LVS* deck is single-file and
-   directly runnable** -- issue #904 cross-checks gf180mcu's LVS
-   device-extraction rules against it separately; see
-   `tests/test_lvs_native_extraction_cross_check_gf180mcu.py` and
-   `docs/cli/extract.md`'s "gf180mcu native-deck LVS device-extraction
-   cross-check" section (not this DRC-side manifest).
+   skips cleanly, never fails, in an environment with neither.
+
+   For gf180mcu, tiers 1 and 2 cover all of its DRC rules. Tier 3 remains
+   deferred because the manifest tests do not yet run the golden-pair fixtures
+   through the native engine.
+   Since #4002, `klt drc --engine klayout|both --pdk <variant>` resolves the
+   family main script `tech/drc/gf180mcu.drc` as `native_deck.kind: pdk_main_script`.
+   Both engines completed a live `--engine both` run on `gf180mcuA`
+   (premise corrected 2026-11-18, issue #5720).
+
+   Issue #904 separately cross-checks LVS device extraction against gf180mcu's
+   single, directly runnable `gf180mcu.lvs` deck. See the
+   [LVS cross-check tests](../test_lvs_native_extraction_cross_check_gf180mcu.py)
+   and the [gf180mcu LVS results](../../docs/cli/extract.md#gf180mcu-native-deck-gf180mculvs-lvs-device-extraction-cross-check-issue-904).
 
 ## Cross-check results (sky130)
 
@@ -247,6 +250,12 @@ print("agree:  ", ", ".join(agree))
 print("approx: ", ", ".join(approx))
 PY
 ```
+
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29 under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1), issue #3420:
+> `tests/test_golden_deck.py` plus both native-extraction cross-check
+> modules re-run against the `~/.ciel` f6eeac7 install with KLayout 0.28.16 from the
+> system package: all passed, so the manifest's `expected_disagreement`
+> values are unchanged. The text below records the original runs.
 
 Tier 3 has been run against a real `volare`-fetched sky130A install
 (`open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b`, the same commit
@@ -308,8 +317,8 @@ this pilot's geometry.
 | `capm2.width.1` | A | `violate` | violations | clean | Same FEOL-gated CAPM/CAP2M section as `capm.width.1`. |
 | `capm2.space.1` | A | `violate` | violations | clean | Same FEOL-gated CAPM/CAP2M section as `capm.width.1`. |
 | `licon1.width.1` | A | `violate` | violations | clean | Same `FEOL = false` gate (issue #2594) -- the native `licon.1` lives inside the script's `if FEOL ... end` block, so the real deck reports zero rules checked on either fixture. |
-| `mcon.space.1` | B | `clean` | clean | violations (`ct.1`, `ct.4`) | A bare, isolated mcon shape trips `ct.1` (mcon edges must be exactly 0.17um -- a fixed size this deck's own `mcon.width.1` enforces both halves of since #2835) and `ct.4` (mcon must be covered by li), neither of which this pilot's geometry can satisfy. |
-| `mcon.width.1` | B | `clean` | clean | violations (`ct.1`, `ct.4`) | Same pair as `mcon.space.1` (issue #2594): `ct.1` is an exact min *and* max 0.17um, so any bar wide enough to pass this engine's min-only `width_check` is over the native maximum -- the `via.1a` mismatch one stack level down. |
+| `mcon.space.1` | B | `clean` | clean | violations (`ct.4`) | Both 0.17 µm cuts satisfy the size rule. Each lacks the underlying li1 that the native deck requires. |
+| `mcon.width.1` | B | `clean` | clean | violations (`ct.4`) | The 0.17 µm cut satisfies the size rule and lacks underlying li1. The undersized fixture also trips native `ct.1`. |
 | `via.width.1` | B | `clean` | clean | violations (`via.1a`, `m2.via`, `via.4c.5c`) | The native `via.1a` demands an *exact* 0.15um square (`edges.without_length(0.15)`), not a minimum width; any fixture wide enough to pass this engine's min-only `width_check` is by construction wider than the native max. |
 | `via.space.1` | B | `clean` | clean | violations (`m2.5`, `m2.via`, `via.1a`, `via.4c.5c`) | Same exact-size `via.1a` mismatch, plus the native deck's met2-enclosure rules that this single-layer fixture never draws. |
 | `via2.width.1` | B | `clean` | clean | violations (`via2.1a`, `via2`, `m3.via2`, `via2.5`) | Same rectangularity-only residual (`via2.1a`; the exact-size max half is enforced as of issue #2443), plus met2/met3 enclosure rules and `via2.5`'s 2-adjacent-edges-relaxed refinement this curated deck does not model. |
@@ -344,19 +353,23 @@ same `if FEOL ... end` block that suppresses
 `diff.width.1`/`poly.width.1`/`nwell.width.1`. It therefore now carries a
 non-null `expected_disagreement` and appears as a class-A row above.
 
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29
+> under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1),
+> issue #3420: the `tap.width.1` FEOL-gated disagreement above is unchanged
+> under `f6eeac7` — covered by the tier-3 re-qualification note above,
+> whose re-run found every manifest `expected_disagreement` value
+> unchanged.
+
 If you add a rule to `sky130/manifest.json`, add it to the class-A/class-B
 table above (or state the new class in prose) in the same change -- the
 tier-1 coverage test enforces that the manifest matches the deck, but
 nothing enforces that this section matches the manifest.
 
-gf180mcu's 56 rules have no native-*DRC*-deck cross-check verdict either
-way (deferred per the scope above -- no single runnable native DRC deck
-exists to cross-check against, re-verified unchanged as of issue #904); their
-`expected_disagreement` fields are all `null` because none has been
-cross-checked, which is **not** a claim of agreement. This is explicitly
-noted, not a silent skip: gf180mcu's DRC rules are still validated by tiers 1
-and 2 above (coverage + curated-engine self-consistency) on all 56 rules, and
-issue #904 additionally cross-checks gf180mcu's *LVS* device-extraction
-rules against a real, directly-runnable native deck (see the tier-3 note
-above) -- the DRC-side gap and the LVS-side result are two different
-questions with two different answers, not one deferred item.
+For gf180mcu, the `expected_disagreement` fields are all `null` because the
+golden-pair manifest tests do not yet run their fixtures through the native
+DRC engine. A native DRC verdict on those fixtures is pending for all of its
+rules. Since #4002, `klt drc --engine klayout|both --pdk <variant>` resolves
+`tech/drc/gf180mcu.drc` as `native_deck.kind: pdk_main_script`. Both engines completed a live
+`--engine both` run on one `gf180mcuA` layout (premise corrected 2026-11-18,
+issue #5720). Tiers 1 and 2 check manifest coverage and curated-engine results.
+The LVS device-extraction cross-check in #904 uses the separate native LVS deck.

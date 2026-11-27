@@ -69,20 +69,6 @@ loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
 # Colors
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-YELLOW='\033[0;33m'  # retired() below
-
-
-# An assertion that CANNOT survive the #8191 port of this guard to Rust,
-# retired under the three-part test in defaults/docs/verification-recipes.md §6.
-# Printed, not deleted: a reader must be able to see what was removed, why, and
-# what proves the property now. Counted as run so the totals stay honest.
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
 
 # --- Minimal logging/error shims the extracted function calls ---
 # `error` must exit non-zero to faithfully model the real script's hard block;
@@ -96,9 +82,8 @@ error()   { echo "ERROR: $*" >&2; exit 1; }
 # --- Extract the function under test from merge-pr.sh and source it ---
 # From `_check_no_open_stacked_children() {` up to (not including) the
 # `# Invoke the guard before` invocation comment. The #7982 pin/warn/block
-# decision is inline in that same function (merge-pr.sh is ratcheted and a new
-# sibling shell lib is not an available remedy — see the comment above the
-# function in merge-pr.sh), so this one extraction covers all of it.
+# decision is inline in that same function, so this one extraction covers all
+# of it.
 # Extracting from source keeps the test in lockstep with the script.
 FUNCS_FILE="$(mktemp)"
 STUB_DIR="$(mktemp -d)"

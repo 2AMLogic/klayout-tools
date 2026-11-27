@@ -438,10 +438,22 @@
             66,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2170,
+            2170
+          ],
+          "layer": [
+            67,
+            20
+          ]
         }
       ]
     },
-    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real volare-fetched install) with no `-rd`-settable override this engine's invocation can flip -- the native rule this one transcribes (`licon.1`, `licon.not(poly.interacting(poly_rs).and(rpm)).edges.without_length(0.17)`, \"minimum/maximum width of licon : 0.17um\") lives inside the script's `if FEOL ... end` block, so `run_drc_klayout_engine` never evaluates it at all, regardless of the input layout: the real deck reports zero rules checked on either fixture (status \"coverage_unknown\"), so a violate fixture correctly trips the curated engine but is reported \"clean\". This is the identical root cause already documented for poly.width.1/diff.width.1/tap.width.1/nwell.width.1. Were FEOL enabled, the clean fixture would disagree in the *other* direction too, exactly like mcon.width.1's own annotation describes for the BEOL twin of this rule (issue #2594): licon.1 is a fixed size, min *and* max, so any bar wide enough to stay clean under this engine's min-only width_check is by construction over that 0.17um maximum, and licon.4 (\"licon must overlap li and (poly or tap or diff)\") flags any single-layer licon fixture besides. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "expected_disagreement": "The golden cross-check runs sky130A.lydrc with FEOL disabled. Its licon.1 rule produces no markers on either fixture, so it misses the undersized cut in the violate fixture.",
     "layer": [
       66,
       44
@@ -459,6 +471,18 @@
           "layer": [
             66,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2115,
+            2170
+          ],
+          "layer": [
+            67,
+            20
           ]
         }
       ]
@@ -491,10 +515,22 @@
             67,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2590,
+            2170
+          ],
+          "layer": [
+            68,
+            20
+          ]
         }
       ]
     },
-    "expected_disagreement": "A bare, isolated mcon shape -- the only kind of fixture this single-rule, single-layer pilot manifest can build -- trips two real sky130A.lydrc rules unrelated to mcon.space.1's own spacing threshold: \"ct.1\" (every mcon edge must be exactly 0.17um -- a fixed size this deck's own mcon.width.1, issue #2594, carries only the minimum half of, pending issue #2388's `threshold_max_dbu` backfill, so the generated fixture geometry is still sized off that minimum alone) and \"ct.4\" (mcon must be covered by li, which this single-layer fixture never draws). Reconciling both would require a realistic multi-layer contact structure, out of scope for this pilot's single-layer width/space geometry.",
+    "expected_disagreement": "Both 0.17 um contacts satisfy ct.1. The native sky130A.lydrc reports ct.4 on both contacts because the fixture lacks li1 underneath. Only the violate fixture also trips ct.2.",
     "layer": [
       67,
       44
@@ -525,6 +561,18 @@
             67,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2470,
+            2170
+          ],
+          "layer": [
+            68,
+            20
+          ]
         }
       ]
     }
@@ -544,10 +592,22 @@
             67,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2170,
+            2170
+          ],
+          "layer": [
+            68,
+            20
+          ]
         }
       ]
     },
-    "expected_disagreement": "A bare, isolated mcon shape -- the only kind of fixture this single-rule, single-layer pilot manifest can build -- trips two real sky130A.lydrc rules on *both* fixtures (observed: \"ct.1\" x4, \"ct.4\" x1 on each). \"ct.1\" (`mcon.edges.without_length(0.17)`, \"minimum/maximum width of mcon : 0.17um\") is a fixed size, min *and* max (issue #2594), so any bar wide enough to stay clean under this engine's min-only width_check is by construction over that maximum -- the same structural mismatch already documented for via.width.1/via2.width.1 -- and \"ct.4\" requires mcon be covered by li, which this single-layer fixture never draws. The max half is expressible as `DrcRule.threshold_max_dbu` and is deferred to issue #2388 (see docs/cli/drc.md's \"Fixed-size rules\" section); until it lands, no fixture can satisfy both engines' notion of \"clean\" at once.",
+    "expected_disagreement": "The 0.17 um clean contact satisfies ct.1. The native sky130A.lydrc reports ct.4 because the fixture lacks li1 underneath. The undersized violate fixture also trips ct.1.",
     "layer": [
       67,
       44
@@ -565,6 +625,18 @@
           "layer": [
             67,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2115,
+            2170
+          ],
+          "layer": [
+            68,
+            20
           ]
         }
       ]
@@ -1585,6 +1657,30 @@
             68,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2525,
+            2150
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2525,
+            2150
+          ],
+          "layer": [
+            69,
+            20
+          ]
         }
       ]
     },
@@ -1619,6 +1715,30 @@
             68,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2415,
+            2150
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2415,
+            2150
+          ],
+          "layer": [
+            69,
+            20
+          ]
         }
       ]
     }
@@ -1637,6 +1757,30 @@
           "layer": [
             68,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2150,
+            2150
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2150,
+            2150
+          ],
+          "layer": [
+            69,
+            20
           ]
         }
       ]
@@ -1659,6 +1803,30 @@
           "layer": [
             68,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2100,
+            2150
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2100,
+            2150
+          ],
+          "layer": [
+            69,
+            20
           ]
         }
       ]
@@ -1691,6 +1859,30 @@
             69,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2665,
+            2200
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2665,
+            2200
+          ],
+          "layer": [
+            70,
+            20
+          ]
         }
       ]
     },
@@ -1725,6 +1917,30 @@
             69,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2535,
+            2200
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2535,
+            2200
+          ],
+          "layer": [
+            70,
+            20
+          ]
         }
       ]
     }
@@ -1743,6 +1959,30 @@
           "layer": [
             69,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2200,
+            2200
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2200,
+            2200
+          ],
+          "layer": [
+            70,
+            20
           ]
         }
       ]
@@ -1765,6 +2005,30 @@
           "layer": [
             69,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2135,
+            2200
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2135,
+            2200
+          ],
+          "layer": [
+            70,
+            20
           ]
         }
       ]
@@ -1797,6 +2061,18 @@
             70,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2665,
+            2200
+          ],
+          "layer": [
+            71,
+            20
+          ]
         }
       ]
     },
@@ -1831,6 +2107,18 @@
             70,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2535,
+            2200
+          ],
+          "layer": [
+            71,
+            20
+          ]
         }
       ]
     }
@@ -1849,6 +2137,18 @@
           "layer": [
             70,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2200,
+            2200
+          ],
+          "layer": [
+            71,
+            20
           ]
         }
       ]
@@ -1871,6 +2171,18 @@
           "layer": [
             70,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2135,
+            2200
+          ],
+          "layer": [
+            71,
+            20
           ]
         }
       ]
@@ -1902,6 +2214,18 @@
           "layer": [
             71,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            4500,
+            2800
+          ],
+          "layer": [
+            72,
+            20
           ]
         }
       ]
@@ -1937,6 +2261,18 @@
             71,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            4300,
+            2800
+          ],
+          "layer": [
+            72,
+            20
+          ]
         }
       ]
     }
@@ -1955,6 +2291,18 @@
           "layer": [
             71,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2800,
+            2800
+          ],
+          "layer": [
+            72,
+            20
           ]
         }
       ]
@@ -1977,6 +2325,18 @@
           "layer": [
             71,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2700,
+            2800
+          ],
+          "layer": [
+            72,
+            20
           ]
         }
       ]

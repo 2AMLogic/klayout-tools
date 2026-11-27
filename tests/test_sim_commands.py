@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.fake_s3_batch import FakeS3BatchRunner as _FakeRunner
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _provenance, netlist_batch, sim, sim_batch, sim_commands
 from klayout_tools.sim import SimError, run_sim
@@ -180,6 +180,17 @@ def test_missing_approvals_is_refused_with_stable_code(tmp_path):
     assert exc.value.code == sim_commands.CODE_APPROVALS_MISSING
 
 
+@pytest.mark.parametrize("name", [r"\inputs\tb.txt", "stdout.bin"])
+def test_invalid_bound_input_name_reports_approval_error(tmp_path, name):
+    entry = {"id": "test", "interpreter": "vvp", "bound_inputs": {name: _sha("tb")}}
+    path = _write(
+        tmp_path / "approvals.json", {"schema_version": 1, "approvals": [entry]}
+    )
+    with pytest.raises(SimError, match=r"approvals\[0\]\.bound_inputs") as exc:
+        sim_commands.load_approvals(path)
+    assert exc.value.code == sim_commands.CODE_APPROVALS_INVALID
+
+
 def test_approvals_may_come_from_the_environment(tmp_path, monkeypatch):
     monkeypatch.setenv(sim_commands.APPROVALS_ENV, _approvals(tmp_path))
     assert run_sim(_request(tmp_path), backend="local")["status"] == "pass"
@@ -298,58 +309,6 @@ def test_iverilog_engine_message_points_at_commands(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _FakeRunner:
-    def __init__(self, keep_dir: Path) -> None:
-        self.calls: list[list[str]] = []
-        self.keep_dir = keep_dir
-        self.uploads: dict[str, Path] = {}
-        self.state = "done"
-        self.exit_code = "0"
-        self.outputs: dict[str, str] = {}
-        self.failures: dict[str, object] = {}
-
-    def __call__(self, argv: list[str], timeout_s: float) -> object:
-        self.calls.append(list(argv))
-        joined = " ".join(argv)
-        for key, value in self.failures.items():
-            if key in joined:
-                return value
-        if "cp" in argv:
-            source, dest = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            if dest.startswith("s3://"):
-                kept = self.keep_dir / dest.rsplit("/", 1)[-1]
-                shutil.copyfile(source, kept)
-                self.uploads[kept.name] = kept
-            elif source.endswith("/status.json"):
-                return fake_completed(
-                    stdout=json.dumps(
-                        {
-                            "job_id": "klt-commands-fake",
-                            "state": self.state,
-                            "exit_code": self.exit_code,
-                            "instance_id": "i-0fake",
-                            "region": "us-east-1",
-                            "lifecycle": "spot",
-                            "spot": True,
-                            "tool": "commands",
-                        }
-                    )
-                )
-            elif source.endswith("/outputs/"):
-                for name, content in self.outputs.items():
-                    path = Path(dest) / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
-        return fake_completed()
-
-    def submissions(self) -> list[list[str]]:
-        return [argv for argv in self.calls if "job.json" in " ".join(argv)]
-
-    @property
-    def job_json(self) -> dict:
-        return json.loads(self.uploads["job.json"].read_text(encoding="utf-8"))
-
-
 @pytest.fixture
 def fake(tmp_path, monkeypatch) -> _FakeRunner:
     script = tmp_path / "batch-fleet-provision.sh"
@@ -363,7 +322,7 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
     monkeypatch.setattr(_provenance, "_klt_version", lambda: CLIENT_VERSION)
     keep = tmp_path / "uploads"
     keep.mkdir()
-    runner = _FakeRunner(keep)
+    runner = _FakeRunner(keep, job_id="klt-commands-fake", tool="commands")
     monkeypatch.setattr(sim_batch, "_run_subprocess", runner)
     return runner
 

@@ -67,6 +67,37 @@ license that covers the rest of this repository (`klayout-tools`' own
 source code); only these specific upstream files carry the Apache-2.0
 license.
 
+## Pinned Tiny Tapeout DRC sample
+
+[`tt_gf0p2_drc_sample.json`](tt_gf0p2_drc_sample.json) records the shuttle
+and project commits, original authors and repositories for the two designs
+selected for issue #5084. PAL is 1×2 in the live index; Dog Battle is 1×1.
+The layouts and Apache-2.0 source archives are fetched at those commits,
+with license provenance recorded in the cache manifests; they are not
+vendored here. Fetches use the corpus fetcher's identifying User-Agent and
+one-second request pacing.
+
+Run the same check as the PR workflow:
+
+```bash
+uv run --frozen python scripts/tt_corpus_sample.py
+```
+
+Live measurement on 2026-11-17, checkout `d87e226ba`, KLayout 0.30.12:
+PAL passed in 118.798 seconds and Dog Battle in 67.967 seconds, both with
+`status: clean` and zero violations (about 3.1 minutes DRC total on the
+shared worker; CI timing may differ).
+
+The adapter runs only `tt_corpus_run.py --stages drc`, prints per-design
+wall time, and requires exactly the sample's records, exit zero, and clean
+DRC envelopes with zero violations. Missing inputs, skipped designs,
+timeouts, findings and partial coverage fail the check. This tests the
+curated gf180mcu deck, not the foundry's full signoff runset. The workflow
+allows 15 minutes total and bounds each design to 300 seconds, saving
+manifests and JSON reports as artifacts even on failure. Extract/LVS await
+the extract-timeout defect (#5893); the full Spot corpus run remains a
+separate increment of #5084.
+
 ## Golden fixtures — `tests/corpus/golden/`
 
 `tests/corpus/golden/<pdk>/<cell>.layers.json` holds the expected
@@ -430,3 +461,118 @@ net (device counts, cell/instance counts, DRC violation counts, ...) — the
 right bar for a metric drifting slightly without the underlying geometry
 becoming byte-different — see [`tests/golden_metrics/README.md`](../golden_metrics/README.md)
 (issue #248).
+
+## Tiny Tapeout corpus fetch cache (Epic #520 Phase 1.A, #5081)
+
+`scripts/tt_corpus_fetch.py` walks a Tiny Tapeout shuttle index, filters by
+PDK, and fetches each design's source archive (and GDS, when the index or a
+`--gds-url-template` names one) at its pinned commit into a content-addressed
+cache with a per-design provenance manifest (repo, commit, shuttle, PDK,
+license, fetch time). Designs with no readable license are marked `excluded`.
+A second run makes zero network requests (`--refresh-index` re-downloads the
+mutable shuttle index). The real index has no `pdk` field, so the PDK is
+derived from the shuttle id (`tt06` -> sky130A, `ttgf*` -> gf180mcuD); a
+`--pdk` that matches no project exits 3 instead of reporting an empty success.
+The seeds in `synth_e2e_validation/` and `place_and_route_tt_validation/`
+already draw their designs from the same `tt06.json` index; they are
+referenced, not migrated, and this tool does not rewrite their records.
+Offline tests: `tests/test_tt_corpus_fetch.py`, against
+`tests/fixtures/tt_corpus/tt06_index_captured.json` (a captured slice of the
+real index; hand-written cases are marked `"_synthetic": true`).
+
+## Tiny Tapeout corpus regression runner (Epic #520 Phase 1.B, #5082)
+
+`scripts/tt_corpus_run.py --shuttle <id> --cache-dir <dir>` runs `klt drc`,
+`klt lvs` and `klt extract` over the designs `tt_corpus_fetch.py` cached and
+writes one JSON record per (design, stage) at
+`<cache-dir>/runs/<shuttle>/<macro>/<stage>.json`: `outcome`
+(`pass`/`findings`/`error`/`timeout`/`crash`/`skipped`), `exit_code`,
+`duration_s`, `stderr_tail`, `tool_version`. A crash or timeout in one design
+never stops the run, and nothing is dropped: excluded designs, designs with no
+GDS, and LVS without a reference netlist (`--reference-dir`, `<macro>.spice`)
+get `skipped` records with a `reason`. A rerun skips pairs that already have a
+record (`--retry` redoes errors/timeouts/crashes, `--force` redoes all).
+Offline tests: `tests/test_tt_corpus_run.py` (injected runner, 6-design fixture).
+
+## Tiny Tapeout corpus defect triage (Epic #520 Phase 1.C, #5083)
+
+`scripts/tt_corpus_triage.py --shuttle <id> --cache-dir <dir> [--markdown]`
+clusters the non-passing records from `tt_corpus_run.py` by signature
+(`stage|outcome|normalized error`; for `findings`, the sorted DRC rule ids or
+LVS mismatch categories, not counts). Each cluster carries a count, up to 3
+cheapest-to-reproduce exemplars with attribution (repo, pinned commit, SPDX
+license from the 1.A manifest), the exact `klt` reproducer, and a drafted issue
+body. It never files issues: drafts are for human/Curator confirmation.
+Offline tests: `tests/test_tt_corpus_triage.py`.
+
+### Full GF180 corpus on Spot (#5084)
+
+The 108 rows in `tt_gf180_slots.tsv` correspond to 24, 52 and 32 slots in
+the [pinned shuttle indexes](https://github.com/TinyTapeout/tinytapeout-index/tree/dfa8764c60911bd85ec42b9c30572c747cb81444/index).
+Each row records the indexed project URL and commit, the SPDX identifier and
+Git blob of its recognized root license, and the SHA-256 of its individual
+layout where available. Source URLs are preserved as indexed, including
+tinyQV's GitHub SSH spelling. The job only downloads public HTTPS assets.
+
+The first shuttle published a combined macro. Its 24 slots have explicit
+skips, including the pad test with no indexed project. Two designs on later
+shuttles have no recognized root license at the project pin. The other 82
+use 80 individual OASIS files at the shuttle commits and two ROMs extracted
+from the tapeout release archives. The job checks both archive and member
+digests. The p2 release precedes the pinned shuttle by four commits and has
+the same 52 project tuples. [p2 comparison](https://github.com/TinyTapeout/tinytapeout-gf-0p2/compare/7416232bbc6b59ebd6b3665de3b2da161c1819d3...622aa779a5e7cf4c1007c6f6ad939678d21897b0)
+
+Use the existing 2am heavy repo-script submitter from an attended submit
+host. Run from the klayout-tools checkout containing the committed payload.
+Each heavy instance runs one serial DRC process and one serial extract
+process concurrently, in separate work directories. The plan reserves 300
+seconds per stage on every eligible slot and 900 seconds per job for setup
+and collection. Four shards fit the 7200-second job cap. The plan prints runtime bounds in seconds. Price
+the actual instance choices, preflight and interruption retries against
+the campaign's remaining $20 before each submission.
+
+```sh
+python3 scripts/tt_corpus_batch.py plan --count 4 --timeout-s 300 \
+    --job-timeout-s 7200 --overhead-s 900
+commit=$(git rev-parse HEAD)
+short=$(git rev-parse --short=12 HEAD)
+index=0  # includes the previously measured Dog Battle DRC control
+python3 "$TWO_AM/infra/aws/repo-script-submit.py" --dry-run \
+    --source-dir . --commit "$commit" --repo 2AMLogic/klayout-tools \
+    --issue 5084 --group "gf180-5084-$short-$index" \
+    --image-profile heavy --capacity spot --profile batch-runner-submit \
+    --script scripts/tt_corpus_batch.py --shard "run $index/4 --timeout-s 300" \
+    --timeout 7200 --output build/tt-gf180-corpus --out "groups/$index"
+```
+
+Use the reviewed command without `--dry-run` for the admitted preflight
+group. Verify its job, baked klt version, the clean DRC control, and its fleet
+ledger charge before admitting additional indices. A successful first shard
+counts toward the four. Use unique group IDs for new submissions. The fleet
+submitter can collect an existing group again with `--collect GROUP --out DIR`.
+Preserve its group, run, status and billing records for each launch attempt.
+
+```sh
+python3 scripts/tt_corpus_batch.py collect --commit "$commit" --count 4 \
+    --out build/tt-gf180-report groups/{0,1,2,3}
+```
+
+The collector checks all 216 expected stage records across the four shard
+assignments. The report includes each outcome, duration, envelope, attribution,
+per-shuttle triage, and job provenance. Report campaign spend from the fleet
+billing records alongside these outputs. Script wall seconds exclude instance
+startup. Cross-reference existing tool defects such as #5893 when reviewing
+the triage drafts.
+
+#### Campaign record, November 25–26, 2026
+
+The first campaign ran the catalogue as five shards (`--count 5`, shard
+arguments `run I/5 --timeout-s 300`) rather than the four in the example
+above. With four, two shards plan to the full 7200 seconds; with five, each
+plans to at most 6000. Every job allowed one paid launch. Spot reclaimed
+two of the five original jobs before they wrote output. Each had used its
+one paid launch, so both shards were resubmitted under new group IDs from
+the same commit and source archive. Seven paid launches produced all 216
+stage records. The outcomes,
+per-design durations, provenance, cost estimates and defect links are in
+[`docs/reports/tt-gf180mcu-corpus-run.md`](../../docs/reports/tt-gf180mcu-corpus-run.md).

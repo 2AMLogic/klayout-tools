@@ -832,8 +832,8 @@ def test_status_clean_partial_when_met3_5_ungraded_but_all_graded_levels_pass(
         for gate in report["gates"]
         for level in gate["levels"]
     )
-    skipped_ids = {entry["id"] for entry in report["coverage"]["skipped"]}
-    assert len(skipped_ids) == 3  # met3, met4, met5
+    skipped = report["coverage"]["skipped"]
+    assert [entry["count"] for entry in skipped] == [3]  # met3, met4, met5
     assert all(
         entry["reason"] == "missing_antenna_limit"
         for entry in report["coverage"]["skipped"]
@@ -2499,7 +2499,7 @@ def _supply_disclosure(report):
     ]
 
 
-def test_two_supply_nets_disclose_substrate_continuity_not_modelled(tmp_path):
+def test_two_supply_nets_disclose_substrate_isolation_undecidable(tmp_path):
     layout, top, poly, li1, label = _nets_fixture_layout()
     gds = tmp_path / "two.gds"
     layout.write(str(gds))
@@ -2516,9 +2516,9 @@ def test_two_supply_nets_disclose_substrate_continuity_not_modelled(tmp_path):
 
     report = run_erc(str(gds), str(spec))
 
-    assert _supply_disclosure(report) == [
-        {"id": "erc.supply_short", "reason": "substrate_continuity_not_modelled"}
-    ]
+    [entry] = _supply_disclosure(report)
+    assert entry["reason"] == "substrate_isolation_undecidable"
+    assert "tap geometry" in entry["missing"][0]
 
 
 def test_fewer_than_two_supply_nets_emit_no_substrate_disclosure(tmp_path):
@@ -5776,15 +5776,15 @@ def test_cli_json_contract(tmp_path, capsys):
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
-
     assert main(["erc", str(gds), str(spec), "--format", "json"]) == 3
     data = json.loads(capsys.readouterr().out)
 
-    assert set(data.keys()) == {
+    assert set(data) == {
         "coverage",
         "erc_coverage",
         "schema_version",
         "file",
+        "top",
         "spec",
         "pdk",
         "findings_only",
@@ -8212,7 +8212,7 @@ def test_compact_without_findings_only_raises(tmp_path):
 
 
 def test_cli_compact_json_and_signoff_classifier(tmp_path, capsys):
-    from klayout_tools.signoff import _is_erc_shape  # noqa: F401
+    from klayout_tools.signoff import _is_erc_shape
 
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.erc.json"
@@ -8948,7 +8948,7 @@ def test_check_erc_report_version_drift_is_an_advisory_only(tmp_path):
 
 
 def test_check_erc_report_missing_or_invalid_report_is_a_clean_error(tmp_path):
-    with pytest.raises(ErcError, match="committed report not found"):
+    with pytest.raises(ErcError, match="file not found"):
         erc.check_erc_report(str(tmp_path / "nope.json"))
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
@@ -9089,7 +9089,7 @@ def test_cli_rerun_without_check_and_missing_inputs_are_clean_errors(tmp_path, c
 
 def test_cli_check_missing_report_is_a_clean_error(tmp_path, capsys):
     assert main(["erc", "--check", str(tmp_path / "nope.json")]) == 1
-    assert "committed report not found" in capsys.readouterr().err
+    assert "file not found" in capsys.readouterr().err
 
 
 # --- ties[].well_complement_of (issue #3750) --------------------------------
@@ -9265,7 +9265,7 @@ def _rail_row_report(
     top = layout.create_cell("TOP")
     # No gate geometry: a passive-only cell that declares `nets[]`/`ties[]`
     # is a valid run (issue #2896), so the recipe needs no gate at all.
-    del poly  # noqa: F841
+    del poly
     for i in range(3):
         cell = layout.create_cell(f"RAILCELL{i}")
         w = _RAIL_CELL_W_UM
@@ -9462,13 +9462,13 @@ def test_sg13g2_unlisted_role_stays_unchecked_and_partial(tmp_path):
     assert report["status"] == "not_checked"
 
 
-def test_unknown_pdk_error_lists_both_supported_pdks(tmp_path):
+def test_unknown_pdk_error_lists_all_supported_pdks(tmp_path):
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    with pytest.raises(ErcError, match=r"supported: ihp-sg13g2, sky130"):
+    with pytest.raises(ErcError, match=r"supported: gf180mcu, ihp-sg13g2, sky130"):
         run_erc(str(gds), str(spec), pdk="nope")
 
 

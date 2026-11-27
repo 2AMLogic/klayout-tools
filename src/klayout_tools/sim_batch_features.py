@@ -1,0 +1,495 @@
+"""Name the request feature(s) a batch runner predates (issue #4863).
+
+Split out of :mod:`klayout_tools.sim_batch` (size ratchet, #2766). Everything
+here is additive: it only adds ``missing_features`` (and the two klt versions)
+to a per-corner diagnostic, and only when the runner-identity report names a
+non-empty ``missing`` list.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from . import _warn
+from ._digest import normalize_sha256
+from ._jsonnum import is_int
+from .sim_batch_contract import BATCH_RUNNER_FEATURE_UNVERIFIED_CODE
+from .sim_batch_corner_libs import (
+    _compare_corner_section_libs,
+    _lib_pairs,
+    runner_corner_section_libs,
+)
+from .sim_batch_version_remedy import older_client_remedy
+from .sim_batch_worker_engine_build import (
+    apply_worker_engine_build as apply_worker_engine_build,
+)
+from .sim_batch_worker_engine_build import (
+    worker_ngspice_binary as worker_ngspice_binary,
+)
+from .sim_exit_reason import exit_reason_env
+
+#: The worker-observed simulator cluster (issues #3110, #5566) moved to
+#: :mod:`klayout_tools.sim_batch_worker_engine_build` (size ratchet) and is
+#: re-exported above -- self-aliased -- so ``sim.apply_engine_host``'s
+#: existing imports keep working.
+
+
+def warn_unverified_features(
+    features: list[str], client: str | None
+) -> dict[str, Any] | None:
+    """Report mandatory features the client could not check against an image."""
+    if not features:
+        return None
+    message = (
+        f"the client could not verify support for {', '.join(features)} before "
+        "launch because the published batch runner image identity is unknown. "
+        "The worker will check these mandatory features when it starts."
+    )
+    _warn.warn(f"klt sim: warning: {message}")
+    return {
+        "code": BATCH_RUNNER_FEATURE_UNVERIFIED_CODE,
+        "severity": "warning",
+        "message": message,
+        "features": features,
+        "runner_klt_version": None,
+        "client_klt_version": client,
+        "source": "manifest",
+    }
+
+
+def missing_features(identity: dict[str, Any]) -> list[str]:
+    """The request-feature keys the runner predates (``[]`` when none, or
+    when the runner version is unknown and ``missing`` is ``null``)."""
+    report = identity.get("runner_request_features")
+    missing = report.get("missing") if isinstance(report, dict) else None
+    return list(missing) if missing else []
+
+
+def gap_note(identity: dict[str, Any]) -> str:
+    """Note suffix naming the missing feature(s); ``""`` when there are none."""
+    missing = missing_features(identity)
+    if not missing:
+        return ""
+    return (
+        f"; the runner (klt {identity.get('runner_klt_version')}) predates "
+        f"the request feature(s) {', '.join(missing)} -- update the "
+        "runner image"
+    )
+
+
+def annotate_gap(
+    diagnostic: dict[str, Any], identity: dict[str, Any], *, versions: bool = False
+) -> None:
+    """Add ``missing_features`` when the runner predates any; add the runner
+    and client klt versions when it does, or when ``versions`` is set."""
+    missing = missing_features(identity)
+    if missing:
+        diagnostic["missing_features"] = missing
+    if missing or versions:
+        diagnostic["runner_klt_version"] = identity.get("runner_klt_version")
+        diagnostic["client_klt_version"] = identity.get("client_klt_version")
+
+
+def refusal_diagnostic(
+    identity: dict[str, Any], gate_release: Any, code: str
+) -> dict[str, Any] | None:
+    """The top-level diagnostic for a refused major.minor mismatch (issue
+    #5061), or ``None`` unless ``identity`` is a ``mismatch``. The caller only
+    asks when the runner preflight actually rejected the job, so a
+    ``runner_version_check: "warn"`` run that proceeded never gets one. The
+    remedy names the runner's accepted client major.minor, the updated image,
+    and the ``runner_version_check: "warn"`` opt-out (#5750); a client older
+    than the runner additionally gets the #7857 pinned-client command.
+    ``gate_release`` is :func:`klayout_tools.sim_batch._runner_gate_release`."""
+    if identity.get("runner_compatibility") != "mismatch":
+        return None
+    runner = identity.get("runner_klt_version")
+    client = identity.get("client_klt_version")
+    accepted = gate_release(str(runner))
+    client_release = gate_release(str(client))
+    if accepted is None or client_release is None:
+        return None
+    return {
+        "code": code,
+        "severity": "error",
+        "message": (
+            f"the fleet runner (klt {runner}) refused the job: the submitting "
+            f"client is klt {client}; submit from a client of klt {accepted}.x, "
+            f"update the runner image to klt {client_release}, or set "
+            'request.batch.runner_version_check to "warn" to run anyway'
+        )
+        + older_client_remedy(client_release, [accepted]),
+        "runner_klt_version": runner,
+        "client_klt_version": client,
+        "accepted_client_release": accepted,
+    }
+
+
+def pop_remote_diagnostics(remote: Any) -> list[dict[str, Any]]:
+    """Lift ``request_feature_diagnostic`` (#2901) and
+    ``runner_version_diagnostic`` (#5061) out of ``environment.remote`` and
+    every ``remote.fleet[]`` member, one entry per kind so a sharded run
+    reports a single diagnostic, not one per shard."""
+    if not isinstance(remote, dict):
+        return []
+    members = remote.get("fleet")
+    blocks = [remote, *(members if isinstance(members, list) else [])]
+    lifted = []
+    for key in ("request_feature_diagnostic", "runner_version_diagnostic"):
+        found = [b.pop(key, None) for b in blocks if isinstance(b, dict)]
+        lifted.extend([d for d in found if d][:1])
+    return lifted
+
+
+def annotate_unrecovered_failure(corners: list[dict[str, Any]], exit_code: int) -> None:
+    """Issue #4217: a job that exited non-zero (other than the preflight
+    reject) with nothing recovered -- no ``report.json``, no klt envelope in
+    ``stderr.log`` -- would otherwise read as the bare ``job command exited
+    N``. Name the exit code, say what did not come back, and point at the
+    places the cause can still be found. Additive: only the
+    ``batch_job_failed`` message is extended."""
+    note = (
+        f"the runner exited {exit_code} and no report.json, stderr.log "
+        "envelope or engine log came back; read harness.log under the job's "
+        "S3 prefix, or bisect the request (fewer corners/measurements, one "
+        "feature at a time) to find the cause"
+    )
+    for corner in corners:
+        for diagnostic in corner.get("diagnostics") or []:
+            if diagnostic.get("code") == "batch_job_failed":
+                diagnostic["message"] = f"{diagnostic['message']} [{note}]"
+
+
+# --- runner model-identity comparison (issues #5321, #5457) ---
+#
+# `models_lib_sha256` pins "which models ran" only for a request that has a
+# `models.lib`. A request whose every selected section names its own library
+# (issue #2522) has none, so #5321's hash pair is null on both sides by
+# construction and `corner_section_libs` carries the identity instead --
+# hence the second, list-shaped pair below (issue #5457).
+
+
+def runner_models_lib_sha256(report: dict[str, Any] | None) -> str | None:
+    """The model-library hash the runner's own ``klt sim`` reported (issue
+    #5321): ``environment.models_lib_sha256`` of the collected inner report,
+    i.e. the card the worker actually resolved. ``None`` when absent or not a
+    64-hex string (older runner, error envelope, malformed report)."""
+    env = report.get("environment") if isinstance(report, dict) else None
+    return normalize_sha256(
+        env.get("models_lib_sha256") if isinstance(env, dict) else None
+    )
+
+
+def _lifted_osdi_entry(entry: Any) -> dict[str, Any]:
+    """One ``{name, sha256}`` from a runner ``environment.osdi_preload``
+    entry, each field ``None`` when it is absent or malformed."""
+    name = entry.get("name") if isinstance(entry, dict) else None
+    sha256 = entry.get("sha256") if isinstance(entry, dict) else None
+    return {
+        "name": name if isinstance(name, str) and name else None,
+        "sha256": normalize_sha256(sha256),
+    }
+
+
+def runner_osdi_preload(report: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """The OSDI objects the runner's own ``klt sim`` loaded (issue #5562):
+    ``environment.osdi_preload`` of the collected inner report, lifted to
+    ``[{name, sha256}]`` in declared order.
+
+    The runner is not a reduced klt -- it runs a full
+    ``--backend local-parallel`` sweep, whose on-host settling expands and
+    existence-checks every entry and hashes the bytes it opened
+    (``sim_environment_report.ModelInputDigests``). So the digest a runner-resolved,
+    image-baked ``.osdi`` otherwise has nowhere to come from already exists
+    one level down; this only lifts it.
+
+    ``None`` -- not ``[]`` -- when the key is absent or not a list, so
+    "older runner / unreported" stays distinguishable from "this request
+    declared no OSDI objects".
+
+    A malformed entry keeps its **slot**, with ``None`` fields, rather than
+    being dropped: the array is index-aligned with the client's declared
+    ``options.osdi_preload`` (``sim_staging._osdi_forward_order`` forwards it
+    index-for-index), and that alignment is the join key
+    (:func:`attach_runner_osdi_digests`). Dropping an entry would shift every
+    later index and attribute one object's bytes to another -- strictly worse
+    than reporting one digest as unknown.
+    """
+    env = report.get("environment") if isinstance(report, dict) else None
+    entries = env.get("osdi_preload") if isinstance(env, dict) else None
+    if not isinstance(entries, list):
+        return None
+    return [_lifted_osdi_entry(entry) for entry in entries]
+
+
+def collected_report_env(status: Any, report: dict[str, Any]) -> dict[str, Any]:
+    """Environment keys derived from the collected inner report: the exit
+    reason plus ``runner_models_lib_sha256`` (#5321),
+    ``runner_corner_section_libs`` (#5457) and ``runner_osdi_preload``
+    (#5562) -- each ``None`` when unreported, so "unknown" is visible."""
+    return {
+        **exit_reason_env(status, report),
+        "runner_models_lib_sha256": runner_models_lib_sha256(report),
+        "runner_corner_section_libs": runner_corner_section_libs(report),
+        "runner_osdi_preload": runner_osdi_preload(report),
+    }
+
+
+def _compare_models_lib(
+    runner_sha: Any,
+    client_sha: Any,
+    *,
+    staged: bool = False,
+    client_absent: bool = False,
+) -> dict[str, Any]:
+    """``models_lib_comparison`` (issue #5321): the runner's executed
+    model-card hash against the client's. Missing data is ``not_comparable``,
+    never a proven mismatch.
+
+    ``client_absent`` says the request declared no ``models.lib`` at all --
+    every selected section names its own library (issue #2522), so
+    ``environment.models_lib`` is ``{"path": null, "scope": "absent"}`` and
+    both hashes are ``null`` **by construction**. That reports
+    ``no_models_lib``, checked before the runner hash, because it is what
+    explains the runner's null: ``runner_hash_unavailable`` reads as a runner
+    or image problem the caller could fix by updating the image, and no image
+    update would ever produce a hash here (issue #5457). The per-section
+    libraries carry the identity instead -- see
+    :func:`_compare_corner_section_libs`.
+    """
+    if client_absent:
+        return {"status": "not_comparable", "reason": "no_models_lib"}
+    if not isinstance(runner_sha, str) or not runner_sha:
+        return {"status": "not_comparable", "reason": "runner_hash_unavailable"}
+    if not isinstance(client_sha, str) or not client_sha:
+        return {"status": "not_comparable", "reason": "client_hash_unavailable"}
+    if staged:
+        return {"status": "not_comparable", "reason": "models_staged"}
+    if runner_sha.lower() == client_sha.lower():
+        return {"status": "match"}
+    return {
+        "status": "mismatch",
+        "warning": (
+            "the model library the runner executed hashes differently from the "
+            "one the submitter resolved locally; results may differ from a "
+            "local run"
+        ),
+    }
+
+
+def attach_models_lib_comparison(environment: dict[str, Any], backend: str) -> None:
+    """Add ``models_lib_comparison`` -- and, when either side lists
+    per-section corner libraries, ``corner_section_libs_comparison`` -- to
+    ``environment.remote`` (single job) or each ``fleet[]`` member, in place
+    (issues #5321, #5457); batch backend only.
+
+    ``corner_section_libs_comparison`` is emitted only when the client or the
+    runner actually reported per-section libraries, so an ordinary request
+    gains nothing but ``runner_corner_section_libs: null``. Unlike
+    ``models_lib_sha256``, the client's ``corner_section_libs`` hashes carry
+    no ``*_scope`` sibling to gate on: they are always the submitting host's
+    resolution (the orchestrator existence-checks every ref locally for the
+    preflight), which is exactly what the runner's list is being compared
+    against.
+    """
+    remote_environment = environment.get("remote")
+    if backend != "batch" or not isinstance(remote_environment, dict):
+        return
+    client_sha = environment.get("models_lib_sha256")
+    client_scope = environment.get("models_lib_sha256_scope")
+    client_libs = environment.get("corner_section_libs")
+    models_lib = environment.get("models_lib")
+    client_absent = isinstance(models_lib, dict) and models_lib.get("scope") == "absent"
+    entries = [remote_environment]
+    fleet = remote_environment.get("fleet")
+    if isinstance(fleet, list):
+        entries = [entry for entry in fleet if isinstance(entry, dict)]
+    if client_scope not in (None, "client"):
+        client_sha = None
+    for entry in entries:
+        worker_env = entry.get("worker_environment")
+        pdk = worker_env.get("pdk") if isinstance(worker_env, dict) else None
+        staged = isinstance(pdk, dict) and pdk.get("models_staged") is True
+        entry["models_lib_comparison"] = _compare_models_lib(
+            entry.get("runner_models_lib_sha256"),
+            client_sha,
+            staged=staged,
+            client_absent=client_absent,
+        )
+        runner_libs = entry.get("runner_corner_section_libs")
+        if _lib_pairs(runner_libs) or _lib_pairs(client_libs):
+            entry["corner_section_libs_comparison"] = _compare_corner_section_libs(
+                runner_libs, client_libs, staged=staged
+            )
+
+
+# --- runner OSDI digests joined onto the declared entries (issue #5562) ---
+
+
+def _collected_runner_osdi_preload(remote: dict[str, Any]) -> list[Any] | None:
+    """The one :func:`runner_osdi_preload` array a whole batch run agrees on,
+    or ``None``.
+
+    A single job answers for itself. A sharded run (``fleet[]``) ran the *same*
+    request on every shard, so every shard must report the same objects: a
+    disagreement means two hosts loaded different bytes and a lost or
+    field-less shard means the fleet has no answer. Both are ``None`` --
+    "unknown" -- rather than one shard's array standing for all of them, the
+    same fail-safe posture :func:`fleet_runner_compatibility` takes.
+    """
+    fleet = remote.get("fleet")
+    if not isinstance(fleet, list):
+        lifted = remote.get("runner_osdi_preload")
+        return lifted if isinstance(lifted, list) else None
+    shards = [
+        member.get("runner_osdi_preload") if isinstance(member, dict) else None
+        for member in fleet
+    ]
+    if not shards or any(not isinstance(shard, list) for shard in shards):
+        return None
+    return shards[0] if all(shard == shards[0] for shard in shards) else None
+
+
+def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str | None:
+    """The runner digest for one ``osdi_preload_runner_resolved`` entry, by
+    its declared ``index`` -- ``None`` whenever that cannot be established.
+
+    The index is the join key, never the ``entry`` string: a declared list may
+    name the same entry twice, and a string match would then be ambiguous.
+    The runner's reported file ``name`` corroborates it -- for a runner-resolved
+    entry the basename survives expansion (``$PDK_ROOT/<rel>`` and a path under
+    ``models.pdk_root`` both keep it), so a name that disagrees means the two
+    arrays do not line up and the digest describes some *other* object. Report
+    nothing rather than the wrong bytes.
+    """
+    index = entry.get("index")
+    if lifted is None or not is_int(index):
+        return None
+    if not 0 <= index < len(lifted):
+        return None
+    reported = lifted[index]
+    if not isinstance(reported, dict):
+        return None
+    name = reported.get("name")
+    declared = entry.get("entry")
+    if isinstance(declared, dict):
+        declared = declared.get("pdk_relative")
+        if not isinstance(declared, str) or not isinstance(name, str):
+            return None
+    # Normalize as the resolver does: ``device.osdi/.`` names ``device.osdi``.
+    if isinstance(name, str) and isinstance(declared, str):
+        if os.path.basename(os.path.normpath(declared)) != name:
+            return None
+    return normalize_sha256(reported.get("sha256"))
+
+
+def attach_runner_osdi_digests(environment: dict[str, Any], backend: str) -> None:
+    """Give each ``environment.osdi_preload_runner_resolved`` entry the digest
+    the runner computed for it (issue #5562), in place; batch backend only.
+
+    The entry named an image-baked ``.osdi`` and why the runner owned it and
+    stopped there, so a consumer recording the report as provenance could not
+    say which OSDI bytes produced the result -- and the only substitute within
+    reach was the submitting host's own hash of a file the runner never read.
+    This fills the gap with the runner's own digest, or leaves the explicit
+    ``null`` :func:`sim_osdi_settle.osdi_runner_environment_fields` wrote.
+    Never a client-side hash: a wrong digest is worse than an absent one.
+
+    Purely additive and never fatal -- an absent, unestablished or
+    disagreeing digest is ``null``, with no diagnostic and no effect on the
+    run's status. The SSH ``remote`` backend is skipped (#5321's batch-only
+    precedent for this field family); its entries keep their ``null``.
+    """
+    entries = environment.get("osdi_preload_runner_resolved")
+    remote = environment.get("remote")
+    if backend != "batch" or not isinstance(entries, list):
+        return
+    if not isinstance(remote, dict):
+        return
+    lifted = _collected_runner_osdi_preload(remote)
+    for entry in entries:
+        if isinstance(entry, dict):
+            entry["sha256"] = _joined_osdi_sha256(entry, lifted)
+
+
+# --- sharded-report top-level roll-ups (issue #5522) ---
+
+#: Worst-of precedence for the sharded ``runner_compatibility`` roll-up: a
+#: proven skew outranks an unestablished one, which outranks an all-``match``
+#: fleet. Anything a shard reports that is not one of these -- a lost
+#: (``null``) shard, a block without the field, or a value a newer runner
+#: invents -- folds into ``"unknown"``, so the roll-up can never read as
+#: clean on evidence it does not have.
+_COMPATIBILITY_RANK: tuple[str, ...] = ("mismatch", "unknown", "match")
+
+
+def fleet_runner_compatibility(fleet: list[Any]) -> str:
+    """Worst-of ``runner_compatibility`` across a sharded batch run's
+    ``fleet[]`` (issue #5522): ``"mismatch"`` when any shard proved a skew,
+    else ``"unknown"`` when any shard is lost / ``unknown`` / field-less (or
+    the fleet is empty), else ``"match"``.
+
+    Never ``None`` and never absent -- the point of the roll-up is that a
+    consumer which cannot tell a missing value from ``"match"`` fails safe
+    on a split run instead of recording a skewed runner as a clean one.
+    """
+    statuses = {
+        (
+            entry.get("runner_compatibility")
+            if isinstance(entry, dict)
+            and entry.get("runner_compatibility") in _COMPATIBILITY_RANK
+            else "unknown"
+        )
+        for entry in fleet
+    }
+    if not statuses:
+        return "unknown"
+    return next(status for status in _COMPATIBILITY_RANK if status in statuses)
+
+
+def attach_fleet_rollups(environment: dict[str, Any], backend: str) -> None:
+    """Add the top-level roll-ups a sharded batch run's ``environment.remote``
+    otherwise lacks (issue #5522), in place: ``job_ids`` (every non-``null``
+    shard's ``job_id``, in shard order) and a worst-of
+    ``runner_compatibility`` (:func:`fleet_runner_compatibility`).
+
+    Splitting (``batch.max_units_per_job`` / ``batch.job_ceiling_check:
+    "split"``, or ``remote.hosts > 1``) moves job identity *and* the
+    runner-skew check inside ``fleet[]``, leaving nothing identity-bearing at
+    the top level -- so a consumer written against the single-job shape read
+    ``None`` for both rather than failing, on exactly the large grids where
+    provenance matters most.
+
+    Purely additive, and only on a sharded **batch** block: a single-job
+    report's ``environment.remote`` is left byte-for-byte unchanged (no
+    ``fleet``, no ``job_ids``), the ``fleet[]`` entries themselves are never
+    touched, and the SSH ``remote`` backend -- whose ``fleet[]`` entries carry
+    neither field -- is skipped. Call it where the batch
+    ``environment.remote`` is finalised, beside
+    :func:`attach_models_lib_comparison`.
+    """
+    remote_environment = environment.get("remote")
+    if backend != "batch" or not isinstance(remote_environment, dict):
+        return
+    fleet = remote_environment.get("fleet")
+    if not isinstance(fleet, list):
+        return
+    remote_environment["job_ids"] = [
+        entry["job_id"]
+        for entry in fleet
+        if isinstance(entry, dict) and entry.get("job_id")
+    ]
+    remote_environment["runner_compatibility"] = fleet_runner_compatibility(fleet)
+
+
+def finalize_batch_remote(environment: dict[str, Any], backend: str) -> None:
+    """Every post-processing step the finished ``environment.remote`` block
+    gets, in one call for :func:`klayout_tools.sim.apply_engine_host`:
+    :func:`attach_models_lib_comparison` (#5321),
+    :func:`attach_fleet_rollups` (#5522) and
+    :func:`attach_runner_osdi_digests` (#5562). Each is independently a no-op
+    off the batch backend, so this is safe to call for any off-host backend."""
+    attach_models_lib_comparison(environment, backend)
+    attach_fleet_rollups(environment, backend)
+    attach_runner_osdi_digests(environment, backend)

@@ -11,23 +11,15 @@ measurement runs the real `ngspice -b` and skips without it.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from klayout_tools import op_sanity, sim, sim_remote
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
+from klayout_tools import op_sanity, sim, sim_remote, sim_xyce_refusals
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 
 def _expand(corners: dict, exclude: list | None = None) -> list[sim.CornerPoint]:
@@ -192,17 +184,12 @@ def test_unrun_corner_report_carries_options():
 
 def test_xyce_refuses_an_options_axis():
     with pytest.raises(sim.SimError, match="corners.options"):
-        sim._enforce_xyce_support_boundary(
+        sim_xyce_refusals.enforce_support_boundary(
             engine="xyce",
             backend="local",
             corners_spec={"options": {"reltol": [1e-3]}},
             monte_carlo_declared=False,
             fail_fast_probe=False,
-            osdi_preload_declared=False,
-            expr_measurements_declared=False,
-            save_mode_declared=False,
-            analysis_steps_declared=False,
-            crossings_declared=False,
         )
 
 

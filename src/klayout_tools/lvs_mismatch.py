@@ -23,18 +23,10 @@ classification.
 :func:`_make_compare_logger`, plus a handful of the classification helpers
 below) exactly as they called the same functions when this was one file.
 
-Dependency surface is intentionally narrow: this module calls out to only
-three helpers defined in ``lvs.py`` (``_name_or_none``,
-``_subcircuit_parent_name``, ``_subcircuit_ref_name``) plus ``lvs.py``'s own
-``LvsError``/``CATEGORY_*``/parameter-tolerance constants -- imported *inside*
-the handful of functions that use them (the same deferred-import discipline
-``gen_compose_routing.py`` uses to depend on ``gen_compose.py``) rather than
-at module scope, so this module never has a load-time dependency back on
-``lvs.py`` -- only ``lvs.py`` depends on this module at import time.
-``lvs.py`` in turn imports this module's entry points back (module scope, no
-cycle -- this module never imports ``lvs`` at its own module scope) to
-preserve ``klayout_tools.lvs.<name>`` as a working import path for every name
-the test suite/callers used before this split.
+Finding categories, errors and parameter tolerances come from
+``lvs_base``. The classification functions resolve the runner's net and
+subcircuit naming helpers when they need them. The runner re-exports
+these classification helpers for existing callers.
 """
 
 from __future__ import annotations
@@ -44,6 +36,43 @@ from collections.abc import Set as AbstractSet
 from typing import Any, NamedTuple
 
 from ._unionfind import UnionFind
+from .lvs_base import (
+    _COLLATERAL_NET_DESCRIPTION,
+    _PARAM_ABS_EPSILON,
+    _PARAM_DISPLAY_NAMES,
+    _PARAM_REL_EPSILON,
+    CATEGORY_DEVICE_CLASS,
+    CATEGORY_DEVICE_CLASS_ARITY,
+    CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE,
+    CATEGORY_DEVICE_FLAVOUR_MISMATCH,
+    CATEGORY_DEVICE_PROPERTY,
+    CATEGORY_DEVICE_UNMATCHED,
+    CATEGORY_HINTS_REJECTED,
+    CATEGORY_NET_MERGED,
+    CATEGORY_NET_SPLIT,
+    CATEGORY_NET_UNMATCHED,
+    CATEGORY_PIN_UNMATCHED,
+    CATEGORY_TOPOLOGY,
+    CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+)
+from .lvs_mismatch_tolerance import (  # noqa: F401  (re-exported)
+    _apply_tolerance_snaps,
+    _collect_tolerance_snaps,
+    _parse_parameter_tolerance,
+    _tolerance_disclosure,
+)
+from .lvs_net_identity import (
+    lookup,
+    name_key,
+    new_registry,
+    pair,
+    record_circuit_nets,
+)
+from .lvs_supply_universe import (  # noqa: F401  (re-exported)
+    _is_unverified_supply_correspondence,
+    _net_name_aliases,
+    _SupplyPinUniverse,
+)
 
 #: Issue #2461: the ``(device-class name, parameter name)`` pairs -- both
 #: lower-cased -- that a **request-side hook took out of this particular
@@ -71,67 +100,6 @@ from ._unionfind import UnionFind
 ExcludedParameters = AbstractSet[tuple[str, str]]
 
 
-class _SupplyPinUniverse(NamedTuple):
-    """The two library-derived name sets :func:`_build_net_correspondence`
-    needs to mark a supply-net correspondence as unverified (issue #2136).
-
-    ``power_pin_names`` is the standard-cell library's own power/ground pin
-    universe (``lvs.py``'s ``_gate_level_power_pin_names``);
-    ``layout_supply_nets`` is the set of layout net names one of those pins
-    demonstrably lands on (``lvs.py``'s ``_layout_supply_net_names``). Both
-    are upper-cased, and both are derived -- never a hardcoded per-PDK name
-    table or a ``V*`` glob. Built only for a ``reference.form:
-    "gate-level-verilog"`` run with resolvable library pin orders; ``None``
-    everywhere else.
-    """
-
-    power_pin_names: frozenset[str]
-    layout_supply_nets: frozenset[str]
-
-
-def _net_name_aliases(name: str | None) -> frozenset[str]:
-    """``name`` upper-cased, plus each of its ``|``-separated aliases.
-
-    A label-merged net is reported as ``VPWR|VDD`` (see ``_name_or_none``),
-    and which alias a given lookup table happens to hold is not something
-    either side controls -- so membership tests in this module consider the
-    joined spelling *and* every alias it joins.
-    """
-    if not name:
-        return frozenset()
-    return frozenset(
-        {name.upper(), *(alias.upper() for alias in name.split("|") if alias)}
-    )
-
-
-def _is_unverified_supply_correspondence(
-    layout_name: str | None,
-    reference_name: str | None,
-    universe: _SupplyPinUniverse | None,
-) -> bool:
-    """True when this pairing puts a layout **supply** net opposite a
-    reference net that is not itself a supply pin (issue #2136).
-
-    A ``reference.form: "gate-level-verilog"`` reference carries no
-    power/ground pins at all (see ``verilog_netlist.py``'s own "No
-    power/ground pins" note), so the comparer never has a same-named
-    candidate for the layout's ``VGND``/``VPWR`` and pairs it with whatever
-    its graph heuristics reach first -- routinely an unrelated signal net.
-    That pairing is reported as an ordinary match today, indistinguishable
-    from one the compare actually verified.
-
-    The reference-side half of the test is not redundant: it is what keeps
-    a genuine supply-to-supply pairing (a reference that *does* declare the
-    supply pin -- possible for a hand-written stub, and the shape every
-    non-``gate-level-verilog`` form has) out of the flag.
-    """
-    if universe is None:
-        return False
-    if not (_net_name_aliases(layout_name) & universe.layout_supply_nets):
-        return False
-    return not (_net_name_aliases(reference_name) & universe.power_pin_names)
-
-
 def _build_net_correspondence(
     logger: Any, supply_universe: _SupplyPinUniverse | None = None
 ) -> list[dict[str, Any]]:
@@ -144,7 +112,11 @@ def _build_net_correspondence(
     ``mismatches[].net`` already uses -- so a label-merged net's ``A|B``
     alias join is represented identically here), plus a ``pin`` boolean:
     whether the *layout* net is one of the circuit's declared pins
-    (``Net.pin_count() > 0``). ``same_circuits`` pins the layout/reference
+    (``Net.pin_count() > 0``). Issue #5833 adds each side's per-report
+    stable net id as ``layout_id``/``reference_id`` (``None`` where that
+    side has no net) -- see ``lvs_net_identity``; unique within one report
+    and side, so cross-circuit display-name collisions stay joinable.
+    ``same_circuits`` pins the layout/reference
     top circuits together before the compare runs (see ``run_lvs``), so a
     matched pair's declared-pin status agrees on both sides by
     construction -- reading it off the layout side is not a side/bias
@@ -177,6 +149,7 @@ def _build_net_correspondence(
     """
     from .lvs import _name_or_none
 
+    net_ids = getattr(logger, "net_ids", None)
     seen: dict[tuple[int, str | None, str | None], dict[str, Any]] = {}
     for scope, layout_net, reference_net in logger.net_matches:
         layout_name = _name_or_none(layout_net)
@@ -184,11 +157,13 @@ def _build_net_correspondence(
         key = (scope, layout_name, reference_name)
         if key in seen:
             continue
-        entry: dict[str, Any] = {
-            "layout": layout_name,
-            "reference": reference_name,
-            "pin": bool(layout_net is not None and layout_net.pin_count() > 0),
-        }
+        entry = pair(
+            net_ids,
+            layout_net,
+            reference_net,
+            (name_key(scope, layout_net), name_key(scope, reference_net)),
+        )
+        entry["pin"] = bool(layout_net is not None and layout_net.pin_count() > 0)
         if supply_universe is not None:
             entry["heuristic"] = _is_unverified_supply_correspondence(
                 layout_name, reference_name, supply_universe
@@ -241,6 +216,10 @@ def _make_compare_logger(
             self.subcircuit_mismatches: list[tuple[Any, Any]] = []
             self.device_class_mismatches: list[tuple[Any, Any]] = []
             self.ambiguous_net_matches: list[tuple[Any, Any]] = []
+            #: Parallel to ``ambiguous_net_matches``: the compare scope
+            #: each was seen in, so the ambiguous-pairing ``topology``
+            #: entries can resolve their nets' stable ids (issue #5833).
+            self.ambiguous_net_scopes: list[int] = []
             #: Every successful net pairing (unambiguous *and* ambiguous), as
             #: ``(scope, layout net, reference net)`` -- the raw net objects
             #: the comparer handed the logger, tagged with the ``scope`` they
@@ -252,6 +231,14 @@ def _make_compare_logger(
             #: merge/split and issue #282 heuristics, not the objects
             #: themselves.
             self.net_matches: list[tuple[int, Any, Any]] = []
+            #: Per-report stable net ids (issue #5833): ``(side, scope, raw
+            #: expanded name)`` -> 0-based id, unique per side across the
+            #: whole compare -- the id source ``mismatches[].net``'s and
+            #: ``net_correspondence[]``'s ``layout_id``/``reference_id``
+            #: fields report. Populated by ``begin_circuit`` (see
+            #: ``lvs_net_identity.record_circuit_nets``); empty for the
+            #: fake-logger stand-ins, whose lookups all report ``None``.
+            self.net_ids, self._net_id_counters = new_registry()
             # Scope counter: `begin_circuit` opens one compare scope per
             # circuit pair, and every event until `end_circuit` belongs to
             # it. Net/device names are unique within a circuit, so
@@ -282,6 +269,14 @@ def _make_compare_logger(
 
         def begin_circuit(self, a: Any, b: Any) -> None:
             self.scope += 1
+            # Issue #5833: pin every net of this circuit pair to its
+            # per-report stable id before any scope event can reference it.
+            record_circuit_nets(
+                self.net_ids, self._net_id_counters, "layout", self.scope, a
+            )
+            record_circuit_nets(
+                self.net_ids, self._net_id_counters, "reference", self.scope, b
+            )
             if (
                 layout_circuit is not None
                 and reference_circuit is not None
@@ -305,6 +300,7 @@ def _make_compare_logger(
             if key_a is not None and key_b is not None:
                 self.matched_net_keys.append((key_a, key_b))
             self.ambiguous_net_matches.append((a, b))
+            self.ambiguous_net_scopes.append(self.scope)
             self.net_matches.append((self.scope, a, b))
 
         def net_mismatch(self, a: Any, b: Any, msg: str) -> None:
@@ -412,7 +408,7 @@ def _mismatch(
 def _terminal_names(device_class: Any) -> list[str]:
     """The ordered terminal names ``device_class`` declares (e.g. ``["A",
     "B", "W"]`` for KLayout's ``DeviceClassResistorWithBulk``) -- the same
-    ``terminal_definitions()`` walk ``_device_body_net_name`` and
+    ``terminal_definitions()`` walk ``lvs_body._device_body_net_name`` and
     ``_degraded_param_pair`` already use, factored out for
     :func:`_device_class_arity_mismatch`."""
     return [terminal.name for terminal in device_class.terminal_definitions()]
@@ -442,7 +438,7 @@ def _device_class_arity_mismatch(a: Any, b: Any) -> dict[str, Any] | None:
     terminal lists already agree (the ordinary both-sided
     ``device.unmatched`` case, if it ever arises).
     """
-    from .lvs import CATEGORY_DEVICE_CLASS_ARITY, _name_or_none
+    from .lvs import _name_or_none
 
     if a is None or b is None:
         return None
@@ -482,219 +478,6 @@ def _count_devices_of_class(netlist: Any, device_class: Any) -> int:
             if device.device_class() is device_class:
                 count += 1
     return count
-
-
-def _device_body_net_name(device: Any) -> str | None:
-    """The expanded name of ``device``'s body/bulk terminal net (KLayout's
-    ``DeviceExtractorMOS4Transistor`` names it ``"B"`` -- the same
-    ``terminal.name.lower()`` convention ``extract.py``'s ``nets[]`` uses),
-    or ``None`` if the device class declares no such terminal, or the
-    terminal reaches no net at all."""
-    device_class = device.device_class()
-    for terminal in device_class.terminal_definitions():
-        if terminal.name.lower() == "b":
-            net = device.net_for_terminal(terminal.id())
-            return net.expanded_name() if net is not None else None
-    return None
-
-
-#: KLayout's own placeholder spelling for a net that carries no drawn label:
-#: ``Net.expanded_name()`` returns ``"$<n>"`` (``"$0"``, ``"$5"``, ...).
-#:
-#: **Raw, not backslash-escaped -- the two spellings are not interchangeable
-#: (issue #2048).** ``extract_report.py``'s ``_ANONYMOUS_NET_PREFIX`` is
-#: ``"\\$"`` because every net name *that* module reports has already
-#: passed through :func:`~klayout_tools.extract.spice_safe_net_name`, which
-#: escapes the leading ``$`` to match the written netlist's own node
-#: spelling (issue #1162). Nothing on *this* module's path does that
-#: escaping: :func:`_device_body_net_name` reads ``Net.expanded_name()``
-#: straight off the in-memory netlist, so the prefix to match here is the
-#: bare ``"$"``. Reusing ``extract_report.py``'s escaped constant here would
-#: silently never match any real body net.
-#:
-#: **A netlist read back from disk spells it escaped (issue #3177).** For the
-#: ``layout.netlist`` + ``layout.deck`` shape the circuit comes from
-#: ``NetlistSpiceReader`` over a ``klt extract -o`` file, whose anonymous nodes
-#: are written ``\\$<n>`` -- so :func:`_is_unresolved_body_net` accepts that
-#: spelling too (:data:`_ESCAPED_ANONYMOUS_NET_PREFIX`).
-_RAW_ANONYMOUS_NET_PREFIX = "$"
-_ESCAPED_ANONYMOUS_NET_PREFIX = "\\$"
-
-
-def _is_unresolved_body_net(name: str | None) -> bool:
-    """Whether a body terminal's net name (as returned by
-    :func:`_device_body_net_name`) fails to identify a real, drawn- or
-    derived-tap net: either KLayout synthesized an anonymous placeholder for
-    it (``"$<n>"`` -- no label reached the net, so nothing biases the body),
-    or the terminal reached no net at all (``None``).
-
-    The in-memory counterpart of ``extract.py``'s
-    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, which
-    makes the same per-device determination against the already-escaped
-    ``"\\$<n>"`` spelling it reports in ``klt extract``/``klt pex`` JSON --
-    see :data:`_RAW_ANONYMOUS_NET_PREFIX` for why the prefix differs between
-    the two paths even though the condition is identical.
-    """
-    return name is None or name.startswith(
-        (_RAW_ANONYMOUS_NET_PREFIX, _ESCAPED_ANONYMOUS_NET_PREFIX)
-    )
-
-
-def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
-    """``{device-class name: unverified device count}`` for every MOS device
-    class in ``layout_circuit`` whose body terminals were compared against a
-    deck-synthesized net rather than a real schematic one (issue #281).
-
-    The single source of truth for that determination: :func:`_body_net_warnings`
-    renders these counts as its ``device.body_unverified`` ``mismatches[]``
-    prose, and :func:`~klayout_tools.lvs_power._body_verification_report` renders the
-    same counts as the machine-checkable ``body_verification`` block (issue
-    #1983) -- so the warning a reader sees and the field a grader reads can
-    never disagree. See :func:`_body_net_warnings` for the full rationale on
-    *which* devices count as unverified on which decks.
-
-    Empty when every MOS body terminal resolved to a real net (a layout that
-    drew its substrate/well ties on a deck that has a tap mechanism), which is
-    exactly the "verified" case.
-    """
-    counts: dict[str, int] = {}
-
-    # Issue #3177: a netlist read back from disk (``layout.netlist`` +
-    # ``layout.deck``) presents class and net names upper-cased
-    # (``NFET``/``VSUBS``), so every name compare is case-insensitive.
-    substrate_net = deck.substrate_net.casefold()
-    nfet_count = 0
-    for device in layout_circuit.each_device():
-        if device.device_class().name.casefold() != deck.nfet_class.casefold():
-            continue
-        body = _device_body_net_name(device)
-        if body is None or body.casefold() == substrate_net:
-            nfet_count += 1
-    if nfet_count:
-        counts[deck.nfet_class] = nfet_count
-
-    # Issue #2048: per-device, not deck-structural. A deck that merely
-    # *declares* a tap mechanism does not guarantee any individual PMOS body
-    # reached a real net -- so ask each device, exactly as `klt extract`'s
-    # `_detect_unbiased_pmos_body_nets` already does.
-    pfet_count = sum(
-        1
-        for device in layout_circuit.each_device()
-        if device.device_class().name.casefold() == deck.pfet_class.casefold()
-        and _is_unresolved_body_net(_device_body_net_name(device))
-    )
-    if pfet_count:
-        counts[deck.pfet_class] = pfet_count
-
-    return counts
-
-
-def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
-    """Issue #281 (narrowed to real-tap-drawn layouts by #490): flag, as
-    non-blocking ``severity: "warning"`` entries, the MOS body terminals
-    that ``extract.py``'s inline extraction ties to a deck-synthesized net
-    rather than deriving from real drawn tap/well-label geometry -- so a
-    caller recording a clean ``klt lvs`` verdict can also record that this
-    dimension went structurally unverified (see this module's own docstring
-    reference, ``extract.py``'s ``nfet_body``/``connect_global`` handling,
-    and ``docs/cli/extract.md`` -> "Coverage").
-
-    Per-device, not deck-structural (#490): a deck that declares a distinct
-    ``tap`` layer (e.g. sky130's ``tap=(65, 44)``) resolves an NMOS body
-    terminal to a real, named net when a layout draws a substrate-tie ring
-    outside every ``nwell`` and contacts it up to that net -- only a device
-    whose body terminal *still* reaches the deck's synthesized
-    ``substrate_net`` global (no ring drawn, or no tap mechanism at all,
-    e.g. gf180mcu before issue #1084) is structurally unverified. The NMOS
-    warning therefore counts only devices whose body net name equals
-    ``deck.substrate_net`` (or resolves to no net at all), not every NMOS
-    device.
-
-    **The PMOS arm is per-device too, since issue #2048.** It used to be
-    deck-structural: it fired only when the deck had no tap mechanism at all
-    (``deck.tap``/``tap_nplus``/``tap_pplus`` all ``None``, gf180mcu before
-    issue #1084), treating a deck that merely *declares* one as sufficient
-    for every PMOS in every layout it extracts. It is not: a gf180mcu layout
-    whose declared ``tap_nplus``/``tap_pplus`` implant layers draw no real
-    well-tie shape still resolves each such PMOS body to an anonymous,
-    KLayout-synthesized ``"$<n>"`` net with no DC bias path -- and that went
-    unflagged here while ``klt pex``'s ``body_bias`` block, built from
-    ``extract.py``'s per-device
-    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, reported
-    the very same layout as ``"unbiased"``. The PMOS warning now counts
-    exactly the devices whose body terminal reached such a placeholder net
-    (or no net at all); see :func:`_is_unresolved_body_net`, and
-    :data:`_RAW_ANONYMOUS_NET_PREFIX` for why this in-memory path matches a
-    raw ``$`` where ``extract.py`` matches an escaped ``\\$``. A deck with a
-    real well-tap mechanism (sky130's drawn ``tap``/``well_label``) still
-    emits no PMOS warning on a well-labelled layout -- but now because each
-    PMOS body demonstrably landed on a named net (e.g. ``VPB``), not because
-    the deck declared a mechanism.
-
-    Neither warning fires for the pre-extracted ``layout.netlist`` request
-    form *without* a ``layout.deck`` -- callers only reach this helper when a
-    deck was resolved, mirroring how ``device_classes``/``provenance.deck``
-    are conditioned on that same distinction in ``run_lvs``. With
-    ``layout.netlist`` + ``layout.deck`` it does run, against the SPICE read
-    back from disk: names there are upper-cased and anonymous nets are
-    spelled ``\\$<n>``, so the compares are case-insensitive and accept both
-    anonymous spellings (issue #3177).
-
-    Counts only the layout's top circuit's own devices (``each_device()``,
-    not recursive), matching ``run_lvs``'s own ``counts.devices.layout``
-    convention -- curated-deck extraction never nests MOS devices inside a
-    subcircuit.
-    """
-    from .lvs import CATEGORY_DEVICE_BODY_UNVERIFIED
-
-    entries: list[dict[str, Any]] = []
-
-    # Issue #1983: both this prose warning and the machine-checkable
-    # `body_verification` block are rendered from one determination, so a
-    # reader and a grader can never see different answers.
-    counts = _body_unverified_counts(layout_circuit, deck)
-
-    nfet_count = counts.get(deck.nfet_class, 0)
-    if nfet_count:
-        entries.append(
-            _mismatch(
-                CATEGORY_DEVICE_BODY_UNVERIFIED,
-                "warning",
-                f"{nfet_count} NMOS device body terminal(s) were compared "
-                f"against the '{deck.substrate_net}' deck-synthesized "
-                "substrate net, not a real schematic net -- either no "
-                "substrate-tap geometry is drawn, or the drawn tap's net "
-                "carries no name label (a body resolves only to a *named* "
-                "net; label the tap-connected conductor, e.g. VSS, to "
-                'resolve it; see docs/cli/extract.md, "Coverage")',
-                "layout",
-                device={"layout": None, "reference": None, "class": deck.nfet_class},
-            )
-        )
-
-    pfet_count = counts.get(deck.pfet_class, 0)
-    if pfet_count:
-        entries.append(
-            _mismatch(
-                CATEGORY_DEVICE_BODY_UNVERIFIED,
-                "warning",
-                f"{pfet_count} PMOS device body terminal(s) were "
-                "compared against an anonymous, KLayout-synthesized well "
-                "net, not a real schematic net -- either no drawn or "
-                "derived well-tap geometry exists, or the tap-connected net "
-                "carries no name label (a body resolves only to a *named* "
-                "net; label the tap-connected conductor, e.g. VDD, to "
-                'resolve it; see docs/cli/extract.md, "Coverage")',
-                "layout",
-                device={
-                    "layout": None,
-                    "reference": None,
-                    "class": deck.pfet_class,
-                },
-            )
-        )
-
-    return entries
 
 
 def _flavour_families(deck: Any) -> list[tuple[str, str, list[str]]]:
@@ -749,7 +532,6 @@ def _flavour_selection_warnings(
     value that would select the reference's class. Warning only: it never
     changes ``status`` and the verdict is unaffected.
     """
-    from .lvs import CATEGORY_DEVICE_FLAVOUR_MISMATCH
 
     if reference_netlist is None or deck is None:
         return []
@@ -840,7 +622,6 @@ def _device_class_family_findings(
     is purely *diagnostic*: it never changes ``status`` on its own (the
     compare this run performed already reported the mismatch it explains).
     """
-    from .lvs import CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE
 
     if reference_netlist is None or deck is None:
         return []
@@ -952,12 +733,7 @@ def _split_dangling_output_ambiguity(logger: Any) -> _DanglingSplit:
       net event is dangling-only: a swap on a connected net, or an extra
       instance whose own dangling nets are mere collateral, stays an error.
     """
-    from .lvs import (
-        CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
-        _name_or_none,
-        _subcircuit_parent_name,
-        _subcircuit_ref_name,
-    )
+    from .lvs import _name_or_none, _subcircuit_parent_name, _subcircuit_ref_name
 
     net_events: list[tuple[Any, Any]] = list(logger.net_mismatches)
     event_keys = getattr(logger, "net_mismatch_keys", None)
@@ -1042,136 +818,6 @@ def _split_dangling_output_ambiguity(logger: Any) -> _DanglingSplit:
     return _DanglingSplit(kept_nets, kept_keys, remaining_subs, entries)
 
 
-class _UnmergedFingers(NamedTuple):
-    """Result of :func:`_group_unmerged_fingers` (issue #4729)."""
-
-    consumed: set[int]
-    entries: list[dict[str, Any]]
-
-
-def _device_param(device: Any, name: str) -> float | None:
-    for definition in device.device_class().parameter_definitions():
-        if definition.name.upper() == name:
-            return device.parameter(definition.id())
-    return None
-
-
-def _device_terminal_key(device: Any) -> tuple[Any, ...] | None:
-    """Hashable terminal connectivity of ``device`` (net cluster ids, source
-    and drain treated as interchangeable), or ``None`` if a terminal floats."""
-    nets: dict[str, int | None] = {}
-    for terminal in device.device_class().terminal_definitions():
-        net = device.net_for_terminal(terminal.id())
-        nets[terminal.name.upper()] = None if net is None else net.cluster_id
-    if None in nets.values():
-        return None
-    if "S" in nets and "D" in nets:
-        nets["S"], nets["D"] = sorted((nets["S"], nets["D"]))  # type: ignore[type-var]
-    return tuple(sorted(nets.items()))
-
-
-def _group_unmerged_fingers(
-    unmatched: Sequence[tuple[Any, Any]],
-    param_pairs: Sequence[tuple[Any, Any]],
-) -> _UnmergedFingers:
-    """Issue #4729: diagnose parallel fingers left unmerged (no
-    ``options.combine_devices``) against a reference holding one device of the
-    summed width.
-
-    Layout candidates are the one-sided layout-unmatched devices plus the layout
-    side of ``device.property`` pairs; reference candidates are the one-sided
-    reference-unmatched devices plus the reference side of those pairs. Layout
-    devices of the same class, length and terminal nets whose widths sum to a
-    reference device's width (and number at least two) are reported as one
-    ``device.unmerged_fingers`` finding naming the group, replacing the
-    per-finger ``device.unmatched``/``device.property`` entries. Nothing is
-    guessed: unequal summed width, differing length or differing terminal nets
-    leave the group untouched. Error severity is kept -- only the wording and
-    grouping change.
-    """
-    from .lvs import CATEGORY_DEVICE_UNMERGED_FINGERS, _name_or_none
-
-    layout_devices = [a for a, b in unmatched if b is None]
-    layout_devices += [a for a, _b in param_pairs]
-    reference_devices = [b for a, b in unmatched if a is None]
-    reference_devices += [b for _a, b in param_pairs]
-    paired_reference = {id(a): b for a, b in param_pairs}
-
-    groups: dict[tuple[Any, ...], list[Any]] = {}
-    for device in layout_devices:
-        width = _device_param(device, "W")
-        length = _device_param(device, "L")
-        key = _device_terminal_key(device)
-        if width is None or length is None or key is None:
-            continue
-        circuit = device.circuit() if hasattr(device, "circuit") else None
-        groups.setdefault(
-            (
-                device.device_class().name,
-                circuit.name if circuit is not None else None,
-                round(length, 9),
-                key,
-            ),
-            [],
-        ).append(device)
-
-    consumed: set[int] = set()
-    entries: list[dict[str, Any]] = []
-    used_reference: set[int] = set()
-    for key, fingers in groups.items():
-        if len(fingers) < 2:
-            continue
-        total = sum(_device_param(f, "W") or 0.0 for f in fingers)
-        target = next(
-            (
-                r
-                for r in reference_devices
-                if id(r) not in used_reference
-                and r.device_class().name == key[0]
-                and (rl := _device_param(r, "L")) is not None
-                and round(rl, 9) == key[2]
-                and (rw := _device_param(r, "W")) is not None
-                and not _values_differ(total, rw)
-            ),
-            None,
-        )
-        if target is None:
-            continue
-        used_reference.add(id(target))
-        consumed.update(id(f) for f in fingers)
-        consumed.add(id(target))
-        for finger in fingers:
-            if id(finger) in paired_reference:
-                consumed.add(id(paired_reference[id(finger)]))
-        names = [_name_or_none(f) for f in fingers]
-        entries.append(
-            _mismatch(
-                CATEGORY_DEVICE_UNMERGED_FINGERS,
-                "error",
-                f"{len(fingers)} parallel layout fingers of class '{key[0]}' "
-                f"(same terminals, L={key[2]:g}) sum to W={total:g}, the width "
-                "of one reference device; the fingers were not merged. Set "
-                "options.combine_devices: true to compare them as one device "
-                "(see docs/cli/lvs.md, 'device.unmerged_fingers')",
-                "both",
-                device={
-                    "layout": names[0],
-                    "reference": _name_or_none(target),
-                    "class": key[0],
-                },
-                details={
-                    "fingers": names,
-                    "finger_count": len(fingers),
-                    "summed_w_um": total,
-                    "reference_w_um": _device_param(target, "W"),
-                    "l_um": key[2],
-                    "suggested_option": "options.combine_devices",
-                },
-            )
-        )
-    return _UnmergedFingers(consumed, entries)
-
-
 def _build_mismatches(
     logger: Any,
     layout_netlist: Any | None = None,
@@ -1182,15 +828,7 @@ def _build_mismatches(
     constant_bindings: Sequence[tuple[str, str, str]] | None = None,
     excluded_parameters: ExcludedParameters | None = None,
 ) -> list[dict[str, Any]]:
-    from .lvs import (
-        CATEGORY_DEVICE_CLASS,
-        CATEGORY_DEVICE_UNMATCHED,
-        CATEGORY_PIN_UNMATCHED,
-        CATEGORY_TOPOLOGY,
-        _name_or_none,
-        _subcircuit_parent_name,
-        _subcircuit_ref_name,
-    )
+    from .lvs import _name_or_none, _subcircuit_parent_name, _subcircuit_ref_name
 
     mismatches: list[dict[str, Any]] = []
 
@@ -1218,6 +856,11 @@ def _build_mismatches(
     dangling = _split_dangling_output_ambiguity(logger)
     mismatches.extend(dangling.entries)
 
+    # Issue #5833: the compare logger's stable net-id registry, for the
+    # net dicts built below (None for the fake-logger classification
+    # stand-ins, whose net dicts then carry null ids).
+    net_ids = getattr(logger, "net_ids", None)
+
     # Issue #1622 deliberately does NOT filter the `circuit_mismatches`/
     # `subcircuit_mismatches` loops below for power-only (filler/tap)
     # circuits. Two reasons: (a) a report-level filter cannot help anyway --
@@ -1244,8 +887,11 @@ def _build_mismatches(
             ),
             hint_reported_pairs=hint_outcomes.refused_after_pairing,
             matched_net_keys=getattr(logger, "matched_net_keys", ()) or (),
+            net_ids=net_ids,
         )
     )
+
+    from .lvs_unmerged_fingers import _group_unmerged_fingers
 
     unmerged = _group_unmerged_fingers(
         [(a, b) for a, b in logger.device_mismatches if a is None or b is None],
@@ -1429,7 +1075,8 @@ def _build_mismatches(
                 )
             )
 
-    for a, b in logger.ambiguous_net_matches:
+    scopes = getattr(logger, "ambiguous_net_scopes", ()) or ()
+    for i, (a, b) in enumerate(logger.ambiguous_net_matches):
         # Issue #596: an ambiguous pairing where *both* sides are a
         # single-device-terminal, non-pin net is not a routine naming nit --
         # it is a real finding (a net with no other connectivity, most often
@@ -1463,16 +1110,14 @@ def _build_mismatches(
                 "nets were paired ambiguously; the comparer resolved it "
                 "structurally (consider a hints.same_nets entry to pin this down)"
             )
+        scope = scopes[i] if i < len(scopes) else None
         mismatches.append(
             _mismatch(
                 CATEGORY_TOPOLOGY,
                 "warning",
                 description,
                 "both",
-                net={
-                    "layout": _name_or_none(a),
-                    "reference": _name_or_none(b),
-                },
+                net=pair(net_ids, a, b, (name_key(scope, a), name_key(scope, b))),
             )
         )
 
@@ -1614,25 +1259,38 @@ def _same_nets_rejections(
     (whose ``details`` stays ``null``, exactly as before this distinction
     existed).
     """
-    from .lvs import CATEGORY_HINTS_REJECTED
 
+    net_ids = getattr(logger, "net_ids", None)
     top_scope = getattr(logger, "top_scope", None)
     entries: list[dict[str, Any]] = []
     for layout_name, reference_name, provenance in _same_nets_assertions(
         same_nets_hints, anchored_pins, constant_bindings
     ):
-        pair = ((top_scope, layout_name), (top_scope, reference_name))
-        if pair in hint_outcomes.confirmed:
+        declared_pair = ((top_scope, layout_name), (top_scope, reference_name))
+        if declared_pair in hint_outcomes.confirmed:
             continue
         entries.append(
             _mismatch(
                 CATEGORY_HINTS_REJECTED,
                 "error",
                 _same_nets_rejection_description(
-                    provenance, pair in hint_outcomes.refused_after_pairing
+                    provenance, declared_pair in hint_outcomes.refused_after_pairing
                 ),
                 "both",
-                net={"layout": layout_name, "reference": reference_name},
+                net={
+                    "layout": layout_name,
+                    "layout_id": lookup(
+                        net_ids,
+                        "layout",
+                        None if top_scope is None else (top_scope, layout_name),
+                    ),
+                    "reference": reference_name,
+                    "reference_id": lookup(
+                        net_ids,
+                        "reference",
+                        None if top_scope is None else (top_scope, reference_name),
+                    ),
+                },
                 details=provenance,
             )
         )
@@ -2038,7 +1696,7 @@ def _classify_param_mismatch(
     disclosed as ``device.placeholder_value``/``device.parameter_excluded``,
     and the engine never compared it, so an error-severity finding on it
     would contradict the same report's own disclosure."""
-    from .lvs import _PARAM_DISPLAY_NAMES, CATEGORY_DEVICE_PROPERTY, _name_or_none
+    from .lvs import _name_or_none
 
     class_name = a.device_class().name
     entries: list[dict[str, Any]] = []
@@ -2103,7 +1761,6 @@ def _param_values_differ(a_value: float, b_value: float, exact: bool) -> bool:
 
 
 def _values_differ(a_value: float, b_value: float) -> bool:
-    from .lvs import _PARAM_ABS_EPSILON, _PARAM_REL_EPSILON
 
     return abs(a_value - b_value) > max(
         _PARAM_ABS_EPSILON, _PARAM_REL_EPSILON * max(abs(a_value), abs(b_value))
@@ -2180,280 +1837,6 @@ def _param_pair_is_comparable(
     if param_name not in _METAL_INDEX_PARAMETER_NAMES:
         return True
     return a_value != 0.0 and b_value != 0.0
-
-
-# --------------------------------------------------------------------------- #
-# options.parameter_tolerance (issue #589): snap-and-recompare
-# --------------------------------------------------------------------------- #
-
-
-def _parse_parameter_tolerance(options: dict[str, Any]) -> float | None:
-    """Validate ``options.parameter_tolerance`` into a float, or ``None`` when
-    omitted (the default: exact compare, unchanged behaviour).
-
-    A *relative* tolerance expressed as a fraction (``0.001`` is 0.1%), not a
-    percentage and not an absolute value -- the parameters this compares span
-    micrometres, ohms and farads in one request, so no single absolute number
-    would be meaningful across them.
-
-    Everything malformed raises :class:`LvsError` rather than degrading to the
-    default, matching every other request-side hook in this module
-    (``hints.same_nets``, ``reference.device_bulk``): a tolerance the caller
-    believes is in force but is not would be the worst possible failure mode
-    for this particular option.
-    """
-    from .lvs import _MAX_PARAMETER_TOLERANCE, LvsError
-
-    if "parameter_tolerance" not in options:
-        return None
-    value = options["parameter_tolerance"]
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise LvsError(
-            "options.parameter_tolerance must be a number (a relative "
-            "tolerance expressed as a fraction, e.g. 0.001 for 0.1%); got "
-            f"{value!r}"
-        )
-    tolerance = float(value)
-    if tolerance < 0:
-        raise LvsError(
-            f"options.parameter_tolerance must not be negative; got {tolerance!r}"
-        )
-    if tolerance >= _MAX_PARAMETER_TOLERANCE:
-        raise LvsError(
-            f"options.parameter_tolerance must be below "
-            f"{_MAX_PARAMETER_TOLERANCE} (a relative tolerance expressed as a "
-            f"fraction -- 0.001 is 0.1%); got {tolerance!r}, which would call "
-            "almost any two values equal"
-        )
-    return tolerance
-
-
-class _ToleratedParam(NamedTuple):
-    """One reference-side device parameter :func:`_collect_tolerance_snaps`
-    resolved to be within ``options.parameter_tolerance`` of its layout-side
-    counterpart (issue #589).
-
-    ``circuit_name``/``device_id``/``param_id`` are the *lookup key* rather
-    than the reference ``Device`` object itself: the objects a
-    ``GenericNetlistCompareLogger`` receives are const references, and
-    ``Device.set_parameter`` on one raises ``RuntimeError: Cannot call
-    non-const method on a const reference``. The mutation therefore has to
-    re-resolve the device from the owning netlist
-    (:func:`_apply_tolerance_snaps`).
-    """
-
-    circuit_name: str
-    device_id: int
-    param_id: int
-    display_name: str
-    layout_value: float
-    reference_value: float
-    layout_device: str | None
-    reference_device: str | None
-    device_class: str | None
-    relative_delta: float
-
-
-def _relative_delta(a_value: float, b_value: float) -> float:
-    """``|a-b| / max(|a|, |b|)`` -- the same denominator
-    :func:`_values_differ`'s relative term uses, so a tolerance and the
-    float-noise epsilon are expressed on one scale.
-
-    ``0.0`` when both values are exactly zero; ``1.0`` when exactly one of
-    them is (no finite relative tolerance below
-    :data:`_MAX_PARAMETER_TOLERANCE` can absorb a zero-vs-nonzero difference,
-    which is the intended outcome -- that is a missing/short device, not a
-    rounding difference).
-    """
-    scale = max(abs(a_value), abs(b_value))
-    if scale == 0.0:
-        return 0.0
-    return abs(a_value - b_value) / scale
-
-
-def _tolerated_device_pair(
-    a: Any,
-    b: Any,
-    tolerance: float,
-    excluded_parameters: ExcludedParameters | None = None,
-) -> list[_ToleratedParam] | None:
-    """The snap records for one layout/reference device pair whose *every*
-    differing parameter sits within ``tolerance``, or ``None``.
-
-    All-or-nothing per device pair on purpose: snapping only the in-tolerance
-    parameters of a pair that also differs by more than the tolerance
-    somewhere else would drop that in-tolerance parameter from
-    ``mismatches[]`` while the run still reports ``mismatch`` -- strictly less
-    information than today's output for a pair the tolerance cannot rescue
-    anyway. A pair with an out-of-tolerance parameter is therefore left
-    completely alone, and reports exactly what it reports today.
-
-    Uses a bare ``!=`` rather than :func:`_values_differ` to decide which
-    parameters are candidates: ``NetlistComparer``'s own equality tolerance is
-    *tighter* than this module's float-noise epsilon, so a difference below
-    :data:`_PARAM_REL_EPSILON` can still be what the engine refused to match
-    on -- and an explicit tolerance should absorb that too, not just the
-    differences this module happens to classify.
-    """
-    from .lvs import _PARAM_DISPLAY_NAMES, _name_or_none
-
-    device_class = a.device_class()
-    try:
-        circuit_name = b.circuit().name
-        device_id = b.id()
-    except (AttributeError, RuntimeError):
-        # A stand-in device object (the classification unit tests' fake
-        # loggers) has no owning circuit to re-resolve the mutation against.
-        return None
-    if circuit_name is None:
-        return None
-
-    records: list[_ToleratedParam] = []
-    for param in device_class.parameter_definitions():
-        a_value = a.parameter(param.id())
-        b_value = b.parameter(param.id())
-        if a_value == b_value:
-            continue
-        if not _param_pair_is_comparable(
-            param.name,
-            a_value,
-            b_value,
-            class_name=device_class.name,
-            excluded_parameters=excluded_parameters,
-        ):
-            # Not a difference to absorb -- and not one that may veto this
-            # pair's snap either (issues #2435/#2461; see the helper's
-            # docstring). Issue #2461 matters here for the same reason it
-            # does in `_classify_param_mismatch`: a placeholder-excluded `R`
-            # reading `0` against a real extracted value is a delta of 1.0
-            # that no tolerance can absorb, so before this it silently vetoed
-            # the whole pair's snap -- an excluded parameter deciding the
-            # outcome of a compare it is not part of.
-            continue
-        delta = _relative_delta(a_value, b_value)
-        if delta > tolerance:
-            return None
-        records.append(
-            _ToleratedParam(
-                circuit_name=circuit_name,
-                device_id=device_id,
-                param_id=param.id(),
-                display_name=_PARAM_DISPLAY_NAMES.get(param.name, param.name.lower()),
-                layout_value=a_value,
-                reference_value=b_value,
-                layout_device=_name_or_none(a),
-                reference_device=_name_or_none(b),
-                device_class=device_class.name,
-                relative_delta=delta,
-            )
-        )
-    return records or None
-
-
-def _collect_tolerance_snaps(
-    logger: Any,
-    tolerance: float,
-    excluded_parameters: ExcludedParameters | None = None,
-) -> list[_ToleratedParam]:
-    """Every reference-side parameter one ``compare()`` pass showed to be
-    within ``tolerance`` of its layout-side counterpart (issue #589).
-
-    Covers both routes a parameter-only difference reaches this module by:
-
-    * ``match_devices_with_different_parameters`` -- the clean case, where
-      surrounding connectivity was enough for ``NetlistComparer`` to pair the
-      two devices before comparing their parameters;
-    * :func:`_degraded_param_pair` -- the minimal-cell case (issue #282),
-      where the devices' own terminals *are* the surrounding structure, the
-      comparer never pairs them at all, and this module reconstructs the
-      pairing from the ``device_mismatch``/``net_mismatch`` cascade instead.
-      Handling only the first would leave the very shape real extracted
-      layouts hit (any body/well net not shorted to a rail) unable to reach
-      ``"match"`` however wide the tolerance.
-    """
-    pairs: list[tuple[Any, Any]] = list(getattr(logger, "param_mismatches", ()) or ())
-    degraded = _degraded_param_pair(logger, excluded_parameters, exact_differences=True)
-    if degraded is not None:
-        pairs.append((degraded.layout_device, degraded.reference_device))
-
-    snaps: list[_ToleratedParam] = []
-    seen: set[tuple[str, int, int]] = set()
-    for a, b in pairs:
-        if a is None or b is None:
-            continue
-        records = _tolerated_device_pair(a, b, tolerance, excluded_parameters)
-        if records is None:
-            continue
-        for record in records:
-            key = (record.circuit_name, record.device_id, record.param_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            snaps.append(record)
-    return snaps
-
-
-def _apply_tolerance_snaps(
-    reference_netlist: Any, snaps: list[_ToleratedParam]
-) -> None:
-    """Set each snapped reference-side parameter to its layout-side value, so
-    the next ``compare()`` sees two netlists that agree within the caller's
-    tolerance.
-
-    Re-resolves every device from ``reference_netlist`` by
-    ``(circuit name, device id)`` -- see :class:`_ToleratedParam` for why the
-    logger's own object references cannot be mutated. A device that no longer
-    resolves is skipped rather than raising: the worst case is that the next
-    ``compare()`` still reports the difference, which is the safe direction.
-    """
-    for snap in snaps:
-        circuit = reference_netlist.circuit_by_name(snap.circuit_name)
-        if circuit is None:
-            continue
-        device = circuit.device_by_id(snap.device_id)
-        if device is None:
-            continue
-        device.set_parameter(snap.param_id, snap.layout_value)
-
-
-def _tolerance_disclosure(snap: _ToleratedParam, tolerance: float) -> dict[str, Any]:
-    """The ``severity: "warning"`` :data:`CATEGORY_DEVICE_PARAMETER_TOLERATED`
-    entry disclosing one absorbed parameter difference (issue #589).
-
-    Carries both original values in ``property`` (the reference side's
-    pre-snap number, never the snapped one) so the caller can always recover
-    what was actually compared -- the same "disclose, never silently absorb"
-    discipline ``device.bulk_reconciled``/``device.body_unverified`` apply.
-    """
-    from .lvs import CATEGORY_DEVICE_PARAMETER_TOLERATED
-
-    return _mismatch(
-        CATEGORY_DEVICE_PARAMETER_TOLERATED,
-        "warning",
-        f"matched device parameter '{snap.display_name}' differs by "
-        f"{snap.relative_delta * 100:.4g}%, within the requested "
-        f"options.parameter_tolerance -- the reference value was snapped to "
-        f"the layout value for the comparison, so this dimension of the "
-        f"compare was verified only to that tolerance, not exactly (see "
-        "docs/cli/lvs.md, 'device.parameter_tolerated')",
-        "both",
-        device={
-            "layout": snap.layout_device,
-            "reference": snap.reference_device,
-            "class": snap.device_class,
-        },
-        property_={
-            "name": snap.display_name,
-            "layout": snap.layout_value,
-            "reference": snap.reference_value,
-        },
-        details={
-            "relative_delta": snap.relative_delta,
-            "tolerance": tolerance,
-        },
-    )
 
 
 #: A node in the merge/split locality graph (issue #1533): which netlist the
@@ -2604,6 +1987,7 @@ def _classify_net_mismatches(
     explained_reference_nets: frozenset[_NetKey] = frozenset(),
     hint_reported_pairs: frozenset[tuple[_NetKey, _NetKey]] = frozenset(),
     matched_net_keys: Sequence[tuple[_NetKey, _NetKey]] = (),
+    net_ids: dict[tuple[str, int, str], int] | None = None,
 ) -> list[dict[str, Any]]:
     """Classify raw ``net_mismatch`` events into ``net.unmatched``/
     ``net.merged``/``net.split``/``topology`` entries -- see this module's
@@ -2653,6 +2037,7 @@ def _classify_net_mismatches(
                 explained_layout_nets=explained_layout_nets,
                 explained_reference_nets=explained_reference_nets,
                 hint_reported_pairs=hint_reported_pairs,
+                net_ids=net_ids,
             )
         )
     return entries
@@ -2664,17 +2049,10 @@ def _classify_net_mismatch_pool(
     explained_layout_nets: frozenset[_NetKey],
     explained_reference_nets: frozenset[_NetKey],
     hint_reported_pairs: frozenset[tuple[_NetKey, _NetKey]],
+    net_ids: dict[tuple[str, int, str], int] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply the merge/split pattern match to one pool of co-located
     ``net_mismatch`` events (see :func:`_net_mismatch_pools`)."""
-    from .lvs import (
-        _COLLATERAL_NET_DESCRIPTION,
-        CATEGORY_NET_MERGED,
-        CATEGORY_NET_SPLIT,
-        CATEGORY_NET_UNMATCHED,
-        CATEGORY_TOPOLOGY,
-        _name_or_none,
-    )
 
     one_sided_layout = [
         (a, key) for (a, b), key in tagged if a is not None and b is None
@@ -2691,14 +2069,14 @@ def _classify_net_mismatch_pool(
     entries: list[dict[str, Any]] = []
 
     if one_sided_layout and both_sided_renamed:
-        for a, _key in one_sided_layout:
+        for a, key in one_sided_layout:
             entries.append(
                 _mismatch(
                     CATEGORY_NET_SPLIT,
                     "error",
                     "a reference net's role is divided across multiple layout nets",
                     "layout",
-                    net={"layout": _name_or_none(a), "reference": None},
+                    net=pair(net_ids, a, None, key),
                 )
             )
     elif one_sided_layout:
@@ -2712,19 +2090,19 @@ def _classify_net_mismatch_pool(
                     if explained
                     else "layout net has no reference counterpart",
                     "layout",
-                    net={"layout": _name_or_none(a), "reference": None},
+                    net=pair(net_ids, a, None, key),
                 )
             )
 
     if one_sided_reference and both_sided_renamed:
-        for b, _key in one_sided_reference:
+        for b, key in one_sided_reference:
             entries.append(
                 _mismatch(
                     CATEGORY_NET_MERGED,
                     "error",
                     "multiple reference nets were collapsed into one layout net",
                     "reference",
-                    net={"layout": None, "reference": _name_or_none(b)},
+                    net=pair(net_ids, None, b, key),
                 )
             )
     elif one_sided_reference:
@@ -2738,7 +2116,7 @@ def _classify_net_mismatch_pool(
                     if explained
                     else "reference net has no layout counterpart",
                     "reference",
-                    net={"layout": None, "reference": _name_or_none(b)},
+                    net=pair(net_ids, None, b, key),
                 )
             )
 
@@ -2759,7 +2137,7 @@ def _classify_net_mismatch_pool(
                     "error",
                     "nets were paired despite a name/identity conflict",
                     "both",
-                    net={"layout": _name_or_none(a), "reference": _name_or_none(b)},
+                    net=pair(net_ids, a, b, key),
                 )
             )
 

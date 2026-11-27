@@ -90,7 +90,10 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._provenance import sha256_file
+from ._provenance import sha256_file, sha256_file_required
+from .sim_errors import SimError
+from .sim_param_file import declared_model_refs, rewrite_model_refs
+from .sim_provenance import staged_asset_json
 
 #: A ``.include``/``.inc`` directive line -- ngspice's two spellings, target
 #: either quoted or bare. Deliberately the same shape ``pex.py``'s own
@@ -253,14 +256,7 @@ class StagedModelAsset:
     source_sha256: str = ""
 
     def to_json(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "field": self.field,
-            "kind": self.kind,
-            "sha256": self.sha256,
-            "rewritten": self.rewritten,
-            "source_sha256": self.source_sha256 or self.sha256,
-        }
+        return staged_asset_json(self)
 
 
 @dataclass(frozen=True)
@@ -319,10 +315,10 @@ _PDK_ROOT_LITERAL_PREFIXES = ("$PDK_ROOT/", "${PDK_ROOT}/")
 def runner_resolved_osdi(request: dict[str, Any], request_dir: str) -> dict[int, str]:
     """``{index: reason}`` for every ``options.osdi_preload`` entry the
     *executing* host resolves for itself (issue #3819), by the same two
-    reasons the include rule reports: ``"env_var"`` for a literal
+    include reasons: ``"env_var"`` for a literal
     ``$PDK_ROOT/<rel>`` and ``"pdk_root"`` for a path under
-    ``models.pdk_root``. Such an entry names an image-baked ``.osdi``: it is
-    not existence-checked, staged or hashed on this host. Malformed entries
+    ``models.pdk_root``. Variant objects use ``"pdk_relative"`` with staging off.
+    The executing host checks and hashes these entries. Malformed entries
     are left to the callers' own validation.
     """
     from ._paths import _resolve_relative
@@ -333,6 +329,9 @@ def runner_resolved_osdi(request: dict[str, Any], request_dir: str) -> dict[int,
     roots = host_resolved_roots(request)
     found: dict[int, str] = {}
     for index, entry in enumerate(raw):
+        if isinstance(entry, dict) and not stage_model_inputs_requested(request):
+            found[index] = "pdk_relative"
+            continue
         if not isinstance(entry, str) or not entry.strip():
             continue
         if entry.startswith(_PDK_ROOT_LITERAL_PREFIXES):
@@ -424,22 +423,21 @@ def netlist_closure(
     return entries
 
 
-_INLINE_COMMENT_RE = re.compile(r"(?:^|\s)[;$].*$")
-
-
 def _normalized_netlist_text(text: str) -> str:
     """One netlist file reduced to the lines that define the circuit
     (issue #3074): ``*`` comment lines and trailing ``;``/``$`` comments
-    dropped, blank lines dropped, ``+`` continuations folded, whitespace
-    collapsed, case folded, and the target of an ``.include``/``.inc``
-    replaced by its directive name (location is not content; the included
-    file's own text is hashed in its place). Line order is left untouched:
-    ``.param``/``.model`` order can matter, so a reorder is a mismatch."""
-    from ._paths import fold_spice_continuations
+    (the shared :func:`~klayout_tools._spice_text.strip_spice_inline_comment`
+    rule, issue #5438) dropped, blank lines dropped, ``+`` continuations
+    folded, whitespace collapsed, case folded, and the target of an
+    ``.include``/``.inc`` replaced by its directive name (location is not
+    content; the included file's own text is hashed in its place). Line order
+    is left untouched: ``.param``/``.model`` order can matter, so a reorder
+    is a mismatch."""
+    from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 
     lines: list[str] = []
     for raw in text.splitlines():
-        line = _INLINE_COMMENT_RE.sub("", raw).strip()
+        line = strip_spice_inline_comment(raw).strip()
         if not line or line.startswith("*"):
             continue
         lines.append(line)
@@ -490,8 +488,6 @@ def stage_model_inputs_requested(request: dict[str, Any]) -> bool:
     #2668): absent means ``False``; anything but a JSON boolean is a
     ``SimError`` (``"yes"``/``1`` reading as "stage everything" is never what
     a request author meant)."""
-    from .sim import SimError
-
     options = request.get("options") or {}
     if not isinstance(options, dict):
         return False
@@ -530,8 +526,6 @@ def stage_sim_job(
     the offending field/path; callers invoke this before any upload, push
     or launch.
     """
-    from .sim import SimError
-
     opted_in = stage_model_inputs_requested(request)
     stager = _Stager(
         reserved_names=(*reserved_names, netlist_staged_name),
@@ -604,9 +598,9 @@ def _stage_model_closure(
                 field=item.field,
                 kind=root.kind if root is not None else "dependency",
                 source_path=item.local_path,
-                sha256=_staged_sha256(staged),
+                sha256=staged_input_sha256(staged.content, staged.local_path),
                 rewritten=staged.content is not None,
-                source_sha256=_file_sha256(item.local_path),
+                source_sha256=sha256_file_required(item.local_path),
             )
         )
 
@@ -646,8 +640,7 @@ def _declared_lib_refs(request: dict[str, Any]) -> Iterator[tuple[str, str, Any]
     """``(field, label, ref)`` for every model-library reference the request
     declares, in :func:`_collect_model_roots`'s order."""
     models = request.get("models") or {}
-    if models.get("lib") is not None:
-        yield "models.lib", "model library", models.get("lib")
+    yield from declared_model_refs(models)  # + param_file (#4759)
     corners = request.get("corners") or {}
     declared = [
         ("process", index, entry)
@@ -692,14 +685,14 @@ def _resolve_declared_lib(
 ) -> str:
     """Resolve one declared library ref exactly as ``sim`` resolves it for a
     local run (memoized per ref), refusing a missing file by field name."""
-    from .sim import SimError, _resolve_lib_ref
+    from .sim_model_paths import resolve_lib_ref
 
     if not isinstance(ref, str) or not ref:
         raise ModelStagingError(f"{field_name} must be a non-empty path")
     if ref in resolved_refs:
         return resolved_refs[ref]
     try:
-        path = os.path.abspath(_resolve_lib_ref(ref, models, request_dir))
+        path = os.path.abspath(resolve_lib_ref(ref, models, request_dir))
     except SimError as exc:
         raise ModelStagingError(f"{field_name}: {exc}") from exc
     if not os.path.isfile(path):
@@ -715,30 +708,22 @@ def _resolve_declared_lib(
 def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
     """``options.osdi_preload`` entries, resolved like ``sim`` resolves them
     (request-relative), in preload order."""
-    from ._paths import _resolve_relative
+    from .sim_errors import SimError
+    from .sim_osdi_pin import resolve_request_osdi
 
-    raw = (request.get("options") or {}).get("osdi_preload")
-    if raw is None:
-        return []
-    runner_resolved = runner_resolved_osdi(request, request_dir)
-    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-        raise ModelStagingError(
-            "options.osdi_preload must be an array of paths to compiled "
-            "`.osdi` shared libraries"
-        )
-    roots: list[_ModelRoot] = []
-    for index, entry in enumerate(raw):
-        field_name = f"options.osdi_preload[{index}]"
-        if not isinstance(entry, str) or not entry.strip():
-            raise ModelStagingError(f"{field_name} must be a non-empty path")
-        if index in runner_resolved:
-            continue
-        path = os.path.abspath(_resolve_relative(entry, request_dir))
-        if not os.path.isfile(path):
-            raise ModelStagingError(
-                f"{field_name}: osdi_preload file not found: {path}"
+    options = request.get("options") or {}
+    skip = runner_resolved_osdi(request, request_dir)
+    try:
+        resolved = iter(resolve_request_osdi(request, request_dir, frozenset(skip)))
+    except SimError as exc:
+        raise ModelStagingError(str(exc)) from exc
+    roots = []
+    for index in range(len(options.get("osdi_preload") or [])):
+        if index not in skip:
+            path = os.path.abspath(next(resolved))
+            roots.append(
+                _ModelRoot(f"options.osdi_preload[{index}]", "osdi", path, path)
             )
-        roots.append(_ModelRoot(field_name, "osdi", entry, path))
     return roots
 
 
@@ -765,8 +750,7 @@ def _rewrite_worker_request(
     resolved entries (issue #3819) verbatim among the staged names."""
     worker = copy.deepcopy(request)
     models = worker.get("models")
-    if isinstance(models, dict) and models.get("lib") in lib_names:
-        models["lib"] = lib_names[models["lib"]]
+    rewrite_model_refs(models, lib_names)
     worker_corners = worker.get("corners") or {}
     process_entries = list(worker_corners.get("process") or []) + [
         unit.get("process")
@@ -791,18 +775,11 @@ def _rewrite_worker_request(
     return worker
 
 
-def _staged_sha256(staged: StagedFile) -> str:
-    if staged.content is not None:
-        return hashlib.sha256(staged.content.encode("utf-8")).hexdigest()
-    assert staged.local_path is not None
-    return _file_sha256(staged.local_path)
-
-
-def _file_sha256(path: str) -> str:
-    digest = sha256_file(path)
-    if digest is None:
-        raise FileNotFoundError(path)
-    return digest
+def staged_input_sha256(content: str | None, local_path: str | None) -> str:
+    if content is not None:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    assert local_path is not None
+    return sha256_file_required(local_path)
 
 
 # --------------------------------------------------------------------------- #

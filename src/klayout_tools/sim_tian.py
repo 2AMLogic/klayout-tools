@@ -68,10 +68,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_transfer
+from . import sim_measurement_kind, sim_transfer
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
+from .sim_forms import normalize_selector as _normalize_voltage
+from .sim_forms import other_forms, validate_exclusive_form
 from .sim_passes import PassResult
-from .sim_transfer_meas import normalize_selector as _normalize_voltage
 
 #: Every accepted ``tian.metric`` token.
 METRICS = (
@@ -117,18 +119,6 @@ _ALLOWED_KEYS = frozenset(
 _SERIES_KEYS = frozenset({"load_node", "source"})
 
 _CURRENT_RE = re.compile(r"^[iI]\(([^\s\x00-\x1f\x7f,()]+)\)$")
-
-#: Every other measurement form an entry must not also declare.
-_OTHER_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-)
 
 
 def is_tian(spec: dict[str, Any]) -> bool:
@@ -192,21 +182,12 @@ def _tuple_key(spec: dict[str, Any]) -> _Key:
 def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     """For an entry declaring ``tian``: refuse any other form beside it and
     validate the body. Returns ``True`` when the entry is a tian entry."""
-    if not is_tian(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _OTHER_FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'tian' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
-    validate_tian_spec(name, spec["tian"])
-    return True
+    return validate_exclusive_form(
+        spec,
+        "tian",
+        other_forms("tian"),
+        lambda name, spec: validate_tian_spec(name, spec["tian"]),
+    )
 
 
 def validate_tian_spec(name: Any, body: Any) -> None:
@@ -257,12 +238,7 @@ def _validate_from(name: Any, body: dict[str, Any]) -> None:
             "alternative ways to choose the start: declare one"
         )
     value = body[given[0]]
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
+    if not is_finite_number(value) or value <= 0:
         raise SimError(
             f"measurement '{name}': tian.{given[0]} must be a finite number "
             f"> 0 (got {value!r})"
@@ -328,15 +304,9 @@ def validate_tian_context(
                     f"is not an analysis.passes name (declared: "
                     f"{sorted(p['name'] for p in passes)})"
                 )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a tian entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a tian entry"
+    )
 
 
 # --------------------------------------------------------------------------- #

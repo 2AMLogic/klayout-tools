@@ -79,7 +79,7 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     (
         "generate",
         "Generate and compose layout",
-        ["gen", "gen-compose", "layout-plan", "draw", "lef-abstract"],
+        ["gen", "gen-compose", "route", "layout-plan", "draw", "lef-abstract"],
     ),
     (
         "extract",

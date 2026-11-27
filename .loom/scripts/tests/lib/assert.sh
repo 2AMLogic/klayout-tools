@@ -2,8 +2,9 @@
 # assert.sh — shared assertion helpers for the shell test suites under
 # defaults/scripts/tests/ (#11695).
 #
-# Replaces the per-suite copies of RED/GREEN/NC, the TESTS_RUN/TESTS_PASSED/
-# TESTS_FAILED counters, and assert_eq / assert_contains / assert_not_contains.
+# Replaces the per-suite copies of RED/GREEN/YELLOW/NC, the TESTS_RUN/
+# TESTS_PASSED/TESTS_FAILED counters, and assert_eq / assert_contains /
+# assert_not_contains.
 # Output format is the dominant one (byte-identical to the ~67 suites that
 # carried their own copy), so run-ci-suites.sh parsing is unaffected.
 #
@@ -19,6 +20,7 @@
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -27,6 +29,19 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+
+# retired(): an assertion that cannot survive a removal or a port, retired
+# under the three-part test (defaults/docs/verification-recipes.md §6).
+# Printed, not deleted: a reader must be able to see what was removed, why,
+# and what proves the property now. Counted as run (and passed) so the totals
+# stay honest (#15181).
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_eq() {
     local expected="$1" actual="$2" msg="$3"
@@ -86,4 +101,17 @@ assert_grep() {
 assert_no_grep() {
     local pattern="$1" file="$2" msg="$3"
     if grep -qE "$pattern" "$file"; then fail "$msg (found pattern: $pattern)"; else pass "$msg"; fi
+}
+
+# assert_doc_contains/assert_doc_lacks: fixed-string (-F) match of <needle>
+# against <file>; args are `file needle msg` (#13795). Suites whose local helper
+# takes a different argument order (e.g. a fixed $DOC) keep their own.
+assert_doc_contains() {
+    local file="$1" needle="$2" msg="$3"
+    if grep -qF -- "$needle" "$file"; then pass "$msg"; else fail "$msg (missing literal in $file: $needle)"; fi
+}
+
+assert_doc_lacks() {
+    local file="$1" needle="$2" msg="$3"
+    if grep -qF -- "$needle" "$file"; then fail "$msg (found literal in $file: $needle)"; else pass "$msg"; fi
 }

@@ -8,7 +8,7 @@ This document maps each `klt` verb implementation to its constituent modules, id
 
 This map is **mechanically assisted, hand-verified**:
 
-1. **CLI parser registration** in `src/klayout_tools/cli/parser.py`: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
+1. **CLI parser registration** in `src/klayout_tools/cli/parser.py` and the per-verb `src/klayout_tools/cli/parsers/<verb>.py` modules: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
 2. **Import graph analysis**: tracing the `from .. import` chains in each `<verb>_cmd.py` module to find all related modules
 3. **Module docstrings**: extracting the first paragraph from each module's `"""..."""` to document ownership boundaries
 
@@ -121,6 +121,7 @@ The `signoff` verb grades digital RTL-flow blocks and coordinates multi-stage ve
 - **signoff** (`signoff.py`): Core digital RTL-flow grading, multi-stage verification coordination (STA/functional verification per kind)
 - **signoff_envelopes** (`signoff_envelopes.py`): Typed evidence-envelope shapes the ingestion boundary validates against — one `TypedDict` per `_classify` kind, the `_EvidenceEnvelope` union they narrow to, and the `_ENVELOPE_SHAPES`/`_SCALAR_CHECKS`/`_UNION_ORIGINS` lookup tables `signoff.py`'s validator walks them with (issue #2313). Pure declarations, no runtime logic
 - **signoff_power_delivery** (`signoff_power_delivery.py`): T1 item 11's ("Power delivery (structural)") grading subsystem — reading and hash-verifying a cited `klt erc` supply spec, the LVS and place-and-route halves of the item's two branches, and rendering the item's report entry (issue #2626)
+- **signoff_store_pin** (`signoff_store_pin.py`): Store-pinned evidence companions (issue #5963) — resolving a `yield` citation's samples-document hash offline from a committed artifact-store manifest, plus the report-relative companion-path resolvers shared by the yield/erc lookups (issues #2197, #2608; moved out of `signoff.py` for its size-ratchet ceiling)
 
 ### sim
 

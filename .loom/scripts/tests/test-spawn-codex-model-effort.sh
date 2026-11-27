@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # test-spawn-codex-model-effort.sh — spawn-codex.sh's `model@effort` split
-# (issue #8387), split out of test-spawn-codex.sh (over the file-size ratchet
-# threshold; new assertions go in a sibling, per file-size-policy.md).
+# (issue #8387), split out of test-spawn-codex.sh.
 #
 # A tier model may carry an effort suffix (`gpt-5-codex@high`). Codex has no
 # such model id, so spawn-codex.sh must forward only the base as `-m` and route
@@ -18,6 +17,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SPAWN_CODEX="$SCRIPTS_DIR/spawn-codex.sh"
+
+# The suite's result must not depend on the caller's session (#15140, #15188).
+# A daemon-dispatched Builder exports LOOM_ROLE, LOOM_MODEL,
+# LOOM_CODEX_AUTH_MODE_CHECK and LOOM_RUNTIME (model-pin, auth-mode and
+# effort-split cases read them); CI's runner has none of them. Scrub them once
+# here. Every case that needs one sets it on its own run_* / env line.
+# LOOM_DAEMON_BIN is the caller's managed/probed daemon, never this suite's
+# subject.
+unset LOOM_ROLE LOOM_MODEL LOOM_CODEX_AUTH_MODE_CHECK LOOM_RUNTIME LOOM_DAEMON_BIN
 
 # spawn-codex.sh execs loom-daemon: pin THIS checkout's build up front, before
 # the first case, never the installed one (#10662).

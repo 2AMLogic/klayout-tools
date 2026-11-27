@@ -13,6 +13,8 @@ klt artifact put FILE... [--manifest PATH] [--repo OWNER/NAME] [--name N]
 klt artifact get REF -o OUT|- [--repo OWNER/NAME] [--force] [--broker URL]
     [--format text|json]
 klt artifact verify MANIFEST [--broker URL] [--format text|json]
+klt artifact verify MANIFEST[#SELECTOR] --local [--root DIR]
+    [--format text|json]
 ```
 
 Access: evidence bytes are **private** and manifests are **public**. A manifest
@@ -49,8 +51,10 @@ never falls back to a local copy or a direct store path.
 - **stat** answers `{key, exists, size}`.
 - **delete** answers any 200 JSON object. The broker owns authorization and
   any retention policy; the client has no list op, so it deletes only objects
-  it is told to name. A broker without `/v1/delete` answers a refusal, which
-  `klt` surfaces as `broker_refused` without retrying or falling back.
+  it is told to name. A broker without `/v1/delete` answers a route-level
+  refusal (404, 405 or 501) — since `stat` had already confirmed the object
+  present, `klt` surfaces that as `unsupported_operation` (exit 1).
+  Other refusals, including 403 and 503, keep `broker_refused`.
 - A **refusal** is `{"error", "message"}` with a 4xx or 5xx status. Examples
   are 403 `repo_firewalled`, `repo_unknown`, `not_granted` or `unknown_caller`,
   503 `fleet_unavailable`, 429, and 502 `store_error`.
@@ -111,10 +115,26 @@ was already stored.
 
 ## `get`
 
-`REF` is either a sha256, stored under `--repo`, or `MANIFEST[#SELECTOR]`,
-where `SELECTOR` is an entry's `sha256` or `name`. A manifest with a single
-entry needs no selector. For a manifest entry, the repo comes from the stored
-key.
+`REF` is one of:
+
+- a sha256, stored under `--repo`;
+- an `artifact:<key>` URI, exactly as a manifest entry's `uri` publishes it
+  (see [Manifest](#manifest)), so a `uri` copied out of a manifest can be
+  handed straight back:
+  `klt artifact get "artifact:evidence/<OWNER>__<REPO>/fd/fd16...2147" -o -`;
+- `MANIFEST[#SELECTOR]`, where `SELECTOR` is an entry's `sha256` or `name`. A
+  manifest with a single entry needs no selector.
+
+For a manifest entry or an `artifact:` URI, the repo comes from the stored
+key's `evidence/<owner>__<name>/` segment. A URI needs no `--repo`, and
+`--repo` does not override the key's; it is used only when the key has some
+other shape (then `$KLT_ARTIFACT_REPO`, then the git `origin`, as for a bare
+sha256). A URI carries no size, so its fetch is checked against the digest and
+the broker's key but not against a size. A URI whose key does not end in a
+64-digit lowercase hex sha256, a bare `artifact:` included, fails with
+`invalid_manifest` before the broker is asked. Only the `artifact:` scheme is
+a URI REF: any other string (`s3://...`, `https://...`) is read as a manifest
+path.
 
 The bytes are streamed to a temporary file beside `OUT`. They are moved into
 place **only** when the recomputed sha256 matches the requested digest (the
@@ -122,7 +142,10 @@ manifest's) and the digest the broker's key names, and when the size matches
 the entry. Otherwise the temporary file is deleted and `get` exits `1` with
 `error.code` set to `hash_mismatch`, `key_mismatch` or `size_mismatch`. If the
 broker answers a key other than the manifest `uri`'s key, that is also a
-`key_mismatch`. An existing `OUT` is replaced only with `--force`.
+`key_mismatch`. An existing `OUT` is replaced only with `--force`. Missing
+parent directories of `OUT` are created, including intermediate ones, so a
+clean checkout can restore an object at its manifest entry name with
+`klt artifact get MANIFEST#NAME -o NAME` run from the repo root.
 
 `-o -` writes the verified bytes to stdout and no JSON envelope. Errors still
 go to stderr. With `--format json`, the success payload is
@@ -136,6 +159,91 @@ every entry is `ok`. It exits `3` when any entry is `missing`, `size_mismatch`,
 broker refusal other than a missing object. A throttled broker (HTTP 429) is
 retried with backoff first (see below), so a rate limit that persists fails the
 run as `broker_rate_limited`, not as an unverified or mismatched entry.
+
+### Local verification (`--local`)
+
+```
+klt artifact verify MANIFEST[#SELECTOR] --local [--root DIR]
+```
+
+`--local` is an explicit, opt-in mode, not a fallback: a broker-backed
+`verify` still never falls back to a local copy on a broker refusal. With
+`--local` the broker is not contacted at all — no network, no credential, and
+no broker URL needs to be configured. Each entry whose `name` resolves to a
+file under `--root` (default: the manifest's git checkout root, else the
+current directory) is re-hashed in place and its sha256 and size compared to
+the manifest entry. This is how a report check re-establishes a record's
+committed summary in a clean CI checkout, where the broker is unreachable by
+policy (CI holds no broker credential — see § Configuration).
+
+Per-entry statuses: `ok`, `absent` (no file under `--root` at that name),
+`hash_mismatch` (same-length or appended content differs), `size_mismatch`
+(the file is shorter than the manifest's `size`), and `no_name` (the entry
+has no `name`, so nothing can be resolved for it — reported, never a crash).
+A `name` that would resolve outside the verify root — an absolute path, a
+`..` climb, or a symlink whose target escapes the root — refuses the whole
+run with `name_escapes_root` before anything is read.
+
+Exit codes for `--local`:
+
+- `0` — every checked entry is `ok`.
+- `3` — a checked entry is not `ok`. With a `#SELECTOR`, exactly one entry is
+  checked and an `absent` one is a failure: you named an entry you need.
+  Without a selector every entry is checked and `absent`/`no_name` entries
+  are reported but expected: the large objects live in the store, not in git.
+- `1` — malformed or unreadable manifest, an unreadable file
+  (`unreadable_input`), an entry name escaping the root
+  (`name_escapes_root`), or — only without a selector — a run in which **no**
+  entry resolved to a file (`nothing_verified`). An empty checkout must
+  never look like a pass.
+- `2` — usage (e.g. `--root` without `--local`).
+
+`--format json`: the same payload shape as broker-backed `verify`, plus
+`mode: "local"`, the resolved `root`, and a per-entry `path`.
+
+#### What a local verify proves — and what it does not
+
+The manifest is the committed root of trust: editing a committed file changes
+its sha256, so the local verify fails against the manifest entry; swapping
+the manifest breaks the digests the record itself cites and fails the
+broker-side `verify` wherever the store is reachable. What a local verify
+does **not** prove is that a committed file's contents were actually computed
+from the record's raw samples — that re-establishment needs the store, and
+stays with the broker-backed `verify` (on the batch fleet or another
+credentialed job).
+
+#### The committed-summary convention
+
+`klt` cannot compute a chip's published statistics: per-point worst cases,
+knee accounting and stray-sample rejection are chip-defined compositions (see
+your report extractor), not a generic rollup. The division of labor is: the
+chip owns the payload, `klt` owns the binding.
+
+- **At record time** (where the store is reachable): write a small
+  `summary.json` beside the large objects carrying exactly the statistics the
+  record publishes, store every object into the manifest with
+  `klt artifact put FILE... --manifest MANIFEST`, and **commit both the
+  manifest and `summary.json`** to git. The summary is small; the large
+  objects stay store-only.
+- **At check time** (clean checkout, no credentials): run
+  `klt artifact verify --local MANIFEST#sim/…/summary.json`, then have the
+  report check read the committed summary and compare the published figures
+  to it. The selector guarantees the summary named by the check is the one
+  bound to that manifest.
+- **Full cross-check** (batch fleet or any store-reachable job): the plain
+  broker-backed `klt artifact verify MANIFEST` re-hashes the raw samples and
+  closes the loop the local check cannot.
+
+Migration recipe for a chip repo whose report `--check` re-reads per-sample
+bytes from the checkout:
+
+1. Add the summary write at record time, next to the existing
+   `artifact put --manifest` call, and commit it beside the manifest.
+2. Point the check's evidence binding at
+   `klt artifact verify --local MANIFEST#<summary name>` (exit `0` required),
+   then compare against the summary instead of the raw bytes.
+3. Keep the raw-bytes crosscheck on a store-reachable job; it moves, it does
+   not disappear.
 
 ### Rate limiting
 
@@ -151,6 +259,71 @@ success and no other status is retried. When they run out the error has
 `--format json`: `{schema_version: 1, manifest, status: "ok"|"failed",
 entry_count, failed_count, entries: [{sha256, name, size, status, ...}]}`.
 
+## Standalone verifier (no `klt` install)
+
+A chip repo's CI can byte-verify a manifest without installing `klt` at all
+(issue #5958). `klayout_tools/artifact_verify.py` — in the repo and in the
+wheel — is a **single-file, stdlib-only** copy of the whole verify path
+above, with a CLI of its own:
+
+```
+python artifact_verify.py MANIFEST --broker URL [--format text|json]
+```
+
+(`--broker` may be omitted when `KLT_ARTIFACT_BROKER` is set.) Vendor it by
+copying that one file out of a `klayout-tools` release tag, or out of the
+installed wheel's `klayout_tools/` directory. It runs under `python -I` with
+no `klt`, no `klayout` and no third-party packages, emits the same
+`--format json` report and uses the same exit codes (`0`/`1`/`2`/`3`, same
+meanings as above) as `klt artifact verify`. There is no second
+implementation to drift: `klt artifact verify` imports this same module, and
+`tests/test_artifact_verify.py` runs a vendored copy under `python -I` and
+diffs its report against the verb's.
+
+### Offline CI: an injected fake broker client
+
+`verify_manifest(client, path)` accepts any object with the broker client's
+`presign` and `fetch_into` methods in place of a `BrokerClient`, so a repo's
+CI can exercise the exact verification code with no broker reachable and no
+socket opened. A minimal fake:
+
+```python
+from artifact_verify import Presigned, verify_manifest
+
+
+class FakeClient:
+    def __init__(self, objects):  # sha256 hex -> bytes
+        self.objects = objects
+
+    def presign(self, op, kind, repo, sha256, size=None):
+        data = self.objects.get(sha256)
+        return Presigned(
+            key=f"evidence/{repo}/{sha256[:2]}/{sha256}",
+            exists=data is not None,
+            size=len(data) if data is not None else None,
+        )
+
+    def fetch_into(self, target, sink):
+        import hashlib
+
+        data = self.objects[target.sha256]
+        if sink is not None:
+            sink(data)
+        return {
+            "key": target.key,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+        }
+
+
+report = verify_manifest(FakeClient({...}), "artifacts.manifest.json")
+```
+
+Stat the entry with `presign`, hash the fetched bytes with `fetch_into`: the
+fake controls both, so every verdict (`ok`, `missing`, `size_mismatch`,
+`hash_mismatch`, `key_mismatch`) can be rehearsed offline. Never log or
+print anything `fetch_into` is handed if your fake mints URLs.
+
 ## `delete`
 
 `klt artifact delete REF... [--keep MANIFEST]... [--yes] [--force-referenced]`.
@@ -165,6 +338,23 @@ the first delete call, so nothing is deleted; `--force-referenced` overrides.
 With no `--keep`, the guard cannot run, and the output says so
 (`guard.checked: false`). An object that is already absent is `absent` and a
 success. Duplicate targets are collapsed.
+
+Keys get the same pre-flight: every `REF` is `stat`ed, and the key `stat`
+returns must name the requested digest and, when the `REF` carries one — an
+`artifact:<key>` URI or a `MANIFEST[#SELECTOR]` entry — be that key. If any
+key disagrees, `delete` exits `1` with `error.code: "key_mismatch"` before
+the first delete call, so nothing is deleted, whether or not `--yes` is given.
+
+The broker must implement `POST /v1/delete`. If the delete call itself is
+refused with 404, 405 or 501 — `stat` had already reported the object
+present, so the route, not the object, is what is missing — `delete` exits
+`1` with `error.code: "unsupported_operation"`, whose `error` still carries
+`broker_status`, `broker_error` and `broker_message`, and whose message says
+the broker does not implement delete for that object. The command stops at
+the first refusal. If earlier deletes succeeded, the diagnostic lists their
+SHA-256 digests. If none succeeded, an unsupported-operation message says
+nothing was deleted. Other refusals, including 403 `not_granted` and
+503 `fleet_unavailable`, keep `error.code: "broker_refused"`.
 
 `--format json`: `{schema_version: 1, status: "dry_run"|"deleted", objects:
 [{sha256, key, status}], guard: {keep_manifests, checked, forced}}`; in a dry
@@ -202,8 +392,10 @@ Campaign outputs are cited the same way.
 | Code | Meaning |
 |---|---|
 | `0` | Done: stored, fetched and verified, every entry ok, or delete (dry run, deleted or absent) |
-| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, or a `delete` of a still-referenced object (`still_referenced`) |
+| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`; a route-level 404/405/501 on delete — a broker with no `/v1/delete` — is code `"unsupported_operation"` instead), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, a `put`, `get` or `delete` whose broker key disagrees with the requested digest, or — `get` and `delete` only — with the key in an `artifact:<key>` URI / `MANIFEST[#SELECTOR]` entry, or — `put` only — an upload the broker bound to an `x-amz-checksum-sha256` that is not the file's digest (each `key_mismatch`), a `delete` of a still-referenced object (`still_referenced`), or — `verify --local` only — a run in which no entry resolved (`nothing_verified`) or an entry name escaping the verify root (`name_escapes_root`) |
 | `2` | Usage error |
-| `3` | `verify` only: at least one entry is missing or mismatched |
+| `3` | `verify` only: at least one checked entry is missing or mismatched (broker-backed or `--local`) |
 
-The library behind the verb is `klayout_tools.artifact_store`.
+The library behind the verb is `klayout_tools.artifact_verify` (the verify
+path, vendorable standalone as above) plus `klayout_tools.artifact_objects`
+(put/get/delete), re-exported through the latter.

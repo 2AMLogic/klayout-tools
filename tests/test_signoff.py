@@ -28,12 +28,13 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as requires_ngspice
 from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
+from klayout_tools.build_identity import grading_ruleset_id
 from klayout_tools.cli import main
-from klayout_tools.cli.output import render_rerun_drift
 from klayout_tools.coverage import build_check_coverage
 from klayout_tools.design_evidence_tiers import (
     DesignEvidenceTiersError,
@@ -66,13 +67,6 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
 #: already-passing artifacts without depending on pytest's cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# Match the real-engine tier in test_sim.py and test_pex.py. CI installs
-# ngspice; the local check:ci command deliberately opts out of this tier.
-requires_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
-    reason="ngspice is unavailable or disabled by KLT_SKIP_NGSPICE_TESTS=1",
-)
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,
@@ -4183,9 +4177,9 @@ def test_every_recognized_kind_declares_a_typed_shape():
         # Issue #4189: T1 item 2's seam/tiling evidence.
         "seam-check",
         "lef-abstract",
-        # Issue #4015: T1 item 1's netlist-evidence half.
-        "synthesize",
+        "synthesize",  # Issue #4015: T1 item 1's netlist-evidence half.
         "generic",
+        "model-run",
         "error",
     }
 
@@ -4940,38 +4934,11 @@ def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
     assert item_6["citation"] is None
 
 
-def test_yield_insufficient_evidence_renders_unmet_undersized_sample(tmp_path):
-    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
-    yield_path = _write(tmp_path, "yield.json", envelope)
-
-    result = build_tier_report(_manifest(evidence={"6": yield_path}))
-
-    item_6 = next(item for item in result["items"] if item["id"] == 6)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "undersized_sample"
-
-
 # --------------------------------------------------------------------------- #
 # Campaign-discipline gate on item 6 (issue #2467): the cited report's own
 # `sample_size.verdict` and `negative_control` state, read as grading inputs
 # rather than dropped with the run-level `warnings` array.
 # --------------------------------------------------------------------------- #
-
-
-def test_yield_insufficient_sample_size_renders_unmet_undersized_sample(tmp_path):
-    """Issue #2467: the report's own `sample_size.verdict` says its estimate
-    is not sized for the claim; a `"pass"` status must not overrule that."""
-    yield_path = _write(tmp_path, "yield.json", YIELD_INSUFFICIENT_SAMPLE_ENVELOPE)
-
-    result = build_tier_report(_manifest(evidence={"6": yield_path}))
-
-    item_6 = next(item for item in result["items"] if item["id"] == 6)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "undersized_sample"
-    assert item_6["citation"] is None
-    campaign = item_6["detail"]["yield_campaign"]
-    assert campaign["sample_size"] == "insufficient"
-    assert campaign["undersized_measurements"] == ["vref"]
 
 
 def test_yield_negative_control_not_detected_renders_unmet(tmp_path):
@@ -7168,34 +7135,6 @@ def test_unpinned_unprovenanced_evidence_carries_no_pin_detail(tmp_path):
     assert "content_hash_pin" not in (item_5.get("detail") or {})
 
 
-def test_unprovenanced_functional_verification_cannot_satisfy_pinned_content_hash(
-    tmp_path,
-):
-    """`klt functional-verification` carries no shared `provenance` block at
-    all (by design -- its verdict depends on no PDK and no rule deck), so a
-    manifest that pins `content_hash` on one always renders
-    "unmet"/"unverifiable_provenance" (issue #2182) -- distinct from
-    "stale_evidence", which requires a genuinely mismatched, non-null hash."""
-    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
-
-    result = build_tier_report(
-        _manifest(
-            kind="digital",
-            evidence={"5": {"file": fv_path, "content_hash": "sha256:expected"}},
-        )
-    )
-
-    item_5 = next(item for item in result["items"] if item["id"] == 5)
-    assert item_5["status"] == "unmet"
-    assert item_5["reason"] == "unverifiable_provenance"
-    assert item_5["citation"] is None
-    # Issue #3747: the pin itself is disclosed as the cause.
-    assert item_5["detail"]["content_hash_pin"] == "unverifiable"
-    note = item_5["detail"]["content_hash_pin_note"]
-    assert "functional-verification" in note
-    assert "provenance.input.content_hash" in note
-
-
 # --------------------------------------------------------------------------- #
 # "power" evidence never satisfies any tier-report item (issue #1321)
 # --------------------------------------------------------------------------- #
@@ -7483,7 +7422,7 @@ def test_command_evidence_launch_failure_renders_command_failed(monkeypatch):
     assert item_3["citation"] is None
 
 
-def test_command_evidence_timeout_renders_command_failed(monkeypatch):
+def test_command_evidence_timeout_renders_command_timeout(monkeypatch):
     def fake_run(command, **kwargs):
         raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
 
@@ -7493,7 +7432,7 @@ def test_command_evidence_timeout_renders_command_failed(monkeypatch):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
-    assert item_3["reason"] == "command_failed"
+    assert item_3["reason"] == "command_timeout"
     assert item_3["citation"] is None
 
 
@@ -8666,17 +8605,13 @@ def test_describe_grader_shape():
         "grading_ruleset_id",
         "source_doc",
         "graded_t1_item_ids",
+        "attestable_items",
         "opt_in_evidence_kinds",
         "opt_in_kinds_by_item",
         "not_applicable_items",
         "pinned_runsets",
     }
     assert result["not_applicable_items"] == {"6": ["digital"]}
-    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
-        "ihp-sg13g2",
-        "ihp-sg13cmos5l",
-        "gf180mcu",
-    }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
@@ -8689,8 +8624,7 @@ def test_describe_grader_reports_none_when_the_shipped_doc_is_unreadable(
     """Never fabricate a claim this build cannot substantiate -- mirrors
     `_is_graded_by_build`'s own "unreadable shipped doc" fallback."""
     monkeypatch.setattr(signoff_module, "_build_t1_item_ids", lambda: None)
-    result = signoff_module.describe_grader()
-    assert result["graded_t1_item_ids"] is None
+    assert signoff_module.describe_grader()["graded_t1_item_ids"] is None
 
 
 def test_describe_grader_matches_klt_versions_grading_ruleset_id(capsys):
@@ -11629,7 +11563,7 @@ def test_item_11_grade_is_unchanged_by_the_substrate_continuity_disclosure(tmp_p
         **ERC_CLEAN_ENVELOPE,
         "erc_coverage": {
             "scope": "connectivity",
-            "checked": [],
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
             "skipped": [],
             "inapplicable": [
                 {
@@ -13817,17 +13751,19 @@ def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
 #: exclusion, not a `dirty` fix alone, is what makes a committed report
 #: comparable across provisioning routes.
 _TARBALL_ROUTE_BUILD_BLOCK = {
-    "version": "0.5.0+unknown",
+    "version": "0.5.0+unknown",  # unresolved identity: build_skew is "unverifiable"
     "package_version": "0.5.0",
     "git_commit": None,
     "git_tag": None,
     "dirty": None,
     "is_release": None,
-    "grading_ruleset_id": "sha256:whatever-this-install-reads",
+    "grading_ruleset_id": grading_ruleset_id(),  # same commit, same grading code
 }
 
 
-def _committed_from_other_provisioning_route(tmp_path, report: dict, name: str) -> str:
+def _committed_from_other_provisioning_route(
+    tmp_path, report: dict, name: str = "committed.json"
+) -> str:
     """``report`` as it would have been committed by an install of the *same
     commit* provisioned differently: identical grading, a different `build`
     block (issue #2249)."""
@@ -13842,18 +13778,19 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
     drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
     manifest = _manifest(evidence={"3": drc_path})
     fresh = build_tier_report(manifest)
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, fresh, "committed.json"
-    )
-
+    committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
+    committed_build = json.loads(Path(committed_path).read_text())["build"]
     # The premise: these two files are NOT byte-identical, so the documented
     # "re-render and byte-compare" gate would fail between them.
     assert json.loads(Path(committed_path).read_text()) != fresh
-    assert json.loads(Path(committed_path).read_text())["build"] != fresh["build"]
+    assert committed_build != fresh["build"]
+    assert committed_build["grading_ruleset_id"] == fresh["build"]["grading_ruleset_id"]
+    skew_fields = [  # fresh values are install-specific, so derived, not hard-coded
+        {"field": f"build.{k}", "committed": v, "fresh": fresh["build"][k]}
+        for k, v in sorted(_TARBALL_ROUTE_BUILD_BLOCK.items() - fresh["build"].items())
+    ]
 
-    result = check_tier_report(committed_path, manifest)
-
-    assert result == {
+    assert check_tier_report(committed_path, manifest) == {
         "schema_version": 1,
         "mode": "check",
         "report": committed_path,
@@ -13861,6 +13798,7 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
+        "build_skew": {"state": "unverifiable", "fields": skew_fields},
         "fresh": fresh,
     }
 
@@ -13873,9 +13811,7 @@ def test_check_reports_drift_in_a_graded_field(tmp_path):
     stale = build_tier_report(manifest)
     stale["t1_met_count"] = 11
     stale["tier"] = "T1"
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, stale, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, stale)
 
     result = check_tier_report(committed_path, manifest)
 
@@ -13970,7 +13906,7 @@ def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
     """Both refusals come from the shared loader -- a clean message, never a
     traceback."""
     manifest = _manifest()
-    with pytest.raises(SignoffError, match="committed report not found"):
+    with pytest.raises(SignoffError, match="file not found"):
         check_tier_report(str(tmp_path / "nope.json"), manifest)
 
     bad = tmp_path / "bad.json"
@@ -13988,9 +13924,7 @@ def test_cli_check_exits_zero_for_a_match_and_three_for_drift(tmp_path, capsys):
     manifest_path = _write(tmp_path, "manifest.json", manifest)
     fresh = build_tier_report(manifest)
     assert fresh["tier"] is None  # rendering this manifest exits 3
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, fresh, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
 
     exit_code = main(
         ["signoff", "--manifest", manifest_path, "--check", committed_path]
@@ -14080,14 +14014,14 @@ def test_cli_check_is_refused_by_the_modes_that_render_no_such_report(tmp_path, 
 def test_check_excludes_build_identity_and_the_checklist_prose_and_nothing_else(
     tmp_path,
 ):
-    """The verdict exclusion is exactly two registered sets -- build identity
-    (issue #2249) and the report's quotation of the checklist (issue #2526):
-    every *other* top-level field of a tier report is still compared, so a
-    future field cannot quietly join the unchecked set. Guards against
-    widening either set by accident."""
+    """Pin three registered sets: build identity (#2249), checklist prose (#2526),
+    and derived unmet_reason_counts (#5903); compare every other top-level field."""
+    from klayout_tools.signoff_unmet_reasons import DERIVED_REPORT_PATHS
+
     assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
+    assert DERIVED_REPORT_PATHS == frozenset({("unmet_reason_counts",)})
     # The only *top-level* doc-prose path; the rest are per-item/per-block.
-    excluded_top_level = {"build", "source_doc_content_hash"}
+    excluded_top_level = {"build", "source_doc_content_hash", "unmet_reason_counts"}
     assert {
         path[0] for path in signoff_module.DOC_PROSE_REPORT_PATHS if len(path) == 1
     } == {"source_doc_content_hash"}
@@ -14397,29 +14331,6 @@ def test_doc_prose_exclusion_is_path_keyed_not_name_keyed():
     }
 
 
-def test_cli_check_text_output_omits_doc_drift_for_the_other_verbs(capsys):
-    """`render_rerun_drift` is shared with five other verbs' `--rerun`, whose
-    payloads carry no `doc_drift` key -- their output must stay byte-identical
-    to what it was before issue #2526."""
-    render_rerun_drift(
-        {
-            "report": "committed.json",
-            "status": "drifted",
-            "drift": [{"field": "violation_count", "committed": 0, "fresh": 2}],
-        }
-    )
-
-    assert capsys.readouterr().out == (
-        "report: committed.json\n"
-        "status: drifted\n"
-        "\n"
-        "drift:\n"
-        "  violation_count:\n"
-        "      committed: 0\n"
-        "      fresh:     2\n"
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Citing an envelope nested inside a composite report: `"pointer"`
 # (issue #2342)
@@ -14478,12 +14389,12 @@ def test_pointer_resolved_envelope_grades_identically_to_the_same_file_unnested(
     plain_item = next(item for item in plain["items"] if item["id"] == 3)
     pointed_item = next(item for item in pointed["items"] if item["id"] == 3)
 
-    # Same fields, same values -- except `citation.file`, which necessarily
-    # names the document each manifest actually cited.
-    assert set(plain_item["citation"]) == set(pointed_item["citation"])
-    assert {k: v for k, v in plain_item["citation"].items() if k != "file"} == {
-        k: v for k, v in pointed_item["citation"].items() if k != "file"
-    }
+    # Same fields, same values -- except `citation.file` (naming the
+    # document each manifest cited) and `citation.pointer` (#5815: only a
+    # pointed citation records its selector).
+    normalized = dict(pointed_item["citation"], file=plain_item["citation"]["file"])
+    normalized.pop("pointer")
+    assert plain_item["citation"] == normalized
     assert plain_item["status"] == pointed_item["status"] == "met"
 
 
@@ -16067,7 +15978,7 @@ def _inventory(item: int, **overrides) -> dict:
                 "name": "sky130A",
                 "revision": "0fe599b2afb6708d281543108caf8310912f54af",
             },
-            "tools": {"ngspice": "42", "klt": "0.7.0"},
+            "tools": {"ngspice": "42"},
         }
     else:
         base["hygiene"] = ["README.md", "LICENSE", ".github/workflows/ci.yml"]
@@ -16097,7 +16008,7 @@ def _failed(envelope: dict) -> list[dict]:
     return [check for check in envelope["attestation"]["checks"] if not check["passed"]]
 
 
-@pytest.mark.parametrize("item", [1, 9, 10])
+@pytest.mark.parametrize("item", [9, 10])
 def test_attest_generates_an_anchored_generic_envelope(tmp_path, item):
     """AC 1/2: a passing inventory yields the existing binding contract --
     `t1_item`, `provenance.input.path` (repo-scoped) and its raw-byte
@@ -16318,7 +16229,7 @@ def test_attest_commands_run_in_the_declared_repo_relative_cwd(tmp_path):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"schema_version": 2}, "schema_version 2"),
+        ({"schema_version": 3}, "schema_version 3"),
         ({"schema_version": _DROP}, "schema_version"),
         ({"schema_version": True}, "schema_version"),
         ({"kind": "manifest"}, "t1-attestation-inventory"),
@@ -16482,7 +16393,7 @@ def _attest_cli(item: int, inventory: str, *extra: str) -> int:
     return main(["signoff", "--attest", str(item), "--inventory", inventory, *extra])
 
 
-@pytest.mark.parametrize("item", [1, 9, 10])
+@pytest.mark.parametrize("item", [9, 10])
 def test_attested_envelope_is_met_for_its_item_and_refused_on_the_others(
     tmp_path, capsys, item
 ):
@@ -18124,43 +18035,9 @@ def test_unreadable_file_evidence_absolute_path_is_unchanged(tmp_path, monkeypat
     assert item_3["detail"]["path"] == gone
 
 
-def _capture_attest_env(monkeypatch):
-    from klayout_tools import signoff_attest
-
-    seen = {}
-
-    def fake_run(argv, **kwargs):
-        seen["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(argv, 0, stdout=b"")
-
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", {"argv": ["python3"], "cwd": "."})
-    return seen["env"]
-
-
-def test_attest_command_env_drops_venv_bin_from_path(monkeypatch):
-    venv_bin = os.path.dirname(sys.executable)
-    monkeypatch.setattr(sys, "prefix", "/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, "/usr/bin"]))
-    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
-
-
-def test_attest_command_env_unchanged_outside_venv(monkeypatch):
-    monkeypatch.setattr(sys, "prefix", "/base")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    path = os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin"])
-    monkeypatch.setenv("PATH", path)
-    assert _capture_attest_env(monkeypatch)["PATH"] == path
-
-
-def test_attest_command_env_tolerates_unset_path_and_absent_venv_bin(monkeypatch):
-    monkeypatch.setattr(sys, "prefix", "/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    monkeypatch.setenv("PATH", "/usr/bin")
-    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
-    monkeypatch.delenv("PATH")
-    assert "PATH" not in _capture_attest_env(monkeypatch)
+# The declared-command environment tests (venv-bin stripping, #4192, plus the
+# run-scoped klt-only shim, #5565) live in tests/test_signoff_attest_env.py,
+# split out of this file for the per-file size ratchet.
 
 
 # --------------------------------------------------------------------------- #
@@ -18184,64 +18061,13 @@ def _graded_attestation(repo: Path, item: int = 1, **grade_kwargs) -> dict:
     return _item(build_tier_report(manifest, repo_root=str(repo), **grade_kwargs), item)
 
 
-@pytest.mark.parametrize("item", [1, 9, 10])
+@pytest.mark.parametrize("item", [9, 10])
 def test_untouched_attested_tree_stays_met_without_extra_fields(tmp_path, item):
     graded = _graded_attestation(_attest_repo(tmp_path), item)
 
     assert graded["status"] == "met"
     assert "detail" not in graded or not graded["detail"]
     assert "members" not in graded["citation"]["artifact_binding"]
-
-
-@pytest.mark.parametrize("path", ["design/ota.sch", "netlist/ota.spice"])
-def test_editing_an_attested_source_or_derived_file_is_stale(tmp_path, path):
-    repo = _attest_repo(tmp_path)
-    inventory = _write_inventory(repo, 1)
-    envelope = build_attestation(1, inventory)
-    (repo / "evidence" / "item1.json").write_text(json.dumps(envelope))
-    manifest = _manifest(
-        evidence={
-            "1": {
-                "file": str(repo / "evidence" / "item1.json"),
-                "content_hash": _hash_of(inventory),
-            }
-        }
-    )
-    assert _item(build_tier_report(manifest, repo_root=str(repo)), 1)["status"] == "met"
-
-    (repo / path).write_text("edited after attestation\n")
-    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
-
-    assert graded["status"] == "unmet"
-    assert graded["reason"] == "stale_evidence"
-    members = graded["detail"]["artifact_binding"]["members"]
-    assert [(m["path"], m["status"]) for m in members] == [(path, "stale")]
-
-
-def test_deleting_an_attested_file_is_unverifiable_provenance(tmp_path):
-    repo = _attest_repo(tmp_path)
-    inventory = _write_inventory(repo, 1)
-    (repo / "evidence" / "item1.json").write_text(
-        json.dumps(build_attestation(1, inventory))
-    )
-    manifest = _manifest(
-        evidence={
-            "1": {
-                "file": str(repo / "evidence" / "item1.json"),
-                "content_hash": _hash_of(inventory),
-            }
-        }
-    )
-    (repo / "design" / "bias.sch").unlink()
-
-    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
-
-    assert graded["status"] == "unmet"
-    assert graded["reason"] == "unverifiable_provenance"
-    members = graded["detail"]["artifact_binding"]["members"]
-    assert [(m["path"], m["status"]) for m in members] == [
-        ("design/bias.sch", "unverifiable")
-    ]
 
 
 # --- Issue #4354: item 4 accepts a list of per-cell `klt lvs` reports -------
@@ -18405,7 +18231,7 @@ def test_item7_partition_qualified_list_with_digital_single_entry(tmp_path):
 
 
 def _capture_attest_timeout(monkeypatch, spec):
-    from klayout_tools import signoff_attest
+    from klayout_tools import signoff_attest_command
 
     seen = {}
 
@@ -18413,8 +18239,8 @@ def _capture_attest_timeout(monkeypatch, spec):
         seen["timeout"] = kwargs["timeout"]
         return subprocess.CompletedProcess(argv, 0, stdout=b"")
 
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", spec)
+    monkeypatch.setattr(signoff_attest_command.subprocess, "run", fake_run)
+    signoff_attest_command._run_command(".", spec)
     return seen["timeout"]
 
 

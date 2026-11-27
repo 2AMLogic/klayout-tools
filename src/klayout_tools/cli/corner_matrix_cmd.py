@@ -26,6 +26,7 @@ _LISTS = (
     "extra",
     "duplicate",
     "not_simulated",
+    "errored",
     "non_finite",
     "out_of_bounds",
 )
@@ -53,3 +54,12 @@ def _print_text(report: dict) -> None:
             for cid in report[key]:
                 print(f"  {cid}")
     print("complete" if report["complete"] else "INCOMPLETE")
+    if not report["complete"]:
+        # Discriminate "did not cover the matrix" from "covered it, but some
+        # corners are unusable/out-of-bounds"; complete implies coverage, so
+        # the extra line carries no information when complete is true.
+        print(
+            "coverage: complete"
+            if report["coverage_complete"]
+            else "coverage: INCOMPLETE"
+        )

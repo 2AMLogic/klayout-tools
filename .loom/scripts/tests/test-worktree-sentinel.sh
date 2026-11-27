@@ -25,37 +25,12 @@ MERGE_PR_SH="$SCRIPTS_DIR/merge-pr.sh"
 AGENT_DESTROY_SH="$SCRIPTS_DIR/agent-destroy.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-YELLOW='\033[0;33m'   # retired() below
-
-# An assertion that CANNOT survive the port to Rust, retired under the
-# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
-# deleted: a reader must be able to see what was removed, why it could not
-# survive, and what proves the property now. Counted as run so the totals stay
-# honest.
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
 
 assert_file_exists() {
     if [[ -f "$1" ]]; then
         pass "$2"
     else
         fail "$2 (expected file: $1)"
-    fi
-}
-
-assert_grep() {
-    local pattern="$1"
-    local file="$2"
-    local msg="$3"
-    if grep -qE "$pattern" "$file"; then
-        pass "$msg"
-    else
-        fail "$msg (pattern not found: $pattern in $file)"
     fi
 }
 

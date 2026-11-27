@@ -13,24 +13,16 @@ from __future__ import annotations
 
 import copy
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import sim, sim_remote, sim_steps
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
+from klayout_tools import sim, sim_measurement_results, sim_remote, sim_steps
 
 pytestmark = pytest.mark.usefixtures(
     "real_build_identity_git", "bare_name_ngspice_resolution"
-)
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
 )
 
 #: A resistive divider: v(out) = vin * 2/3 with no load, so every number
@@ -132,7 +124,7 @@ def test_scalar_analysis_resolves_to_the_requests_own_objects():
 
 def test_scalar_analysis_still_requires_kind_and_args():
     with pytest.raises(sim.SimError, match="requires 'kind' and 'args'"):
-        sim._resolve_analysis_and_measurements({"analysis": {"kind": "op"}})
+        sim._resolve_analysis_and_measurements({"analysis": {"kind": "dc"}})
 
 
 def test_scalar_run_report_gains_no_step_fields(tmp_path, monkeypatch):
@@ -311,7 +303,7 @@ _INVALID = [
     ),
     (
         "missing analysis args",
-        lambda r: r["analysis_steps"][0].update(analysis={"kind": "op"}),
+        lambda r: r["analysis_steps"][0].update(analysis={"kind": "dc"}),
         "requires 'kind' and 'args'",
     ),
     (
@@ -915,7 +907,7 @@ def test_step_outcomes_from_markers():
 
 def _grade(request: dict, log_text: str, *, save_mode: str = "all"):
     analysis, specs = _resolve(request)
-    return sim._corner_measurement_results(
+    return sim_measurement_results._corner_measurement_results(
         sim._parse_measurements(log_text),
         specs,
         analysis=analysis,
@@ -1699,7 +1691,6 @@ _TRAN = '(kind "tran")'
         ("search", {}, "for a bisection/threshold-search measurement"),
         ("optional", True, "for a measurement that may legitimately be absent"),
         ("cycle_mean", {}, f"{_TRAN} for a cycle-aligned mean"),
-        ("eye", {}, f"{_TRAN} for an eye measurement"),
         ("noise", {}, '(kind "noise") for a noise-spectrum measurement'),
     ],
 )

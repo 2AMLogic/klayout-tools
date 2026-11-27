@@ -40,18 +40,22 @@ Behaviour, request/response shape and worked examples:
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import math
 import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from typing import Any
 
 from . import design_centering, env_provenance
+from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
+from .ngspice_build import engine_version as _ngspice_engine_version
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import CornerPoint, SimError, _expand_corners, _resolve_models_lib
 
@@ -122,13 +126,10 @@ _TOPOLOGY_ROLE_KIND = {
     "tail": "nmos",
 }
 
-#: Points in the coarse, log-spaced width sweep run inside the single
-#: sweep invocation (see this module's docstring). Overridable via
-#: ``request.options.sweep_points``.
+#: Default number of log-spaced width samples for ``request.options.sweep_points``.
 DEFAULT_SWEEP_POINTS = 25
 
-#: Minimum sweep points accepted -- fewer than this and a monotonic bracket
-#: search has too little resolution to be meaningful.
+#: Minimum samples needed for a useful monotonic bracket search.
 MIN_SWEEP_POINTS = 5
 
 #: Joint-solve iteration cap for a coupled topology request (issue #768),
@@ -158,9 +159,7 @@ _JOINT_WIDTH_STEP_EPS = 1e-3
 #: module's docstring.
 DEFAULT_TIMEOUT_S = 180
 
-#: Default relative tolerance on the confirmed operating point's ``gm/Id``
-#: against ``request.target.gm_id`` -- overridable via
-#: ``request.tolerance.gm_id_rel``.
+#: Default ``request.tolerance.gm_id_rel`` on achieved versus target gm/Id.
 DEFAULT_GM_ID_TOLERANCE = 0.03
 
 #: Loop-gain constant for the fixed-``Vds`` mode's feedback-regulated gate
@@ -177,7 +176,6 @@ _FIXED_VDS_FEEDBACK_GAIN = 1e4
 
 _MARKER_RE = re.compile(r"^KLT_SIZE_POINT\s+(\d+)\s+(\S+)\s*$")
 _OP_VALUE_RE = re.compile(r"^@\S+\[(\w+)\]\s*=\s*([-+0-9.eEgGnN]+)\s*$")
-_ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 _FATAL_LOG_RE = re.compile(
     r"fatal error|could not find a valid modelname|no simulations run|"
     r"simulation\(s\)\s+aborted",
@@ -246,7 +244,7 @@ def load_request(request_path: str) -> dict[str, Any]:
 
 
 def _require_positive_number(value: Any, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise SizeError(f"{field} must be a number")
     if value <= 0:
         raise SizeError(f"{field} must be positive")
@@ -292,7 +290,7 @@ def _parse_device(device: dict[str, Any]) -> dict[str, Any]:
     nf = device.get("nf", 1)
     mult = device.get("mult", 1)
     for value, field in ((nf, "request.device.nf"), (mult, "request.device.mult")):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if not is_number(value) or value <= 0:
             raise SizeError(f"{field} must be a positive number")
 
     op_point_element = device.get("op_point_element") or _default_op_point_element(
@@ -324,8 +322,7 @@ def _parse_corner(corner: dict[str, Any]) -> dict[str, Any]:
     if vdd is None:
         raise SizeError("request.corner.vdd_v is required")
     vdd = _require_positive_number(vdd, "request.corner.vdd_v")
-    temperature_c = corner.get("temperature_c", 27)
-    if isinstance(temperature_c, bool) or not isinstance(temperature_c, (int, float)):
+    if not is_number(temperature_c := corner.get("temperature_c", 27)):
         raise SizeError("request.corner.temperature_c must be a number")
     return {"process": process, "vdd_v": vdd, "temperature_c": float(temperature_c)}
 
@@ -456,9 +453,7 @@ def _resolve_sizing_index(points: list[dict[str, Any]], sizing_spec: Any) -> int
         candidates = [i for i in candidates if points[i]["process"] == process]
     temperature_c = sizing_spec.get("temperature_c")
     if temperature_c is not None:
-        if isinstance(temperature_c, bool) or not isinstance(
-            temperature_c, (int, float)
-        ):
+        if not is_number(temperature_c):
             raise SizeError("request.corners.sizing.temperature_c must be a number")
         candidates = [
             i for i in candidates if points[i]["temperature_c"] == float(temperature_c)
@@ -562,6 +557,39 @@ def _parse_target(target: dict[str, Any]) -> dict[str, Any]:
         # (Vds=Vgs) unchanged.
         parsed["vds_v"] = _require_positive_number(vds_v, "request.target.vds_v")
     return parsed
+
+
+def _resolve_size_models(
+    request: dict[str, Any], request_dir: str
+) -> tuple[str, dict[str, Any] | None]:
+    """Resolve the library and any available PDK provenance for either sizing mode."""
+    models = request.get("models") or {}
+    try:
+        models_lib = _resolve_models_lib(models, request_dir)
+    except SimError as exc:
+        raise SizeError(str(exc)) from exc
+
+    pdk, root = models.get("pdk"), models.get("pdk_root")
+    if pdk or root:
+        with contextlib.suppress(PdkNotFoundError):
+            return models_lib, find_pdk(variant=pdk, root=root)
+    return models_lib, None
+
+
+def _parse_sweep_settings(request: dict[str, Any]) -> tuple[float, int]:
+    """Read the shared gm/Id tolerance and number of width samples."""
+    tolerance = request.get("tolerance") or {}
+    gm_id_rel = _require_positive_number(
+        tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE),
+        "request.tolerance.gm_id_rel",
+    )
+    options = request.get("options") or {}
+    points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
+    if not is_int(points) or points < MIN_SWEEP_POINTS:
+        raise SizeError(
+            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
+        )
+    return gm_id_rel, points
 
 
 #: ``method.name``/``method.bias`` text for the two single-device bias
@@ -739,6 +767,20 @@ def _run_size_impl(
     )
 
 
+@contextlib.contextmanager
+def _size_work_dir(keep_artifacts: bool, artifacts_dir: str) -> Iterator[str]:
+    """Own a sizing run's scratch directory (issue #6886): the caller's
+    artifact directory, or a disposable ``TemporaryDirectory``."""
+    if keep_artifacts:
+        os.makedirs(artifacts_dir, exist_ok=True)
+        yield artifacts_dir
+        return
+    with tempfile.TemporaryDirectory(
+        prefix="klt-size-", ignore_cleanup_errors=True
+    ) as work_dir:
+        yield work_dir
+
+
 def _run_single_device_size(
     request: dict[str, Any],
     request_dir: str,
@@ -764,38 +806,10 @@ def _run_single_device_size(
         corner_points, sizing_index, hold_across_corners, objective
     )
 
-    models = request.get("models") or {}
-    try:
-        models_lib = _resolve_models_lib(models, request_dir)
-    except SimError as exc:
-        raise SizeError(str(exc)) from exc
-
-    provenance_pdk: dict[str, Any] | None = None
-    if models.get("pdk") or models.get("pdk_root"):
-        try:
-            provenance_pdk = find_pdk(
-                variant=models.get("pdk"), root=models.get("pdk_root")
-            )
-        except PdkNotFoundError:
-            provenance_pdk = None
-
-    tolerance = request.get("tolerance") or {}
-    gm_id_rel_tol = tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE)
-    gm_id_rel_tol = _require_positive_number(
-        gm_id_rel_tol, "request.tolerance.gm_id_rel"
-    )
+    models_lib, provenance_pdk = _resolve_size_models(request, request_dir)
+    gm_id_rel_tol, sweep_points = _parse_sweep_settings(request)
 
     options = request.get("options") or {}
-    sweep_points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
-    if (
-        isinstance(sweep_points, bool)
-        or not isinstance(sweep_points, int)
-        or sweep_points < MIN_SWEEP_POINTS
-    ):
-        raise SizeError(
-            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
-        )
-
     timeout_s = timeout_s if timeout_s is not None else options.get("timeout_s")
     timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
     timeout_s = _require_positive_number(timeout_s, "request.options.timeout_s")
@@ -804,303 +818,291 @@ def _run_single_device_size(
     if artifacts_dir is None:
         artifacts_dir = os.path.join(request_dir, ".klt", "size")
 
-    if keep_artifacts:
-        work_dir = artifacts_dir
-        os.makedirs(work_dir, exist_ok=True)
-    else:
-        work_dir = tempfile.mkdtemp(prefix="klt-size-")
+    with _size_work_dir(keep_artifacts, artifacts_dir) as work_dir:
+        w_grid = _log_space(device["w_min_um"], device["w_max_um"], sweep_points)
 
-    w_grid = _log_space(device["w_min_um"], device["w_max_um"], sweep_points)
-
-    provenance = build_provenance(
-        deck_name=os.path.basename(models_lib),
-        deck_path=models_lib,
-        pdk=provenance_pdk,
-    )
-
-    if objective == "worst_case_margin":
-        payload = _run_worst_case_margin(
-            device=device,
-            corner_points=corner_points,
-            sizing_index=sizing_index,
-            target=target,
-            models_lib=models_lib,
-            repo_root=repo_root,
-            gm_id_rel_tol=gm_id_rel_tol,
-            w_grid=w_grid,
-            work_dir=work_dir,
-            timeout_s=timeout_s,
-            corners_echo=corners_echo,
-            provenance=provenance,
+        provenance = build_provenance(
+            deck_name=os.path.basename(models_lib),
+            deck_path=models_lib,
+            pdk=provenance_pdk,
         )
+
+        if objective == "worst_case_margin":
+            payload = _run_worst_case_margin(
+                device=device,
+                corner_points=corner_points,
+                sizing_index=sizing_index,
+                target=target,
+                models_lib=models_lib,
+                repo_root=repo_root,
+                gm_id_rel_tol=gm_id_rel_tol,
+                w_grid=w_grid,
+                work_dir=work_dir,
+                timeout_s=timeout_s,
+                corners_echo=corners_echo,
+                provenance=provenance,
+            )
+            if keep_artifacts:
+                payload["environment"]["artifacts_dir"] = work_dir
+            return payload
+
+        sweep_points_result, sweep_engine_version, sweep_log, sweep_diagnostic = (
+            _run_sweep(
+                device=device,
+                corner=sizing_corner,
+                target=target,
+                models_lib=models_lib,
+                w_values=w_grid,
+                work_dir=work_dir,
+                deck_name="sweep.cir",
+                log_name="sweep.log",
+                timeout_s=timeout_s,
+            )
+        )
+
+        valid_points = [
+            p
+            for p in sweep_points_result
+            if p["gm_s"] is not None and p["id_a"] not in (None, 0.0)
+        ]
+        for p in valid_points:
+            p["gm_id"] = abs(p["gm_s"]) / abs(p["id_a"])
+
+        environment = {
+            "engine": "ngspice",
+            "engine_version": sweep_engine_version,
+            # Issue #1274: `{path, scope}`, never the resolved absolute path --
+            # a PDK model library normally lives outside the repo (under the
+            # user's home directory) and would leak that layout into every
+            # committed report. `provenance.deck` still pins which library ran.
+            "models_lib": env_provenance.repo_relative_path(
+                models_lib, repo_root=repo_root
+            ),
+        }
+
+        if len(valid_points) < 2:
+            return _error_payload(
+                device=device,
+                corner=sizing_corner,
+                corners=corners_echo,
+                target=target,
+                environment=environment,
+                provenance=provenance,
+                reason=(
+                    "ngspice did not return usable operating-point data for at "
+                    "least 2 of the swept widths"
+                    + (f": {sweep_diagnostic}" if sweep_diagnostic else "")
+                    + (f" (see sweep log: {sweep_log})" if keep_artifacts else "")
+                ),
+            )
+
+        bracket, feasibility_note = _find_bracket(valid_points, target["gm_id"])
+
+        if bracket is None:
+            # Infeasible within [w_min, w_max]: report the boundary point closest
+            # to the target as the best achievable result, never silently "pass".
+            boundary = min(
+                valid_points, key=lambda p: abs(p["gm_id"] - target["gm_id"])
+            )
+            w_star = boundary["w_um"]
+        else:
+            lo, hi = bracket
+            w_star = _log_interp(
+                lo["w_um"], lo["gm_id"], hi["w_um"], hi["gm_id"], target["gm_id"]
+            )
+
+        confirm_points, confirm_engine_version, confirm_log, confirm_diagnostic = (
+            _run_sweep(
+                device=device,
+                corner=sizing_corner,
+                target=target,
+                models_lib=models_lib,
+                w_values=[w_star],
+                work_dir=work_dir,
+                deck_name="confirm.cir",
+                log_name="confirm.log",
+                timeout_s=timeout_s,
+            )
+        )
+        if confirm_engine_version is not None:
+            environment["engine_version"] = confirm_engine_version
+
+        confirmed = confirm_points[0] if confirm_points else None
+        if confirmed is None or confirmed["gm_s"] is None or not confirmed["id_a"]:
+            return _error_payload(
+                device=device,
+                corner=sizing_corner,
+                corners=corners_echo,
+                target=target,
+                environment=environment,
+                provenance=provenance,
+                reason=(
+                    "ngspice confirmation run at the interpolated width did not "
+                    "return usable operating-point data"
+                    + (f": {confirm_diagnostic}" if confirm_diagnostic else "")
+                    + (f" (see confirm log: {confirm_log})" if keep_artifacts else "")
+                ),
+            )
+
+        operating_point, confirmed_gm_id, vov, vov_is_approx = _op_point_from_confirmed(
+            confirmed, device, vds_v=target.get("vds_v")
+        )
+        gm_id_rel_error = (confirmed_gm_id - target["gm_id"]) / target["gm_id"]
+        id_rel_error = (abs(confirmed["id_a"]) - target["id_a"]) / target["id_a"]
+        inversion_level = operating_point["inversion_level"]
+
+        feasible = bracket is not None
+        within_tolerance = abs(gm_id_rel_error) <= gm_id_rel_tol
+        sizing_status = "pass" if (feasible and within_tolerance) else "fail"
+
+        if target.get("vds_v") is not None:
+            rationale_parts = [
+                f"gm/Id lookup via a fixed-Vds bias sweep: {device['kind']} "
+                f"'{device['model']}' at L={device['l_um']}um, Vds held at "
+                f"{target['vds_v']:.6g}V by an ideal bias source while a "
+                "feedback-regulated gate bias servos Vgs to hit the target "
+                f"current {target['id_a']:.6g}A (the confirmed current is "
+                "measured, not assumed exact the way the diode-connected mode's "
+                "ideal current source guarantees -- see margins.id_rel_error), "
+                f"width swept from {device['w_min_um']}um to "
+                f"{device['w_max_um']}um ({len(sweep_points_result)} points) to "
+                f"bracket the target gm/Id={target['gm_id']:.6g}, then "
+                "confirmed by a fresh ngspice operating-point run at the "
+                "interpolated width (never trusting the sweep grid or "
+                "interpolation alone)."
+            ]
+        else:
+            rationale_parts = [
+                "gm/Id lookup via a diode-connected bias sweep (Vds=Vgs): "
+                f"{device['kind']} '{device['model']}' at L={device['l_um']}um, "
+                "current fixed at "
+                f"{target['id_a']:.6g}A by an ideal bias source, width swept from "
+                f"{device['w_min_um']}um to {device['w_max_um']}um "
+                f"({len(sweep_points_result)} points) to bracket the target gm/Id="
+                f"{target['gm_id']:.6g}, then confirmed by a fresh ngspice operating-"
+                f"point run at the interpolated width (never trusting the sweep grid "
+                f"or interpolation alone)."
+            ]
+        if not feasible:
+            rationale_parts.append(
+                f"Target gm/Id={target['gm_id']:.6g} is not reachable within "
+                f"[{device['w_min_um']}, {device['w_max_um']}]um at this "
+                f"current -- {feasibility_note}; reporting the closest boundary "
+                "point actually achieved instead of extrapolating."
+            )
+        if vov is not None and not vov_is_approx:
+            rationale_parts.append(
+                f"Inversion level '{inversion_level}' from Vov=Vgs-Vth="
+                f"{vov:.4g}V (Vov<=0: weak; 0<Vov<0.1V: moderate; "
+                "Vov>=0.1V: strong -- a standard rule-of-thumb threshold, not a "
+                "precise inversion-coefficient computation)."
+            )
+        elif vov is not None and vov_is_approx:
+            rationale_parts.append(
+                f"Inversion level '{inversion_level}' from Vov~=Vdsat="
+                f"{vov:.4g}V (Vth not exposed by this device model; Vdsat "
+                "approximates Vov for a square-law device, same thresholds as "
+                "above -- less accurate for a model where the two genuinely "
+                "diverge)."
+            )
+        else:
+            rationale_parts.append(
+                "Inversion level could not be classified: the device model did "
+                "not expose Vth or Vdsat at this operating point."
+            )
+
+        bracket_w_um = (
+            [bracket[0]["w_um"], bracket[1]["w_um"]] if bracket is not None else None
+        )
+        method = {
+            "name": _bias_method_name(target),
+            "bias": _bias_label(target),
+            "rationale": " ".join(rationale_parts),
+            "sweep_points": len(sweep_points_result),
+            "valid_sweep_points": len(valid_points),
+            "bracket_w_um": bracket_w_um,
+            "interpolated_w_um": w_star,
+            "feasible": feasible,
+        }
+
+        # Verify the solved width across every OTHER declared corner -- a fresh
+        # single-point confirmation each, no further search (issue #729). The
+        # sizing corner's own entry is already fully computed above.
+        corner_results: list[dict[str, Any]] = [None] * len(corner_points)  # type: ignore[list-item]
+        corner_results[sizing_index] = {
+            "corner_id": sizing_corner["corner_id"],
+            "process": sizing_corner["process"],
+            "temperature_c": sizing_corner["temperature_c"],
+            "is_sizing": True,
+            "status": sizing_status,
+            "operating_point": operating_point,
+            "margins": {
+                "gm_id_rel_error": gm_id_rel_error,
+                "id_rel_error": id_rel_error,
+            },
+            "diagnostic": None,
+        }
+        for index, other_corner in enumerate(corner_points):
+            if index == sizing_index:
+                continue
+            corner_results[index] = _verify_corner(
+                device=device,
+                corner=other_corner,
+                target=target,
+                models_lib=models_lib,
+                w_star=w_star,
+                work_dir=work_dir,
+                deck_name=f"verify_{index}.cir",
+                log_name=f"verify_{index}.log",
+                timeout_s=timeout_s,
+                gm_id_rel_tol=gm_id_rel_tol,
+            )
+        corners_echo["results"] = corner_results
+
+        # error > fail > pass, mirroring `klt sim`'s own aggregate precedence: an
+        # evaluator error at *any* declared corner always wins. Otherwise the
+        # sizing corner's own status sets the aggregate -- a non-sizing corner's
+        # "fail" is reported spread, not aggregate-failing, unless the request
+        # opts in via `targets.hold_across_corners`.
+        if any(result["status"] == "error" for result in corner_results):
+            status = "error"
+        elif sizing_status == "fail":
+            status = "fail"
+        elif hold_across_corners and any(
+            not result["is_sizing"] and result["status"] == "fail"
+            for result in corner_results
+        ):
+            status = "fail"
+        else:
+            status = "pass"
+
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "status": status,
+            "device": device,
+            "corner": _corner_public(sizing_corner),
+            "corners": corners_echo,
+            "target": target,
+            # Issue #770: hoisted rationale fields, so a caller can read a
+            # device's gm/Id target/achieved/inversion-level without
+            # reconstructing them from `target`/`operating_point` by hand.
+            "gm_id_target": target["gm_id"],
+            "gm_id_achieved": confirmed_gm_id,
+            "inversion_level": inversion_level,
+            "tolerance": {"gm_id_rel": gm_id_rel_tol},
+            "operating_point": operating_point,
+            "margins": {
+                "gm_id_rel_error": gm_id_rel_error,
+                "id_rel_error": id_rel_error,
+            },
+            "method": method,
+            "environment": environment,
+            "provenance": provenance,
+        }
+
         if keep_artifacts:
             payload["environment"]["artifacts_dir"] = work_dir
-        else:
-            _cleanup_dir(work_dir)
         return payload
-
-    sweep_points_result, sweep_engine_version, sweep_log, sweep_diagnostic = _run_sweep(
-        device=device,
-        corner=sizing_corner,
-        target=target,
-        models_lib=models_lib,
-        w_values=w_grid,
-        work_dir=work_dir,
-        deck_name="sweep.cir",
-        log_name="sweep.log",
-        timeout_s=timeout_s,
-    )
-
-    valid_points = [
-        p
-        for p in sweep_points_result
-        if p["gm_s"] is not None and p["id_a"] not in (None, 0.0)
-    ]
-    for p in valid_points:
-        p["gm_id"] = abs(p["gm_s"]) / abs(p["id_a"])
-
-    engine_version = sweep_engine_version
-    environment = {
-        "engine": "ngspice",
-        "engine_version": engine_version,
-        # Issue #1274: `{path, scope}`, never the resolved absolute path --
-        # a PDK model library normally lives outside the repo (under the
-        # user's home directory) and would leak that layout into every
-        # committed report. `provenance.deck` still pins which library ran.
-        "models_lib": env_provenance.repo_relative_path(
-            models_lib, repo_root=repo_root
-        ),
-    }
-
-    if len(valid_points) < 2:
-        payload = _error_payload(
-            device=device,
-            corner=sizing_corner,
-            corners=corners_echo,
-            target=target,
-            environment=environment,
-            provenance=provenance,
-            reason=(
-                "ngspice did not return usable operating-point data for at "
-                "least 2 of the swept widths"
-                + (f": {sweep_diagnostic}" if sweep_diagnostic else "")
-                + (f" (see sweep log: {sweep_log})" if keep_artifacts else "")
-            ),
-        )
-        if not keep_artifacts:
-            _cleanup_dir(work_dir)
-        return payload
-
-    bracket, feasibility_note = _find_bracket(valid_points, target["gm_id"])
-
-    if bracket is None:
-        # Infeasible within [w_min, w_max]: report the boundary point closest
-        # to the target as the best achievable result, never silently "pass".
-        boundary = min(valid_points, key=lambda p: abs(p["gm_id"] - target["gm_id"]))
-        w_star = boundary["w_um"]
-    else:
-        lo, hi = bracket
-        w_star = _log_interp(
-            lo["w_um"], lo["gm_id"], hi["w_um"], hi["gm_id"], target["gm_id"]
-        )
-
-    confirm_points, confirm_engine_version, confirm_log, confirm_diagnostic = (
-        _run_sweep(
-            device=device,
-            corner=sizing_corner,
-            target=target,
-            models_lib=models_lib,
-            w_values=[w_star],
-            work_dir=work_dir,
-            deck_name="confirm.cir",
-            log_name="confirm.log",
-            timeout_s=timeout_s,
-        )
-    )
-    if confirm_engine_version is not None:
-        environment["engine_version"] = confirm_engine_version
-
-    confirmed = confirm_points[0] if confirm_points else None
-    if confirmed is None or confirmed["gm_s"] is None or not confirmed["id_a"]:
-        payload = _error_payload(
-            device=device,
-            corner=sizing_corner,
-            corners=corners_echo,
-            target=target,
-            environment=environment,
-            provenance=provenance,
-            reason=(
-                "ngspice confirmation run at the interpolated width did not "
-                "return usable operating-point data"
-                + (f": {confirm_diagnostic}" if confirm_diagnostic else "")
-                + (f" (see confirm log: {confirm_log})" if keep_artifacts else "")
-            ),
-        )
-        if not keep_artifacts:
-            _cleanup_dir(work_dir)
-        return payload
-
-    operating_point, confirmed_gm_id, vov, vov_is_approx = _op_point_from_confirmed(
-        confirmed, device, vds_v=target.get("vds_v")
-    )
-    gm_id_rel_error = (confirmed_gm_id - target["gm_id"]) / target["gm_id"]
-    id_rel_error = (abs(confirmed["id_a"]) - target["id_a"]) / target["id_a"]
-    inversion_level = operating_point["inversion_level"]
-
-    feasible = bracket is not None
-    within_tolerance = abs(gm_id_rel_error) <= gm_id_rel_tol
-    sizing_status = "pass" if (feasible and within_tolerance) else "fail"
-
-    if target.get("vds_v") is not None:
-        rationale_parts = [
-            f"gm/Id lookup via a fixed-Vds bias sweep: {device['kind']} "
-            f"'{device['model']}' at L={device['l_um']}um, Vds held at "
-            f"{target['vds_v']:.6g}V by an ideal bias source while a "
-            "feedback-regulated gate bias servos Vgs to hit the target "
-            f"current {target['id_a']:.6g}A (the confirmed current is "
-            "measured, not assumed exact the way the diode-connected mode's "
-            "ideal current source guarantees -- see margins.id_rel_error), "
-            f"width swept from {device['w_min_um']}um to "
-            f"{device['w_max_um']}um ({len(sweep_points_result)} points) to "
-            f"bracket the target gm/Id={target['gm_id']:.6g}, then "
-            "confirmed by a fresh ngspice operating-point run at the "
-            "interpolated width (never trusting the sweep grid or "
-            "interpolation alone)."
-        ]
-    else:
-        rationale_parts = [
-            "gm/Id lookup via a diode-connected bias sweep (Vds=Vgs): "
-            f"{device['kind']} '{device['model']}' at L={device['l_um']}um, "
-            "current fixed at "
-            f"{target['id_a']:.6g}A by an ideal bias source, width swept from "
-            f"{device['w_min_um']}um to {device['w_max_um']}um "
-            f"({len(sweep_points_result)} points) to bracket the target gm/Id="
-            f"{target['gm_id']:.6g}, then confirmed by a fresh ngspice operating-"
-            f"point run at the interpolated width (never trusting the sweep grid "
-            f"or interpolation alone)."
-        ]
-    if not feasible:
-        rationale_parts.append(
-            f"Target gm/Id={target['gm_id']:.6g} is not reachable within "
-            f"[{device['w_min_um']}, {device['w_max_um']}]um at this "
-            f"current -- {feasibility_note}; reporting the closest boundary "
-            "point actually achieved instead of extrapolating."
-        )
-    if vov is not None and not vov_is_approx:
-        rationale_parts.append(
-            f"Inversion level '{inversion_level}' from Vov=Vgs-Vth="
-            f"{vov:.4g}V (Vov<=0: weak; 0<Vov<0.1V: moderate; "
-            "Vov>=0.1V: strong -- a standard rule-of-thumb threshold, not a "
-            "precise inversion-coefficient computation)."
-        )
-    elif vov is not None and vov_is_approx:
-        rationale_parts.append(
-            f"Inversion level '{inversion_level}' from Vov~=Vdsat="
-            f"{vov:.4g}V (Vth not exposed by this device model; Vdsat "
-            "approximates Vov for a square-law device, same thresholds as "
-            "above -- less accurate for a model where the two genuinely "
-            "diverge)."
-        )
-    else:
-        rationale_parts.append(
-            "Inversion level could not be classified: the device model did "
-            "not expose Vth or Vdsat at this operating point."
-        )
-
-    method = {
-        "name": _bias_method_name(target),
-        "bias": _bias_label(target),
-        "rationale": " ".join(rationale_parts),
-        "sweep_points": len(sweep_points_result),
-        "valid_sweep_points": len(valid_points),
-        "bracket_w_um": (
-            [bracket[0]["w_um"], bracket[1]["w_um"]] if bracket is not None else None
-        ),
-        "interpolated_w_um": w_star,
-        "feasible": feasible,
-    }
-
-    # Verify the solved width across every OTHER declared corner -- a fresh
-    # single-point confirmation each, no further search (issue #729). The
-    # sizing corner's own entry is already fully computed above.
-    corner_results: list[dict[str, Any]] = [None] * len(corner_points)  # type: ignore[list-item]
-    corner_results[sizing_index] = {
-        "corner_id": sizing_corner["corner_id"],
-        "process": sizing_corner["process"],
-        "temperature_c": sizing_corner["temperature_c"],
-        "is_sizing": True,
-        "status": sizing_status,
-        "operating_point": operating_point,
-        "margins": {
-            "gm_id_rel_error": gm_id_rel_error,
-            "id_rel_error": id_rel_error,
-        },
-        "diagnostic": None,
-    }
-    for index, other_corner in enumerate(corner_points):
-        if index == sizing_index:
-            continue
-        corner_results[index] = _verify_corner(
-            device=device,
-            corner=other_corner,
-            target=target,
-            models_lib=models_lib,
-            w_star=w_star,
-            work_dir=work_dir,
-            deck_name=f"verify_{index}.cir",
-            log_name=f"verify_{index}.log",
-            timeout_s=timeout_s,
-            gm_id_rel_tol=gm_id_rel_tol,
-        )
-    corners_echo["results"] = corner_results
-
-    # error > fail > pass, mirroring `klt sim`'s own aggregate precedence: an
-    # evaluator error at *any* declared corner always wins. Otherwise the
-    # sizing corner's own status sets the aggregate -- a non-sizing corner's
-    # "fail" is reported spread, not aggregate-failing, unless the request
-    # opts in via `targets.hold_across_corners`.
-    if any(result["status"] == "error" for result in corner_results):
-        status = "error"
-    elif sizing_status == "fail":
-        status = "fail"
-    elif hold_across_corners and any(
-        not result["is_sizing"] and result["status"] == "fail"
-        for result in corner_results
-    ):
-        status = "fail"
-    else:
-        status = "pass"
-
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "status": status,
-        "device": device,
-        "corner": _corner_public(sizing_corner),
-        "corners": corners_echo,
-        "target": target,
-        # Issue #770: hoisted rationale fields, so a caller can read a
-        # device's gm/Id target/achieved/inversion-level without
-        # reconstructing them from `target`/`operating_point` by hand.
-        "gm_id_target": target["gm_id"],
-        "gm_id_achieved": confirmed_gm_id,
-        "inversion_level": inversion_level,
-        "tolerance": {"gm_id_rel": gm_id_rel_tol},
-        "operating_point": operating_point,
-        "margins": {
-            "gm_id_rel_error": gm_id_rel_error,
-            "id_rel_error": id_rel_error,
-        },
-        "method": method,
-        "environment": environment,
-        "provenance": provenance,
-    }
-
-    if keep_artifacts:
-        payload["environment"]["artifacts_dir"] = work_dir
-    else:
-        _cleanup_dir(work_dir)
-
-    return payload
 
 
 def _parse_design_centering(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -2035,8 +2037,7 @@ def _invoke_ngspice(
             text=True,
             timeout=timeout_s,
         )
-        match = _ENGINE_VERSION_RE.search(completed.stdout or "")
-        engine_version = match.group(1) if match else None
+        engine_version = _ngspice_engine_version(completed.stdout)
     except subprocess.TimeoutExpired:
         launch_diagnostic = f"ngspice did not complete within {timeout_s}s, killed"
     except FileNotFoundError as exc:
@@ -2107,9 +2108,3 @@ def _parse_sweep_log(
         }
         for i, p in enumerate(points)
     ]
-
-
-def _cleanup_dir(path: str) -> None:
-    import shutil
-
-    shutil.rmtree(path, ignore_errors=True)

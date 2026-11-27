@@ -125,6 +125,26 @@ case "$1" in
       if [[ -f "$canned" ]]; then cat "$canned"; else echo "[]"; fi
       exit 0
     fi
+    # #13586: timeline (fails if timeline-fail-<N>) and collaborator permission
+    # (perm-<login> holds the permission word; absent -> "none").
+    if [[ "$path" == repos/*/issues/*/timeline ]]; then
+      num="${path#repos/*/issues/}"
+      num="${num%/timeline}"
+      printf 'TIMELINE %s\n' "$num" >> "$STUB_DIR_FROM_ENV/timeline-calls.log"
+      if [[ -f "$STUB_DIR_FROM_ENV/timeline-fail-$num" ]]; then
+        echo "stub gh: timeline fetch failed (HTTP 502)" >&2
+        exit 1
+      fi
+      canned="$STUB_DIR_FROM_ENV/timeline-$num.json"
+      if [[ -f "$canned" ]]; then cat "$canned"; else echo "[]"; fi
+      exit 0
+    fi
+    if [[ "$path" == repos/*/collaborators/*/permission ]]; then
+      login="${path#repos/*/collaborators/}"
+      login="${login%/permission}"
+      if [[ -f "$STUB_DIR_FROM_ENV/perm-$login" ]]; then cat "$STUB_DIR_FROM_ENV/perm-$login"; else echo none; fi
+      exit 0
+    fi
     echo "stub gh: unhandled api args: $*" >&2
     exit 3
     ;;
@@ -193,6 +213,10 @@ if [[ "$1" == "forge" && "$2" == "verdict-equivalent" ]]; then
   if [[ -f "$STUB_DIR_FROM_ENV/tree-compare-fail" ]]; then
     echo "stub loom-daemon: could not decide $4 -> $5 — re-review (fail closed). Why: clean-merge: new head $5 is not in the local clone and could not be fetched: stub" >&2
     exit 1
+  fi
+  if [[ -f "$STUB_DIR_FROM_ENV/tree-no-repo-flag" && "$*" == *" --repo "* ]]; then
+    echo "error: unexpected argument '--repo' found" >&2
+    exit 2
   fi
   EQ_KIND=""
   [[ -f "$STUB_DIR_FROM_ENV/tree-identical" ]] && EQ_KIND=tree
@@ -379,6 +403,7 @@ reset_state() {
     rm -f "$STUB_DIR"/tree-compare-fail "$STUB_DIR"/tree-verb-missing
     rm -f "$STUB_DIR"/equiv-clean-merge "$STUB_DIR"/equiv-rebase
     rm -f "$STUB_DIR"/notice-calls.log "$STUB_DIR"/notice-stdin.json "$STUB_DIR"/notice-verb-missing
+    rm -f "$STUB_DIR"/timeline-*.json "$STUB_DIR"/timeline-fail-* "$STUB_DIR"/timeline-calls.log "$STUB_DIR"/perm-*
 }
 
 run_guard() {
@@ -1275,7 +1300,7 @@ assert_eq "$SHA_B" "$(get_field "$OUT" HEAD_SHA)" "(u1) HEAD_SHA is the moved he
 assert_eq "" "$WRITES" "(u1) loom:pr is NOT removed on a tree-identical move"
 assert_eq "" "$COMMENTS_POSTED" "(u1) No stale-verdict comment posted"
 assert_eq "" "$DAEMON" "(u1) No auto-merge disarm — the reviewed tree IS what is at the head"
-assert_contains "$TREE_CALLS" "forge verdict-equivalent 270 $SHA_A $SHA_B" "(u1) The comparison is asked pr, marker, head, in that order"
+assert_contains "$TREE_CALLS" "forge verdict-equivalent --repo owner/repo 270 $SHA_A $SHA_B" "(u1) The comparison names the vetted write repo, then asks pr, marker, head, in that order (#13150)"
 assert_contains "$OUT" "equivalence kind: tree" "(u1) REASON names the equivalence kind that carried the verdict"
 assert_contains "$OUT" "CI still re-runs" "(u1) REASON states that CI is not exempted (#9416 AC5)"
 
@@ -1327,6 +1352,27 @@ pr_json 274 "$SHA_A" "loom:pr"
 run_guard 274 --clear
 assert_eq "0" "$RC" "(u5) Marker == head -> exit 0"
 assert_eq "" "$TREE_CALLS" "(u5) No compare call on the unchanged-head fast path"
+
+# (u5b) #13150: with LOOM_REPO known the comparison names the repo; without it the flag is omitted.
+reset_state
+pr_json 276 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-276.json"
+: > "$STUB_DIR/tree-identical"
+rm -f "$STUB_DIR/tree-calls.log"
+LOOM_REPO=acme/widgets run_guard 276
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(u5b) LOOM_REPO set -> FRESH"
+assert_contains "$TREE_CALLS" "forge verdict-equivalent --repo acme/widgets 276 $SHA_A $SHA_B" "(u5b) --repo <repo> is passed to the verb"
+rm -f "$STUB_DIR/tree-calls.log"
+run_guard 276
+assert_contains "$TREE_CALLS" "forge verdict-equivalent 276 $SHA_A $SHA_B" "(u5b) No known repo -> flag omitted, as before"
+
+# (u5c) #13150: a daemon whose clap rejects --repo is retried once without it (not widened into STALE).
+rm -f "$STUB_DIR/tree-calls.log"
+: > "$STUB_DIR/tree-no-repo-flag"
+LOOM_REPO=acme/widgets run_guard 276
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(u5c) --repo-rejecting daemon -> still FRESH via the retry"
+assert_contains "$TREE_CALLS" "forge verdict-equivalent 276 $SHA_A $SHA_B" "(u5c) The retry omits the flag"
+rm -f "$STUB_DIR/tree-no-repo-flag"
 
 # (u6) Report-only (no --clear) on a tree-identical move: FRESH, exit 0, and
 #      still nothing written — a caller that only reports must see the
@@ -1497,6 +1543,114 @@ touch "$STUB_DIR/trust-verb-missing"
 run_guard 275 --clear --anchor
 assert_eq "11" "$RC" "(u6) Unauthenticated markers -> exit 11"
 assert_eq "" "$COMMENTS_POSTED$WRITES" "(u6) No comment, no label writes"
+
+# --- (v) operator send-back at an unchanged head (#13586) ------------------
+# Marker names SHA_A, head is SHA_B, and a trusted human applied the label after
+# the marker. v_case <pr> <timeline-json-body> builds that fixture.
+v_case() {
+    local n="$1" tl="$2"
+    reset_state
+    pr_json "$n" "$SHA_B" "loom:changes-requested"
+    { echo "["; verdict_comment "2026-11-01T10:00:00Z" "$SHA_A" "changes-requested"; echo "]"; } > "$STUB_DIR/comments-$n.json"
+    printf '[%s]' "$tl" > "$STUB_DIR/timeline-$n.json"
+}
+V_COMMIT='{"event":"committed","sha":"'"$SHA_B"'"}'
+V_LABEL_OP='{"event":"labeled","label":{"name":"loom:changes-requested"},"actor":{"login":"operator1"},"created_at":"2026-11-02T10:00:00Z"}'
+
+# (v1) trusted label after marker, no head move after -> FRESH, nothing written.
+v_case 280 "$V_COMMIT,$V_LABEL_OP"; echo write > "$STUB_DIR/perm-operator1"
+run_guard 280 --clear
+assert_eq "0/FRESH/0" "$RC/$(get_field "$OUT" DECISION)/$(get_field "$OUT" CLEARED)" "(v1) trusted send-back at current head -> FRESH"
+assert_eq "" "$WRITES$COMMENTS_POSTED$DAEMON" "(v1) nothing cleared or written"
+
+# (v2) a commit lands after the label -> STALE, --clear as before.
+v_case 281 "$V_LABEL_OP,$V_COMMIT"; echo write > "$STUB_DIR/perm-operator1"
+run_guard 281 --clear
+assert_eq "12/STALE/1" "$RC/$(get_field "$OUT" DECISION)/$(get_field "$OUT" CLEARED)" "(v2) head moved after label -> STALE and cleared"
+
+# (v2b) force-push after the label -> STALE.
+v_case 282 "$V_LABEL_OP"',{"event":"head_ref_force_pushed","created_at":"2026-11-03T10:00:00Z"}'; echo write > "$STUB_DIR/perm-operator1"
+run_guard 282
+assert_eq "12" "$RC" "(v2b) force-push after label -> STALE"
+
+# (v3) untrusted labeler -> existing marker comparison decides.
+v_case 283 "$V_COMMIT,$V_LABEL_OP"
+run_guard 283
+assert_eq "12" "$RC" "(v3) labeler without write access -> STALE"
+
+# (v4) label event older than the marker -> STALE.
+v_case 284 "$V_COMMIT,${V_LABEL_OP/2026-11-02/2026-10-30}"; echo write > "$STUB_DIR/perm-operator1"
+run_guard 284
+assert_eq "12" "$RC" "(v4) label older than the marker -> STALE"
+
+# (v5) timeline read failure -> fail closed to the marker comparison.
+v_case 285 "$V_COMMIT,$V_LABEL_OP"; echo write > "$STUB_DIR/perm-operator1"; touch "$STUB_DIR/timeline-fail-285"
+run_guard 285
+assert_eq "12" "$RC" "(v5) timeline unreadable -> STALE"
+
+# (v6) several labeled events: the latest wins (old trusted one, newer untrusted one).
+v_case 286 "$V_COMMIT,$V_LABEL_OP"',{"event":"unlabeled","label":{"name":"loom:changes-requested"},"actor":{"login":"rando"},"created_at":"2026-11-02T11:00:00Z"},{"event":"labeled","label":{"name":"loom:changes-requested"},"actor":{"login":"rando"},"created_at":"2026-11-02T12:00:00Z"}'; echo write > "$STUB_DIR/perm-operator1"
+run_guard 286
+assert_eq "12" "$RC" "(v6) latest labeled event (untrusted) decides -> STALE"
+
+# (v7) an approval never takes this path.
+reset_state
+pr_json 287 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-11-01T10:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-287.json"
+printf '[%s]' "${V_LABEL_OP/changes-requested/pr}" > "$STUB_DIR/timeline-287.json"; echo write > "$STUB_DIR/perm-operator1"
+run_guard 287
+assert_eq "12" "$RC" "(v7) loom:pr keeps the strict marker rule"
+assert_eq "" "$(cat "$STUB_DIR/timeline-calls.log" 2>/dev/null)" "(v7) timeline not even read for an approval"
+
+# --- (w) a prepared commit pushed after the verdict (#14516) ----------------
+# The Doctor commits the correction locally BEFORE Judge's verdict, then
+# fast-forwards the branch AFTER it. The timeline lists the `committed` entry by
+# its commit date (before the label) and a fast-forward emits no event, so "no
+# commit after the label" is true of a head the label never described. The
+# verdict writer (post-verdict.sh) posts the marker and applies the label under
+# one identity; that label is the writer's, not an operator send-back. The marker
+# comment is authored by the fleet identity (verdict_comment); a send-back is only
+# recognised from a different login.
+FLEET_LOGIN='loom-fleet-dispatch[bot]'
+W_LABEL_JUDGE='{"event":"labeled","label":{"name":"loom:changes-requested"},"actor":{"login":"'"$FLEET_LOGIN"'"},"created_at":"2026-11-01T10:00:02Z"}'
+
+# (w1) the observed ordering: commit listed before the verdict + label, both by the
+# marker's author. The rejection names SHA_A, the head is SHA_B -> STALE, and the
+# normal --clear path re-queues it for review.
+v_case 290 "$V_COMMIT,$W_LABEL_JUDGE"; echo write > "$STUB_DIR/perm-$FLEET_LOGIN"
+run_guard 290 --clear
+assert_eq "12/STALE/1" "$RC/$(get_field "$OUT" DECISION)/$(get_field "$OUT" CLEARED)" "(w1) Judge's own label after a prepared commit -> STALE and cleared"
+assert_eq "$SHA_A" "$(get_field "$OUT" MARKER_SHA)" "(w1) the rejection names the earlier head"
+assert_contains "$WRITES" "--add-label loom:review-requested" "(w1) re-review label added"
+assert_contains "$WRITES" "--remove-label loom:changes-requested" "(w1) stale rejection removed"
+
+# (w2) same identity, spelled with different case -> still the writer's label.
+v_case 291 "$V_COMMIT,${W_LABEL_JUDGE/loom-fleet-dispatch/Loom-Fleet-Dispatch}"; echo write > "$STUB_DIR/perm-Loom-Fleet-Dispatch[bot]"
+run_guard 291
+assert_eq "12" "$RC" "(w2) label actor matches the marker author case-insensitively -> STALE"
+
+# (w3) an explicit hold still suppresses the clear on the new STALE path.
+v_case 292 "$V_COMMIT,$W_LABEL_JUDGE"; echo write > "$STUB_DIR/perm-$FLEET_LOGIN"
+pr_json 292 "$SHA_B" "loom:changes-requested" "loom:blocked"
+run_guard 292 --clear
+assert_eq "12/STALE/0" "$RC/$(get_field "$OUT" DECISION)/$(get_field "$OUT" CLEARED)" "(w3) hold label -> STALE reported, nothing cleared"
+assert_eq "" "$WRITES" "(w3) no label writes under a hold"
+
+# (w4) marker author unreadable (a trusted comment carrying no login) is insufficient
+# evidence: the operator send-back is not assumed -> STALE.
+reset_state
+pr_json 293 "$SHA_B" "loom:changes-requested"
+printf '[{"author_association":"MEMBER","created_at":"2026-11-01T10:00:00Z","body":"<!-- loom:verdict-sha sha=%s verdict=changes-requested -->"}]' "$SHA_A" > "$STUB_DIR/comments-293.json"
+printf '[%s]' "$V_COMMIT,$V_LABEL_OP" > "$STUB_DIR/timeline-293.json"; echo write > "$STUB_DIR/perm-operator1"
+run_guard 293
+assert_eq "12" "$RC" "(w4) marker author unknown -> STALE"
+
+# (w5) the real operator send-back is kept even when the judge labelled first: the
+# LATEST labeled event is a trusted human's, a different login than the marker's.
+v_case 294 "$V_COMMIT,$W_LABEL_JUDGE,$V_LABEL_OP"; echo write > "$STUB_DIR/perm-operator1"; echo write > "$STUB_DIR/perm-$FLEET_LOGIN"
+run_guard 294 --clear
+assert_eq "0/FRESH/0" "$RC/$(get_field "$OUT" DECISION)/$(get_field "$OUT" CLEARED)" "(w5) later trusted human send-back on the current head -> FRESH"
+assert_eq "" "$WRITES$COMMENTS_POSTED$DAEMON" "(w5) nothing cleared or written"
 
 # --- Summary -------------------------------------------------------------
 echo ""

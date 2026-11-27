@@ -125,12 +125,15 @@ def _declare_cap2_params(pcell: Any) -> None:
         ("cap2_top_via_layer", "Second-level top-plate via layer"),
         ("cap2_top_via_metal_layer", "Second-level landing-metal layer"),
     ):
-        pcell.param(name, pcell.TypeLayer, desc, default=kdb.LayerInfo(0, 0))
+        pcell.param(
+            name, pcell.TypeLayer, desc, default=kdb.LayerInfo(0, 0), hidden=True
+        )
     pcell.param(
         "cap2_present",
         pcell.TypeBoolean,
         "Whether the resolved PDK family has a verified second level",
         default=False,
+        hidden=True,
     )
     for name, desc in (
         ("cap2_via_side_um", "Second-level via side (um)"),
@@ -140,7 +143,7 @@ def _declare_cap2_params(pcell: Any) -> None:
             "Second-level landing-metal enclosure of its via (um)",
         ),
     ):
-        pcell.param(name, pcell.TypeDouble, desc, default=0.0)
+        pcell.param(name, pcell.TypeDouble, desc, default=0.0, hidden=True)
 
 
 def _stack_geometry(pcell: Any) -> dict[str, float] | None:
@@ -232,18 +235,21 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "MiM top-plate drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "cap_bottom_plate_layer",
                 self.TypeLayer,
                 "MiM bottom-plate drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "cap_top_via_layer",
                 self.TypeLayer,
                 "Top-plate via drawing layer (only used when cap_top_via_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "cap_top_via_present",
@@ -251,6 +257,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether cap_top_via_layer is a real, DRC-checked layer for "
                 "the resolved PDK",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "cap_top_via_metal_layer",
@@ -258,6 +265,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Top-plate via landing-metal drawing layer (only used when "
                 "cap_top_via_metal_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "cap_top_via_metal_present",
@@ -265,6 +273,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether cap_top_via_metal_layer is a real, DRC-checked "
                 "layer for the resolved PDK",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "cap_top_via_metal_min_w_um",
@@ -274,6 +283,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "family with no override, leaving the generic landing-pad "
                 "size unchanged",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "cap_top_via_min_w_um",
@@ -282,6 +292,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "resolved PDK family (issue #1555) -- 0.0 leaves the generic "
                 "CONTACT_SIZE_UM cut unchanged",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "cap_bottom_plate_margin_min_um",
@@ -290,6 +301,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "plate on the resolved PDK family (issue #1555) -- 0.0 "
                 "leaves the generic CAP_BOTTOM_PLATE_MARGIN_UM unchanged",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "cap_min_spacing_um",
@@ -298,6 +310,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "the resolved PDK family (issue #1555) -- 0.0 draws exactly "
                 "the requested spacing_um",
                 default=0.0,
+                hidden=True,
             )
             # One static slot per mask the *widest* family in
             # `_PDK_CAP_TOP_PLATE_REQUIRES` needs (issue #1555), mirroring
@@ -314,6 +327,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     "or MIM_L_MK) drawn over the top plate for device "
                     f"recognition (only used when cap_top_requires_{i}_present)",
                     default=kdb.LayerInfo(0, 0),
+                    hidden=True,
                 )
                 self.param(
                     f"cap_top_requires_{i}_present",
@@ -322,6 +336,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     "resolved PDK family's own MiM device class requires over "
                     "the top plate",
                     default=False,
+                    hidden=True,
                 )
             # Fixed drawn side of every cut on cap_top_via_layer (issue #2585) --
             # harness-computed by `_cut_fixed_size_um` from the resolved PDK
@@ -334,6 +349,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "down to on the resolved PDK family -- 0.0 leaves the "
                 "generator's own cut size unchanged",
                 default=0.0,
+                hidden=True,
             )
 
         def display_text_impl(self) -> str:

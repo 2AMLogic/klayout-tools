@@ -11,7 +11,7 @@
 #
 # This script makes the rule self-reporting. It is strictly READ-ONLY and
 # ADVISORY: it never tags, pushes, or triggers .github/workflows/publish.yml.
-# Cutting a release stays a human action (see RELEASING.md).
+# Cutting a release is .github/workflows/release.yml's job (see RELEASING.md).
 #
 # The threshold is *parsed from RELEASING.md* rather than hardcoded here, so
 # the two can never drift apart silently — editing the policy edits this
@@ -39,11 +39,21 @@
 #                        appended to it (so a CI run surfaces the signal in
 #                        the job summary, not only in the log).
 #
+#   GH_TOKEN/GITHUB_TOKEN  When either is set (and `gh` is on PATH, and the
+#                        repository has a GitHub slug -- $GITHUB_REPOSITORY or
+#                        an origin remote on github.com), the report also
+#                        names the most recent failed `release.yml` run,
+#                        even after a later successful run (issue #6911). The
+#                        lookup is strictly best-effort -- no token, no `gh`,
+#                        no slug, or any API error just omits the line, prints
+#                        nothing to stdout (JSON lives there), and leaves the
+#                        exit codes alone.
+#
 # Exit codes:
 #   0  Within the backstop, or no tags exist yet (nothing to compare against).
 #   1  Over the backstop — a release is due.
 #   2  The check itself could not run (bad usage, not a git repo, RELEASING.md
-#      threshold unparseable).
+#      threshold unparseable). A failed Actions lookup is NEVER a 2.
 
 set -uo pipefail
 
@@ -161,7 +171,7 @@ fi
 # Same ordering RELEASING.md documents: newest tag by creation date.
 LATEST_TAG="$(git -C "$REPO" tag --sort=-creatordate | head -1)"
 
-CHANGELOG_HINT="CHANGELOG.md's \"## Unreleased\" section lists what has landed on main but is not yet in a tagged release."
+CHANGELOG_HINT="See changelog.d/ and CHANGELOG.md's \"## Unreleased\" section for changes pending release."
 
 if [ -z "$LATEST_TAG" ]; then
     STATUS="no_tags"
@@ -181,6 +191,58 @@ else
     fi
 fi
 
+# ---------- last failed Release run (best-effort, issue #6911) ----------
+
+# Prefer the measured checkout's origin. Actions can run this script against
+# another checkout, in which case GITHUB_REPOSITORY names the caller.
+github_slug() {
+    local url slug
+    url="$(git -C "$REPO" remote get-url origin 2>/dev/null)" || url=""
+    case "$url" in
+        https://github.com/* | http://github.com/* | ssh://git@github.com/*)
+            slug="${url#*github.com/}" ;;
+        git@github.com:*) slug="${url#git@github.com:}" ;;
+        "") [ "$REPO" -ef "${GITHUB_WORKSPACE:-$DEFAULT_REPO}" ] || return 1
+            slug="${GITHUB_REPOSITORY:-}" ;;
+        *) return 1 ;;
+    esac
+    slug="${slug%.git}"
+    case "$slug" in
+        */*/* | /* | */) return 1 ;;
+        */*) printf '%s\n' "$slug" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Echo the html_url of the most recent failed release.yml run.
+# Silent on every unavailability; prints nothing else, so callers can treat
+# empty output as "no link".
+last_failed_release_run() {
+    command -v gh >/dev/null 2>&1 || return 0
+    [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] || return 0
+    local slug runs
+    slug="$(github_slug)" || return 0
+    runs="$(gh api "repos/$slug/actions/workflows/release.yml/runs?status=failure&per_page=100" \
+        2>/dev/null)" || return 0
+    printf '%s' "$runs" | python3 -c '
+import json, sys
+
+try:
+    runs = json.load(sys.stdin).get("workflow_runs") or []
+except ValueError:
+    sys.exit(1)
+failed = [run for run in runs if run.get("conclusion") == "failure"]
+if failed:
+    last = max(failed, key=lambda r: (r.get("created_at") or "", r.get("id") or 0))
+    print(last.get("html_url") or "")
+' 2>/dev/null
+}
+
+LAST_FAILED_RUN="$(last_failed_release_run || true)"
+if [ -n "$LAST_FAILED_RUN" ]; then
+    MESSAGE="$MESSAGE Most recent failed Release workflow run: $LAST_FAILED_RUN"
+fi
+
 # ---------- reporting ----------
 
 json_escape() {
@@ -192,8 +254,9 @@ emit_text() {
 }
 
 emit_json() {
-    local tag_field="null"
+    local tag_field="null" run_field="null"
     [ -n "$LATEST_TAG" ] && tag_field="\"$(json_escape "$LATEST_TAG")\""
+    [ -n "$LAST_FAILED_RUN" ] && run_field="\"$(json_escape "$LAST_FAILED_RUN")\""
     cat <<EOF
 {
   "status": "$STATUS",
@@ -202,6 +265,7 @@ emit_json() {
   "commits_ahead": $COMMITS_AHEAD,
   "threshold": $THRESHOLD,
   "threshold_source": "$(json_escape "$THRESHOLD_SOURCE")",
+  "last_failed_run": $run_field,
   "message": "$(json_escape "$MESSAGE")"
 }
 EOF

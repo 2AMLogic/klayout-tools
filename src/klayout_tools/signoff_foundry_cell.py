@@ -11,13 +11,16 @@ A manifest evidence entry opts in with ``foundry_cell_exceptions``, a list of::
     {"cell": str, "cell_hash": "sha256:...", "rules": {rule_id: count},
      "bare_cell_report": path, "bare_cell_layout": path, "layout": path?}
 
-Attribution limit: ``klt drc`` only attributes a violation to a cell
-(``source_cell``) on engines with per-instance attribution; the RDB engine
-reports ``source_cell: null``. Grading therefore compares the block's
-per-rule counts to the summed exception counts (and, where a violation does
+Attribution: ``klt drc`` attributes a violation to a cell
+(``source_cell``) on engines with per-instance attribution -- the curated
+engine, and (issue #5661) the RDB ``klayout`` engine, whose markers now
+carry the containing instance. Grading compares the block's per-rule
+counts to the summed exception counts and, for every violation that does
 carry a ``source_cell``, requires it to be an excepted cell or lie beneath
-one, i.e. an excepted cell appears in its ``source_path``). Paths resolve
-against the working directory, like every other evidence path.
+one (i.e. an excepted cell appears in its ``source_path``); a violation
+without a ``source_cell`` (e.g. top-level geometry) is graded by counts
+alone. Paths resolve against the working directory, like every other
+evidence path.
 """
 
 from __future__ import annotations
@@ -30,7 +33,6 @@ from typing import Any
 from ._provenance import cell_geometry_digest, sha256_file
 
 #: Failure tokens, listed in ``failure_detail.foundry_cell_exceptions.lapsed``.
-LAPSE_MALFORMED = "malformed_exception"
 LAPSE_LAYOUT_UNREADABLE = "layout_unreadable"
 LAPSE_CELL_HASH_MISMATCH = "cell_hash_mismatch"
 LAPSE_BARE_LAYOUT_HASH_MISMATCH = "bare_cell_layout_hash_mismatch"

@@ -57,17 +57,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 # Pin a literal snippet as present verbatim in a doc file -- catches drift
 # between this test's mirrored logic and the shipped markdown.
-assert_doc_contains() {
-    local file="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" "$file"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg (missing literal in $file: $needle)"
-    fi
-}
 
 # =====================================================================
 # Mirrored, in isolation, from champion-pr-merge.md's "Standing operator
@@ -245,6 +234,14 @@ awk '/^KEPT_SET_PATTERNS=\(/{p=1} p{print} /^standing_auth_eval any$/{exit}' "$C
 # the critical-file hits through it, so run_eval defines it as the block does.
 awk '/^CRITICAL_PATTERNS=\(/{p=1} p{print} p&&/^\)/{exit}' "$CHAMPION_MD" >"$CRIT_SRC"
 
+# The shell shard has no daemon build. Rust tests cover the native parser;
+# LOOM_TEST_REAL_DAEMON opts into running the same cases against that parser.
+workflow_permission_check() {
+    [ "$*" = "forge workflow-write-all-check" ] || return 2
+    cat >/dev/null
+    return "${WORKFLOW_WRITE_ALL_RC:-0}"
+}
+
 # run_eval <mode> <config-json> <files> <api> <ci: green|red> <labels>
 # <files> is the critical-files criterion's own $FILES (critical) / FAST_PATH_FILES (any).
 # <api> is the files-API body the stubbed `gh api` returns: "" = the read fails,
@@ -263,10 +260,12 @@ run_eval() {
         FAST_PATH_FILES="$files"
         LABELS="$labels"
         STUB_API="$api"
+        LOOM_DAEMON_BIN="${LOOM_TEST_REAL_DAEMON:-workflow_permission_check}"
         rm -f "$CFG_DIR/shacount"
         gh() { stub_gh "$@"; }
         # loom-daemon forge additive-migrations (#13102): STUB_ADDITIVE_RC=0 clears the PR; default = held.
-        loom-daemon() { [ "${STUB_ADDITIVE_RC:-1}" = "0" ]; }
+        # loom-daemon forge locked-deps-only (2am#6942): STUB_LOCKED_RC=0 clears the PR; default = held.
+        loom-daemon() { case "$2" in locked-deps-only) [ "${STUB_LOCKED_RC:-1}" = "0" ] ;; *) [ "${STUB_ADDITIVE_RC:-1}" = "0" ] ;; esac; }
         read_ci_checks() {
             NO_CHECKS=false
             if [ "$ci" = "green" ]; then CHECKS='[{"name":"t","bucket":"pass"}]'; else CHECKS='[{"name":"t","bucket":"fail"}]'; fi
@@ -898,6 +897,44 @@ assert_doc_contains "$CHAMPION_MD" '`additiveMigrations` (#13102' "champion-pr-m
 assert_doc_contains "$PROMPT_DIR/champion-critical-file-hold.md" '"additiveMigrations": true' "champion-critical-file-hold.md documents the additiveMigrations exception"
 
 echo
+echo "--- 2am#6942: lockedDepsOnly class (Cargo.toml hits, verb-gated) ---"
+
+LD_CLASS='{"champion":{"standingAuthorizations":[{"id":"d1-locked","filePatterns":["*/Cargo.toml"],"conditions":["judgeApproval","greenCi"],"lockedDepsOnly":true}]}}'
+LD_OFF='{"champion":{"standingAuthorizations":[{"id":"d1-off","filePatterns":["*/Cargo.toml"],"conditions":["judgeApproval","greenCi"],"criticalFilesOnly":true}]}}'
+LD_TOML="infra/telemetry-port/Cargo.toml"
+
+out="$(STUB_LOCKED_RC=0 SHOW_SCOPE=1 run_eval critical "$LD_CLASS" "$LD_TOML" AUTO green "loom:pr")"
+assert_eq "ELIGIBLE:d1-locked:critical:$LD_TOML" "$out" "class on + verb exit 0: a locked-deps Cargo.toml is covered"
+
+out="$(STUB_LOCKED_RC=1 run_eval critical "$LD_CLASS" "$LD_TOML" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "class on + verb non-zero (new registry crate, no lock change, older daemon): held as today"
+
+out="$(STUB_LOCKED_RC=0 run_eval critical "$LD_OFF" "$LD_TOML" AUTO green "loom:pr")"
+assert_eq "ELIGIBLE:d1-off" "$out" "control: a plain criticalFilesOnly class does not consult the verb"
+
+LD_STR="${LD_CLASS/\"lockedDepsOnly\":true/\"lockedDepsOnly\":\"true\"}"
+out="$(STUB_LOCKED_RC=0 run_eval critical "$LD_STR" "$LD_TOML" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a non-boolean lockedDepsOnly is malformed and skipped"
+
+out="$(STUB_LOCKED_RC=0 run_eval any "$LD_CLASS" "$LD_TOML" "" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a lockedDepsOnly class is never eligible for the merge-risk criterion"
+
+LD_ANY='{"champion":{"standingAuthorizations":[{"id":"d1-locked","filePatterns":["*"],"conditions":["judgeApproval"],"lockedDepsOnly":true}]}}'
+out="$(STUB_LOCKED_RC=0 run_eval critical "$LD_ANY" "package.json" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "lockedDepsOnly never covers a non-Cargo.toml critical hit"
+
+out="$(STUB_LOCKED_RC=0 run_eval critical "$LD_CLASS" "$(printf '%s\ndefaults/hooks/guard-x.sh' "$LD_TOML")" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a Cargo.toml mixed with a kept-set path still holds"
+
+out="$(STUB_LOCKED_RC=0 run_eval critical "$LD_CLASS" "$LD_TOML" AUTO green "loom:review-requested")"
+assert_eq "NOT ELIGIBLE:" "$out" "conditions still apply: no loom:pr, no waiver"
+
+assert_doc_contains "$CHAMPION_MD" "locked-deps-only waiver" "champion-pr-merge.md records the locked-deps-only waiver in the criterion output"
+assert_doc_contains "$CHAMPION_MD" '`lockedDepsOnly` (2am#6942' "champion-pr-merge.md documents lockedDepsOnly"
+assert_doc_contains "$PROMPT_DIR/champion-critical-file-hold.md" '"lockedDepsOnly": true' "champion-critical-file-hold.md documents lockedDepsOnly"
+assert_doc_contains "$PROMPT_DIR/champion-reference.md" '"lockedDepsOnly": true' "champion-reference.md documents lockedDepsOnly"
+
+echo
 echo "--- #12954: privilegedContentPatterns (capability from head contents, not filename) ---"
 
 FIXTURE_DIR="$TEST_DIR/fixtures/champion-workflows"
@@ -911,7 +948,7 @@ cap_class() { # cap_class <privilegedContentPatterns-json|-> -> a ci class with 
     [ "$1" = "-" ] || extra=",\"privilegedContentPatterns\":$1"
     printf '{"champion":{"standingAuthorizations":[{"id":"ci-cap","filePatterns":[".github/workflows/*.yml"],"conditions":["judgeApproval","greenCi"],"coversCriticalFiles":true,"forbiddenDiffPatterns":["^\\\\s*permissions:","id-token","secrets\\\\.","pull_request_target"]%s}]}}' "$extra"
 }
-CAP_CLASS="$(cap_class "$PRIV_RX")"
+CAP_CLASS="$(cap_class "$(printf '%s\n' "$PRIV_RX" | jq -c '. + ["write-all"]')" | jq -c '.champion.standingAuthorizations[].checkWorkflowWriteAll = true')"
 CONTENT_DIR="$(mktemp -d)"
 trap 'rm -f "$EVAL_SRC" "$LOADER_SRC" "$CRIT_SRC" "${BLOCK_SRC:-}"; rm -rf "$CFG_DIR" "$CONTENT_DIR"' EXIT
 
@@ -943,6 +980,20 @@ export STUB_CONTENT_DIR="$CONTENT_DIR"
 
 out="$(run_eval critical "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
 assert_eq "ELIGIBLE:ci-cap" "$out" "negative control: GITHUB_TOKEN-only, read-only workflow is covered"
+
+put_content "$CI_PATH" ci-write-all-test-name.yml
+out="$(run_eval critical "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-cap" "$out" "typed capability covers a harmless write-all test name and command"
+legacy_class="$(printf '%s\n' "$CAP_CLASS" | jq -c 'del(.champion.standingAuthorizations[].checkWorkflowWriteAll)')"
+out="$(run_eval critical "$legacy_class" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "an unmodified custom write-all regex still matches free text"
+missing_legacy="$(printf '%s\n' "$CAP_CLASS" | jq -c '.champion.standingAuthorizations[].privilegedContentPatterns |= map(select(. != "write-all"))')"
+out="$(run_eval critical "$missing_legacy" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "typed capability requires the fallback pattern for older Champions"
+put_content "$CI_PATH" ci-write-all-permission.yml
+out="$(WORKFLOW_WRITE_ALL_RC=1 run_eval critical "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "typed capability holds a real write-all job permission"
+put_content "$CI_PATH" ci-github-token-only.yml
 
 out="$(run_eval critical "$CAP_CLASS" ".github/workflows/missing.yml" "$(one_file_api .github/workflows/missing.yml '+# x')" green "loom:pr")"
 assert_eq "NOT ELIGIBLE:" "$out" "content the contents API cannot serve fails closed"

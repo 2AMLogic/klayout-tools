@@ -19,7 +19,7 @@ klt yield samples.json --format json > yield.json
 ```
 
 The `--format json` output is the sample-set document itself — a flat
-payload (`schema_version`, `measurements`, `derivation`) emitted through the
+payload (`schema_version`, `measurements`, `derivation`, and `provenance` when the nominal report carries a well-typed `environment.monte_carlo` seed) emitted through the
 shared envelope in [`docs/json-contract.md`](../json-contract.md), which
 `klt yield` reads unchanged. The command does not run simulations, grade
 yield, or need the native extension.

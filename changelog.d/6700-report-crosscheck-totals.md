@@ -1,0 +1,1 @@
+- **`klt report` shows each DRC engine’s status and violation total in cross-check reports** (#6700, 2026-11-20). When only the native engine finds violations, the report explains why the curated table is empty.

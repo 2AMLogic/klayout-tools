@@ -10,13 +10,11 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as real_ngspice
 from klayout_tools import sim, sim_batch, sim_complex_vectors
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
-real_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice not installed"
-)
 
 # Single-pole RC low-pass, fc = 1 kHz, driven by 1 V AC: v(out) = 1/(1+jf/fc).
 _FC = 1e3
@@ -77,7 +75,14 @@ def test_save_mode_netlist_is_rejected_before_launch(tmp_path):
     request = _request(
         tmp_path, {"complex_vectors": ["v(out)"], "save_mode": "netlist"}
     )
-    with pytest.raises(sim.SimError, match="save_mode"):
+    with pytest.raises(
+        sim.SimError,
+        match=(
+            r"omit options\.save_mode\..*options\.save_vectors.*"
+            r'\{"complex_vectors": \["v\(out\)"\], "save_vectors": '
+            r'\["v\(out\)"\]\}'
+        ),
+    ):
         sim.run_sim(str(request))
 
 

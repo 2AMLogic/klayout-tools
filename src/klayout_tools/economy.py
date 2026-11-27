@@ -54,17 +54,7 @@ acceptance criteria:
 - **Budget check and reference deltas** (``budget_um2``/``reference_area_um2``
   request parameters) -- absent from the placeholder entirely.
 
-## Why not `congestion.py`'s native grid machinery
-
-The issue's own text suggests "the whitespace grid can share [congestion.py's]
-machinery" -- but ``congestion.py``'s Rust extension estimates *routing
-demand* from a net list (RUDY/RSMT family), which requires DEF placement +
-connectivity data this command does not have (it takes a bare GDS/OASIS
-stream, not a DEF). What *is* shared is the idiom -- a grid of cells each
-reporting one scalar metric -- re-implemented here in pure
-``klayout.db`` region math (:func:`_whitespace_grid`), matching this
-module's already-lighter dependency footprint (no native extension required
-to run ``klt economy`` at all).
+The whitespace grid uses ``klayout.db`` region math directly on GDS/OASIS geometry.
 """
 
 from __future__ import annotations
@@ -74,6 +64,11 @@ from typing import Any
 from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_cell
 from ._provenance import build_provenance
+from .economy_bands import leaf_bands
+from .economy_gaps import gap_rows, top_level_pieces
+from .economy_leaves import collect_leaf_placements
+from .economy_pnr import attach_pnr, check_pnr_args
+from .economy_whatif import what_if_block_or_none
 
 SCHEMA_VERSION = 1
 
@@ -485,54 +480,6 @@ def _row_utilization(kdb: Any, top_cell: Any, dbu: float) -> dict[str, Any] | No
     }
 
 
-def _margin_edges(gap_bbox: Any, bbox: Any) -> list[str]:
-    """Top-bbox edges the gap component touches, in fixed order."""
-    checks = (
-        ("bottom", gap_bbox.bottom <= bbox.bottom),
-        ("left", gap_bbox.left <= bbox.left),
-        ("right", gap_bbox.right >= bbox.right),
-        ("top", gap_bbox.top >= bbox.top),
-    )
-    return [edge for edge, hit in checks if hit]
-
-
-def _single_neighbour_position(gap_bbox: Any, name: str, ibox: Any) -> str:
-    if gap_bbox.left >= ibox.right:
-        return f"right_of:{name}"
-    if gap_bbox.right <= ibox.left:
-        return f"left_of:{name}"
-    if gap_bbox.bottom >= ibox.top:
-        return f"above:{name}"
-    return f"below:{name}"
-
-
-def _gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> str:
-    """Deterministic position label for one gap component.
-
-    ``margin:<edges>`` when the component touches the top bbox boundary
-    (edges joined by ``+`` in a fixed order); otherwise ``between:<a>,<b>``
-    when it abuts two or more instance bboxes (names sorted), or
-    ``left_of|right_of|above|below:<inst>`` when it abuts exactly one.
-    """
-    edges = _margin_edges(gap_bbox, bbox)
-    if edges:
-        return "margin:" + "+".join(edges)
-
-    neighbours = sorted(
-        (name, ibox)
-        for name, ibox in placed
-        if ibox.left <= gap_bbox.right
-        and ibox.right >= gap_bbox.left
-        and ibox.bottom <= gap_bbox.top
-        and ibox.top >= gap_bbox.bottom
-    )
-    if len(neighbours) >= 2:
-        return "between:" + ",".join(n for n, _ in neighbours)
-    if neighbours:
-        return _single_neighbour_position(gap_bbox, *neighbours[0])
-    return "interior"
-
-
 def _attribution_block(
     kdb: Any,
     layout: Any,
@@ -540,6 +487,7 @@ def _attribution_block(
     bbox: Any,
     dbu: float,
     annotation_pairs: set[tuple[int, int]],
+    flatten_wrappers: bool = False,
 ) -> dict[str, Any]:
     """Partition the top bbox into direct-child instance bboxes and the gap
     components between them (issue #4660).
@@ -548,38 +496,31 @@ def _attribution_block(
     ``sum(child bbox) - instance_overlap + sum(gap components) +
     unattributed == bbox area``. Overlapping instance bboxes are counted
     once (the double-counted area is reported as ``instance_overlap_um2``).
-    Array instances contribute one child per element.
+    Array instances contribute one child per element. With
+    ``flatten_wrappers`` a child holding two or more direct instances is
+    recursively expanded into leaf placements named by hierarchical path
+    (``COMP[0]/OTA[0]``).
+
+    Each gap row also carries its drawn coverage (issue #6941, geometry in
+    :mod:`klayout_tools.economy_gaps`): ``drawn_area_um2`` plus the
+    ``drawn_components`` the top cell draws inside the gap polygon.
+    Component areas describe a gap's *contents* and never enter the bbox
+    partition above.
     """
     drawn_cache: dict[int, float] = {}
-    raw: list[tuple[str, str, Any, float]] = []
-    for inst in top_cell.each_inst():
-        child = inst.cell
-        child_bbox = child.bbox()
-        if child_bbox.empty():
-            continue
+
+    def drawn_area(child: Any) -> float:
         if child.cell_index() not in drawn_cache:
             drawn_cache[child.cell_index()] = _merged_region(
                 kdb, layout, child, annotation_pairs, recursive=True
             ).area()
-        for trans in inst.cell_inst.each_cplx_trans():
-            raw.append(
-                (
-                    child.name,
-                    child.name,
-                    child_bbox.transformed(trans),
-                    drawn_cache[child.cell_index()] * trans.mag**2,
-                )
-            )
+        return drawn_cache[child.cell_index()]
 
-    # Stable names: ordinal among same-cell instances by position.
-    raw.sort(key=lambda r: (r[0], r[2].left, r[2].bottom, r[2].right, r[2].top))
-    counts: dict[str, int] = {}
+    leaves = collect_leaf_placements(kdb, top_cell, drawn_area, flatten_wrappers)
+
     placed: list[tuple[str, Any]] = []
     children: list[dict[str, Any]] = []
-    for cell_name, _, ibox, drawn_dbu2 in raw:
-        idx = counts.get(cell_name, 0)
-        counts[cell_name] = idx + 1
-        name = f"{cell_name}[{idx}]"
+    for name, cell_name, ibox, drawn_dbu2 in leaves:
         placed.append((name, ibox))
         ibox_area = ibox.area()
         children.append(
@@ -600,27 +541,20 @@ def _attribution_block(
     sum_children = sum(ibox.area() for _, ibox in placed)
     overlap = sum_children - union.area()
 
+    top_local = _merged_region(kdb, layout, top_cell, annotation_pairs, recursive=False)
     remainder = (kdb.Region(bbox) - union).merged()
-    gaps: list[dict[str, Any]] = []
-    gap_total = 0
-    for polygon in remainder.each():
-        area = polygon.area()
-        if area <= 0:
-            continue
-        gap_total += area
-        gb = polygon.bbox()
-        gaps.append(
-            {
-                "position": _gap_position(gb, bbox, placed),
-                "bbox_um": bbox_um_dict(gb, dbu),
-                "area_um2": area * dbu * dbu,
-            }
-        )
-    gaps.sort(key=lambda g: (-g["area_um2"], g["position"], g["bbox_um"]["left"]))
+    gap_total, gaps = gap_rows(
+        kdb,
+        remainder,
+        bbox,
+        placed,
+        top_local,
+        top_level_pieces(layout, top_cell, annotation_pairs),
+        dbu,
+    )
 
     unattributed = bbox.area() - (sum_children - overlap) - gap_total
-    top_local = _merged_region(kdb, layout, top_cell, annotation_pairs, recursive=False)
-    return {
+    block: dict[str, Any] = {
         "children": children,
         "gap_components": gaps,
         "unattributed_um2": unattributed * dbu * dbu,
@@ -628,6 +562,9 @@ def _attribution_block(
         "top_level_drawn_area_um2": top_local.area() * dbu * dbu,
         "sums_to_total": unattributed == 0,
     }
+    if top_cell.child_instances() == 0:
+        block["bands"] = leaf_bands(kdb, layout, top_cell, bbox, dbu, annotation_pairs)
+    return block
 
 
 def _area_eff_block(
@@ -720,26 +657,6 @@ def _area_eff_block(
     return {"checks": checks, "status": overall}
 
 
-def _what_if_block(
-    kdb: Any, layout: Any, top_cell: Any, what_if: str | None
-) -> dict[str, Any] | None:
-    """Apply the ``what_if`` moves spec (if any) to the in-memory layout and
-    return the report's ``what_if`` block, or ``None`` when not requested.
-
-    Edits land on the in-memory copy ``load_layout`` just read; nothing is
-    ever written back (issue #4661).
-    """
-    if what_if is None:
-        return None
-    # Imported lazily, matching load_layout()'s own lazy `klayout.db` import
-    # convention (`_layout.py`'s module docstring).
-    from .economy_whatif import apply_what_if, load_what_if_spec
-
-    return apply_what_if(
-        kdb, layout, top_cell, load_what_if_spec(what_if, EconomyError), EconomyError
-    )
-
-
 def economy_report(
     path: str,
     top: str | None = None,
@@ -754,6 +671,8 @@ def economy_report(
     area_eff_require_bbox_tightness: bool = False,
     what_if: str | None = None,
     attribute: bool = False,
+    flatten_wrappers: bool = False,
+    pnr_report: str | None = None,
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
     stream.
@@ -789,8 +708,12 @@ def economy_report(
 
     ``attribute`` (issue #4660) adds an ``attribution`` block partitioning
     the top bbox into direct-child instance bboxes and gap components; see
-    :func:`_attribution_block`. Omitted when false.
+    :func:`_attribution_block`. Omitted when false. ``flatten_wrappers``
+    (issue #5179, requires ``attribute``) expands wrapper children into
+    leaf placements. ``pnr_report`` (issue #5181; needs ``attribute``) adds
+    ``attribution.pnr_decomposition``, see :mod:`klayout_tools.economy_pnr`.
     """
+    check_pnr_args(pnr_report, attribute)
     if grid_cols <= 0 or grid_rows <= 0:
         raise EconomyError(f"grid must be positive, got {grid_cols}x{grid_rows}")
     if max_empty_regions <= 0:
@@ -807,7 +730,7 @@ def economy_report(
     top_cell = resolve_top_cell(layout, top, EconomyError)
     dbu = layout.dbu
 
-    what_if_block = _what_if_block(kdb, layout, top_cell, what_if)
+    what_if_block = what_if_block_or_none(kdb, layout, top_cell, what_if, EconomyError)
 
     bbox = top_cell.bbox()
     if bbox.empty():
@@ -914,8 +837,9 @@ def economy_report(
         report["what_if"] = what_if_block
     if attribute:
         report["attribution"] = _attribution_block(
-            kdb, layout, top_cell, bbox, dbu, annotation_pairs
+            kdb, layout, top_cell, bbox, dbu, annotation_pairs, flatten_wrappers
         )
+        attach_pnr(report, kdb, top_cell, bbox, dbu, pnr_report)
 
     report["provenance"] = build_provenance(input_path=path)
 

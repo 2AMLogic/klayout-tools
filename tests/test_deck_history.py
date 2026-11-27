@@ -11,7 +11,6 @@ minimal sanity coverage at the bottom of this module.
 
 from __future__ import annotations
 
-import hashlib
 import json
 
 import pytest
@@ -223,16 +222,10 @@ def test_is_deck_hash_released_none_when_entries_key_missing(tmp_path, monkeypat
 
 
 def _real_deck_hash(name: str) -> str:
-    """Independently reproduce the sha256 ``deck_info`` should report for
-    the real, installed deck module ``name`` -- the same "streamed SHA-256 of
-    the raw file bytes" computation ``klayout_tools._provenance.sha256_file``
-    (and ``scripts/generate_deck_history.py``) use."""
-    from klayout_tools.decks import deck_source_path
+    """The named pin other verbs must agree with (see test_deck_hash)."""
+    from klayout_tools.decks import deck_content_hash
 
-    digest = hashlib.sha256()
-    with open(deck_source_path(name), "rb") as handle:
-        digest.update(handle.read())
-    return f"sha256:{digest.hexdigest()}"
+    return deck_content_hash(name)
 
 
 def test_deck_info_reports_content_hash_and_device_classes(_history_table):
@@ -974,6 +967,8 @@ def test_checked_in_history_table_covers_every_release():
     import subprocess
     from pathlib import Path
 
+    from _pending_release_tag import with_pending_tag
+
     repo_root = Path(__file__).resolve().parent.parent
     real_path = repo_root / "src" / "klayout_tools" / "decks" / "_history.json"
     data = json.loads(real_path.read_text())
@@ -1004,11 +999,9 @@ def test_checked_in_history_table_covers_every_release():
         "the table -- rerun scripts/generate_deck_history.py"
     )
 
-    # The table is a well-formed, up-to-date reflection of *tagged* history
-    # -- it need not (and for an unreleased dev checkout, generally won't)
-    # include the current working tree's hash, only what git tag --list
-    # reports. Confirm the tag set matches reality so the fixture doesn't
-    # silently drift from a real `git tag` run.
+    # The table reflects *tagged* history (not the working tree's hash).
+    # Confirm the tag set matches reality so the fixture doesn't silently
+    # drift from a real `git tag` run.
     result = subprocess.run(
         ["git", "tag", "--sort=v:refname", "--list", "v*"],
         cwd=repo_root,
@@ -1016,7 +1009,7 @@ def test_checked_in_history_table_covers_every_release():
         capture_output=True,
         text=True,
     )
-    real_tags = [line for line in result.stdout.splitlines() if line.strip()]
+    real_tags = with_pending_tag(repo_root, tags, result.stdout)
     if real_tags:
         assert tags == real_tags, (
             "checked-in _history.json is stale relative to `git tag` -- "
@@ -1027,13 +1020,6 @@ def test_checked_in_history_table_covers_every_release():
 # --------------------------------------------------------------------------- #
 # issue #2451: a release build resolves its own deck hash
 # --------------------------------------------------------------------------- #
-
-
-def _own_hash(name: str) -> str:
-    from klayout_tools._provenance import sha256_file
-    from klayout_tools.decks import deck_source_path
-
-    return f"sha256:{sha256_file(deck_source_path(name))}"
 
 
 def _fake_identity(monkeypatch, is_release):
@@ -1055,7 +1041,7 @@ def test_release_build_resolves_own_deck_hash(_history_table, monkeypatch):
     from klayout_tools import __version__
 
     _fake_identity(monkeypatch, True)
-    h = _own_hash("sky130")
+    h = _real_deck_hash("sky130")
     report = history.resolve_deck(content_hash=h, deck="sky130")
     assert report["package_version"] == __version__
     assert report["git_tag"] == "v9.9.9"
@@ -1065,7 +1051,7 @@ def test_release_build_resolves_own_deck_hash(_history_table, monkeypatch):
 
 def test_non_release_build_does_not_self_identify(_history_table, monkeypatch):
     _fake_identity(monkeypatch, False)
-    h = _own_hash("sky130")
+    h = _real_deck_hash("sky130")
     with pytest.raises(history.DeckHistoryError):
         history.resolve_deck(content_hash=h, deck="sky130")
     assert history.is_deck_hash_released("sky130", h) is False
@@ -1135,7 +1121,7 @@ def test_installed_release_edited_deck_does_not_self_identify(
     even though the frozen build identity still says "clean release"."""
     _fake_identity(monkeypatch, True)
     _fake_build_info(monkeypatch, {"sky130": "sha256:" + "d" * 64})
-    on_disk = _own_hash("sky130")
+    on_disk = _real_deck_hash("sky130")
     assert history.is_deck_hash_released("sky130", on_disk) is False
     with pytest.raises(history.DeckHistoryError):
         history.resolve_deck(content_hash=on_disk, deck="sky130")
@@ -1147,7 +1133,7 @@ def test_installed_release_without_recorded_hashes_does_not_self_identify(
     """A distribution built before deck hashes were recorded fails closed."""
     _fake_identity(monkeypatch, True)
     _fake_build_info(monkeypatch)
-    assert history.is_deck_hash_released("sky130", _own_hash("sky130")) is False
+    assert history.is_deck_hash_released("sky130", _real_deck_hash("sky130")) is False
 
 
 def test_release_tag_with_unknown_dirty_state_does_not_self_identify(
@@ -1158,7 +1144,7 @@ def test_release_tag_with_unknown_dirty_state_does_not_self_identify(
     ident = build_identity._resolve("c" * 40, f"v{__version__}", None, __version__)
     monkeypatch.setattr(build_identity, "identity", lambda: ident)
     _fake_build_info(monkeypatch, present=False)
-    assert history.is_deck_hash_released("sky130", _own_hash("sky130")) is False
+    assert history.is_deck_hash_released("sky130", _real_deck_hash("sky130")) is False
 
 
 # --- layer_refs / layer_table (issue #3092) -----------------------------------

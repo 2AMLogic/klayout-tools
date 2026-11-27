@@ -1,8 +1,10 @@
 """``request.library`` (issue #4086): per-library inputs for a standard-cell
-library the built-in tables do not cover. Script-text and validation tests
-only; no OpenROAD."""
+library the built-in tables do not cover. Covers validation, generated Tcl
+and the resulting power report with a stubbed OpenROAD run."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +15,8 @@ from test_place_and_route import (
     _base_request,
     _isolate_pdk,
     _make_pdk_install,
+    _setup_sg13g2_success_env,
+    _stub_openroad_success,
     _write,
     _write_request,
 )
@@ -293,6 +297,43 @@ def test_explicit_no_tapcell_is_distinct_from_unverified():
         )
 
 
+@pytest.mark.usefixtures("real_build_identity_git")
+@pytest.mark.parametrize(
+    ("setup", "tapcell", "master"),
+    [
+        (_unknown_lib_request, None, None),
+        (
+            _setup_sg13g2_success_env,
+            {"master": "declared_tap", "distance_um": 12},
+            "declared_tap",
+        ),
+    ],
+)
+def test_power_tapless_reports_effective_library_declaration(
+    tmp_path, monkeypatch, setup, tapcell, master
+):
+    request = setup(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"straps": [_STRAP]},
+        library={"power_pins": _PINS, "tapcell": tapcell},
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+    report = place_and_route.run_place_and_route(request)
+    assert report["power"]["pdn"] is True
+    assert report["power"]["tapcell_master"] == master
+    assert report["power"]["tapless"] is (master is None)
+    script = Path(request).parent / ".klt/place-and-route/pnr_gcd_floorplan.tcl"
+    commands = [
+        line for line in script.read_text().splitlines() if line.startswith("tapcell ")
+    ]
+    if master is None:
+        assert commands == []
+    else:
+        assert len(commands) == 1 and f"-tapcell_master {master}" in commands[0]
+
+
 def test_missing_tables_skipped_by_supplied_keys():
     lib = _validate_library(_ASAP7)
     power = place_and_route._validate_power({"straps": [_STRAP]}, "acme", lib)
@@ -387,3 +428,26 @@ def test_layer_map_warning_only_when_resolution_is_none():
         info = {"path": "x.map", "resolution": resolution}
         assert place_and_route._layer_map_warnings(info) == []
     assert place_and_route._layer_map_warnings(None) == []
+
+
+def test_io_layer_outside_route_layers_cap_rejected():
+    # Issue #4802: a signal-layer cap that excludes an io layer is rejected
+    # at request time, naming the cap and the offending layer.
+    lib = _validate_library({"route_layers": {"low": "met2", "high": "met3"}})
+    io = {"layer_h": "met3", "layer_v": "met4"}
+    with pytest.raises(PlaceAndRouteError, match=r"layer_v 'met4'.*met2-met3"):
+        place_and_route._validate_io(io, "sky130_fd_sc_hd", lib)
+    # Same io under the built-in range (met1-met5) is fine.
+    assert place_and_route._validate_io(io, "sky130_fd_sc_hd", None) == io
+    # A cap equal to a single layer containing both io layers is accepted.
+    one = _validate_library({"route_layers": {"low": "met2", "high": "met2"}})
+    io2 = {"layer_h": "met2", "layer_v": "met2"}
+    assert place_and_route._validate_io(io2, "sky130_fd_sc_hd", one) == io2
+
+
+def test_signal_routing_layers_honors_override():
+    lib = _validate_library({"route_layers": {"low": "met2", "high": "met3"}})
+    assert place_and_route._signal_routing_layers("sky130_fd_sc_hd", lib) == (
+        "met2",
+        "met3",
+    )

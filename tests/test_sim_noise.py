@@ -2,20 +2,15 @@
 
 from __future__ import annotations
 
+import builtins
 import json
-import os
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_noise
-
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
-    reason="ngspice is not installed on this machine",
-)
 
 
 def _write_request(tmp_path: Path, request: dict) -> Path:
@@ -26,6 +21,84 @@ def _write_request(tmp_path: Path, request: dict) -> Path:
 
 ARGS = "v(out) V1 dec 50 10 1e7"
 ANALYSIS = {"kind": "noise", "args": ARGS}
+
+
+def _noise_rawfile(tmp_path, plotname="Integrated Noise", vtype="voltage"):
+    path = tmp_path / "waveform.raw"
+    path.write_text(
+        f"Plotname: {plotname}\nFlags: real\nNo. Variables: 1\nNo. Points: 4\n"
+        f"Variables:\n0 onoise_total {vtype}\nValues:\n0 1\n1 2\n2 3\n3 4\n"
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    ("kind", "plotname", "vtype", "representation", "stride"),
+    [
+        ("noise", "Integrated Noise", "voltage", "amplitude", None),
+        ("noise", "Integrated Noise - V^2 or A^2", "voltage", "power", None),
+        ("noise", "Integrated Noise", "current^2", "power", None),
+        ("noise", "Integrated Noise", "voltage", "amplitude", 2),
+        ("ac", "AC Analysis", "voltage", None, None),
+    ],
+)
+def test_waveform_conversion_uses_only_rawfile_header(
+    tmp_path, monkeypatch, kind, plotname, vtype, representation, stride
+):
+    raw = _noise_rawfile(tmp_path, plotname, vtype)
+    artifact = raw.with_suffix(".raw.json")
+    expected = sim.parse_ascii_rawfile(str(raw))
+    if stride == 2:
+        expected["points"] = [[1.0], [3.0], [4.0]]
+    original_open = builtins.open
+
+    def reject_artifact_read(path, mode="r", *args, **kwargs):
+        if path == str(artifact) or path == artifact:
+            assert mode == "w", "waveform JSON reopened for reading"
+        return original_open(path, mode, *args, **kwargs)
+
+    fields = {}
+    diagnostics = []
+    with monkeypatch.context() as guard:
+        guard.setattr(builtins, "open", reject_artifact_read)
+        guard.setattr("io.open", reject_artifact_read)
+        result = sim._persist_waveform_artifact(
+            str(raw),
+            raw.stat().st_size,
+            None,
+            {"kind": kind},
+            diagnostics,
+            fields,
+            stride,
+        )
+    assert result == str(artifact)
+    assert artifact.read_bytes() == json.dumps(expected).encode("utf-8")
+    assert fields == (
+        {"noise_representation": representation} if representation else {}
+    )
+    assert diagnostics == []
+
+
+def test_skipped_and_malformed_noise_artifacts_publish_no_representation(tmp_path):
+    raw = _noise_rawfile(tmp_path)
+    raw.write_text(raw.read_text().replace("3 4\n", "3 malformed\n"))
+    artifact = raw.with_suffix(".raw.json")
+    size = raw.stat().st_size
+    fields = {}
+    diagnostics = []
+    assert (
+        sim._persist_waveform_artifact(
+            str(raw), size, size - 1, ANALYSIS, diagnostics, fields
+        )
+        is None
+    )
+    assert [d["code"] for d in diagnostics] == ["waveform_too_large"]
+    assert fields == {}
+    assert not artifact.exists()
+    with pytest.raises(ValueError, match="malformed"):
+        sim._persist_waveform_artifact(str(raw), size, size, ANALYSIS, [], fields)
+    assert fields == {}
+    assert not artifact.exists()
 
 
 def _spec(**noise):

@@ -14,10 +14,7 @@ own docstrings/callers for how this is used.
 
 PDK root/variant discovery (:func:`klayout_tools.pdk.find_pdk`) and the
 :class:`klayout_tools.pdk.PdkNotFoundError` exception it raises stay in
-:mod:`klayout_tools.pdk`, imported here; likewise :func:`klayout_tools.pdk._read_text`,
-which :mod:`klayout_tools.pdk`'s own :func:`klayout_tools.pdk.lef_files` also
-depends on and so cannot move here without leaving a back-reference the other
-way.
+:mod:`klayout_tools.pdk`, imported here.
 """
 
 from __future__ import annotations
@@ -27,15 +24,19 @@ import os
 import re
 from typing import Any
 
-from .liberty_merge import LibertyMergeError, merge_liberty
+from ._text import read_text as _read_text
 from .pdk import (
     PdkNotFoundError,
-    _read_text,
     find_pdk,
     list_pdks,
     variant_dir_of,
 )
-from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
+from .pdk_descriptor import (
+    DescriptorError,
+    has_descriptor,
+    load_descriptor,
+    mapped_liberty_path,
+)
 
 #: Marker substrings identifying a `libs_ref` entry as a "foundry digital,
 #: standard cell" library, as opposed to primitive-device libraries
@@ -250,11 +251,8 @@ def _ships_cell_library(info: dict[str, Any], cell_library: str) -> bool:
     libs_ref = info["assets"]["libs_ref"]
     if libs_ref and os.path.isdir(os.path.join(libs_ref, cell_library)):
         return True
-    variant_dir = variant_dir_of(info)
-    if variant_dir is None or not has_descriptor(variant_dir):
-        return False
     try:
-        return cell_library in load_descriptor(variant_dir)["liberty"]
+        return descriptor_corner_map(info, cell_library, DescriptorError) is not None
     except DescriptorError:
         return False
 
@@ -286,7 +284,7 @@ def _variants_shipping(
             except PdkNotFoundError:
                 continue
             if _ships_cell_library(other, cell_library):
-                found.append(other)
+                found.append({**other, "resolved_via": install["resolved_via"]})
     return found
 
 
@@ -309,7 +307,7 @@ def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
             f"; other installed variants ship it: {', '.join(candidates)} -- "
             "pass --pdk <variant> (and --pdk-root <root> if needed) to select one"
         )
-    except Exception:  # noqa: BLE001 -- best-effort hint only
+    except Exception:  # -- best-effort hint only
         return ""
 
 
@@ -333,7 +331,7 @@ def _default_variant_shipping(
         return info
     try:
         shipping = _variants_shipping(cell_library, root=root)
-    except Exception:  # noqa: BLE001 -- fall through to the original error
+    except Exception:  # -- fall through to the original error
         return info
     return shipping[0] if shipping else info
 
@@ -367,8 +365,8 @@ def resolve_liberty_for_cell_library(
     ``cell_library``, the first installed variant that ships it is used
     instead (issue #4204); an explicit ``variant``/``$PDK`` is never overridden.
 
-    ``pdk_info`` is :func:`find_pdk`'s own resolution dict, returned
-    unchanged for the caller to pass through to its own provenance builder.
+    ``pdk_info`` describes the chosen variant and how its root was discovered,
+    for the caller to pass through to its provenance builder.
 
     Liberty filename convention: tries open_pdks' double-underscore
     ``<cell_library>__<corner>.lib`` first, falling back to a single
@@ -449,6 +447,19 @@ def resolve_liberty_for_cell_library(
     return liberty_path, corner, info
 
 
+def descriptor_corner_map(
+    info: dict[str, Any], cell_library: str, error_cls: type[Exception]
+) -> dict[str, str | list[str]] | None:
+    """Return the resolved descriptor entries for this library, if declared."""
+    variant_dir = variant_dir_of(info)
+    if variant_dir is None or not has_descriptor(variant_dir):
+        return None
+    try:
+        return load_descriptor(variant_dir)["liberty"].get(cell_library)
+    except DescriptorError as exc:
+        raise error_cls(str(exc)) from exc
+
+
 def _descriptor_liberty(
     info: dict[str, Any],
     cell_library: str,
@@ -457,13 +468,7 @@ def _descriptor_liberty(
 ) -> tuple[str, str] | None:
     """Explicit `klt-pdk.json` `liberty` mapping for `cell_library` (issue
     #3782), or `None` to fall through to the open_pdks naming convention."""
-    variant_dir = variant_dir_of(info)
-    if variant_dir is None or not has_descriptor(variant_dir):
-        return None
-    try:
-        corners = load_descriptor(variant_dir)["liberty"].get(cell_library)
-    except DescriptorError as exc:
-        raise error_cls(str(exc)) from exc
+    corners = descriptor_corner_map(info, cell_library, error_cls)
     if corners is None:
         return None
     corner = requested_corner
@@ -481,16 +486,7 @@ def _descriptor_liberty(
             f"'{cell_library}' in the PDK descriptor "
             f"(mapped: {', '.join(sorted(corners))})"
         )
-    mapped = corners[corner]
-    if isinstance(mapped, list):
-        try:
-            mapped = merge_liberty(mapped)
-        except LibertyMergeError as exc:
-            raise error_cls(
-                f"liberty not found for deck: cannot merge '{cell_library}' "
-                f"corner '{corner}': {exc}"
-            ) from exc
-    return mapped, corner
+    return mapped_liberty_path(corners[corner], cell_library, corner, error_cls), corner
 
 
 def parse_corner_name(name: str) -> dict[str, Any]:

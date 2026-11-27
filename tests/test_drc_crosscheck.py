@@ -38,6 +38,7 @@ def _report(
     layout_hash=HASH,
     pdk="sky130A",
     known=True,
+    klayout_version="0.30",
 ):
     """A report with the fields the cross-check reads. ``known=False`` models
     a native run whose coverage is unmeasured (`coverage_unknown`, exit 4)."""
@@ -62,7 +63,7 @@ def _report(
         "coverage": coverage,
         "provenance": {
             "klt_version": "1",
-            "klayout_version": "0.30",
+            "klayout_version": klayout_version,
             "pdk": {"name": pdk, "source": "s", "version": "v"},
             "deck": {"name": engine, "content_hash": HASH},
             "input": {"content_hash": layout_hash, "role": "layout"},
@@ -70,7 +71,7 @@ def _report(
     }
 
 
-def _run(monkeypatch, curated, native, mapping=MAPPING):
+def _run(monkeypatch, curated, native, mapping=MAPPING, deck="sky130"):
     monkeypatch.setattr(cc, "run_drc", lambda *a, **k: curated)
     if isinstance(native, Exception):
 
@@ -80,7 +81,7 @@ def _run(monkeypatch, curated, native, mapping=MAPPING):
         monkeypatch.setattr(cc, "run_drc_klayout_engine", boom)
     else:
         monkeypatch.setattr(cc, "run_drc_klayout_engine", lambda *a, **k: native)
-    return cc.run_drc_crosscheck("x.gds", "sky130", "native.drc", rule_mapping=mapping)
+    return cc.run_drc_crosscheck("x.gds", deck, "native.drc", rule_mapping=mapping)
 
 
 def _covered(**kw):
@@ -258,6 +259,25 @@ def test_identity_block_records_shared_inputs(monkeypatch):
     assert ident["native_deck"]["content_hash"] == HASH
 
 
+def test_identity_reports_curated_and_native_klayout_versions_distinctly(monkeypatch):
+    # The curated engine is the pip wheel; the native engine is the standalone
+    # binary, which can report a different `-v` version (#5660, #6282).
+    c_kw, n_kw = _covered()
+    curated = _report(engine="curated", klayout_version="0.30.10", **c_kw)
+    native = _report(engine="native", klayout_version="0.30.12", **n_kw)
+    ident = _run(monkeypatch, curated, native)["identity"]
+    assert ident["klayout_version"] == "0.30.10"
+    assert ident["native_klayout_version"] == "0.30.12"
+
+
+def test_identity_native_klayout_version_absent_is_null(monkeypatch):
+    c_kw, n_kw = _covered()
+    native = _report(engine="native", **n_kw)
+    del native["provenance"]["klayout_version"]
+    out = _run(monkeypatch, _report(engine="curated", **c_kw), native)
+    assert out["identity"]["native_klayout_version"] is None
+
+
 def test_cli_engine_both_rejects_rules(tmp_path, capsys):
     gds = tmp_path / "a.gds"
     gds.write_bytes(b"")
@@ -375,6 +395,93 @@ def test_crosscheck_envelope_validates_with_real_reports(tmp_path, monkeypatch):
         native_kwargs={"allow_missing_host_tools": True},
     )
     assert out["reports"]["native"]["engine"] == "klayout"
-    # Real decks and no mapping group: never an agreement.
+    # Real decks and no sky130 mapping group: never an agreement, and the
+    # reason names the empty mapping (schema-validated below with `reason`
+    # present, issue #5720).
     assert out["comparison"]["state"] == "not_comparable"
+    assert out["comparison"]["reason"] == cc.REASON_MAPPING_EMPTY
     _schema_validator().validate(out)
+
+
+# --------------------------------------------------------------------------- #
+# `klt drc --check` on a crosscheck envelope (issue #4986)
+# --------------------------------------------------------------------------- #
+
+
+def _committed_crosscheck(tmp_path, *, native=True):
+    from klayout_tools.drc import run_drc
+
+    gds = _tiny_gds(tmp_path)
+    curated = run_drc(gds, "sky130")
+    envelope = {
+        "schema_version": 2,
+        "mode": "crosscheck",
+        "file": gds,
+        "reports": {
+            "curated": curated,
+            # Same layout/deck hashes recorded on the native side.
+            "native": json.loads(json.dumps(curated)) if native else None,
+        },
+    }
+    report = tmp_path / "x.crosscheck.json"
+    report.write_text(json.dumps(envelope))
+    return gds, str(report)
+
+
+def test_check_crosscheck_report_matches_with_engine_prefixed_fields(tmp_path):
+    from klayout_tools.drc import check_drc_report
+
+    gds, report = _committed_crosscheck(tmp_path)
+    # Embedded `file` is scope "external" outside a repo, so the input path
+    # comes from the positional override, which applies to both sides.
+    result = check_drc_report(report, input_path=gds)
+    assert result["status"] == "match"
+    fields = {c["field"] for c in result["checks"]}
+    assert "reports.curated.provenance.input.content_hash" in fields
+    assert "reports.native.provenance.deck.content_hash" in fields
+
+
+def test_check_crosscheck_report_drifts_when_input_changes(tmp_path):
+    import klayout.db as kdb
+
+    from klayout_tools.drc import check_drc_report
+
+    gds, report = _committed_crosscheck(tmp_path)
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    layout.create_cell("OTHER")
+    layout.write(gds)
+    result = check_drc_report(report, input_path=gds)
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["reports.curated.provenance.input.content_hash"]["match"] is False
+
+
+def test_check_crosscheck_report_null_native_checks_curated_only(tmp_path):
+    from klayout_tools.drc import check_drc_report
+
+    gds, report = _committed_crosscheck(tmp_path, native=False)
+    result = check_drc_report(report, input_path=gds)
+    assert result["status"] == "match"
+    assert all(c["field"].startswith("reports.curated.") for c in result["checks"])
+
+
+def test_rerun_crosscheck_report_is_rejected(tmp_path):
+    from klayout_tools.drc import DrcError, rerun_drc_report
+
+    _, report = _committed_crosscheck(tmp_path)
+    with pytest.raises(DrcError, match="single-engine"):
+        rerun_drc_report(report)
+
+
+def test_native_unavailable_reason_names_family(monkeypatch):
+    """Issue #5211: the family reason is carried into the comparison error."""
+    monkeypatch.setattr(
+        cc, "run_drc", lambda *a, **k: _report(engine="curated", checked=["a"])
+    )
+    out = cc.run_drc_crosscheck(
+        "x.gds", "sg13g2", None, native_unavailable_reason="no PDK variant of sg13g2"
+    )
+    assert out["comparison"]["state"] == "native_unavailable"
+    assert "sg13g2" in out["comparison"]["error"]["message"]
+    assert cc.crosscheck_exit_code(out) == 4

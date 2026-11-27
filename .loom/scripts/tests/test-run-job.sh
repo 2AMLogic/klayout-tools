@@ -725,7 +725,7 @@ cat >"$TMP_ROOT/job.json" <<'SPECFILE'
 {
   "schema": "loom.run-job/v1",
   "id": "job-fromfile",
-  "image": "ghcr.io/rjwalters/loom-worker:latest",
+  "image": "ghcr.io/2amlogic/loom-worker:latest",
   "command": ["bash", "-lc", "cargo build --release"],
   "workdir": "/home/loom/workspaces/loom",
   "mounts": [{"path": "/home/loom/workspaces/loom", "mode": "rw"}],
@@ -907,9 +907,9 @@ exempt_files=(
     "$SCRIPTS_DIR/spawn-claude.sh"
     "$SCRIPTS_DIR/spawn-codex.sh"
     "$SCRIPTS_DIR/tests/test-spawn-codex.sh"
-    # Sibling of test-spawn-codex.sh (split out by the file-size ratchet,
-    # #8518): asserts the session-exec argv shape, so `docker exec` appears
-    # only inside its expected-string literals, exactly like its parent.
+    # Sibling of test-spawn-codex.sh (split out by #8518): asserts the
+    # session-exec argv shape, so `docker exec` appears only inside its
+    # expected-string literals, exactly like its parent.
     "$SCRIPTS_DIR/tests/test-spawn-codex-session-exec.sh"
     "$SCRIPT_DIR/test-run-job.sh"
     # Host-side, opt-in live test (#10830): drives a session container directly

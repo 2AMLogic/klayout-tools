@@ -1,3 +1,6 @@
+---
+disable-model-invocation: true
+---
 # Judge: CI Is Red — Finished Run, Named Test, Recorded Flake Rerun (#12011)
 
 **Load when**: `loom-daemon forge wait-checks` printed `LOOM-CHECKS-RED`, or
@@ -16,13 +19,20 @@ known flake.
 
 ## 1. The run must be finished
 
+Reuse a settled snapshot and its stderr from the same head when available.
+If you came here from a raw RED or an approval refusal without that evidence,
+take one bounded snapshot:
+
 ```bash
 err="$(mktemp)"; first="$(loom-daemon forge wait-checks <number> --timeout 20 --settle-red 2>"$err" | head -n1)"
 ```
 
+Treat a snapshot stamped for a different head as `LOOM-CHECKS-HEAD-MOVED`.
+
 | First line | Action |
 |---|---|
-| `LOOM-CHECKS-TIMEOUT*` / `-HEAD-MOVED*` | The run has not finished. Follow judge.md "When CI is Pending". No CI-failing verdict on a partial run. In single-PR mode you may instead wait in the foreground with `--timeout 1800 --settle-red`. |
+| `LOOM-CHECKS-HEAD-MOVED*` | Hand back per judge.md "When CI is Pending" so a later Judge reviews the new head. |
+| `LOOM-CHECKS-TIMEOUT*` | CI is pending. A CI-failing verdict requires a finished run. Hand back per judge.md "When CI is Pending" in a daemon Judge step (`step-judge-*` sweep id) or a batch. Only an attended/manual single-PR invocation without a `step-judge-*` sweep id may instead wait in the foreground with `--timeout 1800 --settle-red`. |
 | `LOOM-CHECKS-GREEN*` / `-NONE*` | The red was superseded. Continue the review. |
 | `LOOM-CHECKS-RED*` | Finished red. `$err` holds `<name>\t<url>\t<run_id>` per failing check. Go to step 2. |
 | `-ERROR*` or empty (older binary without `--settle-red`, or Gitea) | Run `gh pr checks <number>` once. If any check is still pending, treat it as TIMEOUT. |
@@ -79,10 +89,21 @@ the normal verdict, and the tracker comment keeps attempt 1 on record.
    sentinel as `ci-refusals-reference.md` shows. On `LOOM-RERUN-DENIED …` or
    `ERROR`, go to step 5 and quote the refusal in the verdict.
 3. **On `LOOM-RERUN-OK`**: post a PR comment naming the test, the tracker and
-   the rerun. Add no end-state label and no `loom:ci-failure`. Release the claim
-   exactly as "When CI is Pending" does
-   (`gh pr edit <number> --remove-label "loom:reviewing"`; `loom:review-requested` stays).
-   In single-PR mode you may instead wait for the rerun with
+   the rerun, with this body (the last line is required: `post-verdict.sh`'s
+   stale-read gate counts a marker-less same-user comment as a human comment
+   newer than the review start and refuses your own verdict):
+
+   ```
+   CI flake rerun: `<test>` failed on `<job>` (attempt 1, head `<sha>`).
+   Tracker: #<tracker>. Rerun requested via `loom-daemon forge rerun <run_id> --failed`.
+   <!-- loom:ci-flake-note -->
+   ```
+
+   Add no end-state label and no `loom:ci-failure`. In a daemon Judge step
+   (`step-judge-*` sweep id) or a batch, hand back per judge.md "When CI is
+   Pending", leaving `loom:review-requested` in place and releasing the claim.
+   Only an attended/manual single-PR invocation without a `step-judge-*`
+   sweep id may instead wait for the rerun with
    `wait-checks --settle-red --timeout 1800` and continue from step 1.
 
 ## 5. The CI-failing verdict

@@ -8,7 +8,7 @@ was the exception: "the engine has stopped and a human is the only way
 forward." Champion's merge-risk hold expressed that state as an HTML comment
 marker (`<!-- champion:merge-risk-hold -->`) buried inside a PR comment —
 invisible to `gh pr list`, the dashboard, or any label-filtered query. See
-[#5502](https://github.com/rjwalters/loom/issues/5502) for the incident that
+[#5502](https://github.com/2AMLogic/loom/issues/5502) for the incident that
 prompted this (four Judge-approved PRs sat held-but-invisible for up to 126
 hours).
 
@@ -47,7 +47,7 @@ Loom has three hold labels, each with one meaning:
 
 | Label | Meaning | Release |
 |---|---|---|
-| `loom:blocked` | Waiting on something outside the item: another change merging, a capability, a dependency. The park record or a `Blocked by #N` line says what. Also Champion's own merge-risk and critical-file PR holds (#11861, "Champion's PR holds" below) | A role or a human, once the blocker resolves. Nothing lifts it automatically: the daemon's release pass was retired (#11301). `check-stale-blocked` and `merge-pr.sh`'s cleared-blocker notice report cleared blockers; see [`park-record.md`](park-record.md). Champion releases its own PR holds |
+| `loom:blocked` | Waiting on something outside the item: another change merging, a capability, a dependency. The park record or a `Blocked by #N` line says what. Also Champion's own merge-risk and critical-file PR holds (#11861, "Champion's PR holds" below) | A role or a human, once the blocker resolves. Nothing lifts it automatically, with one carve-out (#13331): `merge-pr.sh`'s cleared-blocker notice (`notify-cleared-blockers`) swaps `loom:blocked` for `loom:curated` on an issue whose park records are all `by=curator`, name a blocker, and whose every blocker has merged or closed (no unticked dependency, no `loom:operator`/`loom:frozen`/hard-exclusion label); it never adds `loom:issue`. The daemon's release pass stays retired (#11301). `check-stale-blocked` and `merge-pr.sh`'s cleared-blocker notice report cleared blockers; see [`park-record.md`](park-record.md). Champion releases its own PR holds |
 | `loom:operator` | A human must act or decide. The body says which: a ```` ```decision ```` block is a ruling ([`operator-decision.md`](operator-decision.md)); otherwise the comment names the step; a `Blocked by #N` line says the human action waits on something named | A human removes it. Nothing else does |
 | `loom:frozen` | Not now; don't touch (#11743). No agent or daemon path reads it as work, comments on it or relabels it | A human removes it |
 
@@ -340,7 +340,8 @@ Champion's content criteria say nothing about who wrote the issue. So before any
 `check-promotion-landed.sh --apply` backstop) it asks
 `loom-daemon forge promotion-author --number N`, which judges the issue **author**
 with the same predicate as [`comment-trust.md`](comment-trust.md) (repo insider, a
-fleet App, this daemon, `forge.trustedCommenters`, the fleet admin roster), with
+fleet App, this daemon, `forge.trustedCommenters`, the fleet admin roster, the fleet trusted Apps list
+`apps` in `fleet/admins.json`, #13545), with
 no second trust table. Only `TRUSTED` promotes. An `UNTRUSTED` author, or an
 `UNKNOWN` one (the issue could not be read), leaves the issue at `loom:curated`
 with one comment (keyed on its `<!-- loom:promotion-author-gate rev=… trust=… -->`
@@ -351,8 +352,48 @@ trusted notice matches both, the step tick excludes the issue from `champion_pro
 repeat the verdict. A body edit, a trust-list change, or a legacy unstamped notice
 makes it drawable once; a trusted `loom:issue` takes it out of the queue.
 
+**ci-daily tracker exception (#13378).** `promotion-author` also returns `TRUSTED` for an
+issue authored by exactly `github-actions[bot]` whose title starts with `[ci-daily] ` and
+whose body contains ``opened, updated and closed by `.github/workflows/ci-daily.yml` ``
+(the sentence the workflow writes into every tracker); all three must hold. The exception
+lives in the author gate only: the bot is not added to `forge.trustedCommenters`, so its
+comments and markers stay untrusted everywhere (`forge trusted-comments`, verdict and
+hold markers, PRs and non-tracker issues).
+
 Adoption is a trusted maintainer applying `loom:issue` by hand, or re-filing the
-issue; an automated Champion verdict alone is not adoption. Trusted authors see no
+issue; an automated Champion verdict alone is not adoption. **An adoption persists
+(#13578) as the body was adopted:** for an `UNTRUSTED` author, `promotion-author`
+also reads the issue timeline and returns `TRUSTED` (detail on stderr) while a
+maintainer's adoption stands, so landed-route re-curation does not re-arm the gate.
+
+- **Who can adopt** (operator ruling 20261116-r15 q48). Only a human account (the
+  forge reports its type as `User`) that is allow-listed (`forge.trustedCommenters`
+  or the fleet admin roster) or has write access or better on the repository
+  (`admin`, `maintain` or `write` from the collaborator-permission lookup; timeline
+  actors carry no association). A `loom:issue` applied by an App or bot is never an
+  adoption, the fleet's own included, whatever the trust policy says about that
+  actor's comments. Nor is one applied by a human without write access, the author
+  included.
+- **What ends it: the label is withdrawn.** An `unlabeled loom:issue` event after
+  the latest adoption ends it, unless it is a move of the state machine: the *same
+  actor* also applied `loom:building` (a Builder claim) or `loom:triage` (the
+  landed-route or a rescope) within 30 seconds of the removal, and that actor is
+  trusted (a fleet identity or a maintainer). A bare removal, a removal whose
+  successor label came from another actor, and a removal paired with any other
+  label (`loom:blocked`, `loom:curated`, ...) are withdrawals, whoever makes them.
+  `merge-pr.sh` stripping `loom:issue` from an issue its merge closes is therefore a
+  withdrawal too: a closed issue that is reopened is adopted again by hand.
+- **What ends it: the body changes** (operator ruling r7-q6). Adoption covers the
+  body as adopted. The timeline carries no body edits, so the edit history (GraphQL
+  `userContentEdits`, `editedAt` and `editor`) is compared with the latest adoption,
+  and an edit at or after it by an editor outside the trust policy returns
+  `UNTRUSTED`. An edit by a trusted actor does not.
+- **What restores it.** A later `loom:issue` applied by a maintainer. Nothing else.
+- **Fail closed.** An unreadable timeline or edit history, a repository that cannot
+  be resolved to a real `owner/name`, a removal whose time cannot be read, or an
+  edit whose time or editor cannot be read keeps `UNTRUSTED`.
+
+Trusted authors see no
 change. This is admission control for external submissions, not protection against
 a compromised trusted agent, and it adds no signed decisions or keys.
 
@@ -368,6 +409,14 @@ a compromised trusted agent, and it adds no signed decisions or keys.
   leaves every pattern, and respect a human's hand-removal at the held diff.
 - **Queues** — `pr-queue --role champion` keeps `loom:pr` + `loom:blocked`
   (and no other park); Judge's and Doctor's queues drop every park.
+- **Base conflicts after a foreign park clears (#14810)** — Guide applies
+  `loom:changes-requested` and `loom:merge-conflict`, confirms those labels and
+  the current conflict and exact blocked-label episode, then removes
+  `loom:review-requested` and `loom:blocked`. Doctor takes the PR in its
+  existing conflict lane. Named blockers must all be terminal. A reason-only
+  park needs evidence for its exact cause, head, and blocked-label episode.
+  Explicit holds, Loom stack bases, unverified state, and disabled conflict
+  routing retain the park. See [Guide's PR unblock sweep](park-record.md#the-unblock-sweeps-pr-side-functions).
 - **The stale-verdict machinery** (`verdict-staleness-guard.sh`,
   `reconcile_pr_verdicts`) reports a moved head as stale but does not clear a
   verdict on a PR carrying any hold (`loom:blocked`, `loom:operator`,
@@ -434,7 +483,7 @@ gh issue list --state open --label loom:operator --json number --jq 'length'
 gh pr list --state open --label loom:operator --json number --jq 'length'
 ```
 
-**2. The merge-risk hold digest — [#6877](https://github.com/rjwalters/loom/issues/6877).**
+**2. The merge-risk hold digest — [#6877](https://github.com/2AMLogic/loom/issues/6877).**
 Champion's Held-PR Census (#6720 / #6851 / #7020) overwrites this issue's body
 every pass with one row per held PR — PR number, the hold's own reason, the
 `mergeable` status, how long a conflict has been rotting, and (#8552) the PR's
@@ -463,7 +512,7 @@ pairing is deliberate:
 **3. `loom-daemon serve`'s dashboard.** Surfacing these counts in
 `loom-daemon health` and as an operator-held bucket on `GET /api/pipeline` is
 tracked separately in
-[#8091](https://github.com/rjwalters/loom/issues/8091) — note that `health`
+[#8091](https://github.com/2AMLogic/loom/issues/8091) — note that `health`
 rolls `overall` up over *every* section, so a new section there interacts with
 the #4761 exit-code contract.
 
@@ -711,6 +760,13 @@ hold); factual findings get one Curator disposition round first.
 `loom:triage` (`labels migrate` also strips `loom:curated`). Contract and
 bound: [`promotion-throughput.md`](promotion-throughput.md).
 
+**Awaiting-revision parks (#10936)**: a `loom:blocked` issue parked only as
+"awaiting (Architect) revision" / "awaiting a design epic", with no named
+blocker, is converted by Guide onto this same revise path (`loom:triage`, park
+record removed, a `champion:revise:body-<HASH>` ask). No new label. A park that
+names a blocker, or carries `loom:operator` / `loom:frozen` / `loom:building` /
+`loom:curating` / a permanent-block marker, is left alone.
+
 ## Fact-based de-escalation of a Champion `proposal-escalated` hold (#7650, retired by #11861)
 
 Curator used to remove `loom:operator` from Champion's escalation once it had
@@ -804,6 +860,20 @@ A CI-only gate must not add `loom:blocked`; if one is unavoidable, park with
 `loom-daemon park-record apply --issue <PR> --reason ci-gate --by judge` so the
 pass can tell it from a real hold.
 
+**A CI-only verdict is never re-anchored across a head move (#13822).** The
+head-move re-anchor carve-out (`verdict_invalidation`, #9124/#9416) carries a
+verdict forward when the new head is the same *change*; it skips a CI-only
+`changes-requested` entirely, because that verdict records no review and its one
+requested change is the head move itself. Such a PR takes the ordinary
+stale-verdict clear instead: `loom:changes-requested` + `loom:ci-failure` off,
+`loom:review-requested` on. Without that skip the rejection was copied onto the
+very head that fixed it, in a comment carrying no `<!-- loom:ci-gate-only -->`
+marker — so this pass skipped the PR as `VerdictNotCiOnly`, `forge
+doctor-handback` read the re-anchored same-head marker as a *fresh* rejection and
+withdrew its own `loom:review-requested`, and the PR sat on
+`loom:changes-requested` alone with green CI and no Judge ever queued (PR #13593).
+A verdict carrying a real review still re-anchors.
+
 ## Follow-up work
 
 - Derive `loom:blocked-unnamed` from "blocked without a park record" instead
@@ -812,7 +882,7 @@ pass can tell it from a real hold.
 
 ## Label registry: the source of truth (#10013)
 
-> **Step dispatch (#11894, live since #11909).** `stale_after_minutes` (live since #11898, see below) is the claim liveness of the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** `stale_after_minutes` (live since #11898, see below) is the claim liveness of the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/2AMLogic/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 `defaults/labels.json` is the single source of truth for label semantics: each
 label's name, description, color, `kind`, `applied_by`/`removed_by`, and the

@@ -44,17 +44,27 @@ exclusive with ``file``/``--check`` and refuses the layout-only flags.
 """
 
 import argparse
+import json
 
+from ..coverage_work import coverage_work_count
 from ..env_provenance import render_path_field
 from ..erc import (
-    DISCLOSURE_KIND_UNEXPRESSIBLE,
     ErcError,
     check_erc_report,
     rerun_erc_report,
     run_erc,
     validate_erc_spec,
 )
-from .output import emit_error, emit_success, render_check_text, render_rerun_drift
+from ..erc_pnr import supply_spec_from_pnr
+from ..erc_spec import DISCLOSURE_KIND_UNEXPRESSIBLE
+from ._request_file import RequestFileError, load_request_file
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    write_json_file,
+)
 
 #: `status` -> exit code (issue #2115, applying the common rollup rule's
 #: exit codes, #2109). `"clean_partial"` reports the same exit `0` as
@@ -71,10 +81,14 @@ _EXIT_CODE_BY_STATUS = {
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.validate_spec is not None:
-        return _run_validate_spec(args)
+    if args.validate_spec is not None or args.pnr_response is not None:
+        return _run_spec_mode(args)
 
     if args.check is not None:
+        if args.output is not None:
+            return emit_error(
+                "erc", "--output cannot be combined with --check", args.format
+            )
         # `file` is in `--check`'s mutually exclusive argparse group
         # (parser.py), and `spec` cannot be given without it -- so
         # file/spec alongside --check is already a usage error (exit 2).
@@ -101,16 +115,21 @@ def run(args: argparse.Namespace) -> int:
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
 
+    if args.output is not None:
+        try:
+            write_json_file(report, args.output)
+        except OSError as exc:
+            return emit_error(
+                "erc", f"could not write report {args.output!r}: {exc}", args.format
+            )
     emit_success(report, args.format, _print_text)
     return _EXIT_CODE_BY_STATUS[report["status"]]
 
 
-def _run_validate_spec(args: argparse.Namespace) -> int:
-    # `file` and `--check` are in `--validate-spec`'s mutually exclusive
-    # argparse group (parser.py), so those combinations are usage errors
-    # (exit 2). The remaining flags are not positional, so they are refused
-    # here rather than silently ignored.
+def _run_spec_mode(args: argparse.Namespace) -> int:
+    mode = "--pnr-response" if args.pnr_response is not None else "--validate-spec"
     layout_only = {
+        "--output": args.output is not None,
         "--top": args.top is not None,
         "--pdk": args.pdk is not None,
         "--deck": args.deck is not None,
@@ -123,13 +142,20 @@ def _run_validate_spec(args: argparse.Namespace) -> int:
     if conflicts:
         return emit_error(
             "erc",
-            f"--validate-spec reads no layout and runs no check, so it cannot "
+            f"{mode} reads no layout and runs no check, so it cannot "
             f"be combined with {', '.join(conflicts)}",
             args.format,
         )
     try:
+        if args.pnr_response is not None:
+            spec = supply_spec_from_pnr(load_request_file(args.pnr_response))
+            # Both formats emit the editable JSON document, ready for redirection.
+            emit_success(
+                spec, args.format, lambda data: print(json.dumps(data, indent=2))
+            )
+            return 0
         result = validate_erc_spec(args.validate_spec)
-    except ErcError as exc:
+    except (ErcError, RequestFileError) as exc:
         return emit_error("erc", str(exc), args.format)
 
     emit_success(result, args.format, _print_validate_spec_text)
@@ -210,7 +236,8 @@ def _print_skipped_coverage(report: dict) -> None:
     skipped = (report.get("erc_coverage") or {}).get("skipped") or []
     if not skipped:
         return
-    print(f"erc_skipped: {len(skipped)} (not checked; see erc_coverage.skipped)")
+    skipped_count = sum(map(coverage_work_count, skipped))
+    print(f"erc_skipped: {skipped_count} (not checked; see erc_coverage.skipped)")
     for entry in skipped:
         print(f"  {entry['id']}: {entry['reason']}")
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
+import json
 
 from klayout_tools import lvs
-from klayout_tools.verilog_netlist import VerilogNetlistError, _parse_header
+from klayout_tools.verilog_netlist import _parse_header
 
 CATEGORY = lvs.CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS
 
@@ -132,6 +132,60 @@ def test_unbalanced_counts_stay_errors():
     assert any(e["severity"] == "error" for e in entries)
 
 
-def test_escaped_module_name_gets_a_clear_error():
-    with pytest.raises(VerilogNetlistError, match="escaped identifier"):
-        _parse_header("module \\$paramod$abc\\top (a, b)")
+def test_escaped_module_name_is_accepted():
+    name, ports = _parse_header("module \\$paramod$abc\\top (a, b)")
+    assert name == "$paramod$abc\\top"
+    assert ports == ["a", "b"]
+
+
+def test_abstract_output_left_open_beside_split_fanout(tmp_path):
+    """A spare buffer stays open through the split-fanout repair."""
+    cells = ".subckt cell_inv A Y\n.ends\n.subckt cell_buf A Y\n.ends\n"
+    (tmp_path / "cells.spice").write_text(cells)
+    (tmp_path / "ref.v").write_text(
+        "module top(a, b, y); input a; input b; output y;\n"
+        "wire fanout, spare;\n"
+        "cell_inv driver (.A(a), .Y(fanout));\n"
+        "cell_buf tap (.A(fanout), .Y(spare));\n"
+        "cell_buf load (.A(fanout), .Y(y));\n"
+        "cell_buf unused (.A(fanout), .Y());\n"
+        "endmodule\n"
+    )
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "layout": {"netlist": "layout.spice", "top": "top"},
+                "reference": {
+                    "netlist": "ref.v",
+                    "top": "top",
+                    "form": "gate-level-verilog",
+                    "pin_order_files": ["cells.spice"],
+                },
+            }
+        )
+    )
+    layout = tmp_path / "layout.spice"
+    correct = (
+        ".subckt top a b y\n"
+        "Xdriver a fanout cell_inv\n"
+        "Xtap fanout spare cell_buf\n"
+        "Xload fanout y cell_buf\n"
+        "Xunused fanout floating cell_buf\n"
+        ".ends\n" + cells
+    )
+    layout.write_text(
+        correct.replace("Xdriver a fanout", "Xdriver a spare").replace(
+            "Xtap fanout spare", "Xtap b spare"
+        )
+    )
+    broken = lvs.run_lvs(str(request))
+    assert broken["status"] == "mismatch"
+    errors = broken["category_error_counts"]
+    assert {"topology", "net.split", "net.merged", "hints.rejected"} <= errors.keys()
+    assert CATEGORY not in broken["category_counts"]
+
+    layout.write_text(correct)
+    repaired = lvs.run_lvs(str(request))
+    assert repaired["status"] == "match"
+    assert repaired["error_count"] == 0

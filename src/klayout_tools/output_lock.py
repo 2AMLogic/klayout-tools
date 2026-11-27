@@ -62,6 +62,8 @@ import threading
 from collections.abc import Iterator
 from typing import Any
 
+from ._jsonnum import is_int
+
 try:  # pragma: no cover - exercised implicitly per platform
     import fcntl
 except ImportError:  # pragma: no cover - Windows
@@ -255,12 +257,12 @@ def _read_owner(fd: int) -> tuple[int | None, str | None]:
         data = json.loads(raw.decode("utf-8"))
         pid = data.get("pid")
         acquired = data.get("acquired_at")
-        if not isinstance(pid, int) or isinstance(pid, bool):
+        if not is_int(pid):
             pid = None
         if not isinstance(acquired, str):
             acquired = None
         return pid, acquired
-    except Exception:  # noqa: BLE001 - diagnostics must never mask contention
+    except Exception:  # - diagnostics must never mask contention
         return None, None
 
 

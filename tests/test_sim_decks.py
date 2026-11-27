@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import read_job_contract
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 from klayout_tools import sim_decks as sd
@@ -1101,21 +1102,17 @@ class TestRemoteDispatch:
 
 
 class _FakeFleet:
-    """Stands in for the batch transport primitives ``_run_decks_batch``
-    uses: submit captures the job spec, poll returns a canned status, and
-    collect *executes* the captured worker request locally into the
-    collected tree (report.json plus the artifacts/ subtree), exactly what
-    the real harness's outputs/ upload carries back."""
+    """Store submitted specs, return canned status and execute the worker locally."""
 
     def __init__(self, status: dict, *, fail_collect: bool = False):
         self.status = status
         self.spec: sb.BatchJobSpec | None = None
-        self.job_id = "batch-fake-0001"
+        self.specs: dict[str, sb.BatchJobSpec] = {}
         self.fail_collect = fail_collect
 
     def submit(self, config, job_id, spec, **kwargs):
         self.spec = spec
-        self.job_id = job_id
+        self.specs[job_id] = spec
 
     def launch(self, config, job_id, **kwargs):
         pass
@@ -1153,6 +1150,9 @@ class _FakeFleet:
 
 
 def install_fake_batch(monkeypatch, fleet: _FakeFleet) -> _FakeFleet:
+    monkeypatch.setattr(
+        sb, "_run_subprocess", lambda argv, _: read_job_contract(argv, fleet.specs)
+    )
     monkeypatch.setattr(sb, "submit_job", fleet.submit)
     monkeypatch.setattr(sb, "launch_job", fleet.launch)
     monkeypatch.setattr(sb, "poll_status", fleet.poll)
@@ -1359,7 +1359,7 @@ class TestBatchDispatch:
         assert remote["runner_compatibility"] == "mismatch"
 
     def test_job_command_captures_stderr_from_the_first_line(self):
-        cmd = sd._deck_batch_command("enforce")
+        cmd = sd._deck_batch_command("enforce", {}, [])
         assert cmd.startswith(sb._job_stderr_capture_prefix())
         assert cmd.count('> "$EDA_OUTPUT_DIR/report.json"') == 1
 
@@ -1641,12 +1641,12 @@ class TestBatchAsync:
             ),
             (
                 {"attach_job_id": "klt-sim-1", "backend": "local"},
-                "--attach requires backend 'batch'",
+                "backend 'local'.*--backend batch",
                 None,
             ),
             (
                 {"attach_job_id": "klt-sim-1", "hosts": 2},
-                "--attach requires backend 'batch'",
+                "single job .*hosts = 1.*batch-shards.json",
                 None,
             ),
             (
@@ -2058,16 +2058,10 @@ def test_runner_shell_probe_matches_python_rule(tmp_path, version, expected):
 
 def _publish_runner(monkeypatch, *versions):
     images = [
-        {
-            "pdk": "sky130A",
-            "region": "us-east-1",
-            "ami_id": f"ami-{index}",
-            "klt_version": version,
-            "klt_ref": None,
-        }
-        for index, version in enumerate(versions)
+        dict(pdk="sky130A", region="r", ami_id=str(n), klt_version=v, klt_ref=None)
+        for n, v in enumerate(versions)
     ]
-    monkeypatch.setattr(sb, "published_runner_identities", lambda pdk, region: images)
+    monkeypatch.setattr(sb.BatchConfig, "runner_identities", lambda *a: images)
 
 
 class TestRunnerDecksGate:

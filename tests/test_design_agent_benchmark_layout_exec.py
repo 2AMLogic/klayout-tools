@@ -437,13 +437,13 @@ def test_real_shim_refuses_forbidden_verbs_and_logs_outside_the_sandbox(
         tasks[TASK_ID], REPO_ROOT, sandbox, run_dir / ex.POLICY_FILENAME, None
     )
     shim = sandbox / "bin" / "klt"
-    refused = subprocess.run(  # noqa: S603
+    refused = subprocess.run(
         [str(shim), "gen", "mos_array"], cwd=sandbox, capture_output=True, text=True,
         check=False,
     )  # fmt: skip
     assert refused.returncode == ex.EXIT_REFUSED
     ref_layout = tasks[TASK_ID]["reference_layout"]["path"]
-    allowed = subprocess.run(  # noqa: S603
+    allowed = subprocess.run(
         [str(shim), "layers", str(REPO_ROOT / ref_layout)],
         cwd=sandbox, capture_output=True, text=True, check=False,
     )  # fmt: skip
@@ -465,7 +465,7 @@ def test_live_provider_runs_the_agent_through_the_policed_shim(
             and "Bash(python:*)" not in request.allowed_tools
         )
         shim = str(request.workdir / "bin" / "klt")
-        bad = subprocess.run(  # noqa: S603
+        bad = subprocess.run(
             [shim, "draw", "--params", "{}"], cwd=request.workdir, check=False,
             capture_output=True,
         )  # fmt: skip
@@ -473,7 +473,7 @@ def test_live_provider_runs_the_agent_through_the_policed_shim(
         step = json.loads(
             (REPO_ROOT / tasks[TASK_ID]["generator_recipe"]["path"]).read_text()
         )["steps"][0]
-        subprocess.run(  # noqa: S603
+        subprocess.run(
             [shim, "gen", step["generator"], "--params", json.dumps(step["params"]),
              "--cell-name", step["cell_name"],
              "-o", str(request.workdir / ex.DELIVERABLE),

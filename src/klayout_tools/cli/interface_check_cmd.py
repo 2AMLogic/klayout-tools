@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import argparse
 
+from .._layer_spec import parse_layer_spec
 from ..interface_check import (
     InterfaceCheckError,
-    parse_layer,
+    parse_pair,
     parse_place,
     run_interface_check,
 )
@@ -27,15 +28,66 @@ EXIT_PASS = 0
 EXIT_FAIL = 3
 
 
+def add_matching_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register the pad-matching options (``--tol-um``, per-side
+    ``--pins-a`` / ``--pins-b``, ``--pair``).
+
+    Lives here, not in ``parser.py``, to keep that file under its size ceiling.
+    """
+    parser.add_argument(
+        "--tol-um",
+        type=float,
+        default=0.0,
+        metavar="UM",
+        help="largest pad-to-pad gap still counted as mated (default 0: overlap/touch)",
+    )
+    parser.add_argument(
+        "--pins-a",
+        default=None,
+        metavar="REGEX",
+        help=(
+            "narrow A's checked labels: a label is checked only when it fully "
+            "matches --pins AND --pins-a (default: --pins alone)"
+        ),
+    )
+    parser.add_argument(
+        "--pins-b",
+        default=None,
+        metavar="REGEX",
+        help=(
+            "narrow B's checked labels: a label is checked only when it fully "
+            "matches --pins AND --pins-b (default: --pins alone)"
+        ),
+    )
+    parser.add_argument(
+        "--pair",
+        action="append",
+        default=None,
+        metavar="A_REGEX=B_TEMPLATE",
+        help=(
+            "pair complementary names: an A label fully matching A_REGEX mates "
+            "with the B label named by the re.Match.expand template, e.g. "
+            "'n_out\\[(\\d+)\\]=s_in[\\1]'; repeatable, first match wins; "
+            "both names must match --pins, each within its side's "
+            "--pins-a/--pins-b scope"
+        ),
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     try:
         place = parse_place(args.place)
         layer_a = (
-            parse_layer(args.pin_layer_a, "--pin-layer-a") if args.pin_layer_a else None
+            parse_layer_spec(args.pin_layer_a, "--pin-layer-a", InterfaceCheckError)
+            if args.pin_layer_a
+            else None
         )
         layer_b = (
-            parse_layer(args.pin_layer_b, "--pin-layer-b") if args.pin_layer_b else None
+            parse_layer_spec(args.pin_layer_b, "--pin-layer-b", InterfaceCheckError)
+            if args.pin_layer_b
+            else None
         )
+        pairs = [parse_pair(spec) for spec in (args.pair or [])]
         report = run_interface_check(
             args.a,
             args.b,
@@ -46,6 +98,9 @@ def run(args: argparse.Namespace) -> int:
             tol_um=args.tol_um,
             top_a=args.top_a,
             top_b=args.top_b,
+            pairs=pairs,
+            pins_a=args.pins_a,
+            pins_b=args.pins_b,
         )
     except InterfaceCheckError as exc:
         return emit_error("interface-check", str(exc), args.format)
@@ -73,4 +128,7 @@ def _print_text(report: dict) -> None:
             detail = f" offset=({dx}, {dy}) gap={pin['gap_um']}"
         elif pin["reason"]:
             detail = f" ({pin['reason']})"
-        print(f"  {pin['name']}: {pin['status']}{detail}")
+        name = pin["name"]
+        if pin.get("b_name", name) != name:
+            name = f"{name} <-> {pin['b_name']}"
+        print(f"  {name}: {pin['status']}{detail}")

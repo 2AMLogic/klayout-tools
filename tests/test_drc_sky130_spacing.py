@@ -73,6 +73,6 @@ def test_unmodeled_list_sorted_and_discloses_omitted_spacing():
     rules = list(deck_mod.UNMODELED_RULES)
     assert rules == sorted(rules)
     assert len(rules) == len(set(rules))
-    for rid in ("poly.3", "li.7", "dnwell.2", "licon.13", "capm.2b"):
+    for rid in ("poly.3", "li.7", "dnwell.2", "licon.13", "capm.2b", "ct.4", "li.5"):
         assert rid in rules
     assert "difftap.3" not in rules and "poly.2" not in rules

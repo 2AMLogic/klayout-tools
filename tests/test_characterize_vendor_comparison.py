@@ -26,12 +26,12 @@ Two tiers:
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.ihp_sg13g2_root import find_ihp_sg13g2
+from helpers.tool_probes import HAVE_NGSPICE
 from klayout_tools import characterize, liberty_compare
 from klayout_tools.cli import main
 
@@ -107,8 +107,8 @@ def _inverter_lib(
     return (
         "/* synthetic */\n"
         "library (synthetic) {\n"
-        '  time_unit : "1ns";\n'
-        "  capacitive_load_unit (1, pf);\n"
+        '  time_unit : "1ns"; voltage_unit : "1V";\n'
+        '  capacitive_load_unit (1, pf); leakage_power_unit : "1pW";\n'
         "  cell (inv) {\n"
         "    area : 1;\n"
         + leak
@@ -240,8 +240,7 @@ def test_a_subset_of_the_reference_grid_is_read_directly(tmp_path):
 
     def timing_only(rows, i1, i2):
         return (
-            "library (synthetic) {\n"
-            "  cell (inv) {\n"
+            _inverter_lib().split("  cell (inv)")[0] + "  cell (inv) {\n"
             '    pin (A) { direction : "input"; }\n'
             '    pin (Y) {\n      direction : "output";\n      function : "!A";\n'
             '      timing () {\n        related_pin : "A";\n'
@@ -398,32 +397,7 @@ def test_default_tolerances_cover_every_compared_field():
 # --------------------------------------------------------------------------- #
 
 
-def _find_ihp_sg13g2() -> Path | None:
-    """The fetched IHP-Open-PDK `ihp-sg13g2` variant: `$KLT_IHP_SG13G2_ROOT`
-    (the variant directory itself), else `pdks/ihp-open-pdk/ihp-sg13g2` in
-    this checkout, else in the checkout this worktree hangs off (a Loom
-    worktree under `.loom/worktrees/` shares the main checkout's gitignored
-    `pdks/`)."""
-    candidates = []
-    override = os.environ.get("KLT_IHP_SG13G2_ROOT")
-    if override:
-        candidates.append(Path(override))
-    repo = Path(__file__).resolve().parents[1]
-    candidates.append(repo / "pdks" / "ihp-open-pdk" / "ihp-sg13g2")
-    if repo.parent.name == "worktrees" and repo.parent.parent.name == ".loom":
-        candidates.append(repo.parents[2] / "pdks" / "ihp-open-pdk" / "ihp-sg13g2")
-    for root in candidates:
-        if (root / "libs.tech" / "ngspice" / "osdi" / "psp103.osdi").is_file() and (
-            root / "libs.ref" / "sg13g2_stdcell" / "lib"
-        ).is_dir():
-            return root
-    return None
-
-
-IHP_SG13G2 = _find_ihp_sg13g2()
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
+IHP_SG13G2 = find_ihp_sg13g2()
 _SKIP_NO_VENDOR = pytest.mark.skipif(
     IHP_SG13G2 is None or not HAVE_NGSPICE,
     reason=(

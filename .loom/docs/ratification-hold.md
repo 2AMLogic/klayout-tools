@@ -40,6 +40,8 @@ not hold (a PR that edits `spec/README.md` without declaring ratification), nor
 does a bare `Status: Proposed`. A fenced or quoted example of the phrase still
 holds: a false hold costs one operator comment, a false pass ratifies a spec.
 
+A held PR that goes CONFLICTING is served by Doctor, hold intact (#13505): Doctor resolves and pushes, leaves `loom:blocked` and `loom:pr` on, and Judge re-reviews the new head; the operator then ratifies a clean head.
+
 ## Why it is distinct from the critical-file hold
 
 Same shape (`loom:blocked` + reason-only park record + marker comments, so the
@@ -59,12 +61,15 @@ need no change), two deliberate differences:
 
 A release is scoped to a head. A later push that still declares ratification
 re-arms the hold: the text the operator released may not be the text now on the
-PR.
+PR. The re-arm is a fresh hold notice recording the new head (#14833) — the
+quiet `stands` answer is given only at the head the standing notice records —
+so the `champion:hold-state` marker that `merge-pr.sh --release-hold` reads
+never names a head the hold has moved off.
 
 ## Config
 
-`champion.ratificationPaths` (globs, additive to `spec/**`, `decisions/**`,
-`docs/decisions/**`, `*decision*.md`) and `champion.ratificationPhrases`
+`champion.ratificationPaths` (globs, additive to `spec/**`, `ratification/**`,
+`decisions/**`, `docs/decisions/**`, `*decision*.md`) and `champion.ratificationPhrases`
 (case-insensitive regexes, additive to the built-ins). Neither can remove a
 built-in. An explicit path alone does not hold; the phrase test still applies.
 Invalid phrase regexes degrade to literals.
@@ -77,3 +82,5 @@ Invalid phrase regexes degrade to literals.
 
 Out of scope: judging whether a spec *should* be ratified; changing the
 critical-file hold, the kept set or `merge-pr.sh`.
+
+The reviewer lane that produces the key markers this hold waits on is documented in [`ratification-lane.md`](ratification-lane.md).

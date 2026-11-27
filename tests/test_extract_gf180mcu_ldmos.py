@@ -99,3 +99,82 @@ def test_ldmos_does_not_cross_claim_plain_6v_device(tmp_path):
         for line in _device_lines(report)
     )
     assert models == ["nfet_06v0", "nfet_10v0_asym"]
+
+
+def _two_gate_shared_drain_layout() -> kdb.Layout:
+    """The PDK ``nfet_10v0_asym`` PCell's shape (issue #4892): a central drain
+    island under MVSD and two source islands, each crossed by one poly gate
+    whose end lies over the (separate) drain island's side. Dbu 0.0005 um."""
+    layout = kdb.Layout()
+    layout.dbu = 0.0005
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, x0: int, y0: int, x1: int, y1: int) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(kdb.Box(x0, y0, x1, y1))
+
+    draw(55, 0, -6340, -8720, 6340, 8720)  # Dualgate
+    draw(226, 0, -6340, -8720, 6340, 8720)  # LDMOS_XTOR
+    draw(210, 0, -1740, -5000, 1740, 5000)  # MVSD
+    draw(32, 0, -4140, -4460, 4140, 4460)  # Nplus
+    draw(22, 0, -3820, -4000, -940, 4000)  # source island
+    draw(22, 0, -220, -4000, 220, 4000)  # shared drain island
+    draw(22, 0, 940, -4000, 3820, 4000)  # source island
+    draw(30, 0, -2940, -4800, -540, 6200)  # gate
+    draw(30, 0, 540, -4800, 2940, 6200)  # gate
+    return layout
+
+
+def test_two_gate_shared_drain_ldmos_binds_pdk_model_on_every_device(tmp_path):
+    report = _run(
+        _two_gate_shared_drain_layout(),
+        tmp_path,
+        pdk_variant="gf180mcuA",
+        pdk_root=_pdk_root(tmp_path),
+    )
+    # Claimed by the flavour (so not reported unsupported) AND extracted as
+    # LDMOS: the two predicates cannot disagree.
+    assert report["unsupported_devices"] == []
+    lines = _device_lines(report)
+    assert len(lines) == 2
+    assert all(" nfet_10v0_asym " in line for line in lines)
+
+
+def test_bare_ldmos_marker_without_drain_still_reported_unsupported(tmp_path):
+    layout = _two_gate_shared_drain_layout()
+    layout.top_cell().shapes(layout.layer(210, 0)).clear()
+    report = _run(layout, tmp_path)
+    assert [d["kind"] for d in report["unsupported_devices"]] == ["ldmos"]
+
+
+def _pcell_shaped_layout_with_contacts() -> kdb.Layout:
+    """The two-gate PCell shape plus Contact/Metal1 on the centre drain stripe
+    and on both source islands (issue #4949): the drain extensions flanking
+    the stripe are separate COMP islands that only MVSD spans."""
+    layout = _two_gate_shared_drain_layout()
+    top = layout.top_cell()
+    for box in (
+        kdb.Box(-3600, -3000, -3200, 3000),
+        kdb.Box(3200, -3000, 3600, 3000),
+        kdb.Box(-100, -3000, 100, 3000),
+    ):
+        top.shapes(layout.layer(33, 0)).insert(box)
+        top.shapes(layout.layer(34, 0)).insert(box.enlarged(100, 100))
+    return layout
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_pcell_shaped_ldmos_fingers_share_one_drain_net(tmp_path, mirror):
+    layout = _pcell_shaped_layout_with_contacts()
+    if mirror:
+        top = layout.top_cell()
+        top.transform(kdb.Trans(kdb.Trans.M90))
+    report = _run(
+        layout, tmp_path, pdk_variant="gf180mcuA", pdk_root=_pdk_root(tmp_path)
+    )
+    assert report["device_counts"] == {"nfet": 2}
+    drains = [d["nets"]["d"] for d in report["devices"]]
+    sources = [d["nets"]["s"] for d in report["devices"]]
+    assert None not in drains and None not in sources
+    assert drains[0] == drains[1]
+    assert sources[0] != sources[1]
+    assert drains[0] not in sources

@@ -1,6 +1,6 @@
 # Fleet Observability: end-to-end reference
 
-> Epic [#4702](https://github.com/rjwalters/loom/issues/4702), Phase 4
+> Epic [#4702](https://github.com/2AMLogic/loom/issues/4702), Phase 4
 > (#4860). This is the single entry point tying the whole pipeline together —
 > **daemon config → wire schema → exporter → Cloudflare backend → dashboard
 > views** — matching the map-plus-links pattern `daemon-reference.md` and
@@ -20,6 +20,7 @@
 - [3c. Operational signals from daemon loops (Issue #8860)](#3c-operational-signals-from-daemon-loops-issue-8860)
 - [3d. Agent telemetry relay (Issue #10964)](#3d-agent-telemetry-relay-issue-10964)
 - [3e. Alerts as `alert.transition` telemetry (Issues #11295, #12806)](#3e-alerts-as-alerttransition-telemetry-issues-11295-12806)
+- [3f. Telemetry kind inventory (Issue #12117)](#3f-telemetry-kind-inventory-issue-12117)
 - [4. The backend: deploy your own Cloudflare Worker](#4-the-backend-deploy-your-own-cloudflare-worker)
 - [5. Authenticated vs. public: two views, one redaction policy](#5-authenticated-vs-public-two-views-one-redaction-policy)
 - [5b. Doc-maintenance throughput (Guide, local-only, issue #6136)](#5b-doc-maintenance-throughput-guide-local-only-issue-6136)
@@ -82,11 +83,30 @@ Precedence is **env > config > default**, the same rule every other
 | `endpoint` | `LOOM_OBSERVABILITY_ENDPOINT` | unset (disables export) |
 | `ingestKeyFile` | `LOOM_OBSERVABILITY_INGEST_KEY_FILE` | `$HOME/.loom/observability/ingest.key` |
 | `batchSize` | `LOOM_OBSERVABILITY_BATCH_SIZE` | 50 |
+| `maxBatchBytes` | `LOOM_OBSERVABILITY_MAX_BATCH_BYTES` | 4,194,304 bytes (4 MiB) |
 | `flushIntervalSecs` | `LOOM_OBSERVABILITY_FLUSH_INTERVAL_SECS` | 30 |
 | `queueCapacity` | `LOOM_OBSERVABILITY_QUEUE_CAPACITY` | 2000 |
 | `exporter` | `LOOM_OBSERVABILITY_EXPORTER` | unset ⇒ no exporter; `"otlp"` (§3). The retired `"https"` is skipped with a warning (#12813) |
 | `exporters` | — (config only) | unset ⇒ `exporter` (§3); an `otlp` entry may carry `headers_file` (§3) |
 | `claudeCodeTelemetry` | `LOOM_CLAUDE_CODE_TELEMETRY_*` | off — a nested, separately-resolved block (#9215) |
+
+`batchSize` limits the number of queued envelopes considered per flush.
+`maxBatchBytes` limits the **encoded OTLP JSON body** of each HTTP request,
+including its resource and scope wrappers. The first valid positive integer
+wins in this order: `LOOM_OBSERVABILITY_MAX_BATCH_BYTES`, the selected
+`observability.exporters[].maxBatchBytes` object field, the shared
+`observability.maxBatchBytes` field, then 4 MiB. A singular exporter or a
+string entry uses the shared field. For a receiver that caps requests at
+one MiB, set `"maxBatchBytes": 1048576` next to `batchSize` or on its exporter
+object.
+
+The queued exporter splits requests over the configured limit and requests
+explicitly refused for size (HTTP 413 or an explicit HTTP 400 size message).
+It processes the resulting groups in order. An irreducible oversized
+envelope records `request_too_large` in the durable loss ledger. Ordinary
+HTTP 400 responses keep their existing `status_400` behavior. This byte
+setting applies to the queued exporter. Raw worker relay forwarding keeps
+its own request policy.
 
 `claudeCodeTelemetry` is the one sub-block that configures **someone else's**
 exporter: the OTel environment a spawned worker's own Claude Code session needs
@@ -162,7 +182,7 @@ exporter is configured**):
 
 OTLP is the only exporter (#12813 removed the native JSON-over-HTTPS `POST
 /ingest` one). `OtlpExporter` (epic Phase 4, issue
-[#4858](https://github.com/rjwalters/loom/issues/4858)) translates
+[#4858](https://github.com/2AMLogic/loom/issues/4858)) translates
 `TelemetryEnvelope` batches into OTLP logs (`/v1/logs`) and metrics
 (`/v1/metrics`) requests, batched (`batchSize`), retried with jitter, and
 backed by the durable disk queue so a sink outage or a sleeping host never
@@ -194,7 +214,7 @@ host-shape attributes in the next table:
 | `host.name` | the envelope's `host_id` (#10977) |
 | `service.version` | the reporting daemon's version (a `host.health` record's `daemon_version`, else the exporting build's) |
 | `loom.daemon.revision` | the exporting build's full git SHA (`unknown` for a tarball build) — the same value every span carries (#11197) |
-| `loom.fleet.config_sha` | the fleet-gitops commit whose rendered config tiers are **on disk on this host right now**: a 40-hex SHA, `unknown` (a fleet host where no applied commit is established yet, e.g. during a startup-pass timeout), or `none` (no fleet store, `fleet.repo` unset). Never empty, never omitted (#11197) |
+| `loom.fleet.config_sha` | the fleet state store commit whose rendered config tiers are **on disk on this host right now**: a 40-hex SHA, `unknown` (a fleet host where no applied commit is established yet, e.g. during a startup-pass timeout), or `none` (no fleet store, `fleet.repo` unset). Never empty, never omitted (#11197) |
 
 **Host shape (#12874).** The emitting host's static shape, so a sweep or phase
 span resolves to its host's size with no join against the
@@ -214,9 +234,8 @@ then `meta-data/instance-type` and `meta-data/placement/region`) spawned at
 telemetry startup on Linux. It bypasses any `HTTP(S)_PROXY`, has a 1 s total
 budget, never retries and is never awaited — so startup is not delayed, and
 batches exported before it lands (or on a host where IMDS is unreachable)
-simply lack `host.type`/`cloud.*`. `eta.stage_outcome` records carry the
-*observing* host's shape, not the executing host's; join through the
-executing `host.id` on `sweep.*` records for that.
+simply lack `host.type`/`cloud.*`. Records carry the *observing* host's shape, not the executing
+host's; join through the executing `host.id` on `sweep.*` records for that.
 
 **Host load on sweep/phase spans (#12884).** `loom.sweep` and every
 `loom.phase` span carry the `lifecycle::host_attributes()` sample, including
@@ -757,16 +776,18 @@ out earlier (`workspace_halted`, `parked`,
 `host_constraint`, a backoff, a cooldown, …) had no per-issue SigNoz record
 at all before this. Every ready-queue row now gets a `loom.dispatch.disposition`
 span on a disposition transition (including first sight), on a periodic
-refresh (`LOOM_DISPATCH_DISPOSITION_REFRESH_SECS`, default 600s = 10 min), or
-once as a terminal `left_queue` record when it leaves a repo whose listing
-succeeded. Sampled from the collector's periodic pass (the same cadence as
-the other queue samples), never the tick loop, so a disposition lasting less than one
-collector interval can be missed; a 10-minute-or-longer lookback still always
-contains the current state of every queued issue. Every queued row becomes a
-span (no volume cap: a cap would make which items carry facts depend on
-iteration order), and a row whose repo root never resolved to a forge slug is
-dropped and counted as `reason="unresolved"` rather than exported with a local
-path. `loom.dispatch.admission` also gained `loom.repo`/`loom.repo.visibility`
+refresh (`LOOM_DISPATCH_DISPOSITION_REFRESH_SECS`, default 150 seconds of
+source time), or once as a terminal `left_queue` record when it leaves a repo
+whose listing succeeded. A 30-second timer checks for a newer completed tick
+using cached identities. It shares the collector loop with host snapshots and
+backfill, whose work can delay the check. The existing five-minute host snapshot
+pass resolves repo identities and counts unresolved rows. The span
+timestamp is the source tick's completion time; the envelope records when
+the collector offered it. Warm repos can refresh while other identities are
+unresolved. Missing rows in failed or incomplete listings keep their last
+observation. The export has no row cap. Rows without a resolved forge slug
+are counted as `reason="unresolved"` and omit any local path from telemetry.
+`loom.dispatch.admission` also gained `loom.repo`/`loom.repo.visibility`
 in the same change, so `loom.issue` is no longer ambiguous on a multi-repo
 host. Full attribute table in
 [`telemetry-schema.md`](telemetry-schema.md#loomdispatchdisposition-issue-9222-per-issue-why-is-it-waiting).
@@ -890,9 +911,11 @@ every span also names the endpoint: `github.route` (a template such as
 `/repos/{owner}/{repo}/pulls/{n}`, from the same finite table as gh-shim's
 `github.api.route`), `http.request.method`, and `github.command` (`pr view`
 for an agent front read), so `api.rest` and `agent_gh_front` spend can be
-ranked by route. That pass also
-emits a `pass.summary` log per pass and a `pass.verdict` per artifact; Champion
-steps add `pass.verdict` rows with `mechanism=step:champion`; see
+ranked by route. Role steps emit a
+`pass.verdict` per artifact; Champion
+steps add `pass.verdict` rows with `mechanism=step:champion` (Judge steps and
+verdict-writing Judge ticks add `mechanism=step:judge`, #12362) and a
+`stage_items{state="pr_refused"}` gauge (#12027); see
 [`telemetry-schema.md`](telemetry-schema.md) and
 `defaults/observability/signoz/pass-queries.sql`.
 
@@ -991,7 +1014,7 @@ override for a stopped daemon or an opted-out reconciler.
 
 **Uncovered `gh` callers (#10343, tracked in #10618).** Spend from `safehouse.rs`,
 `auto_update`/`release_resolve`, `credential_preflight`, `sweep-lease-renew.sh`,
-`peer_coord.rs` and `main_health_gate` bypasses the `invoke github` span, so it
+and `main_health_gate` bypasses the `invoke github` span, so it
 reads as shadow spend. The span-vs-`/rate_limit` hourly reconciliation is an
 operational check on a fleet host (shadow recipe above), not a CI check.
 
@@ -1086,6 +1109,73 @@ Each such span carries, at open:
 A host-process run carries no container keys: unknown is absent, never zero.
 A sweep-dispatched Judge or Doctor has no `loom.role_attempt`; read its
 `loom.phase` span, which carries the PR through the sweep.
+
+### Tokens per step, per PR or issue (#13563)
+
+`sweep.completed` no longer carries per-unit tokens under step dispatch. The
+source now is the step's close **log record**, `role_tick.outcome` with
+`loom.role_tick.source = step`. It is built from the step's session
+transcripts by the same decoder `burn.rs` uses (deduped on `message.id`), so
+totals match by construction. `loom.dispatch.step` is an instant span emitted
+at spawn and cannot carry them; `loom.llm.tokens.*` metrics stay unlabelled by
+repo/issue to bound cardinality.
+
+Since #14048 the record also carries the step's **launch identity**, read back
+off the step's own per-item log (`step-<role>-<item>.log`) and anchored to the
+step's `sweep_id=` dispatch header — never the per-role log a role-runner tick
+reads, which a step never writes. A native runtime's token rows are narrowed to
+the **exact session ids that log names** (OpenCode's `--format json` event
+stream `sessionID`, Codex's `session id: <uuid>` banner), which is strictly
+more precise than directory+window: two concurrent same-role steps in one
+workspace overlap in time by construction, so only the id can separate them.
+OpenCode's id is the whole key; the Codex arm still ANDs the ids with the
+workspace directory and window (the window bounds the rollout scan).
+Claude steps keep the transcript scan; a Kimi step has no id source yet and
+keeps directory+window.
+
+| Key | Meaning |
+|---|---|
+| `loom.repo`, `loom.sweep_id`, `loom.role` | the repo, step and role |
+| `loom.stage` | the step-engine stage (`builder`, `judge`, `champion_promote`, `champion_merge`, …) — finer than `loom.role`, which folds Champion's two stages to `champion` (#14048) |
+| `loom.runtime`, `loom.provider`, `loom.profile` | the launch's own `# LOOM_LAUNCH` identity (#14048): absent for a Claude/legacy-adapter spawn, never a guessed `claude` |
+| `loom.issue` / `loom.pr_number` | the step's item: a PR for Judge / Champion-merge-style steps, else an issue |
+| `loom.models_used`, `loom.tokens_by_model` | observed models and per-model rows (never inferred from config) |
+| `loom.tokens.input` / `.output` / `.cache_read` / `.cache_write` | flat sums of the rows (`cache_write` = 5m + 1h) |
+
+A step with no readable transcript or launch record carries no token or
+identity keys: absent, never zero. Each host's daemon emits its own steps'
+records, so a **cross-host per-stage join** is `repo + issue/PR + stage` over
+these rows — the narrating host's completion envelope no longer has to see the
+other hosts' sessions.
+**Known gap:** summing per-step counts undercounts `loom.llm.tokens.*` by the
+tokens used outside steps (role-runner ticks, which have no item). Kimi steps
+key on directory+window, not session id. The hourly comparison against
+`loom.llm.tokens.*` is a post-roll live check and has not been run.
+
+### Resync landings: who, which path, what result (#13674)
+
+Each attempt to land a workspace-resync PR emits one instant
+`workspace_resync.landing` span (its own root). Attributes: `github.repo`,
+`github.number`, `loom.head_sha`, `path` (`queue_handoff` or `waiver`),
+`outcome` (`Queued`, `Waiting`, `Failed`, `Merged`, `NotQueueMode`), `reason`
+(bounded) and `gate_paths_included` (`false` until #13665 lets a gate path
+land). The waiver path's result maps `Landed` to `Merged`, `Lane` to `Failed`
+and `Held` to `Waiting`. A pass whose waiver does not land goes on to the
+queue hand-off, so it can emit one span per path. The `merge_queue.enqueue`
+and `merge_queue.dequeue` `invoke github` spans carry `github.number`. This
+week's landings by path and outcome:
+
+```sql
+SELECT attributes_string['path'] AS path, attributes_string['outcome'] AS outcome, count() AS landings
+FROM signoz_traces.signoz_index_v3
+WHERE name = 'workspace_resync.landing' AND timestamp >= now() - INTERVAL 7 DAY
+GROUP BY path, outcome ORDER BY landings DESC
+```
+
+The daemon's `log::info!` landing lines are **not** exported to the logs
+store: no generic log bridge exists, and exporting them needs a new telemetry
+record kind. The span is the queryable record. Not yet run against a live
+daemon.
 
 ## 3d. Agent telemetry relay (Issue #10964)
 
@@ -1340,7 +1430,63 @@ go out once the exporters are up. llm-monitor's quota step-change alert is not
 in `ranking.json` yet, so it is not sent.
 
 `fleet_alert` only runs when `autonomous.fleetAlert.enabled` is on (off by
-default here); the fleet defaults (fleet-gitops) are where to enable it.
+default here); the fleet defaults (the fleet state store) are where to enable it.
+
+## 3f. Telemetry kind inventory (Issue #12117)
+
+Every kind in `TELEMETRY_KINDS` (`loom-daemon/src/telemetry/kinds.rs`). Origin: **daemon** = observed or emitted by the daemon itself; **CLI** = emitted by an agent- or operator-invoked CLI. Signal is the OTLP table the kind lands in. All kinds currently export over OTLP; none is `NotExported`. Producer paths are relative to `loom-daemon/src/` and show the main construction sites, not every one.
+
+Guards: `kind_producer.rs` fails when a kind loses its last producer; `kind_export.rs` fails when a kind has neither an OTLP mapping arm nor an entry on `NOT_EXPORTED_KINDS`, and when this table lacks a row for a registered kind; `kind_silence.rs` holds the per-kind silence thresholds.
+
+| Kind | Producer | Origin | Signal | Notes |
+|---|---|---|---|---|
+| `sweep.started` | observability/collector.rs | daemon | logs |  |
+| `sweep.identity` | observability/collector/identity.rs | daemon | logs |  |
+| `sweep.phase` | observability/collector.rs | daemon | logs |  |
+| `sweep.completed` | observability/collector.rs | daemon | logs |  |
+| `sweep.outcome` | sweep_outcome_summary.rs, observability/collector.rs | daemon | logs |  |
+| `tokens.snapshot` | observability/collector.rs | daemon | metrics (gauges) |  |
+| `host.health` | observability/sender.rs, observability/collector.rs | daemon | metrics (gauges) |  |
+| `role_tick.outcome` | role_tick_telemetry.rs, sweep_outcomes.rs | daemon | logs | Exported (mapped since #11858). The 7-day zero-row window to 2026-10-14 predates that fix; live rows not re-verified here. |
+| `session.summary` | observability/session_summary.rs | daemon | logs |  |
+| `session.analysis` | observability/session_analysis.rs | daemon | logs |  |
+| `daemon.event` | observability/daemon_event.rs, observability/daemon_lifecycle.rs | daemon | logs |  |
+| `trace.span` | ci_telemetry/records.rs, ci_telemetry/nextest.rs | daemon | spans |  |
+| `ci.run` | ci_telemetry/records.rs | daemon | logs |  |
+| `ci.job` | ci_telemetry/records.rs | daemon | logs |  |
+| `ci.duration` | ci_telemetry/records.rs | daemon | metrics (histogram) |  |
+| `ci.job.log` | ci_telemetry/logs.rs | daemon | logs | Gated off by default: `autonomous.ciTelemetry.logCaptureEnabled` (see [ci-observability](ci-observability.md)). Zero rows on a host without it is expected. |
+| `metric.points` | observability/ops.rs | daemon | metrics (grouped points) |  |
+| `session.output` | observability/session_output.rs | daemon | logs | Gated off by default: `observability.liveOutput.enabled` / `LOOM_OBSERVABILITY_LIVE_OUTPUT=1`, and needs an OTLP exporter (see [session-output](session-output.md)). Zero rows on a host without it is expected. |
+| `auto_update.tick` | auto_update/tick_telemetry.rs | daemon | logs |  |
+| `pick.decision` | observability/pick_decision.rs | daemon | logs |  |
+| `pass.verdict` | observability/step_verdict.rs | daemon | logs |  |
+| `token_ranking.refresh` | token_ranking_refresh/telemetry.rs | daemon | logs |  |
+| `host.export` | observability/collector.rs | daemon | logs |  |
+| `checkout.external_change` | fleet_sync/checkout_ff/external_change.rs | daemon | logs |  |
+| `roster.change` | fleet_sync/roster_clone.rs | daemon | logs |  |
+| `issue.estimate` | telemetry/kinds/issue_estimate/observe.rs | daemon | logs | Observed from curated issues by the intake pass (#12118). |
+| `stage.work_started` | observability/work_started.rs | daemon | logs |  |
+| `completion.narrated` | safehouse/completion_runtime.rs | daemon | logs |  |
+| `write_scope.refused` | write_scope.rs | daemon | logs |  |
+| `daemon.exit` | observability/daemon_exit.rs | daemon | logs |  |
+| `daemon.run_state_request` | observability/run_state_request.rs | daemon | logs |  |
+| `scope.memory` | observability/ops/scope_memory.rs | daemon | logs |  |
+| `host.status` | observability/collector.rs | daemon | metrics (gauges) |  |
+| `checkout.freshness` | fleet_sync/checkout_ff/freshness.rs, daemon_root_freshness.rs | daemon | logs |  |
+| `merge_queue.event` | forge_merge_queue/events.rs | daemon | logs |  |
+| `merge.authorization.evaluated` | forge_merge_queue/group_run.rs | daemon | logs |  |
+| `hold.transition` | observability/hold_transition.rs | daemon | logs |  |
+| `merge.lane_wait` | observability/lane_wait.rs | daemon | logs |  |
+| `champion.run` | observability/step_verdict.rs | daemon | logs |  |
+| `merge.queue.observed` | forge_merge_queue/group_github.rs | daemon | logs |  |
+| `merge.queue.regime` | forge_merge_queue/group_run.rs | daemon | logs |  |
+| `eta.dispatch_eligibility` | observability/dispatch_eligibility.rs | daemon | logs |  |
+| `eta.dispatch_state` | observability/dispatch_state.rs | daemon | logs |  |
+| `alert.transition` | alerts/mod.rs, observability/standalone_ops.rs | daemon | logs |  |
+| `eta.stage_occupancy` | observability/stage_occupancy.rs | daemon | logs |  |
+| `eta.stage_entry` | observability/stage_entry_fact.rs | daemon | logs |  |
+
 
 ## 4. The backend: deploy your own Cloudflare Worker
 

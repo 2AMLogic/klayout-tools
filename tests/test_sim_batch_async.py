@@ -16,6 +16,7 @@ from klayout_tools import sim_batch_async as sba
 from klayout_tools.cli import main
 from test_sim_batch import (
     FAKE_BUCKET,
+    INPUTS_UPLOAD_ARGV,
     _batch_request,
     _ceiling_request,
     _Clock,
@@ -86,8 +87,8 @@ def test_submit_only_refuses_sharded_request_before_any_s3_write(tmp_path, monke
     with pytest.raises(sim.SimError) as err:
         sim.run_sim(str(path), submit_only=True, hosts=2)
 
-    assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
-    assert "hosts" in str(err.value)
+    # One unit cannot fill two hosts (issue #5281): refused by name.
+    assert "exceeds the number of units" in str(err.value)
     assert runner.calls == []
 
 
@@ -217,7 +218,7 @@ def test_submit_status_attach_round_trip(tmp_path, monkeypatch):
 
     job_id = _submit(path)["job_id"]
     launches = len(runner.argvs_matching("launch"))
-    uploads = [a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)]
+    uploads = runner.argvs_matching("s3", "cp", INPUTS_UPLOAD_ARGV)
     assert uploads
 
     # An interrupted job is reported, and nothing re-launches or re-uploads.
@@ -234,9 +235,7 @@ def test_submit_status_attach_round_trip(tmp_path, monkeypatch):
 
     assert report["environment"]["remote"]["job_id"] == job_id
     assert len(runner.argvs_matching("launch")) == launches
-    assert [
-        a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)
-    ] == uploads
+    assert runner.argvs_matching("s3", "cp", INPUTS_UPLOAD_ARGV) == uploads
 
 
 def test_cli_job_status_unknown_job_exits_1_with_code(tmp_path, monkeypatch, capsys):
@@ -384,29 +383,6 @@ def test_cli_wait_for_capacity_with_job_status_is_a_usage_error(
             "klt-sim-x",
             "--wait-for-capacity",
             "5",
-            "--format",
-            "json",
-        ]
-    )
-
-    assert code == 2
-    assert "--wait-for-capacity" in _stderr_json(capsys)["error"]["message"]
-    assert runner.calls == []
-
-
-def test_cli_wait_for_capacity_with_batch_set_is_a_usage_error(
-    tmp_path, monkeypatch, capsys
-):
-    runner = _FakeRunner()
-    path = _setup(tmp_path, monkeypatch, runner)
-
-    code = main(
-        [
-            "sim",
-            "--batch-set",
-            str(path),
-            "--wait-for-capacity",
-            "0",
             "--format",
             "json",
         ]
@@ -801,7 +777,7 @@ def test_attach_shard_map_reports_a_lost_shard_and_the_others(tmp_path, monkeypa
 
     def _lose(argv, timeout_s):
         joined = " ".join(argv)
-        if lost in joined and joined.endswith("job.json -"):
+        if lost in joined and "head-object" in argv:
             return fake_completed("", returncode=1, stderr="404 Not Found")
         return inner(argv, timeout_s)
 
@@ -832,10 +808,10 @@ def test_attach_requires_the_shard_map_filename(tmp_path, monkeypatch):
     assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
 
 
-def test_submit_only_hosts_greater_than_one_keeps_its_refusal(tmp_path, monkeypatch):
+def test_submit_only_hosts_with_resume_is_still_refused(tmp_path, monkeypatch):
     runner = _FakeRunner()
     path = _setup(tmp_path, monkeypatch, runner)
     with pytest.raises(sim.SimError) as err:
-        sim.run_sim(str(path), submit_only=True, hosts=2)
+        sim.run_sim(str(path), submit_only=True, hosts=3, resume=True)
     assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
     assert runner.calls == []

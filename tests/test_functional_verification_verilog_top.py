@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
+from klayout_tools._provenance import _combined_content_hash
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
@@ -22,8 +24,6 @@ EXAMPLE_DIR = (
     / "functional-verification"
     / "verilog-tb"
 )
-HAVE_ICARUS = shutil.which("iverilog") is not None and shutil.which("vvp") is not None
-needs_icarus = pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog/vvp not installed")
 
 
 def _stage(tmp_path: Path, request_name: str = "request-rtl.json") -> Path:
@@ -138,7 +138,11 @@ def test_integration_pass_without_sdf(tmp_path):
     assert report["environment"]["cocotb_version"] is None
     assert report["environment"]["sdf"] is None
     assert Path(report.local_paths["test_log"]).is_file()
-    assert report["environment"]["results_xml"] == {"path": None, "scope": "absent"}
+    assert report["environment"]["results_xml"] == {
+        "path": None,
+        "scope": "absent",
+        "sha256": None,
+    }
 
 
 @needs_icarus
@@ -186,6 +190,13 @@ def test_integration_sdf_annotated_run(tmp_path):
     sdf = report["environment"]["sdf"]
     assert sdf["annotated"] is True
     assert sdf["partial"] is False
+    source_paths = [
+        str(tmp_path / name) for name in ("and_cell.v", "and2.v", "tb_and2.v")
+    ]
+    assert report["provenance"]["input"] == {
+        "content_hash": _combined_content_hash(source_paths),
+        "role": "source",
+    }
 
 
 @needs_icarus
@@ -195,3 +206,51 @@ def test_integration_sdf_that_fails_to_annotate_still_raises(tmp_path):
     sdf.write_text(sdf.read_text().replace("INSTANCE u1", "INSTANCE nosuch"))
     with pytest.raises(FunctionalVerificationError, match="did not fully apply"):
         run_functional_verification(str(request))
+
+
+# -- testbench.plusargs (issue #5006) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,match",
+    [
+        ("+a=1", "array of strings"),
+        ([1], r"plusargs\[0\] must be a non-empty string"),
+        ([""], r"plusargs\[0\] must be a non-empty string"),
+        (["+ok", "bin=x"], r"plusargs\[1\] must start with '\+'"),
+    ],
+)
+def test_plusargs_validation(tmp_path, value, match):
+    request = _edit(_stage(tmp_path), **{"testbench.plusargs": value})
+    with pytest.raises(FunctionalVerificationError, match=match):
+        run_functional_verification(request)
+
+
+# `testbench.plusargs` with `testbench.module` is no longer an unknown
+# field: issue #6906 accepts and forwards it on the cocotb path. Its
+# validation, reservation, forwarding, and echo are covered by
+# tests/test_functional_verification_plusargs.py.
+
+
+@needs_icarus
+def test_integration_plusargs_forwarded_and_echoed(tmp_path):
+    _stage(tmp_path)
+    _rewrite_bench(
+        tmp_path,
+        '    if (errors == 0) $display("PASS");',
+        '    if (errors == 0 && $test$plusargs("go") && '
+        '$value$plusargs("file=%s", f)) $display("PASS %0s", f);',
+    )
+    _rewrite_bench(
+        tmp_path, "integer errors = 0;", "integer errors = 0; reg [255:0] f;"
+    )
+    absent = run_functional_verification(str(tmp_path / "request-rtl.json"))
+    assert absent["status"] == "fail"
+    assert absent["environment"]["plusargs"] == []
+    request = _edit(
+        tmp_path / "request-rtl.json",
+        **{"testbench.plusargs": ["+go", "+file=a b=c"]},
+    )
+    report = run_functional_verification(request)
+    assert report["status"] == "pass"
+    assert report["environment"]["plusargs"] == ["+go", "+file=a b=c"]

@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import subprocess
 import tarfile
 from pathlib import Path
 
 import pytest
 
+from helpers.fake_s3_batch import FakeS3BatchRunner as _FakeRunner
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _provenance, sim_batch
 from klayout_tools import signoff_generator_batch as sgb
@@ -48,69 +48,6 @@ def _sha(data: bytes | str) -> str:
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-
-
-class _FakeRunner:
-    """Stands in for `aws` and the launch script: records every argv, keeps
-    uploads, answers `status.json` and materializes `outputs`."""
-
-    def __init__(self, keep_dir: Path) -> None:
-        self.calls: list[list[str]] = []
-        self.keep_dir = keep_dir
-        self.uploads: dict[str, Path] = {}
-        self.status = "done"
-        self.exit_code = "0"
-        self.outputs: dict[str, str | bytes] = {}
-        self.failures: dict[str, object] = {}
-
-    def __call__(self, argv: list[str], timeout_s: float) -> object:
-        self.calls.append(list(argv))
-        joined = " ".join(argv)
-        for key, value in self.failures.items():
-            if key in joined:
-                if isinstance(value, Exception):
-                    raise value
-                return value
-        if "cp" in argv:
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            if destination.startswith("s3://"):
-                name = destination.rsplit("/", 1)[-1]
-                kept = self.keep_dir / name
-                shutil.copyfile(source, kept)
-                self.uploads[name] = kept
-                return fake_completed()
-            if source.endswith("/status.json"):
-                return fake_completed(
-                    stdout=json.dumps(
-                        {
-                            "job_id": "klt-signoff-gen-fake",
-                            "state": self.status,
-                            "exit_code": self.exit_code,
-                            "instance_id": "i-0fake",
-                            "region": "us-east-1",
-                            "lifecycle": "spot",
-                            "spot": True,
-                            "tool": "generator",
-                        }
-                    )
-                )
-            if source.endswith("/outputs/"):
-                for name, content in self.outputs.items():
-                    path = Path(destination) / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    if isinstance(content, bytes):
-                        path.write_bytes(content)
-                    else:
-                        path.write_text(content, encoding="utf-8")
-                return fake_completed()
-        return fake_completed()
-
-    def submissions(self) -> list[list[str]]:
-        return [argv for argv in self.calls if "job.json" in " ".join(argv)]
-
-    @property
-    def job_json(self) -> dict:
-        return json.loads(self.uploads["job.json"].read_text(encoding="utf-8"))
 
 
 def _good_outputs(content: str = ARTIFACT) -> dict[str, str]:
@@ -137,7 +74,7 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
     monkeypatch.setattr(_provenance, "_klt_version", lambda: CLIENT_VERSION)
     keep = tmp_path / "uploads"
     keep.mkdir()
-    runner = _FakeRunner(keep)
+    runner = _FakeRunner(keep, job_id="klt-signoff-gen-fake", tool="generator")
     monkeypatch.setattr(sim_batch, "_run_subprocess", runner)
     return runner
 
@@ -202,7 +139,7 @@ def repo(tmp_path) -> Path:
 
 
 def _approval(**overrides) -> dict:
-    base = {
+    return {
         "id": "ota-netlist",
         "interpreter": "python3",
         "script": "scripts/gen.py",
@@ -210,9 +147,8 @@ def _approval(**overrides) -> dict:
         "allowed_arguments": [["--seed", "1"]],
         "artifact": ARTIFACT_PATH,
         "output": "build/ota.spice",
+        **overrides,
     }
-    base.update(overrides)
-    return base
 
 
 def _approvals_file(tmp_path: Path, *approvals: dict) -> str:
@@ -546,6 +482,7 @@ def test_approval_requires_a_script_content_hash(tmp_path):
     "overrides",
     [
         {"script": "/etc/passwd"},
+        {"script": r"\scripts\gen.py"},
         {"script": "../outside.py"},
         {"output": "../../escape"},
         {"artifact": "/abs/path"},

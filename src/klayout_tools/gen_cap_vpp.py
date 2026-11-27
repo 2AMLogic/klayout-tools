@@ -16,6 +16,9 @@ import functools
 import os
 from typing import Any
 
+from .gen_base import GenError
+from .gen_snap import _grid_snapped
+
 #: Name prefix of the fixed-layout capacitor cells this generator arrays.
 CAP_VPP_PREFIX = "sky130_fd_pr__cap_vpp_"
 
@@ -28,7 +31,6 @@ _DRAWING_DATATYPE = 20
 
 
 def _gds_path(pdk_info: dict[str, Any]) -> str:
-    from .gen import GenError
     from .gen_layer_params import _pdk_family
 
     family = _pdk_family(pdk_info["variant"])
@@ -53,15 +55,18 @@ def _gds_path(pdk_info: dict[str, Any]) -> str:
 
 
 @functools.lru_cache(maxsize=4)
-def _inspect_gds(path: str, mtime_ns: int) -> dict[str, Any]:
-    """Map every ``cap_vpp_*`` cell in ``path`` to its bbox and pin labels."""
+def _inspect_gds(
+    path: str, mtime_ns: int, prefix: str = CAP_VPP_PREFIX
+) -> dict[str, Any]:
+    """Map every cell in ``path`` whose name starts with ``prefix`` to its bbox
+    and pin labels (``prefix=""`` takes every cell; shared with ``pdk_cell``)."""
     import klayout.db as kdb
 
     layout = kdb.Layout()
     layout.read(path)
     cells: dict[str, Any] = {}
     for cell in layout.each_cell():
-        if not cell.name.startswith(CAP_VPP_PREFIX):
+        if not cell.name.startswith(prefix):
             continue
         bbox = cell.dbbox()
         pins = []
@@ -109,8 +114,6 @@ def _cell_table(pdk_info: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cap_vpp_array_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     if params["num"] < 1:
         raise GenError("generator 'cap_vpp_array': params.num must be >= 1")
     if params["pitch_um"] < 0:
@@ -119,8 +122,6 @@ def _cap_vpp_array_validate(params: dict[str, Any]) -> None:
 
 def _lookup(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, Any]:
     """Return the named cell's info, rejecting unknown names / overlapping pitch."""
-    from .gen import GenError
-
     table = _cell_table(pdk_info)
     entry = table.get(params["pdk_cell"])
     if entry is None:
@@ -153,11 +154,14 @@ def effective_pitch_um(params: dict[str, Any], entry: dict[str, Any]) -> float:
 
 
 def _cap_vpp_array_describe(
-    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+    params: dict[str, Any],
+    dbu: float,
+    pdk_info: dict[str, Any],
+    entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from .gen import _grid_snapped
-
-    entry = _lookup(params, pdk_info)
+    """Describe the array; ``entry`` lets ``pdk_cell`` supply its own lookup."""
+    if entry is None:
+        entry = _lookup(params, pdk_info)
     pitch = effective_pitch_um(params, entry)
     x0, y0, x1, y1 = entry["bbox_um"]
     notes: list[str] = []

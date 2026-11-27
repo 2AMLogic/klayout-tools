@@ -11,6 +11,20 @@ uses for a declare-only net). This mirrors the shape of the earlier
 verbatim out of a file that had grown past the point one module should hold
 placement/parsing *and* routing.
 
+Three leaf clusters have since moved one level further down, the same way and
+for the same reason -- this file reaching its own per-file size ratchet
+ceiling, leaving routing work no headroom: the own-block via-cut clearance
+check into ``gen_compose_via_cuts.py`` (#5398), and, in #5426, layer-rule
+resolution into :mod:`~klayout_tools.gen_compose_layer_rules` (the
+``_resolve_route_layer``/width/area/enclosure/landing-pad lookups named
+above) plus the pin helpers and plane-changing leg routing
+(``_pin_ref`` .. ``_plane_change_failure``, #2930) into
+:mod:`~klayout_tools.gen_compose_plane_change`. Both #5426 modules are
+re-imported at this module's scope (see the import block below), so they
+remain reachable as ``klayout_tools.gen_compose_routing.<name>`` exactly as
+before the move; the plane-change module reaches :func:`route_two_pin` back
+through a deferred import, so there is no load-time cycle.
+
 ``promote_composed_ports`` (port-promotion for the composed cell) and
 :func:`~klayout_tools.gen_compose.compose` (top-level orchestration) are
 *not* part of this split -- they stay in ``gen_compose.py``, calling into
@@ -19,308 +33,96 @@ this module's public routing entry points (``route_two_pin``,
 a handful of the layer-resolution/geometry helpers below) exactly as they
 called the same functions when this was one file.
 
-Dependency surface is intentionally narrow and mostly one-directional:
-``gen_compose.py``'s own module-scope constants/helpers this module needs
-(``GenComposeError``, ``_DIRECTION_VECTORS``, ``_ORIENTATION_KDB_ARGS``,
-``_VIA_LANDING_SIZE_UM``, ``_load_block_cell``, ``_port_has_geometry``) are
-imported *inside* the handful of functions that use them (the same deferred-
-import discipline ``gen_pcells/*.py`` uses to depend on ``gen.py``) rather
-than at module scope, so this module never has a load-time dependency back
-on ``gen_compose.py`` -- only ``gen_compose.py`` depends on this module at
-import time. Two of those same functions (``_endpoint_stub_widen_um``,
-``_self_net_cross_layer_lane_waypoints_um``) are *also* looked up this way
-even though :func:`route_two_pin` (defined in this module) could otherwise
-call them as ordinary same-module names -- the test suite monkeypatches
-both by their ``klayout_tools.gen_compose`` re-export (predating this
-split), and only a call routed back through ``gen_compose`` at call time
-still observes that patch. ``gen_compose.py`` in turn imports this module's
-entire routing API back (module scope, no cycle -- this module never
-imports ``gen_compose`` at its own module scope) purely to preserve
-``klayout_tools.gen_compose.<name>`` as a working import path for every
-name the test suite/callers used before this split, plus the one name it
-calls directly itself (``_ring_port_side``, for ``_validate_block_port``'s
-ring-gap-port check).
+Shared errors, port geometry, orientation constants and via sizing come
+from ``gen_compose_base`` at module scope. Reading block geometry imports
+``_load_block_cell`` and ``_rescale_block_layout`` from ``gen_compose``
+inside the function to avoid a circular import. The stub-widening and
+cross-layer retry helpers look up ``_endpoint_stub_widen_um`` and
+``_self_net_cross_layer_lane_waypoints_um`` through ``gen_compose`` at call
+time so tests can patch their re-exports. The composition runner exposes the
+routing API to callers and uses ``_ring_port_side`` to check ring-gap ports.
 """
 
 from __future__ import annotations
 
 import functools
 import math
-from typing import Any, NamedTuple
+from typing import Any
 
+from ._jsonnum import is_finite_number
 from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
-    UnknownDeckError,
-    get_deck,
     get_extraction_deck,
-    get_nominal_dbu,
 )
-from .gen import _PDK_ROLE_LAYERS, RING_SIDE_DIRECTIONS, GenError, _pdk_family
+from .gen import RING_SIDE_DIRECTIONS, _pdk_family
+from .gen_compose_base import (
+    _DIRECTION_VECTORS,
+    _ORIENTATION_KDB_ARGS,
+    _VIA_LANDING_SIZE_UM,
+    GenComposeError,
+    _port_has_geometry,
+)
+from .gen_compose_base import _drop_array_extra_um as _drop_array_extra_um
 
-
-def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
-    """Resolve ``routing.layer_role`` to a ``(layer, datatype)`` pair.
-
-    Routing goes through the *same* per-PDK-family role-layer table every
-    ``klt gen`` generator already uses (:data:`klayout_tools.gen._PDK_ROLE_LAYERS`)
-    -- never a raw ``{layer, datatype}`` pair from the request, and never a
-    second, private layer map (spike section 2, ``routing.layer_role``).
-
-    Raises :class:`GenComposeError` when the variant is unsupported, the role
-    is not a known role, or the resolved family's curated deck has no layer
-    for the role (``None`` entry).
-    """
-    from .gen_compose import GenComposeError
-
-    try:
-        family = _pdk_family(variant)
-    except GenError as exc:
-        raise GenComposeError(str(exc)) from exc
-
-    family_roles = _PDK_ROLE_LAYERS[family]
-    if layer_role not in family_roles:
-        available = ", ".join(sorted(family_roles))
-        raise GenComposeError(
-            f"routing.layer_role '{layer_role}' is not a known layer role for "
-            f"PDK family '{family}' -- available: {available}"
-        )
-    pair = family_roles[layer_role]
-    if pair is None:
-        raise GenComposeError(
-            f"routing.layer_role '{layer_role}' has no layer in PDK family "
-            f"'{family}''s curated deck -- cannot route on it"
-        )
-    return pair
-
-
-def _min_width_um_for_layer(
-    variant: str, layer: tuple[int, int] | None
-) -> tuple[float, str] | None:
-    """Resolve the tightest applicable minimum-*width* DRC rule for ``layer``
-    from the resolved PDK family's own curated deck -- the *same*
-    ``ExtractionDeck``/``DrcRule`` set ``klt drc`` judges composed geometry
-    with, never a private, hard-coded threshold (issue #1501).
-
-    Mirrors ``compose()``'s own same-layer minimum-*spacing* lookup (issue
-    #1386's ``_min_spacing_um_for_layer``), generalised to ``"width"`` rules
-    and lifted to module scope so both the ``routing.width_um`` validation
-    and the via-drop square sizing below can share it. Returns
-    ``(threshold_um, rule_id)`` for the widest matching ``"width"`` rule on
-    ``layer`` (a layer can carry more than one width rule from different DRM
-    sections; the widest is the true floor), or ``None`` when ``layer`` is
-    ``None``, the layer has no such rule in the resolved deck, or the PDK
-    family/deck cannot be resolved at all -- an unresolvable family degrades
-    this check to a no-op, exactly like #1386's spacing lookup does.
-    """
-    if layer is None:
-        return None
-    try:
-        family = _pdk_family(variant)
-        deck_rules = get_deck(family)
-        nominal_dbu_um = get_nominal_dbu(family)
-    except (GenError, UnknownDeckError):
-        return None
-    best: tuple[float, str] | None = None
-    for rule in deck_rules:
-        if (
-            rule.check == "width"
-            and rule.layer == layer
-            and rule.other_layer is None
-            and rule.derived_layer is None
-        ):
-            threshold_um = rule.threshold_dbu * nominal_dbu_um
-            if best is None or threshold_um > best[0]:
-                best = (threshold_um, rule.id)
-    return best
-
-
-def _min_area_um2_for_layer(
-    variant: str, layer: tuple[int, int] | None
-) -> tuple[float, str] | None:
-    """Resolve the tightest applicable minimum-*area* DRC rule for ``layer``
-    from the resolved PDK family's own curated deck -- the *same*
-    ``ExtractionDeck``/``DrcRule`` set ``klt drc`` judges composed geometry
-    with, never a private, hard-coded threshold (issue #2072).
-
-    Mirrors :func:`_min_width_um_for_layer` above, generalised to ``"area"``
-    rules -- used by :func:`_landing_pad_side_um_for_layer` below to floor a
-    via-drop's landing-pad square against whichever metal level it actually
-    lands on. Returns ``(threshold_um2, rule_id)`` for the *largest*
-    matching plain ``"area"`` rule on ``layer`` (``other_layer`` and
-    ``derived_layer`` both unset -- this deliberately excludes a layer's
-    ``*.holes_area.*`` sibling rule, which checks the area of an *interior
-    void* of the merged region, not the polygon itself, and would never be
-    satisfied merely by drawing a bigger solid square), or ``None`` when
-    ``layer`` is ``None``, the layer has no such rule in the resolved deck,
-    or the PDK family/deck cannot be resolved at all -- an unresolvable
-    family degrades this check to a no-op, exactly like
-    :func:`_min_width_um_for_layer` does.
-    """
-    if layer is None:
-        return None
-    try:
-        family = _pdk_family(variant)
-        deck_rules = get_deck(family)
-        nominal_dbu_um = get_nominal_dbu(family)
-    except (GenError, UnknownDeckError):
-        return None
-    best: tuple[float, str] | None = None
-    for rule in deck_rules:
-        if (
-            rule.check == "area"
-            and rule.layer == layer
-            and rule.other_layer is None
-            and rule.derived_layer is None
-            and rule.area_min_dbu2 is not None
-        ):
-            threshold_um2 = rule.area_min_dbu2 * (nominal_dbu_um**2)
-            if best is None or threshold_um2 > best[0]:
-                best = (threshold_um2, rule.id)
-    return best
-
-
-def _min_enclosing_margin_um_for_layer(
-    variant: str,
-    layer: tuple[int, int] | None,
-    other_layer: tuple[int, int] | None,
-) -> tuple[float, str] | None:
-    """Tightest plain enclosure rule for the ordered metal/via layer pair.
-
-    Like the width/area lookups above, convert the resolved family's deck
-    threshold from its nominal dbu to um, and return ``None`` for a missing
-    rule or unresolvable family/deck. Derived-region rules do not describe
-    a plain landing-pad square and are deliberately excluded.
-    """
-    if layer is None or other_layer is None:
-        return None
-    try:
-        family = _pdk_family(variant)
-        deck_rules = get_deck(family)
-        nominal_dbu_um = get_nominal_dbu(family)
-    except (GenError, UnknownDeckError):
-        return None
-    candidates = (
-        (rule.threshold_dbu * nominal_dbu_um, rule.id)
-        for rule in deck_rules
-        if rule.check == "enclosing"
-        and rule.layer == layer
-        and rule.other_layer == other_layer
-        and rule.derived_layer is None
-    )
-    return max(candidates, key=lambda entry: entry[0], default=None)
-
-
-def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> float:
-    """A landing pad's baseline/area side length (um) on ``layer`` (#2072).
-
-    :func:`_resolve_landing_pad_sizes` additionally applies each hop's
-    via-enclosure floor before passing the final size into drawing (#2074).
-
-    A via-drop's landing pad (``_VIA_LANDING_SIZE_UM``, sized from the PDK's
-    contact-enclosure convention) is drawn on *every* hop of a multi-level
-    via ladder (:func:`_resolve_via_drop_layer`) -- including an
-    intermediate metal level the ladder merely passes through on its way to
-    a pin several levels up (e.g. a route reaching a `bond_pad`'s
-    ``top_metal`` port through sky130's li1->met1->met2->met3->met4->met5
-    stack). ``_VIA_LANDING_SIZE_UM`` (0.42um square, 0.1764um^2) clears
-    sky130's own met1/met2 minimum-area rules (0.083/0.0676um^2) but falls
-    short of met3/met4's (0.240um^2 each) and met5's (4.0um^2) -- so an
-    intermediate hop landing pad that never merges with a larger shape on
-    that layer (nothing else the composition draws is anchored there) is a
-    real, isolated sub-minimum-area polygon: exactly the `met3.area.1`/
-    `met4.area.1` violations issue #2072 reproduced against a real `klt
-    gen-compose` + `bond_pad` output.
-
-    Returns ``max(_VIA_LANDING_SIZE_UM, sqrt(area_floor))`` when ``layer``
-    carries a plain minimum-area rule in the resolved deck (a landing pad
-    already merged into a larger drawn shape on that layer stays clean
-    regardless of the extra size), or ``_VIA_LANDING_SIZE_UM`` unchanged
-    when the layer has no such rule (or the family/deck cannot be
-    resolved) -- an unresolvable family degrades to the pre-#2072 fixed
-    size, never blocks routing.
-
-    Same known, already-accepted scoping trade-off as ``via_drop_size_um``
-    (issue #1501): this resolved size is threaded into *drawing*
-    (:func:`~klayout_tools.gen_compose._write_composed_gds`) only, not into
-    the router's own pre-route spacing/collision pre-checks (still sized
-    off the fixed ``_VIA_LANDING_SIZE_UM`` baseline) -- so an oversized pad
-    on a rule-heavy layer (met5's 2.0um side, up from 0.42um) is, in the
-    rare case a route was accepted right at that pre-check's own margin,
-    theoretically capable of surfacing a *new*, previously-unseen spacing
-    violation against a neighbour `klt drc` would still catch. This is
-    strictly better than the pre-#2072 guaranteed area violation it
-    replaces, and mirrors the exact precedent #1501 already shipped and
-    left unchanged for `via_drop_size_um`'s own via-square growth.
-    """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
-    area_floor = _min_area_um2_for_layer(variant, layer)
-    if area_floor is None:
-        return _VIA_LANDING_SIZE_UM
-    needed_side_um = math.sqrt(area_floor[0])
-    return max(_VIA_LANDING_SIZE_UM, needed_side_um)
-
-
-def _resolve_landing_pad_sizes(
-    routed_geometry: list[dict[str, Any]],
-    variant: str,
-    via_drop_size_um: dict[tuple[int, int], float],
-) -> dict[tuple[tuple[int, int], tuple[int, int]], float]:
-    """Landing-pad sides keyed by ``(landing_layer, via_layer)`` (#2074).
-
-    Each side of each hop independently clears the fixed baseline, its
-    metal's area floor (#2072), and the actual via side plus twice that
-    pair's enclosure margin. Include the via in the key: the same metal
-    can enclose different cuts with different margins on adjacent hops.
-    Missing enclosure rules leave the baseline/area floor unchanged.
-
-    Resolve once per distinct pair and pass the result into drawing; the
-    router's existing spacing pre-checks keep their baseline footprint,
-    as with the area and via-width floors described above.
-    """
-    from .gen_compose import _VIA_DROP_SIZE_UM
-
-    landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
-    for route in routed_geometry:
-        for drop in route.get("via_drops", []):
-            via_layer = drop["via_layer"]
-            for pad_layer in drop.get("landing_layers", ()):
-                pair = (pad_layer, via_layer)
-                if pair not in landing_pad_size_um:
-                    side = _landing_pad_side_um_for_layer(variant, pad_layer)
-                    enclosure = _min_enclosing_margin_um_for_layer(
-                        variant, pad_layer, via_layer
-                    )
-                    if enclosure is not None:
-                        via_side = via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)
-                        side = max(side, via_side + 2 * enclosure[0])
-                    landing_pad_size_um[pair] = side
-    return landing_pad_size_um
-
-
-def _port_own_layer(port: dict[str, Any]) -> tuple[int, int] | None:
-    """The ``(layer, datatype)`` a port's own reported ``layer{layer,
-    datatype}`` geometry names, or ``None`` when it is missing/malformed.
-
-    Distinct from :func:`_port_has_geometry` (which also requires
-    ``x_um``/``y_um``) -- callers of this helper already know the port has a
-    usable position and only need its physical layer, e.g. to decide whether
-    a via-drop is needed (issue #454, see :func:`_resolve_via_drop_layer`).
-    """
-    layer = port.get("layer")
-    if not isinstance(layer, dict):
-        return None
-    layer_num, datatype = layer.get("layer"), layer.get("datatype")
-    if (
-        isinstance(layer_num, int)
-        and not isinstance(layer_num, bool)
-        and isinstance(datatype, int)
-        and not isinstance(datatype, bool)
-    ):
-        return (layer_num, datatype)
-    return None
-
+# Layer-rule resolution (``routing.layer_role`` -> ``(layer, datatype)`` and
+# the deck floors that pair implies) lives in ``gen_compose_layer_rules``
+# (#5426); plane-changing leg routing and the pin helpers ``route_bundle``
+# names legs by live in ``gen_compose_plane_change``. Both were relocated
+# verbatim out of this module, which had reached its per-file size ratchet
+# ceiling. They are re-imported at module scope -- with the redundant-alias
+# re-export form for the names only used through this module -- so every
+# pre-existing ``from klayout_tools.gen_compose_routing import <name>``
+# path, and ``gen_compose.py``'s re-export of it, resolves unchanged.
+# Relocated verbatim to gen_compose_landing_pads.py (issue #5803 -- this
+# file sat exactly at its per-file size ratchet ceiling; see that module's
+# docstring for the same move gen_compose_layer_rules.py made in #5426).
+# Re-imported at module scope so every pre-existing
+# ``from .gen_compose_routing import _drawn_leg_intermediate_pad_regions``
+# path keeps resolving unchanged.
+from .gen_compose_landing_pads import (
+    _drawn_leg_intermediate_pad_regions as _drawn_leg_intermediate_pad_regions,
+)
+from .gen_compose_landing_pads import _landing_pad_box
+from .gen_compose_landing_pads import (
+    _marked_via_drop_entry as _marked_via_drop_entry,
+)
+from .gen_compose_layer_rules import (
+    _landing_pad_side_um_for_layer as _landing_pad_side_um_for_layer,
+)
+from .gen_compose_layer_rules import (
+    _min_area_um2_for_layer as _min_area_um2_for_layer,
+)
+from .gen_compose_layer_rules import (
+    _min_enclosing_margin_um_for_layer as _min_enclosing_margin_um_for_layer,
+)
+from .gen_compose_layer_rules import (
+    _min_width_um_for_layer as _min_width_um_for_layer,
+)
+from .gen_compose_layer_rules import (
+    _port_own_layer,
+    _resolve_route_layer,
+)
+from .gen_compose_layer_rules import (
+    _resolve_landing_pad_sizes as _resolve_landing_pad_sizes,
+)
+from .gen_compose_pad_notch import _pad_introduced_notches_dbu
+from .gen_compose_plane_change import (
+    RouteConflict as RouteConflict,
+)
+from .gen_compose_plane_change import (
+    _changes_plane,
+    _leg_conflict_reason,
+    _normalize_leg_conflict,
+    _pin_failed_pair,
+    _pin_position_um,
+    _pin_ref,
+    _PlaneChangeContext,
+    _route_plane_change_leg,
+    _segments_field,
+    _unrouted_leg_record,
+)
+from .gen_compose_plane_climb import PlaneClimbContext, _endpoint_geometry_for
 
 #: ``direction_deg`` values a *stub-widen* (#496) applies to -- a port's own
 #: outward-facing north/south stub, never an east/west one. Scoped this
@@ -370,7 +172,7 @@ def _endpoint_stub_widen_um(
     if route_layer is None or _port_own_layer(port) != route_layer:
         return None
     pad_width_um = port.get("width_um")
-    if not isinstance(pad_width_um, (int, float)) or isinstance(pad_width_um, bool):
+    if not is_finite_number(pad_width_um):
         return None
     pad_width_um = float(pad_width_um)
     if pad_width_um <= width_um:
@@ -389,6 +191,15 @@ def _endpoint_stub_widen_um(
 #: two ``deck.metals`` levels it lands a pad on, in ascending stack order
 #: (issue #1567).
 _ViaDropHop = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
+
+#: Rejection for a backbone outside ``deck.metals`` whose pin is on it (#7957).
+_BACKBONE_OFF_METALS_REASON = (
+    "the backbone is outside the PDK's metals stack and has no contact to the "
+    "pin's metal pad. Set the applicable connectivity[].legs[].layer_role or "
+    "connectivity[].layer_role to a metal role, or clear the override to inherit "
+    "a metal role. If the leg inherits routing.layer_role, set that default to a "
+    "metal role. Alternatively, use a port on the backbone's own layer (issue #7957)"
+)
 
 
 def _resolve_via_drop_layer(
@@ -411,11 +222,10 @@ def _resolve_via_drop_layer(
 
     Returns ``(ladder, error)``:
 
-    * ``(None, None)`` -- no drop needed. Either ``port_layer`` already *is*
-      ``route_layer`` (the pre-#454 single-metal routing path, unchanged), or
-      ``route_layer`` itself is not a member of ``deck.metals`` (a
-      ``"poly"``/``"tap"``-role backbone has no metals stack to walk, so it
-      draws directly exactly as it always has).
+    * ``(None, None)`` -- no drop needed: ``port_layer`` already *is* ``route_layer``
+      (the pre-#454 single-metal path, unchanged), or no stack joins them to walk:
+      ``route_layer`` is not a member of ``deck.metals`` and neither is ``port_layer``,
+      or ``port_layer`` is a layer the deck models in no recognised role (as before).
     * ``(ladder, None)`` -- a drop is needed and fully resolved. ``ladder`` is
       a non-empty, ordered tuple of :data:`_ViaDropHop` entries -- one per via
       the backbone must drop through between ``route_layer`` and
@@ -435,10 +245,10 @@ def _resolve_via_drop_layer(
       ordinary metals-stack hops up to ``route_layer`` -- a real contact
       reaching the diffusion, not just a metal stub sitting near it.
     * ``(None, reason)`` -- a drop is needed but not resolvable (the deck
-      declares no via for one of the hops the ladder needs, or the pin sits
-      on the deck's bare ``poly`` layer, which no via in the metals stack
-      reaches) -- the caller reports the net unroutable rather than drawing a
-      disconnected short.
+      declares no via for one of the hops the ladder needs; the pin is a
+      bare-``poly`` gate; or, issue #7957, the backbone is outside
+      ``deck.metals`` while the pin is on it) -- the caller reports the net
+      unroutable rather than drawing a disconnected short.
 
     That last case is issue #492: before it, a metal-role backbone ending on
     a bare-poly gate port fell into the ``(None, None)`` "unrelated role,
@@ -447,17 +257,8 @@ def _resolve_via_drop_layer(
     joining the two. That is an open net (or, where the stub crosses other
     geometry, a short) that only a later ``klt drc``/``klt extract``/``klt
     lvs`` run would surface, with nothing pointing back at the cause. It is
-    now an explicit rejection naming the fix. Issue #1894 found the same
-    failure shape one branch over: a diffusion-role port (``deck.active``)
-    fell into that same "unrelated role, nothing to do" branch, so no
-    licon/mcon contact was ever drawn between the routed metal and the
-    diffusion it was meant to strap -- ``"routed": true`` and a clean ``klt
-    drc`` both held while `klt extract` recovered either an unstrapped node
-    (the strap never landed) or a short (an unrelated net's own via-drop
-    landing pad overlapped the un-tracked stub, invisible to the same-block
-    footprint-collision check since it never saw a landing pad for this leg
-    at all). That branch is now resolved via ``deck.contact`` instead,
-    exactly like the bare-poly case above but with a real contact available.
+    now an explicit rejection naming the fix. Issue #1894 found the same failure
+    shape one branch over (a diffusion-role pin), issue #7957 on the backbone side.
     """
     if route_layer == port_layer:
         return None, None
@@ -465,9 +266,10 @@ def _resolve_via_drop_layer(
         route_idx = deck.metals.index(route_layer)
     except ValueError:
         # The backbone itself is not on a declared routing-metal level (e.g.
-        # routing.layer_role "tap"): there is no metals stack to drop through,
-        # so draw directly on route_layer exactly as before #454.
-        return None, None
+        # routing.layer_role "tap"/"poly"): no metals stack to drop through, so
+        # it draws directly as before #454 -- unless the pin *is* on the stack
+        # (issue #7957): no via joins them, so the stripe would only overlap.
+        return None, _BACKBONE_OFF_METALS_REASON if port_layer in deck.metals else None
     try:
         port_idx = deck.metals.index(port_layer)
     except ValueError:
@@ -522,25 +324,25 @@ def _resolve_via_drop_layer(
                     "land a contact on"
                 )
             contact_hop: _ViaDropHop = (deck.contact, port_layer, deck.metals[0])
-            ladder = [contact_hop]
+            contact_ladder = [contact_hop]
             for via_index in range(0, route_idx):
                 if via_index >= len(deck.vias):
                     return None, (
                         "the resolved PDK's extraction deck declares no via "
                         f"connecting deck metals[{via_index}] and "
                         f"metals[{via_index + 1}] -- needed for a via-drop "
-                        "ladder between routing.layer_role's metal (deck "
+                        "ladder between the backbone metal (deck "
                         f"metals[{route_idx}]) and this pin's own diffusion "
                         "layer (reached via deck.contact)"
                     )
-                ladder.append(
+                contact_ladder.append(
                     (
                         deck.vias[via_index],
                         deck.metals[via_index],
                         deck.metals[via_index + 1],
                     )
                 )
-            return tuple(ladder), None
+            return tuple(contact_ladder), None
         # Any other non-metals-stack, non-diffusion-class role (no current
         # `klt gen` generator reports a port this way, but a deck may model
         # such a layer) keeps the pre-#454 behavior: drawn directly on
@@ -554,7 +356,7 @@ def _resolve_via_drop_layer(
                 "the resolved PDK's extraction deck declares no via "
                 f"connecting deck metals[{via_index}] and "
                 f"metals[{via_index + 1}] -- needed for a via-drop ladder "
-                f"between routing.layer_role's metal (deck "
+                f"between the backbone metal (deck "
                 f"metals[{route_idx}]) and this pin's own layer (deck "
                 f"metals[{port_idx}])"
             )
@@ -587,18 +389,17 @@ def _resolve_cross_block_route_layer(
     the *same* ``_PDK_ROLE_LAYERS`` table :func:`_resolve_route_layer` reads
     (never a second, private layer map).
 
-    Reuses :func:`_resolve_via_drop_layer` verbatim to confirm the two
-    resolved layers are connectable by a via-drop ladder in the resolved PDK
-    family's own ``ExtractionDeck.metals``/``.vias`` stack, and to resolve
-    which via(s) connect them -- the identical hop-resolution logic
-    :func:`route_two_pin`'s check 6 (via-drop) already relies on, called here
-    with the roles reversed (``route_layer`` slot = the cross-block layer,
-    ``port_layer`` slot = the primary ``layer_role``) rather than
-    reimplemented a second time. ``via_layers`` is returned for
-    completeness/testability only -- the actual via-drop(s) a leg falling
-    back to this cross layer needs are re-resolved per pin by check 6 itself
-    (:func:`route_two_pin`), since that is also where a pin's own reported
-    layer, not just the two routing layers, enters the picture.
+    Reuses :func:`_resolve_via_drop_layer` verbatim to confirm the two resolved layers
+    are connectable by a via-drop ladder in the resolved PDK family's own
+    ``ExtractionDeck.metals``/``.vias`` stack, and to resolve which via(s) connect
+    them -- the identical hop-resolution logic :func:`route_two_pin`'s check 6
+    (via-drop) already relies on, called here with the roles reversed (``route_layer``
+    slot = the cross-block layer, ``port_layer`` slot = the primary ``layer_role``)
+    rather than reimplemented a second time. ``via_layers`` is returned for
+    completeness/testability only -- the actual via-drop(s) a leg falling back to this
+    cross layer needs are re-resolved per pin by check 6 itself
+    (:func:`route_two_pin`), since that is also where a pin's own reported layer,
+    not just the two routing layers, enters the picture.
 
     Raises :class:`GenComposeError` when either role does not resolve (the
     same errors :func:`_resolve_route_layer` raises), when the two roles
@@ -608,8 +409,6 @@ def _resolve_cross_block_route_layer(
     issue #1567 removed the earlier single-hop-only restriction here, the
     same as it did for :func:`_resolve_via_drop_layer` itself).
     """
-    from .gen_compose import GenComposeError
-
     route_layer = _resolve_route_layer(variant, layer_role)
     try:
         cross_layer = _resolve_route_layer(variant, cross_layer_role)
@@ -630,7 +429,8 @@ def _resolve_cross_block_route_layer(
     deck = get_extraction_deck(_pdk_family(variant))
     ladder, error = _resolve_via_drop_layer(deck, cross_layer, route_layer)
     if ladder is None:
-        reason = error or (
+        # #7957: a non-metals cross-block role keeps the generic wording (no pin here).
+        reason = (error if cross_layer in deck.metals else None) or (
             f"'{cross_layer_role}' and '{layer_role}' are not both members of "
             "the PDK's metals/via stack"
         )
@@ -863,8 +663,6 @@ def manhattan_backbone(
     renders each interior corner as a square miter that fully fills the bend,
     so no separate bend-insertion pass is needed -- the corner *is* the bend.
     """
-    from .gen_compose import _DIRECTION_VECTORS
-
     ax, ay = a
     bx, by = b
     va = _DIRECTION_VECTORS[dir_a_deg]
@@ -1307,7 +1105,7 @@ def _ring_gap_ports(block: dict[str, Any]) -> dict[str, dict[str, float]]:
         values: list[float] = []
         for key in ("x_um", "y_um", "width_um"):
             value = port.get(key)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_finite_number(value):
                 break
             values.append(float(value))
         if len(values) != 3 or values[2] <= 0.0:
@@ -1333,7 +1131,7 @@ def _ring_side_lines(block: dict[str, Any]) -> dict[str, float]:
         if side is None or not isinstance(port, dict):
             continue
         value = port.get("x_um" if side in ("E", "W") else "y_um")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_finite_number(value):
             continue
         lines[side] = float(value)
     return lines
@@ -1398,7 +1196,7 @@ def _ring_trace_half_width_um(block: dict[str, Any]) -> float | None:
         if _ring_port_side(name) is None:
             continue
         value = port.get("width_um")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_finite_number(value):
             continue
         if value > 0.0:
             widths.append(float(value))
@@ -1489,7 +1287,6 @@ def _leg_plane_clears_ring(
     ring_half_um = _ring_trace_half_width_um(block)
     if ring_half_um is None:
         return False  # the ring does not say how wide its trace is
-    from .gen_compose import _VIA_LANDING_SIZE_UM
 
     # A via-drop's landing pad is a fixed-size square (`_VIA_LANDING_SIZE_UM`,
     # sized from the PDK's own contact-enclosure convention), independent of
@@ -1887,6 +1684,7 @@ def read_block_layer_geometry(
     block: dict[str, Any],
     offset_um: dict[str, float],
     layer: tuple[int, int],
+    target_dbu: float | None = None,
 ) -> dict[str, Any] | None:
     """Read ``block``'s **drawn** shapes on ``layer`` into the composed frame.
 
@@ -1894,10 +1692,8 @@ def read_block_layer_geometry(
     geometry on the ``(layer, datatype)`` pair the route is drawn on, mirrored/
     rotated per the block's own ``orientation`` (#1166) and translated by the
     block's placed ``offset_um``, in integer database units -- or ``None``
-    when the block draws nothing there. The same ``kdb.Trans`` (mirror-then-
-    translate) is applied here as :func:`_write_composed_gds` applies to this
-    block's actual cell instance, so this obstacle geometry always agrees
-    with what the composed GDS actually draws.
+    when the block draws nothing there. With ``target_dbu``, scale the block
+    and snap its placement on the output grid just as the GDS writer does.
 
     This is the one place this module looks at a block's *shapes* rather than
     at its ``generator_report``. It exists because a ``klt gen`` port's
@@ -1913,28 +1709,24 @@ def read_block_layer_geometry(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _ORIENTATION_KDB_ARGS, _load_block_cell
+    from .gen_compose import _load_block_cell, _rescale_block_layout
 
     src_layout, src_cell = _load_block_cell(block_id, block)
 
-    dbu = src_layout.dbu
+    dbu = target_dbu or src_layout.dbu
     layer_index = src_layout.find_layer(layer[0], layer[1])
     if layer_index is None:
         return None
 
+    _rescale_block_layout(src_layout, src_cell, dbu, block_id, block["gds_path"])
     region = kdb.Region(src_cell.begin_shapes_rec(layer_index))
     region.merge()
     if region.is_empty():
         return None
     rot, mirrx = _ORIENTATION_KDB_ARGS[block.get("orientation", "none")]
-    region.transform(
-        kdb.Trans(
-            rot,
-            mirrx,
-            int(round(offset_um["x"] / dbu)),
-            int(round(offset_um["y"] / dbu)),
-        )
-    )
+    ox = round(offset_um["x"] / dbu)
+    oy = round(offset_um["y"] / dbu)
+    region.transform(kdb.Trans(rot, mirrx, ox, oy))
     return {"region": region, "dbu": dbu}
 
 
@@ -1963,6 +1755,8 @@ def _drawn_leg_footprint_region(
     stub_widen: list[dict[str, Any]],
     dbu: float,
     route_layer: tuple[int, int] | None = None,
+    side_for_pair: Any = None,
+    cut_side_um: Any = None,
 ):
     """The full metal one routed leg draws on its own route layer, as a
     ``kdb.Region`` -- the bare backbone (:func:`_drawn_route_region`) plus
@@ -2018,14 +1812,9 @@ def _drawn_leg_footprint_region(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
     region = _drawn_route_region(points_um, width_um, dbu)
 
     for drop in via_drops:
-        landing_half_dbu = int(
-            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
-        )
         landing_layers = drop.get("landing_layers")
         if (
             route_layer is not None
@@ -2033,15 +1822,8 @@ def _drawn_leg_footprint_region(
             and route_layer not in landing_layers
         ):
             continue  # this hop's pads are on a different layer than route_layer
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
         region.insert(
-            kdb.Box(
-                cx - landing_half_dbu,
-                cy - landing_half_dbu,
-                cx + landing_half_dbu,
-                cy + landing_half_dbu,
-            )
+            _landing_pad_box(drop, route_layer, dbu, side_for_pair, cut_side_um)
         )
 
     for widen in stub_widen:
@@ -2055,74 +1837,6 @@ def _drawn_leg_footprint_region(
             region.insert(kdb.Box(cx - half_dbu, cy - length_dbu, cx + half_dbu, cy))
 
     return region
-
-
-def _drawn_leg_intermediate_pad_regions(
-    via_drops: list[dict[str, Any]],
-    dbu: float,
-    route_layer: tuple[int, int] | None,
-) -> dict[tuple[int, int], Any]:
-    """Every via-drop landing-pad box this leg draws on a physical layer
-    *other than* its own primary ``route_layer``, grouped by that pad's own
-    layer (issue #1913).
-
-    :func:`_drawn_leg_footprint_region` deliberately excludes a multi-hop
-    via-drop ladder's intermediate/far landing pads -- they are not part of
-    the leg's footprint *on route_layer* -- and the module docstring for
-    that function pointed at `klt drc` as the backstop for a cross-net short
-    that lives entirely on one of those excluded planes. That pointer is
-    wrong: two shapes that overlap on one layer *merge* into a single
-    polygon in the composed GDS, which is a short, not a spacing violation,
-    so no rule deck has anything to flag.
-
-    This is the complement of :func:`_drawn_leg_footprint_region`: the
-    landing-pad geometry it leaves out, keyed by the pad's own layer so the
-    route-vs-route collision check in :func:`compose` can compare it against
-    another already-accepted net's footprint on that *same* plane -- even
-    though neither net's own primary routing layer names it.
-
-    Returns ``{}`` when ``route_layer`` is ``None`` -- a caller that
-    genuinely does not know its own leg's layer already gets every via-drop
-    pad folded into the single conservative region
-    :func:`_drawn_leg_footprint_region` returns for that case, so there is
-    nothing left here to separate out.
-    """
-    import klayout.db as kdb
-
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
-    regions: dict[tuple[int, int], Any] = {}
-    if route_layer is None:
-        return regions
-
-    for drop in via_drops:
-        landing_layers = drop.get("landing_layers")
-        if not landing_layers:
-            continue
-        landing_half_dbu = int(
-            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
-        )
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
-        box = kdb.Box(
-            cx - landing_half_dbu,
-            cy - landing_half_dbu,
-            cx + landing_half_dbu,
-            cy + landing_half_dbu,
-        )
-        # dict.fromkeys dedupes the common case where both layers of a hop
-        # happen to be identical (mirrors the same idiom in
-        # `_leg_conflict`'s own-block pad self-notch loop).
-        for pad_layer in dict.fromkeys(landing_layers):
-            if pad_layer == route_layer:
-                continue  # already part of _drawn_leg_footprint_region
-            region = regions.get(pad_layer)
-            if region is None:
-                region = kdb.Region()
-                regions[pad_layer] = region
-            region.insert(box)
-
-    return regions
 
 
 def _pad_self_notch_violation_um(
@@ -2156,10 +1870,12 @@ def _pad_self_notch_violation_um(
     ``region.merge()``, literally the same polygon; the violation is a
     self-notch of *that* polygon, not a conflict between two separate ones.
 
-    Returns the closest found spacing (um), or ``None`` when nothing in the
-    merged shape violates ``spacing_um`` (including when ``spacing_um`` is
-    non-positive, or the pad does not even reach the block's own geometry at
-    the resolution ``geometry["dbu"]`` provides).
+    Only a notch the *pad introduces* counts (#6314, ``gen_compose_pad_notch``);
+    one the block already carries is left to ``klt drc``. Returns the closest
+    introduced spacing (um), or ``None`` when the pad
+    introduces none narrower than ``spacing_um`` (including when ``spacing_um``
+    is non-positive, or the pad does not even reach the block's own geometry
+    at the resolution ``geometry["dbu"]`` provides).
     """
     import klayout.db as kdb
 
@@ -2169,21 +1885,17 @@ def _pad_self_notch_violation_um(
         return None
 
     x0_um, y0_um, x1_um, y1_um = pad_box_um
-    combined = kdb.Region()
-    combined.insert(geometry["region"])
-    combined.insert(
+    widths = _pad_introduced_notches_dbu(
+        geometry["region"],
         kdb.Box(
             int(round(x0_um / dbu)),
             int(round(y0_um / dbu)),
             int(round(x1_um / dbu)),
             int(round(y1_um / dbu)),
-        )
+        ),
+        spacing_dbu,
     )
-    combined.merge()
-    violations = combined.notch_check(spacing_dbu)
-    if violations.is_empty():
-        return None
-    return min(edge_pair.distance() for edge_pair in violations) * dbu
+    return min(widths) * dbu if widths else None
 
 
 def _leg_block_spacing_violation_um(
@@ -2310,8 +2022,6 @@ def _self_net_drawn_short(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _port_has_geometry
-
     region = geometry["region"]
     dbu = geometry["dbu"]
 
@@ -2351,20 +2061,22 @@ def _self_net_drawn_short(
     return overlap_um2, crossed
 
 
-def _unroutable(reason: str) -> dict[str, Any]:
+def _unroutable(reason: str, blocking_net: str | None = None) -> dict[str, Any]:
     """Build ``route_two_pin``'s minimal 4-key rejection result.
 
     Every rejection path inside ``route_two_pin`` returns this exact shape
     (``routed``/``route_length_um``/``points_um``/``reason``) -- a
     deliberately minimal contract distinct from the function's 9-key success
     return, not a partial version of it. Factored into one helper so the 12
-    call sites can't drift from each other.
+    call sites can't drift from each other. Since #6961 a rejection
+    naming an already-routed net also carries a ``blocking_net`` key.
     """
     return {
         "routed": False,
         "route_length_um": None,
         "points_um": None,
         "reason": reason,
+        **({} if blocking_net is None else {"blocking_net": blocking_net}),
     }
 
 
@@ -2411,10 +2123,6 @@ def _same_layer_short_reason(
     same_block_self_net: bool,
     margin_eps_um: float,
 ) -> str | None:
-    # Looked up at call time, as ``route_two_pin`` does: the test suite's
-    # ``klayout_tools.gen_compose.<name>`` re-export takes effect here.
-    from .gen_compose import _port_has_geometry
-
     # Self-net pad-crossing check (#433): the whole-block bbox check below
     # skips a self-net's own block entirely (a same-block net's backbone
     # is, by construction, always inside its own block's bbox -- that
@@ -2534,11 +2242,7 @@ def _same_layer_short_reason(
                     )
 
             pad_w = other_port.get("width_um")
-            if (
-                not isinstance(pad_w, (int, float))
-                or isinstance(pad_w, bool)
-                or (pad_w <= 0)
-            ):
+            if not is_finite_number(pad_w) or pad_w <= 0:
                 # no reported pad size -- fall back to trace width
                 pad_w = effective_width_um
             half = float(pad_w) / 2.0 + route_half_um
@@ -3475,7 +3179,7 @@ def _resolve_via_drops(
             if drop_error is not None:
                 return via_drops, (
                     f"pin '{pin['port']}' on block '{pin['block']}' is drawn "
-                    f"on layer {port_layer}, which routing.layer_role's "
+                    f"on layer {port_layer}, which the effective backbone layer "
                     f"{effective_route_layer} cannot reach: {drop_error}"
                 )
             if ladder is not None:
@@ -3486,24 +3190,17 @@ def _resolve_via_drops(
                 # (``landing_layers``) -- :func:`_write_composed_gds` draws a
                 # via square plus a landing pad on each of those two layers
                 # per entry, so a multi-level drop is just N single-level
-                # drops stacked at the identical (x, y).
-                for via_layer, metal_a, metal_b in ladder:
-                    drop_array = _drop_array(port, via_layer)
+                # drops stacked at the identical (x, y). Since #6058 each
+                # entry also records its terminal landings.
+                for hop in ladder:
                     via_drops.append(
-                        {
-                            "x_um": pos[0],
-                            "y_um": pos[1],
-                            "via_layer": via_layer,
-                            "landing_layers": (metal_a, metal_b),
-                            **({"array": drop_array} if drop_array else {}),
-                            # block_id (#1520): which endpoint's own block
-                            # this drop's landing pad lands on -- lets a
-                            # caller-side conflict check (compose()'s own
-                            # _leg_conflict) test the pad against *that*
-                            # block's own drawn geometry, not just against
-                            # other already-accepted nets.
-                            "block_id": pin["block"],
-                        }
+                        _marked_via_drop_entry(
+                            pos,
+                            (port_layer, effective_route_layer),
+                            hop,
+                            _drop_array(port, hop[0]),
+                            pin["block"],
+                        )
                     )
     return via_drops, None
 
@@ -3585,7 +3282,7 @@ def _same_block_cross_layer_retry(
     unroutable wording), ``None`` when it is not armed or the fixed shape has
     no conflict. ``leg_conflict`` is an optional callable with the same
     signature as :func:`route_bundle`'s own ``leg_conflict`` parameter
-    (``(points_um, via_drops, stub_widen, route_layer) -> str | None``).
+    (``(points_um, via_drops, stub_widen, route_layer) -> str | RouteConflict | None``).
 
     Only armed when ``leg_conflict`` was supplied AND this leg is a
     same-block self-net's fixed-shape attempt that resolved on
@@ -3628,12 +3325,14 @@ def _same_block_cross_layer_retry(
         and cross_block_route_layer is not None
         and effective_route_layer == cross_block_route_layer
     )
-    conflict_reason = (
-        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+    conflict = (
+        _normalize_leg_conflict(
+            leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+        )
         if retry_eligible
         else None
     )
-    if conflict_reason is None:
+    if conflict is None:
         return None
     lanes = _self_net_cross_layer_lane_waypoints_um(
         a, b, own_bbox_um, effective_width_um
@@ -3651,10 +3350,11 @@ def _same_block_cross_layer_retry(
         if lane_conflict is None:
             return retry
     return _unroutable(
-        conflict_reason + " -- a bounded same-block cross-layer detour "
-        f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
-        "looped clear of the block's own bbox) was tried first, and "
-        "each one still conflicted"
+        conflict.reason + f" -- a bounded same-block cross-layer detour ({len(lanes)}"
+        f" alternate lane{'' if len(lanes) == 1 else 's'} looped clear of the block's "
+        "own bbox) was tried first, and each one still conflicted; for a higher plane,"
+        " name connectivity[].legs[].layer_role or legs[].waypoints_um (issue #7003)",
+        blocking_net=conflict.blocking_net,
     )
 
 
@@ -3719,12 +3419,14 @@ def _channel_track_retry(
         and vb[1] != 0
         and va[1] == vb[1]
     )
-    channel_track_reason = (
-        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+    conflict = (
+        _normalize_leg_conflict(
+            leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+        )
         if channel_track_eligible
         else None
     )
-    if channel_track_reason is None:
+    if conflict is None:
         return None
     pitch_um = _CHANNEL_TRACK_PITCH_WIDTHS * effective_width_um
     direction_sign = 1 if va[1] > 0 else -1
@@ -3752,11 +3454,11 @@ def _channel_track_retry(
             points, via_drops, stub_widen, effective_route_layer, effective_width_um
         )
     return _unroutable(
-        channel_track_reason
-        + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
+        conflict.reason + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
         "leg's shared-channel horizontal jog shifted farther from "
         "the row, one route width's worth of clearance per track) "
-        "were tried first, and each one still conflicted"
+        "were tried first, and each one still conflicted",
+        blocking_net=conflict.blocking_net,
     )
 
 
@@ -3983,8 +3685,9 @@ def route_two_pin(
     cross-layer conflict retry (#1393, :func:`_same_block_cross_layer_retry`)
     and the channel track retry (#1467, :func:`_channel_track_retry`).
     ``leg_conflict`` has :func:`route_bundle`'s own signature (``(points_um,
-    via_drops, stub_widen, route_layer) -> str | None``); ``channel_offset_um``
-    is the track offset the channel track retry supplies.
+    via_drops, stub_widen, route_layer) -> str | RouteConflict | None``);
+    a rejection its retries produce can carry a ``blocking_net`` (#6961).
+    ``channel_offset_um`` is the track offset the channel track retry supplies.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "via_drops": list, "stub_widen": list,
@@ -3992,9 +3695,11 @@ def route_two_pin(
     "channel_track": int, "reason": str | None}`` (a rejected leg omits
     ``width_um``/``channel_track``, nothing having been drawn for it).
     ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
-    "landing_layers", "block_id"}`` entries (empty unless a drop was
-    resolved; one entry per via *hop* since #1567), consumed by
-    :func:`_write_composed_gds`. ``stub_widen`` (#496, see
+    "landing_layers", "terminal_landing_layers", "block_id"}`` entries
+    (empty unless a drop was resolved; one entry per via *hop* since
+    #1567; ``terminal_landing_layers`` since #6058 -- the subset of that
+    hop's ``landing_layers`` that are terminal planes for this endpoint),
+    consumed by :func:`_write_composed_gds`. ``stub_widen`` (#496, see
     :func:`_endpoint_stub_widen_um`) is a list of ``{"x_um", "y_um",
     "direction_deg", "length_um", "width_um"}`` entries -- one per endpoint
     whose own pad is wider than ``width_um`` and faces north/south.
@@ -4008,28 +3713,21 @@ def route_two_pin(
     # looked up dynamically inside `_endpoint_stub_widen_entries`/
     # `_same_block_cross_layer_retry` (see their comments) so a monkeypatch of
     # `klayout_tools.gen_compose.<name>` still takes effect.
-    from .gen_compose import _DIRECTION_VECTORS
 
     block_a = blocks[pin_a["block"]]
     block_b = blocks[pin_b["block"]]
     port_a = block_a["ports"].get(pin_a["port"])
     port_b = block_b["ports"].get(pin_b["port"])
 
-    # A block with no reported ports[] (a hand-crafted generator_report) can't
-    # supply a routable position -- treat as unroutable rather than crashing.
-    if not isinstance(port_a, dict) or not isinstance(port_b, dict):
+    # A block with no reported ports[] (a hand-crafted generator_report), or a
+    # port whose x_um/y_um is not a finite number (a 400-digit int overflows
+    # float(), #6565), can't supply a routable position -- treat as
+    # unroutable rather than crashing. Same resolver route_bundle orders by.
+    a = _pin_position_um(pin_a, blocks, offsets_um)
+    b = _pin_position_um(pin_b, blocks, offsets_um)
+    if a is None or b is None:
         return _unroutable("one or both ports report no position (empty ports[])")
 
-    off_a = offsets_um[pin_a["block"]]
-    off_b = offsets_um[pin_b["block"]]
-    a = (
-        float(port_a["x_um"]) + off_a["x"],
-        float(port_a["y_um"]) + off_a["y"],
-    )
-    b = (
-        float(port_b["x_um"]) + off_b["x"],
-        float(port_b["y_um"]) + off_b["y"],
-    )
     dir_a = int(port_a.get("direction_deg", 0)) % 360
     dir_b = int(port_b.get("direction_deg", 0)) % 360
     if dir_a not in _DIRECTION_VECTORS or dir_b not in _DIRECTION_VECTORS:
@@ -4292,372 +3990,6 @@ def route_two_pin(
     )
 
 
-def _pin_ref(pin: dict[str, Any]) -> str:
-    """``"block.port"`` -- the compact form router diagnostics name a pin by."""
-    return f"{pin['block']}.{pin['port']}"
-
-
-def _pin_position_um(
-    pin: dict[str, Any],
-    blocks: dict[str, dict[str, Any]],
-    offsets_um: dict[str, dict[str, float]],
-) -> tuple[float, float] | None:
-    """A pin's port position in the *composed* frame, or ``None``.
-
-    ``None`` when the block reported no ``ports[]`` entry for it, or the entry
-    carries no usable ``x_um``/``y_um`` -- exactly the case
-    :func:`route_two_pin` already reports as "one or both ports report no
-    position (empty ports[])". Used only to *order* candidate legs by
-    Manhattan distance (:func:`route_bundle`); the routability verdict itself
-    always comes from :func:`route_two_pin`.
-    """
-    block = blocks.get(pin["block"])
-    if block is None:
-        return None
-    port = (block.get("ports") or {}).get(pin["port"])
-    if not isinstance(port, dict):
-        return None
-    x_um, y_um = port.get("x_um"), port.get("y_um")
-    if isinstance(x_um, bool) or not isinstance(x_um, (int, float)):
-        return None
-    if isinstance(y_um, bool) or not isinstance(y_um, (int, float)):
-        return None
-    offset = offsets_um[pin["block"]]
-    return (float(x_um) + offset["x"], float(y_um) + offset["y"])
-
-
-def _leg_conflict_reason(result: dict[str, Any], leg_conflict: Any) -> str | None:
-    """Why a :func:`route_two_pin` result cannot stand as a bundle leg, else ``None``.
-
-    The router's own rejection reason when it did not route; otherwise the
-    caller-supplied ``leg_conflict`` verdict on the drawn geometry (``None``
-    when there is no conflict hook).
-    """
-    if not result["routed"]:
-        return result["reason"]
-    if leg_conflict is None:
-        return None
-    return leg_conflict(
-        result["points_um"],
-        result.get("via_drops", []),
-        result.get("stub_widen", []),
-        result.get("route_layer"),
-    )
-
-
-def _changes_plane(leg_spec: dict[str, Any]) -> bool:
-    """Whether an explicit leg carries a plane-bearing waypoint (#2930)."""
-    return any(plane is not None for plane in leg_spec.get("waypoint_layers") or ())
-
-
-def _pin_failed_pair(
-    pinned_failed_pairs: set[frozenset[tuple[str, str]]],
-    pins: list[dict[str, Any]],
-    i: int,
-    j: int,
-) -> None:
-    """Block the pin pair of a rejected layer-pinned leg from automatic re-pickup."""
-    pinned_failed_pairs.add(
-        frozenset(
-            (
-                (pins[i]["block"], pins[i]["port"]),
-                (pins[j]["block"], pins[j]["port"]),
-            )
-        )
-    )
-
-
-def _segments_field(result: dict[str, Any]) -> dict[str, Any]:
-    """Per-plane drawing payloads of a plane-changing leg (#2930), if any."""
-    return {"segments": result["segments"]} if result.get("segments") else {}
-
-
-# Plane-bearing waypoints (#2930): a leg whose `waypoints_um` carries a
-# `[x, y, "layer_role"]` triple changes routing plane at that point. It is
-# split there into one same-plane segment per plane, each routed by the
-# ordinary `route_two_pin()` (so every routability check -- obstacles, rings,
-# own-block shorts, the via-drop resolution -- applies to each segment on the
-# plane it is drawn on) between two ends that are either a real pin or a
-# *junction*: a synthetic one-port, zero-area block placed at the waypoint
-# whose port sits on the plane the route continues on. The segment arriving at
-# a junction therefore drops to the junction's plane through the very same
-# #454/#1567 via ladder it would use to reach a block's pad, and the segment
-# leaving it starts on that plane with no drop -- no new via or pad geometry
-# exists. The result is one leg whose `segments` carry each plane's drawing
-# payload.
-
-
-class _PlaneChangeContext(NamedTuple):
-    """The ``route_bundle()`` state a plane-changing leg is routed against."""
-
-    pins: list[dict[str, Any]]
-    blocks: dict[str, dict[str, Any]]
-    offsets_um: dict[str, dict[str, float]]
-    placed_bboxes_um: dict[str, dict[str, float]]
-    route_layer: tuple[int, int] | None
-    extraction_deck: ExtractionDeck | None
-    block_geometry_for: Any
-    geometry_for_layer: Any
-    leg_conflict: Any
-    grid_um: float
-
-
-def _split_at_plane_changes(
-    waypoints: list[tuple[float, float]],
-    waypoint_layers: list[dict[str, Any] | None],
-    start_layer: tuple[int, int],
-    start_width_um: float,
-) -> list[dict[str, Any]]:
-    """Split a waypoint path into one same-plane segment per plane (#2930).
-
-    A segment carries its ``layer``, ``width_um`` and the plain ``waypoints``
-    that steer it, plus ``start_junction`` / ``end_junction`` (the index of the
-    plane-bearing waypoint it begins / ends at) where it does not begin / end
-    at a real pin. A waypoint naming the plane already in force changes
-    nothing.
-    """
-    segments: list[dict[str, Any]] = []
-    current: dict[str, Any] = {
-        "layer": start_layer,
-        "width_um": start_width_um,
-        "waypoints": [],
-    }
-    for k, waypoint in enumerate(waypoints):
-        plane = waypoint_layers[k]
-        if plane is None or plane["layer"] == current["layer"]:
-            current["waypoints"].append(waypoint)
-            continue
-        current["end_junction"] = k
-        segments.append(current)
-        current = {
-            "layer": plane["layer"],
-            "width_um": plane["width_um"],
-            "waypoints": [],
-            "start_junction": k,
-        }
-    segments.append(current)
-    return segments
-
-
-def _junction_scope(
-    ctx: _PlaneChangeContext,
-    waypoints: list[tuple[float, float]],
-    waypoint_layers: list[dict[str, Any] | None],
-    junction_ids: dict[int, str],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """``blocks`` / offsets / bboxes extended with one junction block per id."""
-    scoped_blocks = dict(ctx.blocks)
-    scoped_offsets = dict(ctx.offsets_um)
-    scoped_bboxes = dict(ctx.placed_bboxes_um)
-    for k, junction_id in junction_ids.items():
-        x, y = waypoints[k]
-        plane = waypoint_layers[k]
-        assert plane is not None  # junctions exist only at plane-bearing waypoints
-        plane_layer = plane["layer"]
-        scoped_blocks[junction_id] = {
-            "port_names": {"J"},
-            "ports": {
-                "J": {
-                    "x_um": 0.0,
-                    "y_um": 0.0,
-                    "direction_deg": 0,
-                    "layer": {"layer": plane_layer[0], "datatype": plane_layer[1]},
-                    "junction": True,
-                }
-            },
-        }
-        scoped_offsets[junction_id] = {"x": x, "y": y}
-        scoped_bboxes[junction_id] = {"x0": x, "y0": y, "x1": x, "y1": y}
-    return scoped_blocks, scoped_offsets, scoped_bboxes
-
-
-def _junction_aware_fetch(plane_fetch: Any, junction_blocks: set[str]) -> Any:
-    """Wrap a per-block geometry reader so a junction answers for itself.
-
-    A junction owns no drawn geometry: answer for it here instead of asking
-    compose()'s per-block reader, which only knows real blocks.
-    """
-    if plane_fetch is None:
-        return None
-
-    def _fetch(block_id: str) -> Any:
-        if block_id in junction_blocks:
-            return {block_id: None}
-        return plane_fetch(block_id)
-
-    return _fetch
-
-
-def _plane_segment_geometry(
-    ctx: _PlaneChangeContext,
-    fetch: Any,
-    seg_pins: tuple[dict[str, str], ...],
-    junction_blocks: set[str],
-    i: int,
-    j: int,
-) -> Any:
-    """Own-block geometry for a segment's real-pin ends (last such pin wins)."""
-    if fetch is None:
-        return None
-    geometry = None
-    for pin in seg_pins:
-        block = pin["block"]
-        if block in junction_blocks:
-            continue
-        if (
-            block == ctx.pins[i]["block"] == ctx.pins[j]["block"]
-            or ctx.blocks[block].get("source") == "cell"
-        ):
-            geometry = fetch(block)
-    return geometry
-
-
-def _null_junction_block_ids(result: dict[str, Any], junction_blocks: set[str]) -> None:
-    """Drops landing on a junction are not on any block's own geometry: null
-    the block id so compose()'s own-block pad check skips them."""
-    for key in ("via_drops", "stub_widen"):
-        for item in result.get(key, []):
-            if item.get("block_id") in junction_blocks:
-                item["block_id"] = None
-
-
-def _route_plane_segment(
-    ctx: _PlaneChangeContext,
-    scoped: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
-    seg: dict[str, Any],
-    ends: tuple[dict[str, str], dict[str, str]],
-    junction_blocks: set[str],
-    pin_indices: tuple[int, int],
-) -> tuple[dict[str, Any], str | None]:
-    """Route one same-plane segment; returns ``(route_two_pin result, reason)``."""
-    seg_a, seg_b = ends
-    plane_fetch = (
-        ctx.block_geometry_for
-        if seg["layer"] == ctx.route_layer or ctx.geometry_for_layer is None
-        else ctx.geometry_for_layer(seg["layer"])
-    )
-    fetch = _junction_aware_fetch(plane_fetch, junction_blocks)
-    scoped_blocks, scoped_offsets, scoped_bboxes = scoped
-    result = route_two_pin(
-        seg_a,
-        seg_b,
-        scoped_blocks,
-        scoped_offsets,
-        scoped_bboxes,
-        seg["width_um"],
-        seg["layer"],
-        ctx.extraction_deck,
-        _plane_segment_geometry(ctx, fetch, ends, junction_blocks, *pin_indices),
-        waypoints_um=seg["waypoints"],
-        leg_conflict=ctx.leg_conflict,
-        block_geometry_for=fetch,
-        grid_um=ctx.grid_um,
-    )
-    _null_junction_block_ids(result, junction_blocks)
-    return result, _leg_conflict_reason(result, ctx.leg_conflict)
-
-
-def _route_plane_change_leg(
-    ctx: _PlaneChangeContext,
-    i: int,
-    j: int,
-    leg_spec: dict[str, Any],
-    start_layer: tuple[int, int] | None,
-    start_width_um: float,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Route a leg split at its plane-bearing waypoints (#2930).
-
-    Returns ``(result, None)`` with ``result["segments"]`` carrying each
-    plane's drawing payload, or ``(None, reason)`` when the pinned leg cannot
-    be routed.
-    """
-    waypoints = list(leg_spec["waypoints_um"])
-    waypoint_layers = leg_spec["waypoint_layers"]
-    if start_layer is None or ctx.extraction_deck is None:
-        return None, (
-            "a plane-bearing waypoint needs a resolved routing layer and "
-            "PDK extraction deck to build the via ladder between planes"
-        )
-
-    segments = _split_at_plane_changes(
-        waypoints, waypoint_layers, start_layer, start_width_um
-    )
-    junction_ids = {
-        k: f"__plane_change_{k}__"
-        for seg in segments
-        for k in (seg.get("start_junction"), seg.get("end_junction"))
-        if k is not None
-    }
-    junction_blocks = set(junction_ids.values())
-    scoped = _junction_scope(ctx, waypoints, waypoint_layers, junction_ids)
-
-    drawn: list[dict[str, Any]] = []
-    total_um = 0.0
-    for seg in segments:
-        start_k, end_k = seg.get("start_junction"), seg.get("end_junction")
-        seg_a = (
-            {"block": junction_ids[start_k], "port": "J"}
-            if start_k is not None
-            else ctx.pins[i]
-        )
-        seg_b = (
-            {"block": junction_ids[end_k], "port": "J"}
-            if end_k is not None
-            else ctx.pins[j]
-        )
-        if not seg["waypoints"]:
-            # Always take the caller-steered path (#634) -- the fixed one-jog
-            # shape assumes two block ports facing each other, not a free
-            # junction. Anchoring on the junction gives a single deterministic
-            # elbow (x first, then y) from the pin's stub.
-            anchor_k = start_k if start_k is not None else end_k
-            assert anchor_k is not None  # a plane-changing leg has a junction
-            seg = {**seg, "waypoints": [waypoints[anchor_k]]}
-        result, reason = _route_plane_segment(
-            ctx, scoped, seg, (seg_a, seg_b), junction_blocks, (i, j)
-        )
-        if reason is not None:
-            return None, _plane_change_failure(reason, start_k, end_k, waypoints)
-        total_um += result["route_length_um"]
-        drawn.append(
-            {
-                "points_um": result["points_um"],
-                "via_drops": result.get("via_drops", []),
-                "stub_widen": result.get("stub_widen", []),
-                "route_layer": result.get("route_layer"),
-                "width_um": result.get("width_um", seg["width_um"]),
-            }
-        )
-
-    first = drawn[0]
-    return {
-        "routed": True,
-        "route_length_um": total_um,
-        "points_um": [pt for part in drawn for pt in part["points_um"]],
-        "via_drops": first["via_drops"],
-        "stub_widen": first["stub_widen"],
-        "route_layer": first["route_layer"],
-        "width_um": first["width_um"],
-        "channel_track": 0,
-        "segments": drawn,
-        "reason": None,
-    }, None
-
-
-def _plane_change_failure(
-    reason: str,
-    start_k: int | None,
-    end_k: int | None,
-    waypoints: list[tuple[float, float]],
-) -> str:
-    """Prefix a segment's rejection reason with the plane change it ended at."""
-    at = end_k if end_k is not None else start_k
-    if at is None:
-        return reason
-    x, y = waypoints[at]
-    return f"plane change at waypoints_um[{at}] ({x:g}, {y:g}): {reason}"
-
-
 def route_bundle(
     pins: list[dict[str, Any]],
     blocks: dict[str, dict[str, Any]],
@@ -4675,6 +4007,11 @@ def route_bundle(
     explicit_legs: list[dict[str, Any]] | None = None,
     geometry_for_layer: Any = None,
     grid_um: float = 0.0,
+    pdk_variant: str | None = None,
+    auto_plane_climb: bool = True,
+    width_aware_conflict: Any = None,
+    landing_pad_side: Any = None,
+    route_dbu: Any = None,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
 
@@ -4705,6 +4042,15 @@ def route_bundle(
     accepted, and the *next* candidate that would join the same two components
     is tried -- so an N-pin net routes around an individually unroutable pair
     whenever another spanning tree exists, rather than failing outright.
+
+    **Automatic plane climb (issue #6920).** Before a rejected leg gives up,
+    ``PlaneClimbContext.climb_leg``
+    (:mod:`klayout_tools.gen_compose_plane_climb`) retries it, plane by plane
+    up the resolved PDK's own metals stack, on the obstacle- and
+    conflict-class rejections a higher plane can lift; each attempt is a full
+    :func:`route_two_pin` pass plus the ``leg_conflict`` gate on that plane's
+    own geometry. Off for a net whose plane the caller named (#1655) and for
+    caller-supplied ``waypoints_um`` paths.
 
     **Partial routing when no spanning tree exists (issue #1169).** A net
     whose pins cannot all be joined into one component still gets every leg
@@ -4756,7 +4102,9 @@ def route_bundle(
     and, when it has a same-layer minimum-spacing rule to consult, reject a
     leg that comes too *close* to an already-accepted one, not only one that
     literally overlaps it) and returning a rejection reason (or ``None`` to
-    accept) -- ``compose()`` passes its route-vs-route collision check
+    accept) -- since #6961 a RouteConflict verdict may also name the
+    blocking net, reported on the rejected leg as ``blocking_net``.
+    ``compose()`` passes its route-vs-route collision check
     (#1057) here, so a leg colliding with an *already-routed other net* is
     rejected as a candidate and an alternative leg is tried, rather than
     failing the whole net. The identical callable is also threaded straight
@@ -4824,7 +4172,7 @@ def route_bundle(
     ``explicit_legs`` (issue #1529) is the bundle-net counterpart:
     ``[{"from_pin": {block, port}, "to_pin": {block, port}, "waypoints_um":
     [...] | None}, ...]``, each pair already validated (by
-    :func:`_parse_connectivity`/:func:`_parse_legs`) to be members of this
+    :func:`_parse_connectivity`/:func:`parse_legs`) to be members of this
     net's own ``pins``. Every explicit leg is routed and unioned into the
     spanning tree **before** the automatic nearest-first search runs (seeded
     first, not merely preferred) -- so a caller can hand-route one or more
@@ -4920,8 +4268,6 @@ def route_bundle(
     not part of the ``klt gen-compose`` response (``compose()`` projects
     every leg down to ``pins``/``routed``/``route_length_um``/``reason``).
     """
-    from .gen_compose import GenComposeError
-
     if len(pins) < 2:
         raise GenComposeError("route_bundle() needs at least 2 pins")
     if waypoints_um is not None and len(pins) != 2:
@@ -4966,99 +4312,37 @@ def route_bundle(
         key=lambda pair: (_candidate_distance_um(pair), pair[0], pair[1]),
     )
 
-    # Own-block geometry (issue #1527): for an *inter*-block leg (unlike a
-    # same-block self-net, always fetched below), also fetched for whichever
-    # endpoint's own block is a `blocks[].cell` block -- an existing
-    # GDS/OASIS stream this command did not generate, whose `ports[]` are
-    # hand-declared by the caller directly on the stream's own internal
-    # geometry (see `_parse_cell_block`). That is the one block kind where
-    # "every merged shape not touching my own declared port is a genuinely
-    # different net" actually holds: a `generator_report` block can
-    # legitimately carry drawn geometry no `ports[]` entry names (e.g.
-    # `mos_array`'s own unreported dummy matching columns, deliberately
-    # excluded from `klt extract`'s netlist via its own dummy-suppression
-    # convention, #295/#462) that this check cannot tell apart from a real
-    # obstacle -- so it is scoped to `cell` blocks only, see
-    # route_two_pin()'s own "own-block escape check" docstring.
-    # block_geometry_for()/cross_block_geometry_for() each return the *same*
-    # growing {block_id: geometry} cache object regardless of which block id
-    # is requested (populating it lazily, once per block), so the two
-    # assignments below always end up pointing at one dict either way.
-    # Shared by both the explicit-legs loop and the automatic candidate loop
-    # below (#1529) -- previously duplicated inline in the candidate loop
-    # only, since explicit legs did not exist yet.
-    def _endpoint_geometry(i: int, j: int, fetch: Any) -> Any:
-        if fetch is None:
-            return None
-        if pins[i]["block"] == pins[j]["block"]:
-            return fetch(pins[i]["block"])
-        geometry = None
-        for pin in (pins[i], pins[j]):
-            if blocks[pin["block"]].get("source") == "cell":
-                geometry = fetch(pin["block"])
-        return geometry
-
     def _leg_geometry(i: int, j: int) -> tuple[Any, Any]:
         return (
-            _endpoint_geometry(i, j, block_geometry_for),
-            _endpoint_geometry(i, j, cross_block_geometry_for),
+            _endpoint_geometry_for(pins, blocks, i, j, block_geometry_for),
+            _endpoint_geometry_for(pins, blocks, i, j, cross_block_geometry_for),
         )
 
-    # Route-vs-route cross-layer retry (issue #1680): `leg_conflict` (#1057)
-    # only ever runs *after* `route_two_pin()` has already returned
-    # `routed: True` on the primary `route_layer` -- so, unlike checks 3/4's
-    # own same-layer-short retry inside that function (#1168/#1393), a
-    # rejection here never got a chance to try `cross_block_route_layer`
-    # before failing the whole net. This closure re-runs the identical pin
-    # pair with the primary/cross layer roles swapped -- `cross_geometry`
-    # (this leg's own drawn-geometry cache for `cross_block_route_layer`,
-    # the same one checks 3/4's own retry already uses) standing in for
-    # `block_geometry`, `cross_block_geometry_for` standing in for
-    # `block_geometry_for` -- so every one of `route_two_pin`'s own checks
-    # (including its own via-drop resolution for a port whose reported
-    # layer differs from this new "primary") runs exactly as they would for
-    # a leg drawn on `cross_block_route_layer` from the start, not only the
-    # narrower same-block short case #1393 already covers. No further
-    # fallback layer is offered to this retried call (`cross_block_route_
-    # layer=None`) -- one level of retry, mirroring the bound every other
-    # detour search in this module already enforces (#1167/#1393).
-    def _retry_leg_on_cross_layer(
-        i: int,
-        j: int,
-        cross_geometry: Any,
-        leg_waypoints_um: list[tuple[float, float]] | None,
-    ) -> dict[str, Any] | None:
-        if cross_block_route_layer is None or leg_conflict is None:
-            return None
-        retry_width_um = (
-            cross_block_width_um if cross_block_width_um is not None else width_um
-        )
-        retry = route_two_pin(
-            pins[i],
-            pins[j],
-            blocks,
-            offsets_um,
-            placed_bboxes_um,
-            retry_width_um,
-            cross_block_route_layer,
-            extraction_deck,
-            cross_geometry,
-            waypoints_um=leg_waypoints_um,
-            leg_conflict=leg_conflict,
-            block_geometry_for=cross_block_geometry_for,
-            grid_um=grid_um,
-        )
-        if not retry["routed"]:
-            return None
-        retry_reason = leg_conflict(
-            retry["points_um"],
-            retry.get("via_drops", []),
-            retry.get("stub_widen", []),
-            retry.get("route_layer"),
-        )
-        if retry_reason is not None:
-            return None
-        return retry
+    # Cross-plane leg retries: the request-configured cross_block_route_layer
+    # retry (#1680) and the automatic metals-stack plane climb (#6920) live in
+    # gen_compose_plane_climb.PlaneClimbContext (relocated out of this module
+    # at its size-ratchet ceiling) -- every attempt is a full route_two_pin()
+    # pass plus the leg_conflict gate, never a waived check.
+    climb_ctx = PlaneClimbContext(
+        pins=pins,
+        blocks=blocks,
+        offsets_um=offsets_um,
+        placed_bboxes_um=placed_bboxes_um,
+        width_um=width_um,
+        route_layer=route_layer,
+        pdk_variant=pdk_variant,
+        extraction_deck=extraction_deck,
+        cross_block_route_layer=cross_block_route_layer,
+        cross_block_width_um=cross_block_width_um,
+        cross_block_geometry_for=cross_block_geometry_for,
+        geometry_for_layer=geometry_for_layer,
+        leg_conflict=leg_conflict,
+        grid_um=grid_um,
+        auto=auto_plane_climb,
+        width_aware_conflict=width_aware_conflict,
+        landing_pad_side=landing_pad_side,
+        route_dbu=route_dbu,
+    )
 
     legs: list[dict[str, Any]] = []
     total_length_um = 0.0
@@ -5084,7 +4368,7 @@ def route_bundle(
     # Explicit legs (#1529): caller-steered pin pairs, routed and seeded into
     # the spanning tree *before* the automatic nearest-first search below.
     # Each is resolved to its pin indices via `first_seen` -- from_pin/to_pin
-    # were already validated (at request-parse time, see _parse_legs) to be
+    # were already validated (at request-parse time, see parse_legs) to be
     # members of this net's own pins[], so every (block, port) key here is
     # guaranteed present when route_bundle() is reached through compose()'s
     # normal request path; the lookup is still defensive (a direct caller of
@@ -5123,7 +4407,7 @@ def route_bundle(
             # Plane-bearing waypoints (#2930): pinned to its named planes
             # like any layer-pinned leg -- no cross-block retry, no automatic
             # re-pickup of the pin pair if a segment is rejected.
-            result, reason = _route_plane_change_leg(
+            result, conflict = _route_plane_change_leg(
                 plane_change_ctx,
                 i,
                 j,
@@ -5139,7 +4423,9 @@ def route_bundle(
             override_geometry = (
                 geometry
                 if override_layer == route_layer
-                else _endpoint_geometry(
+                else _endpoint_geometry_for(
+                    pins,
+                    blocks,
                     i,
                     j,
                     None
@@ -5167,8 +4453,8 @@ def route_bundle(
                 block_geometry_for=override_geometry_for,
                 grid_um=grid_um,
             )
-            reason = _leg_conflict_reason(result, leg_conflict)
-            if reason is not None or not result["routed"]:
+            conflict = _leg_conflict_reason(result, leg_conflict)
+            if conflict is not None or not result["routed"]:
                 # "Explicit wins, no retry" is only a real guarantee if the
                 # automatic candidate loop below cannot quietly reconnect the
                 # very pins this override just failed on -- on the *net's*
@@ -5204,19 +4490,19 @@ def route_bundle(
                 cross_block_geometry_for=cross_block_geometry_for,
                 grid_um=grid_um,
             )
-            reason = _leg_conflict_reason(result, leg_conflict)
-            if (
-                result["routed"]
-                and leg_conflict is not None
-                and reason is not None
-                and result.get("route_layer") != cross_block_route_layer
-            ):
-                retry = _retry_leg_on_cross_layer(
-                    i, j, cross_geometry, leg_spec.get("waypoints_um")
+            conflict = _leg_conflict_reason(result, leg_conflict)
+            if conflict is not None:
+                result, conflict = climb_ctx.retry_rejected_leg(
+                    i,
+                    j,
+                    leg_spec.get("waypoints_um"),
+                    leg_effective_width_um,
+                    cross_geometry,
+                    result,
+                    conflict,
                 )
-                if retry is not None:
-                    result = retry
-                    reason = None
+        reason = conflict.reason if conflict is not None else None
+        blocking_net = conflict.blocking_net if conflict is not None else None
         if reason is None and result["routed"]:
             if uf.union(i, j):
                 components -= 1
@@ -5240,17 +4526,7 @@ def route_bundle(
             )
         else:
             legs.append(
-                {
-                    "pins": [pins[i], pins[j]],
-                    "pin_indices": (i, j),
-                    "explicit": True,
-                    "routed": False,
-                    "route_length_um": None,
-                    "reason": reason,
-                    "points_um": None,
-                    "via_drops": [],
-                    "stub_widen": [],
-                }
+                _unrouted_leg_record(pins, i, j, reason, blocking_net, explicit=True)
             )
 
     for i, j in candidates:
@@ -5295,22 +4571,13 @@ def route_bundle(
             cross_block_geometry_for=cross_block_geometry_for,
             grid_um=grid_um,
         )
-        reason = None if result["routed"] else result["reason"]
-        if result["routed"] and leg_conflict is not None:
-            reason = leg_conflict(
-                result["points_um"],
-                result.get("via_drops", []),
-                result.get("stub_widen", []),
-                result.get("route_layer"),
+        conflict = _leg_conflict_reason(result, leg_conflict)
+        if conflict is not None:
+            result, conflict = climb_ctx.retry_rejected_leg(
+                i, j, waypoints_um, width_um, cross_geometry, result, conflict
             )
-            if (
-                reason is not None
-                and result.get("route_layer") != cross_block_route_layer
-            ):
-                retry = _retry_leg_on_cross_layer(i, j, cross_geometry, waypoints_um)
-                if retry is not None:
-                    result = retry
-                    reason = None
+        reason = conflict.reason if conflict is not None else None
+        blocking_net = conflict.blocking_net if conflict is not None else None
 
         if reason is None and result["routed"]:
             uf.union(i, j)
@@ -5332,18 +4599,7 @@ def route_bundle(
                 }
             )
         else:
-            legs.append(
-                {
-                    "pins": [pins[i], pins[j]],
-                    "pin_indices": (i, j),
-                    "routed": False,
-                    "route_length_um": None,
-                    "reason": reason,
-                    "points_um": None,
-                    "via_drops": [],
-                    "stub_widen": [],
-                }
-            )
+            legs.append(_unrouted_leg_record(pins, i, j, reason, blocking_net))
 
     if components == 1:
         return {
@@ -5514,12 +4770,3 @@ def _drop_array(
     if pitch is None:
         return None
     return {"rows": spec["rows"], "cols": spec["cols"], "pitch_um": pitch}
-
-
-def _drop_array_extra_um(drop: dict[str, Any]) -> float:
-    """Extra side length (um) a drop's cut array adds to its landing pad over
-    the single-cut pad: ``(max(rows, cols) - 1) * pitch``; ``0.0`` without one."""
-    array = drop.get("array")
-    if not array:
-        return 0.0
-    return (max(array["rows"], array["cols"]) - 1) * array["pitch_um"]

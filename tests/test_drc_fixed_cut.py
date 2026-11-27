@@ -1,99 +1,122 @@
-"""sky130 licon1/mcon fixed-size maximum and exemptions (issue #2835)."""
-
-from __future__ import annotations
+"""Ordinary 170 nm sky130 contact sizes and their runset exemptions (#2835)."""
 
 import klayout.db as kdb
 import pytest
 
-from klayout_tools.drc import DrcError, run_drc
+from klayout_tools.drc import run_drc
 
-# --- licon1.width.1 / mcon.width.1 maximum size (issue #2835) -----------
+LICON = (66, 44)
+MCON = (67, 44)
+RPM = (86, 20)
+URPM = (79, 20)
+PSDM = (94, 20)
+POLY = (66, 20)
+POLY_RS = (66, 13)
+AREAID_CE = (81, 2)
 
 
-def _fixed_cut_report(tmp_path, shapes):
+def _size_report(tmp_path, cut_layer, shapes):
     layout = kdb.Layout()
+    layout.dbu = 0.001
     top = layout.create_cell("TOP")
-    for (layer, datatype), geometry in shapes:
-        top.shapes(layout.layer(layer, datatype)).insert(geometry)
+    context = layout.create_cell("CONTEXT")
+    top.insert(kdb.CellInstArray(context.cell_index(), kdb.Trans()))
+    for layer, geometry in shapes:
+        cell = top if layer == cut_layer else context
+        cell.shapes(layout.layer(*layer)).insert(geometry)
     path = tmp_path / "fixed_cut.gds"
     layout.write(str(path))
-    return run_drc(str(path), "sky130")
+    rule = "licon1.width.1" if cut_layer == LICON else "mcon.width.1"
+    return run_drc(str(path), "sky130", rules=[rule])
 
 
-_CUT_RING = kdb.Region(kdb.Box(0, 0, 1000, 1000)) - kdb.Region(
-    kdb.Box(400, 400, 600, 600)
-)
-
-
+@pytest.mark.parametrize("layer", [LICON, MCON])
 @pytest.mark.parametrize(
-    ("rule_id", "layer"),
-    [("licon1.width.1", (66, 44)), ("mcon.width.1", (67, 44))],
+    ("width", "height", "bad"),
+    [(165, 165, True), (170, 170, False), (175, 175, True), (170, 210, True)],
 )
-def test_sky130_fixed_size_cut_max_ordinary(tmp_path, rule_id, layer):
-    """Ordinary 0.17um cuts stay clean; an oversized square or an elongated
-    bar violates the rule's maximum half."""
-    assert (
-        _fixed_cut_report(tmp_path, [(layer, kdb.Box(0, 0, 170, 170))])["status"]
-        == "clean"
-    )
-    for box in (kdb.Box(0, 0, 200, 200), kdb.Box(0, 0, 170, 400)):
-        report = _fixed_cut_report(tmp_path, [(layer, box)])
-        assert report["rule_counts"] == {rule_id: 1}
+def test_ordinary_cut_size(tmp_path, layer, width, height, bad):
+    report = _size_report(tmp_path, layer, [(layer, kdb.Box(0, 0, width, height))])
+    assert bool(report["violations"]) == bad
 
 
-@pytest.mark.parametrize("marker", [(86, 20), (79, 20)])
-def test_sky130_licon1_precision_resistor_exemption(tmp_path, marker):
-    """A 0.19 x 2.0um licon under rpm or urpm is exempt (licon.1b/c)."""
-    report = _fixed_cut_report(
-        tmp_path,
-        [
-            ((66, 44), kdb.Box(0, 0, 190, 2000)),
-            (marker, kdb.Box(-500, -500, 900, 3000)),
-        ],
+@pytest.mark.parametrize("marker", [RPM, URPM])
+@pytest.mark.parametrize(
+    ("missing", "marker_left", "bad"),
+    [
+        (None, -10, False),  # Full resistor stack
+        (None, 190, True),  # Marker touches only the right edge
+        (None, 100, True),  # Remaining 100 nm of cut is still checked
+        (PSDM, -10, True),
+        (POLY, -10, True),
+        (POLY_RS, -10, True),
+    ],
+)
+def test_licon_precision_resistor(tmp_path, marker, missing, marker_left, bad):
+    full = kdb.Box(-10, -10, 210, 2400)
+    shapes = [
+        (LICON, kdb.Box(0, 0, 190, 2000)),
+        (marker, kdb.Box(marker_left, -10, 210, 2400)),
+        (PSDM, full),
+        (POLY, full),
+        (POLY_RS, kdb.Box(0, 2100, 190, 2300)),  # same poly, away from cut
+    ]
+    report = _size_report(
+        tmp_path, LICON, [(layer, box) for layer, box in shapes if layer != missing]
     )
-    assert report["status"] == "clean"
-    # Same cut away from the marker is not exempt.
-    report = _fixed_cut_report(
+    assert bool(report["violations"]) == bad
+
+
+@pytest.mark.parametrize("marker_left", [-10, 200])
+def test_rpm_alone_does_not_exempt_an_oversized_square(tmp_path, marker_left):
+    report = _size_report(
         tmp_path,
+        LICON,
         [
-            ((66, 44), kdb.Box(0, 0, 190, 2000)),
-            (marker, kdb.Box(10000, 10000, 20000, 20000)),
+            (LICON, kdb.Box(0, 0, 200, 200)),
+            (RPM, kdb.Box(marker_left, -10, 500, 500)),
         ],
     )
     assert report["rule_counts"] == {"licon1.width.1": 1}
 
 
-def test_sky130_mcon_areaid_ce_and_ring_exemptions(tmp_path):
-    """mcon under areaid:ce and ring-shaped mcon are exempt; a plain
-    oversized mcon beside a ring is still flagged."""
-    big = kdb.Box(0, 0, 200, 200)
-    report = _fixed_cut_report(
-        tmp_path, [((67, 44), big), ((81, 2), kdb.Box(-500, -500, 900, 900))]
-    )
-    assert report["status"] == "clean"
-    report = _fixed_cut_report(tmp_path, [((67, 44), _CUT_RING)])
-    assert report["status"] == "clean"
-    report = _fixed_cut_report(
+@pytest.mark.parametrize("size", [165, 170, 175])
+@pytest.mark.parametrize("offset", [-5, 0, 5])
+def test_mcon_areaid_boundary(tmp_path, size, offset):
+    report = _size_report(
         tmp_path,
-        [((67, 44), _CUT_RING), ((67, 44), kdb.Box(5000, 5000, 5200, 5200))],
+        MCON,
+        [
+            (MCON, kdb.Box(0, 0, size, size)),
+            (AREAID_CE, kdb.Box(size + offset, -50, 500, 500)),
+        ],
+    )
+    assert bool(report["violations"]) == (size != 170 and offset >= 0)
+
+
+def test_mcon_corner_touch(tmp_path):
+    report = _size_report(
+        tmp_path,
+        MCON,
+        [
+            (MCON, kdb.Box(0, 0, 200, 200)),
+            (AREAID_CE, kdb.Box(200, 200, 500, 500)),
+        ],
     )
     assert report["rule_counts"] == {"mcon.width.1": 1}
 
 
-def test_derived_layer_exclusions_require_not_interacting():
-    from klayout_tools.decks import DerivedLayer, DrcRule
-
-    rule = DrcRule(
-        id="x.1",
-        description="x",
-        layer=(1, 0),
-        check="width",
-        threshold_dbu=10,
-        derived_layer=DerivedLayer(
-            base=(1, 0), sized_by_um=0.0, mode="holes", exclude_holed=True
-        ),
+def test_mcon_ring_with_ordinary_cut(tmp_path):
+    ring = kdb.Region(kdb.Box(0, 0, 1000, 1000)) - kdb.Region(
+        kdb.Box(400, 400, 600, 600)
     )
-    from klayout_tools.drc import _validate_derived_layer
-
-    with pytest.raises(DrcError, match="exclude_holed"):
-        _validate_derived_layer(rule)
+    report = _size_report(
+        tmp_path,
+        MCON,
+        [
+            (MCON, ring),
+            (MCON, kdb.Box(2000, 0, 2200, 200)),
+        ],
+    )
+    assert report["rule_counts"] == {"mcon.width.1": 1}
+    assert report["violations"][0]["bbox"]["left"] == 2000

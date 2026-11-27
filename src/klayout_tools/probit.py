@@ -36,15 +36,13 @@ Numerical choices that matter (the reason this is a module and not a recipe):
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import os
 from collections.abc import Callable
 from statistics import NormalDist
 from typing import Any
 
-from ._jsonnum import is_finite_number
+from .probit_document import ThresholdError, grade_corners, load_document, record_number
 
 SCHEMA_VERSION = 1
 
@@ -61,13 +59,6 @@ STATUS_SEPARATED = "separated"
 STATUS_NON_INCREASING = "non_increasing"
 STATUS_NON_CONVERGENCE = "non_convergence"
 STATUS_NO_SAMPLES = "no_samples"
-
-
-class ThresholdError(Exception):
-    """Raised when ``klt yield-threshold`` cannot run: a bad/missing input
-    document or an invalid option. The CLI turns it into a clean stderr
-    message + exit code 1, never a traceback (``docs/json-contract.md``).
-    """
 
 
 # --------------------------------------------------------------------------- #
@@ -649,28 +640,6 @@ _DEFAULT_CORNER = "default"
 _EXCLUDED_STATUSES = {"errored": "errored", "inconclusive": "inconclusive"}
 
 
-def _load(path: str) -> tuple[Any, str]:
-    try:
-        with open(path, "rb") as handle:
-            raw = handle.read()
-    except OSError as exc:
-        raise ThresholdError(
-            f"cannot read records document {path!r}: {exc.strerror or exc}"
-        ) from exc
-    try:
-        return json.loads(raw), hashlib.sha256(raw).hexdigest()
-    except ValueError as exc:
-        raise ThresholdError(
-            f"records document {path!r} is not valid JSON: {exc}"
-        ) from exc
-
-
-def _number(value: Any, where: str) -> float:
-    if not is_finite_number(value):
-        raise ThresholdError(f"{where} must be a finite number, got {value!r}")
-    return float(value)
-
-
 def _outcome(
     record: dict[str, Any], where: str, threshold: float | None, outcome_when: str
 ) -> bool:
@@ -687,7 +656,7 @@ def _outcome(
                 f"{where} carries a `value` but no --threshold was given to "
                 "derive the outcome"
             )
-        value = _number(record["value"], f"{where}.value")
+        value = record_number(record["value"], f"{where}.value")
         return value > threshold if outcome_when == "above" else value < threshold
     raise ThresholdError(f"{where} needs an `outcome` or a `value`")
 
@@ -758,7 +727,7 @@ def fit_corner(
                 )
             excluded[_EXCLUDED_STATUSES[status]] += 1
             continue
-        stimulus = _number(record.get("stimulus"), f"{where}.stimulus")
+        stimulus = record_number(record.get("stimulus"), f"{where}.stimulus")
         points.append((stimulus, _outcome(record, where, threshold, outcome_when)))
 
     levels = group_levels(points)
@@ -812,7 +781,7 @@ def fit_document(
         )
     if outcome_when not in ("above", "below"):
         raise ThresholdError("--outcome-when must be 'above' or 'below'")
-    doc, digest = _load(path)
+    doc, digest = load_document(path)
     corners = [
         fit_corner(
             name,
@@ -824,7 +793,7 @@ def fit_document(
         )
         for name, records in _corner_records(doc).items()
     ]
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "input": {"path": os.fspath(path), "content_hash": f"sha256:{digest}"},
         "confidence": confidence,
@@ -836,3 +805,6 @@ def fit_document(
         ),
         "corners": corners,
     }
+    if "limits" in doc:
+        report["status"] = grade_corners(corners, doc["limits"])
+    return report

@@ -16,17 +16,11 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_stress
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 _DECL = {
     "name": "vstress_md1",
@@ -392,3 +386,15 @@ def test_integration_windowed_peak_excludes_the_early_overshoot(tmp_path):
     assert settled["value"] == pytest.approx(0.5, abs=1e-3)
     assert settled["status"] == "pass"
     assert whole["value"] == pytest.approx(1.5, abs=1e-3)
+
+
+def test_runner_feature_gate_registered():
+    from klayout_tools import sim_batch
+
+    assert "stress" in sim_batch._RUNNER_REQUEST_FEATURES
+    assert "stress" in sim_batch._MANDATORY_RUNNER_FEATURES
+    detect = sim_batch._RUNNER_REQUEST_FEATURES["stress"][1]
+    assert detect({"measurements": [{"name": "s", "stress": {"a": "x", "b": "y"}}]})
+    assert not detect({"measurements": [{"name": "e", "expr": "v(a)"}]})
+    assert sim_batch._missing_runner_features(["stress"], "0.8.0") == ["stress"]
+    assert sim_batch._missing_runner_features(["stress"], "0.8.1.dev3") == []

@@ -1,3 +1,6 @@
+---
+disable-model-invocation: true
+---
 # Sweep — PR-set wave lifecycle (Mode C only)
 
 > **Reference file for [`sweep.md`](sweep.md)**, the `/loom:sweep` dispatcher.
@@ -73,7 +76,7 @@ Apply exactly one of the three branches below, based on the PR's current label.
 #### C1a. `loom:review-requested` → Judge phase only
 
 - Load and follow the instructions in `.claude/commands/loom/judge.md` for this PR.
-- **In-session Judge dispatch (#13222):** do not pass the orchestrator's run id as the Judge's `LOOM_SWEEP_ID`; the Stale-Read Gate takes the start from a `step-judge-<pr>-<epoch>` id or the PR judge lease.
+- **In-session Judge dispatch (#13222):** do not pass the orchestrator's run id as the Judge's `LOOM_SWEEP_ID`; the Stale-Read Gate takes the start from a `step-judge-<pr>-<epoch>` id or the PR judge lease. Brief the Judge to run `loom-daemon lease pr claim <pr> --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"` (and `release`) with that same `--watch-pid` value on every call (#13264): without it the claim records `pr-lease-unknown` and `post-verdict.sh` refuses the approval as a peer's lease (exit 10).
 - Dispatch `loom-judge` as a **single subagent Task** from this orchestrator session. Do **NOT** invoke `/loom:sweep` or `/loom:judge` slash-commands as subagents — see "CRITICAL: One level deep" in the Execution Model.
 - If a previous Judge attempt for this PR died mid-flight without a fresh checkpoint (rate limit, crash), re-verify forge state and complete only the missing steps before re-dispatching — see "Mid-phase-death recovery" in the Wave Lifecycle (the rule is phase-generic; Mode C inherits it, same as the Doctor-cycle cap).
 - Expected exit states:
@@ -141,10 +144,10 @@ VERDICT_RC=$?
 Use the merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
 
 ```bash
-LOOM_AUTO_MERGE_TIMEOUT=420 ./.loom/scripts/merge-pr.sh P --auto
+./.loom/scripts/merge-pr.sh P --auto
 ```
 
-**Give that call a 600000 ms Bash-tool timeout (#9395)**: the 420s pin must stay strictly under its caller's, or the tool kills the script and no exit code reaches the branches below. Raise neither alone. Why the pin but no `CHAMPION-MERGE-OUTCOME` sentinel (#9096): [exit codes](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
+That call waits on no checks (#12063), so the default Bash-tool timeout suffices. Why no `CHAMPION-MERGE-OUTCOME` sentinel (#9096): [exit codes](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
 
 It merges via the forge API and cleans up the worktree. `--auto` waits for the head's check-runs to settle, re-validates `loom:pr` and the head SHA against fresh state, then merges **in this process** — never via the server-side queue, which re-reads neither label nor non-required suites once armed (#8410). An already-settled head merges at once, so `--auto` is always safe to pass (#3820); a repo with no workflows (Checks API 404s everywhere) merges straight off, not polling out (#6389). CI outlasting the wait exits 5 — retry next pass.
 

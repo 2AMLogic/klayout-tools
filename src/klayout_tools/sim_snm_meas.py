@@ -27,13 +27,14 @@ with a ``[<reason>]`` token from :data:`ERROR_CODES`.
 
 from __future__ import annotations
 
-import os
-import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_snm
+from . import sim_measurement_kind, sim_snm
 from .sim_errors import SimError
+from .sim_forms import normalize_selector as normalize_selector
+from .sim_forms import other_forms, validate_exclusive_form
+from .sim_measurement_grading import _vector_measurement_result
 
 #: Reason tokens a failed ``snm`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -47,39 +48,15 @@ ERROR_CODES = (
 _KEYS = ("x", "y1", "y2")
 _ALLOWED_KEYS = frozenset(_KEYS)
 
-#: Single-ended ``v(node)``: one non-empty token without whitespace, control
-#: characters, commas or parentheses.
-_SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
-
 _VECTOR_PREFIX = "__klt_snm_"
-
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-)
 
 
 def is_snm(spec: dict[str, Any]) -> bool:
-    return spec.get("snm") is not None
+    return sim_measurement_kind.declares(spec, "snm")
 
 
 def snm_measurements(measurements_spec: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [spec for spec in measurements_spec if is_snm(spec)]
-
-
-def normalize_selector(selector: Any) -> str | None:
-    """``"v(node)"`` lower-cased, or ``None`` when not an accepted selector."""
-    if not isinstance(selector, str):
-        return None
-    match = _SELECTOR_RE.match(selector)
-    return None if match is None else f"v({match.group(1).lower()})"
 
 
 def _triple(spec: dict[str, Any]) -> tuple[str, str, str]:
@@ -109,21 +86,12 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     """For an entry declaring ``snm``: refuse any other form beside it and
     validate the body. Returns ``True`` when the entry is an snm entry (so the
     caller has nothing more to validate)."""
-    if not is_snm(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'snm' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
-    validate_snm_spec(name, spec["snm"])
-    return True
+    return validate_exclusive_form(
+        spec,
+        "snm",
+        other_forms("snm"),
+        lambda name, spec: validate_snm_spec(name, spec["snm"]),
+    )
 
 
 def validate_snm_spec(name: Any, body: Any) -> None:
@@ -155,22 +123,16 @@ def validate_snm_context(
     declared = snm_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "dc":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'snm', which needs "
-            f'a DC sweep and so requires analysis.kind "dc" (got '
-            f"{analysis.get('kind')!r})"
-        )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares an snm entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="snm",
+        required="dc",
+        explanation="needs a DC sweep",
+    )
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="an snm entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -178,8 +140,12 @@ def validate_snm_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each snm measurement writes per corner.
+_RAWFILE_PREFIX = "snm"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"snm_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -222,26 +188,17 @@ class SnmOutcome:
 def _analyze_triple(raw_path: str) -> sim_snm.SnmResult | SnmOutcome:
     """The SNM for one triple's rawfile, or a triple-level failure outcome
     (the caller prefixes the measurement name)."""
-    if not os.path.isfile(raw_path):
-        return SnmOutcome(
-            code="snm_vector_missing",
-            error=(
-                "its x, y1 or y2 vector did not resolve against this DC "
-                "analysis's saved vectors (no rawfile was written) -- check "
-                "the node names, and that options.save_mode does not omit them"
-            ),
-        )
-    try:
-        raw = sim_raw.read_complex_ascii_rawfile(raw_path)
-    except sim_raw.RawFileError as exc:
-        return SnmOutcome(
-            code="snm_raw_invalid", error=f"could not read its rawfile: {exc}"
-        )
-    if len(raw.names) != 4 or not raw.points:
-        return SnmOutcome(
-            code="snm_raw_invalid",
-            error="its rawfile must hold a sweep axis, x, y1 and y2 with samples",
-        )
+    raw, error = sim_measurement_kind.read_complex_rawfile(
+        raw_path,
+        form="snm",
+        columns=4,
+        vector_desc="x, y1 or y2",
+        analysis_label="DC",
+        expected_columns="a sweep axis, x, y1 and y2",
+    )
+    if error is not None:
+        return SnmOutcome(code=error[0], error=error[1])
+    assert raw is not None
     columns = [[z.real for z in raw.column(i)] for i in (1, 2, 3)]
     try:
         return sim_snm.analyze_snm(*columns)
@@ -275,3 +232,27 @@ def extract_corner_snms(
         for position, spec in enumerate(measurements_spec)
         if is_snm(spec)
     }
+
+
+# --------------------------------------------------------------------------- #
+# Response entry
+# --------------------------------------------------------------------------- #
+
+
+def snm_measurement_result(
+    spec: dict[str, Any],
+    outcome: SnmOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``snm`` measurement's response entry (issue #3895).
+
+    ``value`` is the butterfly SNM in volts, graded through
+    :func:`_grade_measurement_value` like any scalar; the request echo and the
+    two per-eye sides ride the additive ``snm`` sibling. A failure is
+    ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
+    ``code: "measurement"`` diagnostic whose message starts with a
+    ``[<reason>]`` token from :data:`ERROR_CODES`."""
+    return _vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="snm", report_with_spec=True
+    )

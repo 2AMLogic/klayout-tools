@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import Any
 
+from .._jsonnum import is_int
+from .extraction_inductor import InductorDevice
 from .rules import RuleProvenance
 
 
@@ -69,33 +71,26 @@ class ResistorDevice:
     Geometry (all fields are ``(layer, datatype)`` pairs, matching the
     layout's own GDS numbering):
 
-    - ``body`` -- the drawn conductor layer the resistor lives on. **Must**
-      be one of the owning deck's own conductor layers (``poly``,
-      ``active``, or one of ``metals``), because the recognised resistor
-      body is *subtracted* from that layer's connectivity region: leaving it
-      in would short the two terminals together through the conductor and
-      defeat the whole point.
-    - ``marker`` -- the resistor-ID layer. The resistive segment is
-      ``body & marker`` (further narrowed by ``requires``/``excludes``); the
-      **terminals** are the rest of that conductor layer (``body`` minus the
-      recognised segment), i.e. the contacted heads on either side. This
-      mirrors both PDKs' own KLayout LVS decks, which derive the terminal
-      layer the same way (sky130's ``poly_con = poly.not(poly_res)``,
-      gf180mcu's ``poly2_con = poly2.not(res_mk)``).
-    - ``requires`` -- additional layers that must **all** cover the segment
-      for it to be this device (e.g. gf180mcu's ``Pplus`` + ``SAB``, which
-      are what distinguish a 350 ohm/sq *unsalicided* p+ poly resistor from
-      a 7.3 ohm/sq salicided one).
-    - ``excludes`` -- layers that disqualify the segment (subtracted from
-      it), e.g. sky130's ``rpm``/``urpm`` precision-resistor implant masks,
-      which mark the *other*, much-higher-sheet-rho poly resistor flavours.
-      A segment excluded here is left as ordinary connected conductor (it
-      keeps today's short) rather than extracted with the wrong resistance
-      -- a wrong value passing LVS with high confidence is worse than a
-      known-unmodelled device.
-    - ``terminal`` -- optional override naming a *different* deck conductor
-      layer to take the terminals from (defaults to ``body``). Like
-      ``body``, it must be one of the deck's own conductor layers.
+    - ``body`` -- the drawn conductor layer (``poly``, ``active``, or a
+      member of ``metals``). Extraction subtracts the recognised segment
+      from its connectivity region to separate the terminals.
+    - ``marker`` -- the resistor-ID layer. The default topology takes the
+      segment from ``body & marker``. The remaining conductor provides the
+      terminal heads, as in sky130's ``poly.not(poly_res)`` and gf180mcu's
+      ``poly2.not(res_mk)`` KLayout LVS derivations.
+    - ``requires`` -- layers that must all cover the segment. For example,
+      gf180mcu uses ``Pplus`` and ``SAB`` to distinguish its 350 ohm/sq
+      unsalicided p+ poly resistor from the 7.3 ohm/sq salicided device.
+    - ``excludes`` -- layers subtracted from the segment, e.g. sky130
+      ``rpm`` and ``urpm`` for higher-sheet-resistance flavours. Excluded
+      segments remain ordinary conductor.
+    - ``terminal`` -- optional deck conductor layer for the terminal heads.
+      Defaults to ``body``.
+    - ``terminal_enclosure_um`` (#5889) -- minimum terminal-conductor
+      enclosure required by the PDK, in micrometres. With a positive value,
+      extraction severs the band flanks that would join the two heads and
+      retains the leads through the band. The default ``0.0`` applies no
+      enclosure correction. See ``docs/cli/extract.md``, "Drawn resistors".
 
     ``sheet_rho_ohm_sq`` is the device's sheet resistance in ohms per
     square; KLayout computes ``R = L / W * sheet_rho`` from the recognised
@@ -121,12 +116,11 @@ class ResistorDevice:
     device parameter back and rewrites it in place to ``L / W *
     sheet_rho_ohm_sq + fixed_offset_ohm`` after extraction, before the
     netlist reaches the SPICE writer or ``klt lvs``'s comparer (issue
-    #521). Defaults to ``0.0``, which
-    reproduces ``R = L / W * sheet_rho_ohm_sq`` only -- today's behaviour,
-    bit-for-bit -- for every deck entry that does not set it. A deck that
+    #521). Defaults to ``0.0``, which reproduces ``R = L / W *
+    sheet_rho_ohm_sq`` only -- today's behaviour, bit-for-bit. A deck that
     transcribes (or, as for sky130's ``res_high_po``, measures via ngspice
-    against) its PDK's own composite head-plus-body resistor model should
-    set this rather than leave the fixed head/end term silently dropped.
+    against) its PDK's composite head-plus-body resistor model should set
+    this rather than leave the fixed head/end term silently dropped.
 
     ``end_term_ohm_um``/``width_offset_um`` (issue #2652) are two more
     optional coefficients covering a composite PDK resistor model
@@ -141,14 +135,11 @@ class ResistorDevice:
     separate coefficients rather than folding into ``fixed_offset_ohm``:
 
     - ``end_term_ohm_um`` is an ohm-micrometre coefficient: ``R`` gains
-      ``end_term_ohm_um / W`` (``W`` the already-computed device parameter,
-      in micrometres like every other KLayout device geometry parameter --
-      see ``CapacitorDevice.area_cap_f_um2``/``perim_cap_f_um``'s own units).
-      A PDK model's own coefficient is typically quoted in ohm-*metres*
-      against ``w`` in metres (e.g. sg13g2 rppd's ``70.0e-6 / w``); converting
-      to ohm-micrometres against ``W`` in micrometres is a clean factor of
-      1e6 (``70.0e-6`` ohm*m == ``70.0`` ohm*um), so deck entries transcribe
-      the PDK coefficient directly without an awkward residual scale factor.
+      ``end_term_ohm_um / W`` (``W`` in micrometres like every KLayout
+      device geometry parameter). PDK coefficients are typically quoted in
+      ohm-*metres* against ``w`` in metres (sg13g2 rppd's ``70.0e-6 / w``);
+      the conversion is a clean factor of 1e6 (``70.0e-6`` ohm*m == ``70.0``
+      ohm*um), so entries transcribe the PDK coefficient directly.
     - ``width_offset_um`` shifts the body term's denominator from ``W`` to
       ``W + width_offset_um`` (micrometres, so a PDK ``lwd`` quoted in metres
       is converted the same way): since the already-computed ``R = L / W *
@@ -159,18 +150,15 @@ class ResistorDevice:
       width the same way a positive one (rppd's/rsil's ``w + lwd``) widens
       it.
 
-    Both are applied in the same post-extraction correction (``extract.py``'s
-    ``apply_resistor_fixed_offset_corrections``) and in the same order
-    relative to series ``combine_devices()`` folding as ``fixed_offset_ohm``
-    (applied once per surviving, possibly-combined device, using that
-    device's own already-combined ``R``/``W`` -- correct because a uniform-
-    width series string's combined ``R`` stays linear in the summed ``L``,
-    and only the two true end contacts of the folded string get an end
-    term, not one per drawn primitive). Both default to ``0.0``, the
-    identity: ``end_term_ohm_um=0.0`` adds nothing, and
-    ``width_offset_um=0.0`` leaves ``W / (W + 0.0) == 1.0``, so every deck
-    entry that does not set them extracts ``R`` bit-for-bit as before this
-    field existed.
+    Both are applied in the same post-extraction correction
+    (``extract.py``'s ``apply_resistor_fixed_offset_corrections``), in the
+    same order relative to series ``combine_devices()`` folding as
+    ``fixed_offset_ohm`` -- once per surviving, possibly-combined device,
+    using its own already-combined ``R``/``W`` (correct: a uniform-width
+    string's combined ``R`` stays linear in the summed ``L``, and only the
+    folded string's two true end contacts get an end term). Both default to
+    ``0.0``, the identity: every entry that does not set them extracts ``R``
+    bit-for-bit as before.
 
     ``topology`` (issue #2679) selects how ``body``/``marker`` relate:
 
@@ -194,22 +182,23 @@ class ResistorDevice:
       layout that *does* overlap (a continuous bar marked by ``polyres``)
       keeps extracting as before.
 
-    ``name`` is the extracted device-class name (``devices[].class`` in the
-    JSON response, and the model token on the written ``R`` card -- a
-    consumer simulating the netlist supplies a matching ``.model``, exactly
-    as it already must for the ``nfet``/``pfet`` ``M`` cards).
+    ``anode_marker`` (issue #4312) declares a **split-terminal** resistor: two
+    terminals carved from one conductor shape by marker layers (the gf180mcu
+    eFuse). ``requires`` is then the scope; a shape missing its segment, anode
+    or cathode stays ordinary conductor. See ``extract_split_terminal``.
+
+    ``name`` is the extracted device-class name (``devices[].class`` and the
+    model token on the written ``R`` card; a consumer supplies a matching
+    ``.model``, as it already must for the ``nfet``/``pfet`` ``M`` cards).
 
     ``bulk_to_substrate`` selects ``DeviceExtractorResistorWithBulk`` (a
     third ``W`` terminal tied to the deck's ``substrate_net`` global)
     instead of the plain two-terminal ``DeviceExtractorResistor``, for a
     device whose PDK LVS deck models a bulk terminal (e.g. gf180mcu's
-    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It shares the
-    same ``W`` terminal region as the NMOS body (``extract.py``'s
-    ``nfet_body``), so it inherits that terminal's behaviour: on a deck that
-    draws a distinct ``tap`` layer (issue #490), a substrate-tie ring drawn
-    outside every ``nwell`` and contacted up to a named net resolves the
-    bulk terminal to that real net; only a layout with no such ring falls
-    back to the deck's synthesized ``substrate_net`` global.
+    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It shares the NMOS
+    body's ``W`` terminal region: with a distinct ``tap`` layer (issue #490) a
+    contacted substrate-tie ring names the bulk net, else the synthesized
+    ``substrate_net`` global is used.
 
     ``flavour_option``/``flavours`` (issue #595) declare an optional,
     caller-selectable **sheet-rho flavour set** for a resistor family whose
@@ -230,30 +219,27 @@ class ResistorDevice:
     ``deck_options`` (``klt extract --deck-option <flavour_option>=<value>``).
 
     ``flavour_option`` is the deck-option key this entry's flavour is chosen
-    by (``None``, the default, means this entry has no caller-selectable
-    flavour -- today's behaviour, unaffected either way). ``flavours`` is the
-    tuple of every :class:`ResistorFlavour` selectable through that key,
-    typically including one entry that matches this ``ResistorDevice``'s own
-    default ``name``/``sheet_rho_ohm_sq`` (the value used when no
-    ``deck_options`` override is given) plus the previously-unmodelled
-    siblings. :func:`get_extraction_deck` validates a given ``deck_options``
-    value against this list and raises :class:`InvalidDeckOptionError` for an
-    unrecognised key or value rather than silently keeping the default or
-    guessing -- the same "known-unmodelled short beats a silently wrong
-    value" discipline ``excludes`` already applies. A deck entry that leaves
-    ``flavours`` at its empty default has no selectable flavour: passing
-    ``deck_options`` naming a key no entry declares is itself an
+    by (``None``, the default: no caller-selectable flavour). ``flavours`` is
+    the tuple of every :class:`ResistorFlavour` selectable through that key,
+    typically one matching this entry's own default
+    ``name``/``sheet_rho_ohm_sq`` (used when no ``deck_options`` override is
+    given) plus the previously-unmodelled siblings.
+    :func:`get_extraction_deck` validates a ``deck_options`` value against
+    this list and raises :class:`InvalidDeckOptionError` for an unrecognised
+    key or value rather than guessing -- the same "known-unmodelled short
+    beats a silently wrong value" discipline ``excludes`` applies. A
+    ``deck_options`` key no entry declares is itself an
     :class:`InvalidDeckOptionError`, not a silent no-op.
 
-    ``provenance`` (issue #868) is a machine-readable citation of the exact
-    upstream PDK-LVS-deck source this entry's ``sheet_rho_ohm_sq`` (and, when
-    set, ``fixed_offset_ohm``) was transcribed/measured from -- the
-    device-recognition analogue of :class:`DrcRule.provenance` (see
-    :class:`RuleProvenance`'s own docstring for the shared type and how it
-    generalises beyond DRC). ``None`` (the default) means no structured
-    provenance has been backfilled for this entry yet -- the prose citation
-    in the deck module's own inline comment remains the only record, exactly
-    as for every entry before this field existed.
+    ``ignored_parameters`` (issue #4312): parameters the PDK's own LVS deck
+    leaves out of its compare (``ignore_parameter``), the eFuse's ``R``. ``klt
+    lvs`` excludes them by default and discloses it; naming the class in
+    ``options.compare_parameters`` compares it as asked.
+
+    ``provenance`` (issue #868) cites the upstream PDK-LVS-deck source this
+    entry's ``sheet_rho_ohm_sq`` (and ``fixed_offset_ohm``) came from, as
+    :class:`DrcRule.provenance` does (see :class:`RuleProvenance`); ``None``
+    leaves only the deck module's inline prose citation.
     """
 
     name: str
@@ -271,12 +257,22 @@ class ResistorDevice:
     flavours: tuple[ResistorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
     topology: str = "overlap"
+    terminal_enclosure_um: float = 0.0
+    anode_marker: tuple[int, int] | None = None
+    ignored_parameters: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.topology not in RESISTOR_TOPOLOGIES:
             raise ValueError(
                 f"ResistorDevice '{self.name}': unknown topology "
                 f"{self.topology!r} (expected one of {RESISTOR_TOPOLOGIES})"
+            )
+        if self.anode_marker is not None and (
+            self.topology != "overlap" or not self.requires
+        ):
+            raise ValueError(
+                f"ResistorDevice '{self.name}': anode_marker needs "
+                "topology='overlap' and a non-empty requires (the scope)"
             )
 
 
@@ -380,17 +376,16 @@ class MOSFlavour:
     that PDK-model-name table (kept in separate modules, matching this
     codebase's existing "geometry vs. model binding" module split).
 
-    A transistor's *whole* active-diffusion island (both source and drain,
-    not just the gate -- gf180mcu draws a MOS device's active mask as one
-    continuous polygon spanning source-gate-drain) is classified against
-    ``marker`` as a single unit: an island that ``interacting`` overlaps the
-    marker *at all* is entirely this flavour's, never split mid-island. This
-    is a deliberate, documented choice for the marker-straddling case (the
-    DRM does not contemplate a transistor legally straddling a voltage-
-    domain boundary at all -- every real device is either fully inside or
-    fully outside the marker), and matches the "any overlap counts" idiom
-    ``_detect_voltage_domain_overlap`` (issue #552/#577) already uses for its
-    own marker-interaction gate.
+    Classification is **per gate** (issue #5301): each gate (``poly`` over
+    active) is tested against ``marker`` with the "any overlap counts" idiom
+    ``_detect_voltage_domain_overlap`` (issue #552/#577) uses, so a marker
+    touching any part of a gate claims that whole device, while a marker that
+    only reaches source/drain diffusion shared with a neighbouring gate does
+    not flip that neighbour. Shared source/drain diffusion stays available to
+    both the flavoured and the default pass, so it remains one connected net
+    across the flavour boundary. An island that is wholly inside or wholly
+    outside the marker (every gf180mcu/sg13g2 device, one gate per island)
+    classifies exactly as before.
 
     ``description`` is a short human-readable label for this flavour
     (currently unused by any consumer beyond documentation -- a placeholder
@@ -418,9 +413,9 @@ class MOSFlavour:
 
     - ``and_markers``: the island must also ``interacting``-overlap *every*
       one of these layers to be claimed.
-    - ``not_markers``: an island that ``interacting``-overlaps *any* of these
+    - ``not_markers``: a gate that ``interacting``-overlaps *any* of these
       layers is not claimed (it stays available to later flavours / the
-      default split). Like ``marker``, this is island-level, not a geometric
+      default split). Like ``marker``, this is gate-level, not a geometric
       subtraction -- the same documented straddling policy.
     - ``nfet_only``: the flavour has no PMOS counterpart; an island
       ``interacting`` the deck's ``nwell`` is never claimed (no PMOS is
@@ -672,7 +667,7 @@ class ExtractionDeck:
     of this layer resolves to a *per-island* identity (named
     ``f"{substrate_net}_iso{n}"``, with ``n`` assigned in deterministic
     bounding-box order, not raw ``Region`` iteration order -- see
-    :func:`~klayout_tools.extract._partition_region_by_islands`) instead of
+    :func:`~klayout_tools.erc_islands.partition_region_by_islands`) instead of
     the single, deck-wide ``substrate_net`` global -- letting two physically
     separate, isolated NMOS domains (e.g. deep-nwell/isolated-p-well tubs)
     extract as two genuinely distinct nets rather than always collapsing
@@ -680,19 +675,18 @@ class ExtractionDeck:
     all keeps today's single shared ``substrate_net`` identity, matching
     real silicon (an un-isolated p-substrate genuinely is one continuous
     node) -- this is a per-*isolated-region* split, not a full per-instance
-    one. ``None`` (the default -- every deck as of this field's
-    introduction, until gf180mcu's own module sets it) disables this
-    scoping entirely: a deck that declares no ``substrate_isolation``
-    extracts exactly as it did before this field existed, with every NMOS
-    body/substrate-tie sharing one identity regardless of any well/deep-well
-    geometry drawn in the layout. Applies only to this deck's *default*
-    (non-``mos_flavours``) NMOS device recognition and to the ``tap``/
-    derived-tap substrate-tie slice -- a flavoured NMOS device
-    (``mos_flavours``), a ``bulk_to_substrate`` resistor's ``W`` terminal, or
-    a collector-less :class:`BipolarDevice`'s collector, whose own geometry
-    happens to sit inside an isolated region, still resolves to the single
-    global ``substrate_net`` identity: a known, documented residual gap left
-    for a follow-up rather than this issue's scope.
+    one. ``None`` (the default) disables this scoping entirely: every NMOS
+    body/substrate-tie shares one identity. Applies only to this deck's
+    *default* (non-``mos_flavours``) NMOS device recognition and the ``tap``/
+    derived-tap substrate-tie slice -- a flavoured NMOS device, a
+    ``bulk_to_substrate`` resistor's ``W`` terminal, or a collector-less
+    :class:`BipolarDevice`'s collector inside an isolated region still
+    resolves to the global ``substrate_net``: a known, documented gap.
+
+    ``substrate_isolation_needs_nwell_ring`` (#5344, default ``False``): an
+    island counts only when ``nwell`` closes its outline
+    (:func:`~klayout_tools.erc_islands.is_ring_closed`), as sky130's deep
+    n-well isolates only with a ring; ``False`` keeps every island (gf180mcu).
 
     ``bipolars`` is an optional tuple of :class:`BipolarDevice` entries (empty
     by default) declaring this deck's drawn vertical-BJT device-recognition
@@ -734,6 +728,9 @@ class ExtractionDeck:
     a deck with no curated diode recognition; non-empty decks may declare
     more than one entry (e.g. gf180mcu's n+/p-substrate and p+/Nwell
     junction flavours).
+
+    ``inductors`` (empty by default) declares spiral inductors recognised from
+    their marker/pin/text layers (issue #6726, :class:`InductorDevice`).
 
     ``nfet_provenance``/``pfet_provenance`` (issue #868) are machine-readable
     citations of the exact upstream PDK-LVS-deck source line each MOS
@@ -812,6 +809,7 @@ class ExtractionDeck:
     pfet_class: str = "pfet"
     substrate_net: str = "vsubs"
     substrate_isolation: tuple[int, int] | None = None
+    substrate_isolation_needs_nwell_ring: bool = False
     bipolars: tuple[BipolarDevice, ...] = ()
     capacitors: tuple[CapacitorDevice, ...] = ()
     mom_capacitors: tuple[MomCapacitorDevice, ...] = ()
@@ -825,6 +823,7 @@ class ExtractionDeck:
     pfet_provenance: RuleProvenance | None = None
     capacitor_variants: tuple[CapacitorVariant, ...] = ()
     capacitor_variant_selected: str | None = None
+    inductors: tuple[InductorDevice, ...] = ()
 
     @property
     def unselected_capacitors(self) -> tuple[tuple[str, CapacitorDevice], ...]:
@@ -855,22 +854,12 @@ class ExtractionDeck:
         "what can be found" declaration).
 
         Every registered deck extracts two-terminal-well MOS (``"nfet"``,
-        ``"pfet"``); a deck that also declares one or more ``bipolars``
-        entries (#223) appends each entry's ``class_name`` (in declaration
-        order, deduplicated), and a deck that declares one or more
-        ``capacitors`` entries (#225) likewise appends each entry's ``name``
-        after that. Finally, a deck that declares one or more ``resistors``
-        entries (#222) appends the ``"resistor"`` role after those -- a single
-        role token regardless of how many drawn-resistor device classes the
-        deck declares. Last, a deck that declares one or more ``diodes``
-        entries (#542) appends each entry's ``name`` (in declaration order,
-        deduplicated) after that -- one token per declared junction-diode
-        flavour, matching how ``bipolars``/``capacitors`` name theirs. A deck
-        that declares one or more ``mom_capacitors`` entries (#1466) appends
-        each entry's ``name`` right after ``capacitors``' own -- the two
-        capacitor families are structurally distinct (see
-        :class:`MomCapacitorDevice`'s docstring) but share the same "device-
-        class role" position in this list.
+        ``"pfet"``), then one token per entry of each declared family
+        (first-declared order, deduplicated): ``bipolars`` (``class_name``,
+        #223), ``capacitors`` (#225), ``mom_capacitors`` (#1466, see
+        :class:`MomCapacitorDevice`), ``mos_capacitors``, a single
+        ``"resistor"`` role however many drawn-resistor classes are declared
+        (#222), ``diodes`` (#542) and ``inductors`` (#6726).
         """
         groups = (
             (bipolar.class_name for bipolar in self.bipolars),
@@ -879,6 +868,7 @@ class ExtractionDeck:
             (mos_capacitor.name for mos_capacitor in self.mos_capacitors),
             ("resistor",) if self.resistors else (),
             (diode.name for diode in self.diodes),
+            (inductor.name for inductor in self.inductors),
         )
         # `dict.fromkeys` keeps first-declared order and drops repeats.
         return tuple(dict.fromkeys(("nfet", "pfet", *chain.from_iterable(groups))))
@@ -999,8 +989,8 @@ class ExtractionDeck:
             layers.add(resistor.marker)
             layers.update(resistor.requires)
             layers.update(resistor.excludes)
-            if resistor.terminal is not None:
-                layers.add(resistor.terminal)
+            # filter(None, ...) keeps this ratcheted function's complexity put.
+            layers.update(filter(None, (resistor.terminal, resistor.anode_marker)))
         for diode in self.diodes:
             layers.add(diode.marker)
             layers.update(diode.anode_requires)
@@ -1018,6 +1008,7 @@ class ExtractionDeck:
             layers.update(mos_capacitor.excludes)
         for mos_flavour in self.mos_flavours:
             layers.add(mos_flavour.marker)
+        layers.update(chain.from_iterable(i.recognition_layers for i in self.inductors))
         return frozenset(layers)
 
     @property
@@ -1227,9 +1218,7 @@ class ExtractionDeck:
             if (
                 not isinstance(layer, tuple)
                 or len(layer) != 2
-                or not all(
-                    isinstance(v, int) and not isinstance(v, bool) for v in layer
-                )
+                or not all(is_int(v) for v in layer)
             ):
                 raise InvalidLabelLayerError(
                     f"{where} label-layer role {role!r} override must be a "
@@ -1387,10 +1376,7 @@ class LayerExpr:
             if (
                 isinstance(operand, tuple)
                 and len(operand) == 2
-                and all(
-                    isinstance(part, int) and not isinstance(part, bool)
-                    for part in operand
-                )
+                and all(is_int(part) for part in operand)
             ):
                 continue
             raise ValueError(
@@ -1969,9 +1955,8 @@ class CapacitorDevice:
     set, ``perim_cap_f_um``) was transcribed from -- the device-recognition
     analogue of :class:`DrcRule.provenance` (see :class:`RuleProvenance`'s
     own docstring). ``None`` (the default) means no structured provenance
-    has been backfilled for this entry yet -- the prose citation in the deck
-    module's own inline comment remains the only record, exactly as for
-    every entry before this field existed.
+    has been backfilled yet -- the deck module's inline prose citation
+    remains the only record, as for every entry before this field existed.
     """
 
     name: str
@@ -1979,6 +1964,7 @@ class CapacitorDevice:
     bottom_plate: tuple[int, int]
     area_cap_f_um2: float
     top_plate_requires: tuple[tuple[int, int], ...] = ()
+    top_plate_requires_interacting: bool = False  # interacting, not AND (#3440)
     top_plate_excludes: tuple[tuple[int, int], ...] = ()
     bottom_plate_requires: tuple[tuple[int, int], ...] = ()
     bottom_plate_excludes: tuple[tuple[int, int], ...] = ()

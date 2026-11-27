@@ -1,0 +1,1 @@
+- Unconstrained placement skips timing-driven buffering, so a structural Liberty with no timing arcs can reach detailed routing (#5672).

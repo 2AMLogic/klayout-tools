@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from helpers.drc_known_findings import GF180MCU_OFFGRID_RULES
+from helpers.sky130_drc_landings import insert_licon_with_li1_landing
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
@@ -259,7 +260,6 @@ def test_generate_reports_snapped_to_grid(tmp_path, pdk_root):
 
 
 def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
-    output = tmp_path / "res.gds"
     exit_code = main(
         [
             "gen",
@@ -271,7 +271,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
             "--pdk-root",
             str(pdk_root),
             "-o",
-            str(output),
+            str(tmp_path / "res.gds"),
             "--format",
             "json",
         ]
@@ -286,6 +286,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
         "pdk",
         "dbu_um",
         "bbox_um",
+        "subcell_naming_scheme",
         "device_count",
         "ports",
         "navigable_regions",
@@ -694,11 +695,8 @@ _SG13G2_DUMMY_LAYER = (99, 50)
 
 
 def test_list_generators_includes_all_four_phase2_families():
-    """`klt gen --list` must show all four analog primitive families the
-    issue scopes, alongside phase 1's `resistor_strip`, phase 4's
-    `bjt_array`, the chip-boundary `bond_pad` (issue #568), `esd_device`
-    (issue #569), and the named-net `well_island` (issue #1421) (acceptance
-    criterion #1)."""
+    """`klt gen --list` must show every registered generator family (incl.
+    `pdk_cell`, #5290): the analog primitives, `bond_pad`, `esd_device`, ASAP7."""
     report = list_generators()
     names = {g["name"] for g in report["generators"]}
     assert names == {
@@ -713,7 +711,10 @@ def test_list_generators_includes_all_four_phase2_families():
         "esd_device",
         "cap_array",
         "cap_vpp_array",
+        "pdk_cell",
         "well_island",
+        "asap7_finfet",
+        "asap7_tap",
     }
 
 
@@ -2044,8 +2045,12 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     """#461: the gate poly must extend past the diffusion's gate-side edge so a
     contact can land on the gate outside the channel. Verify the drawn poly
     (66/20) extends past the diff (65/20) by the landing-pad margin, that the
-    reported gate port sits in that extension, and that a licon placed at the
-    port is DRC-clean (no `poly.enclosing.licon.1`/`diff.enclosing.licon.1`)."""
+    reported gate port sits in that extension, and that a contact stack placed
+    at the port is DRC-clean (no `poly.enclosing.licon.1`/
+    `diff.enclosing.licon.1`). The stack carries an li1 landing pad at li.5's
+    own 0.08 um enclosure (see the helper): since #5737 flipped
+    `li1.enclosing.licon1.1` to required containment, a bare cut with no li1
+    above it is itself a reported defect, not a legal contact."""
     import klayout.db as kdb
 
     from klayout_tools.gen import CONTACT_SIZE_UM, ENCLOSURE_MARGIN_UM
@@ -2081,15 +2086,10 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     top = layout.top_cell()
     dbu = layout.dbu
     licon = layout.layer(66, 44)
-    half = gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0  # licon.1 (#2835)
-    gx, gy = gate["x_um"], gate["y_um"]
-    top.shapes(licon).insert(
-        kdb.Box(
-            round((gx - half) / dbu),
-            round((gy - half) / dbu),
-            round((gx + half) / dbu),
-            round((gy + half) / dbu),
-        )
+    li1 = layout.layer(67, 20)
+    half = gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0
+    insert_licon_with_li1_landing(
+        layout, top, licon, li1, gate["x_um"], gate["y_um"], half, dbu
     )
     contacted = tmp_path / f"{generator}_gate_contacted.gds"
     layout.write(str(contacted))
@@ -2427,7 +2427,10 @@ def test_mos_array_series_fingers_gate_conductors_are_distinct(tmp_path, pdk_roo
 def test_mos_array_series_fingers_gate_contacts_are_drc_clean(tmp_path, pdk_root):
     """#781's acceptance bar: a contact placed at *any* reported gate port
     (not just the first finger's, as before) is DRC-clean -- every finger
-    is padded per #461, not just the first."""
+    is padded per #461, not just the first. Each contact carries an li1
+    landing pad at li.5's 0.08 um enclosure (see the helper): since #5737
+    flipped `li1.enclosing.licon1.1` to required containment, a bare cut is
+    itself a reported defect, not a legal contact."""
     import klayout.db as kdb
 
     gds_path, report = _mos_unit_gds(
@@ -2438,19 +2441,13 @@ def test_mos_array_series_fingers_gate_contacts_are_drc_clean(tmp_path, pdk_root
     top = layout.top_cell()
     dbu = layout.dbu
     licon = layout.layer(66, 44)
-    half = gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0  # licon.1 (#2835)
+    li1 = layout.layer(67, 20)
+    half = gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0
     for port in report["ports"]:
-        if not port["name"].startswith("U0_G"):
-            continue
-        gx, gy = port["x_um"], port["y_um"]
-        top.shapes(licon).insert(
-            kdb.Box(
-                round((gx - half) / dbu),
-                round((gy - half) / dbu),
-                round((gx + half) / dbu),
-                round((gy + half) / dbu),
+        if port["name"].startswith("U0_G"):
+            insert_licon_with_li1_landing(
+                layout, top, licon, li1, port["x_um"], port["y_um"], half, dbu
             )
-        )
     contacted = tmp_path / "series3_contacted.gds"
     layout.write(str(contacted))
 
@@ -3074,6 +3071,7 @@ def test_res_array_series_ports_note_and_drc_clean(tmp_path, pdk_root, extra):
     assert report["drc_hints"]["matched_group_id"] == f"res_array:{num}"
     notes = " ".join(report["drc_hints"]["notes"])
     assert f"{num - 1} joint jumper" in notes
+    assert "combine_devices" in notes
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
 
@@ -3099,6 +3097,56 @@ def test_res_array_series_extracts_as_connected_chain(tmp_path, pdk_root):
     # A 4-resistor series chain: 5 nets, two terminals (degree 1), three
     # interior joints (degree 2). Unjoined units would give 8 degree-1 nets.
     assert sorted(degree.values()) == [1, 1, 2, 2, 2], degree
+
+
+#: `res_generic_po`'s deck sheet rho (`decks/sky130.py`), transcribed as a
+#: literal so a deck-value drift fails the test loudly instead of silently
+#: tracking it -- the same convention as test_lvs.py's resistor fixtures.
+_RES_GENERIC_PO_SHEET_RHO_OHM_SQ = 48.2
+
+
+def test_res_array_series_fold_lvs_matches_one_device_reference(tmp_path, pdk_root):
+    """Issue #5555 regression: a series=true `res_array` draws one long
+    logical resistor as a folded chain, and `klt lvs` matches it against the
+    *unmodified* one-device schematic reference when `options.combine_devices:
+    true`; without combining, the chain's 4 extracted devices mismatch the
+    reference's 1."""
+    num, length_um, width_um = 4, 2.0, 1.0
+    output, _ = _series_report(
+        tmp_path,
+        pdk_root,
+        "fold",
+        num=num,
+        rows=2,
+        dummy=0,
+        series=True,
+        length_um=length_um,
+        width_um=width_um,
+    )
+    reference = tmp_path / "ref.spice"
+    r_ohm = num * (length_um / width_um) * _RES_GENERIC_PO_SHEET_RHO_OHM_SQ
+    reference.write_text(
+        f".subckt RES R0_A R3_B\nR1 R0_A R3_B {r_ohm:.5f} res_generic_po\n.ends\n"
+    )
+
+    from klayout_tools.lvs import run_lvs
+
+    request = {
+        "layout": {"file": str(output), "deck": "sky130"},
+        "reference": {"netlist": str(reference), "top": "RES"},
+    }
+    folded = run_lvs(json.dumps({**request, "options": {"combine_devices": True}}))
+    assert folded["status"] == "match"
+    assert folded["counts"]["devices"] == {
+        "layout": 1,
+        "reference": 1,
+        "matched": 1,
+    }
+
+    unfolded = run_lvs(json.dumps({**request, "options": {"combine_devices": False}}))
+    assert unfolded["status"] == "mismatch"
+    assert unfolded["counts"]["devices"]["layout"] == num
+    assert unfolded["counts"]["devices"]["reference"] == 1
 
 
 def test_res_array_num_1_boundary_and_zero_dummy(tmp_path, pdk_root):
@@ -4011,118 +4059,65 @@ def test_res_array_sky130_draws_poly_res_marker(tmp_path, pdk_root):
     assert _SKY130_RES_MARK_LAYER in present
 
 
-def test_res_array_sky130_draws_dummy_marker_over_dummy_cells_only(tmp_path, pdk_root):
-    """Issue #491: on sky130, `res_array` draws the deck's curated `dummy`
-    marker layer over each dummy unit resistor's recognised body segment --
-    the same footprint the `poly.res` marker covers -- and only over the
-    dummy units, never a real cell, so `klt extract`'s existing
-    dummy-suppression guard (#295/#462) actually fires on sky130."""
-    import klayout.db as kdb
-
-    output = tmp_path / "res_array_dummy_marker.gds"
-    num, dummy = 3, 2
-    generate(
-        {
-            "generator": "res_array",
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"num": num, "dummy": dummy},
-            "options": {"output": str(output)},
-        }
-    )
-    layout = kdb.Layout()
-    layout.read(str(output))
-    present = {
-        (layout.get_info(i).layer, layout.get_info(i).datatype)
-        for i in layout.layer_indexes()
-    }
-    assert _SKY130_DUMMY_LAYER in present
-
-    dummy_index = layout.layer(*_SKY130_DUMMY_LAYER)
-    dummy_region = kdb.Region(layout.top_cell().begin_shapes_rec(dummy_index))
-    mark_index = layout.layer(*_SKY130_RES_MARK_LAYER)
-    mark_region = kdb.Region(layout.top_cell().begin_shapes_rec(mark_index))
-    # One dummy-marker shape per dummy unit (2 dummies per end, single row).
-    assert dummy_region.count() == 2 * dummy
-    # It is a strict subset of the res-mark marker's own footprint -- never
-    # bleeding onto a real unit's body segment.
-    assert (dummy_region - mark_region).is_empty()
-    assert dummy_region.area() < mark_region.area()
-
-    output_no_dummy = tmp_path / "res_array_no_dummy_marker.gds"
-    generate(
-        {
-            "generator": "res_array",
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"num": num, "dummy": 0},
-            "options": {"output": str(output_no_dummy)},
-        }
-    )
-    layout_no_dummy = kdb.Layout()
-    layout_no_dummy.read(str(output_no_dummy))
-    present_no_dummy = {
-        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
-        for i in layout_no_dummy.layer_indexes()
-    }
-    assert _SKY130_DUMMY_LAYER not in present_no_dummy
-
-
-def test_res_array_gf180mcu_draws_dummy_marker_over_dummy_cells_only(
-    tmp_path, both_pdk_root
+@pytest.mark.parametrize(
+    ("variant", "dummy_layer", "marker_layer"),
+    [
+        # sky130: the deck's curated `dummy` marker vs its `poly.res` marker
+        # (issue #491).
+        ("sky130A", _SKY130_DUMMY_LAYER, _SKY130_RES_MARK_LAYER),
+        # gf180mcuD: the same discipline against `RES_MK` (issue #2599, the
+        # gf180mcu counterpart of sky130's #491).
+        ("gf180mcuD", _GF180_DUMMY_LAYER, _GF180_RES_MARK_LAYER),
+    ],
+)
+def test_res_array_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, both_pdk_root, variant, dummy_layer, marker_layer
 ):
-    """Issue #2599 (the gf180mcu counterpart of sky130's own #491): on
-    gf180mcu, `res_array` draws the deck's curated `dummy` marker layer over
-    each dummy unit resistor's recognised body segment -- the same footprint
-    the `RES_MK` marker covers -- and only over the dummy units, never a real
-    cell, so `klt extract`'s existing dummy-suppression guard (#295/#462)
-    actually fires on this family too."""
+    """Issues #491/#2599: on each family, `res_array` draws the deck's curated
+    `dummy` marker layer over each dummy unit resistor's recognised body
+    segment -- the same footprint the marker layer (`poly.res`/`RES_MK`)
+    covers -- and only over the dummy units, never a real cell, so `klt
+    extract`'s existing dummy-suppression guard (#295/#462) actually fires on
+    this family."""
     import klayout.db as kdb
 
-    output = tmp_path / "res_array_gf180_dummy_marker.gds"
+    output = tmp_path / f"res_array_{variant}_dummy_marker.gds"
     num, dummy = 3, 2
     generate(
         {
             "generator": "res_array",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
             "params": {"num": num, "dummy": dummy},
             "options": {"output": str(output)},
         }
     )
     layout = kdb.Layout()
     layout.read(str(output))
-    present = {
-        (layout.get_info(i).layer, layout.get_info(i).datatype)
-        for i in layout.layer_indexes()
-    }
-    assert _GF180_DUMMY_LAYER in present
+    assert dummy_layer in _layers_present(output)
 
     dummy_region = kdb.Region(
-        layout.top_cell().begin_shapes_rec(layout.layer(*_GF180_DUMMY_LAYER))
+        layout.top_cell().begin_shapes_rec(layout.layer(*dummy_layer))
     )
     mark_region = kdb.Region(
-        layout.top_cell().begin_shapes_rec(layout.layer(*_GF180_RES_MARK_LAYER))
+        layout.top_cell().begin_shapes_rec(layout.layer(*marker_layer))
     )
     # One dummy-marker shape per dummy unit (2 dummies per end, single row).
     assert dummy_region.count() == 2 * dummy
-    # It is a strict subset of the RES_MK marker's own footprint -- never
-    # bleeding onto a real unit's body segment.
+    # It is a strict subset of the marker's own footprint -- never bleeding
+    # onto a real unit's body segment.
     assert (dummy_region - mark_region).is_empty()
     assert dummy_region.area() < mark_region.area()
 
-    output_no_dummy = tmp_path / "res_array_gf180_no_dummy_marker.gds"
+    output_no_dummy = tmp_path / f"res_array_{variant}_no_dummy_marker.gds"
     generate(
         {
             "generator": "res_array",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
             "params": {"num": num, "dummy": 0},
             "options": {"output": str(output_no_dummy)},
         }
     )
-    layout_no_dummy = kdb.Layout()
-    layout_no_dummy.read(str(output_no_dummy))
-    assert _GF180_DUMMY_LAYER not in {
-        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
-        for i in layout_no_dummy.layer_indexes()
-    }
+    assert dummy_layer not in _layers_present(output_no_dummy)
 
 
 def test_res_array_gf180_draws_res_mk_marker_and_requires_layers(
@@ -4245,24 +4240,35 @@ def test_res_array_sky130_default_matches_explicit_generic(tmp_path, pdk_root):
     _assert_gds_geometry_equal(output_default, output_explicit)
 
 
-def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
-    """`flavor='high'` (`res_high_po`) draws the psdm P+ implant and the rpm
-    precision-resistor mask over each unit body -- and *not* urpm, which is
-    mutually exclusive with rpm."""
-    output = tmp_path / "res_array_high.gds"
+@pytest.mark.parametrize(
+    ("flavor", "marker_layer", "mutually_exclusive_layer"),
+    [
+        # `flavor='high'` (`res_high_po`): rpm marker, never urpm.
+        ("high", _SKY130_RPM_LAYER, _SKY130_URPM_LAYER),
+        # `flavor='xhigh'` (`res_xhigh_po`): urpm marker, never rpm.
+        ("xhigh", _SKY130_URPM_LAYER, _SKY130_RPM_LAYER),
+    ],
+)
+def test_res_array_sky130_flavor_draws_psdm_and_marker(
+    tmp_path, pdk_root, flavor, marker_layer, mutually_exclusive_layer
+):
+    """`flavor='high'`/`'xhigh'` draws the psdm P+ implant and its family's
+    precision-resistor marker over each unit body -- and *not* the mutually
+    exclusive other marker."""
+    output = tmp_path / f"res_array_{flavor}.gds"
     generate(
         {
             "generator": "res_array",
             "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"flavor": "high"},
+            "params": {"flavor": flavor},
             "options": {"output": str(output)},
         }
     )
     present = _layers_present(output)
     assert _SKY130_RES_MARK_LAYER in present
     assert _SKY130_PSDM_LAYER in present
-    assert _SKY130_RPM_LAYER in present
-    assert _SKY130_URPM_LAYER not in present
+    assert marker_layer in present
+    assert mutually_exclusive_layer not in present
     assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
@@ -4303,26 +4309,6 @@ def test_res_array_sky130_min_width_marker_meets_pdk_minimum(
 
     drc_report = run_drc(str(output), "sky130")
     assert rule_id not in drc_report["rule_counts"]
-
-
-def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
-    """`flavor='xhigh'` (`res_xhigh_po`) draws the psdm P+ implant and the urpm
-    precision-resistor mask over each unit body -- and *not* rpm."""
-    output = tmp_path / "res_array_xhigh.gds"
-    generate(
-        {
-            "generator": "res_array",
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"flavor": "xhigh"},
-            "options": {"output": str(output)},
-        }
-    )
-    present = _layers_present(output)
-    assert _SKY130_RES_MARK_LAYER in present
-    assert _SKY130_PSDM_LAYER in present
-    assert _SKY130_URPM_LAYER in present
-    assert _SKY130_RPM_LAYER not in present
-    assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
 def test_res_array_invalid_flavor_rejected(tmp_path, pdk_root):
@@ -4588,35 +4574,29 @@ def test_res_array_sky130_flavor_still_rejects_narrower_than_0p35(
         )
 
 
-def test_res_array_sky130_generic_flavor_floor_unchanged_at_0p42(tmp_path, pdk_root):
-    """The `"high"`/`"xhigh"` per-flavour floor (issue #2407) does not widen
-    to sky130's `"generic"` flavour (`res_generic_po`), which has no such
-    fixed-width PDK primitive on record -- a request between the new 0.35um
-    floor and the generic 0.42um structural floor still fails, with the
-    original 0.42um message."""
-    with pytest.raises(GenError, match=r"width_um must be >= 0\.42"):
-        generate(
-            {
-                "generator": "res_array",
-                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-                "params": {"length_um": 22, "width_um": 0.35, "num": 1},
-                "options": {"output": str(tmp_path / "out.gds")},
-            }
-        )
-
-
-def test_res_array_gf180_generic_flavor_floor_unchanged_at_0p42(
-    tmp_path, both_pdk_root
+@pytest.mark.parametrize(
+    "variant",
+    [
+        # sky130's `"generic"` flavour (`res_generic_po`) has no fixed-width
+        # PDK primitive on record, so the per-flavour floor table (issue
+        # #2407) does not widen to it.
+        "sky130A",
+        # gf180mcu has no `_PDK_RES_FLAVOR_MIN_W_UM` entry: its own flavours
+        # keep the original, unconditional floor byte-for-byte.
+        "gf180mcuD",
+    ],
+)
+def test_res_array_generic_flavor_floor_unchanged_at_0p42(
+    tmp_path, both_pdk_root, variant
 ):
-    """The new sky130-only per-flavour floor table (issue #2407) leaves
-    gf180mcu's own flavours at the original, unconditional `UNIT_MIN_W_UM`
-    floor -- `_PDK_RES_FLAVOR_MIN_W_UM` has no gf180mcu entry, so this must
-    fall back byte-for-byte to the pre-#2407 behaviour."""
+    """Issue #2407's per-flavour floor is sky130-only: a request between the
+    new 0.35um floor and the generic 0.42um structural floor still fails,
+    with the original 0.42um message."""
     with pytest.raises(GenError, match=r"width_um must be >= 0\.42"):
         generate(
             {
                 "generator": "res_array",
-                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "pdk": {"variant": variant, "root": str(both_pdk_root)},
                 "params": {"length_um": 22, "width_um": 0.35, "num": 1},
                 "options": {"output": str(tmp_path / "out.gds")},
             }
@@ -7230,8 +7210,9 @@ def test_cut_fixed_size_table_agrees_with_every_curated_deck():
     """Every `_PDK_CUT_FIXED_SIZE_UM` entry is a genuine *fixed*-size rule
     already present (as its minimum half) in that family's curated deck:
     the table value equals the deck's own `"width"` threshold on that layer,
-    and -- once a deck carries `threshold_max_dbu` (#2370/#2388) -- that too,
-    so the two sources can never disagree about the cut size."""
+    and -- once a deck carries the upper bound itself as `threshold_max_dbu`
+    (#2370/#2388) -- equals that too, so the two sources can never disagree
+    about how big a generator draws the cut."""
     from klayout_tools.decks import get_deck, get_nominal_dbu
     from klayout_tools.gen_layer_params import _deck_cut_max_size_um
 
@@ -7245,8 +7226,7 @@ def test_cut_fixed_size_table_agrees_with_every_curated_deck():
                 if rule.check == "width"
                 and rule.layer == layer
                 and rule.other_layer is None
-                and getattr(rule.derived_layer, "mode", None)
-                in (None, "not_interacting")
+                and rule.derived_layer is None
             ]
             assert minima, (family, layer)
             assert max(minima) == size_um, (family, layer, minima)
@@ -7804,12 +7784,11 @@ def test_families_without_gate_pad_clearance_are_unchanged(family):
     )
 
 
-@pytest.mark.parametrize("generator_name", ("bjt_array", "esd_device", "well_island"))
+@pytest.mark.parametrize("generator_name", ("esd_device", "well_island"))
 def test_sg13g2_deferred_generators_rejected(generator_name, tmp_path, sg13g2_pdk_root):
-    """`bjt_array` (no bipolar device recognition in this deck's curated
-    extraction deck -- `EXTRACTION_DECK.bipolars` is empty), `esd_device`,
-    and `well_island` (neither attempted by this issue) are all explicitly
-    deferred rather than silently accepted with untested geometry."""
+    """`esd_device` and `well_island` (neither attempted by this issue) are
+    explicitly deferred rather than silently accepted with untested geometry.
+    (`bjt_array` is no longer deferred: issue #4850 -- see the HBT tests.)"""
     with pytest.raises(GenError, match="not yet supported by this generator"):
         generate(
             {
@@ -8634,6 +8613,7 @@ def test_list_generators_bjt_array_params_schema():
     generator = next(g for g in report["generators"] if g["name"] == "bjt_array")
     params = {p["name"]: p for p in generator["params"]}
     assert set(params) == {
+        "flavor",  # sg13g2 HBT cell selector (#4850)
         "emitter_um",
         "rows",
         "cols",
@@ -9960,125 +9940,18 @@ def test_esd_device_extracts_as_nfet_not_pfet(tmp_path, both_pdk_root, variant, 
     assert report["device_counts"].get("pfet", 0) == 0
 
 
-# --------------------------------------------------------------------------- #
-# `generate()` resolves its output dbu from the target PDK's tech LEF
-# (issue #1496), the same way `klt place_and_route`'s DEF/GDS merge already
-# does (#1032) -- rather than always hard-coding 0.001, so a `klt gen` output
-# agrees, by construction, with a `klt place_and_route` output resolved
-# against the same PDK. Falls back to the historical 0.001 default when the
-# resolved PDK ships no tech LEF (or one that doesn't parse) -- see
-# `pdk.resolve_pdk_dbu`'s own docstring for the shared resolution logic.
-# --------------------------------------------------------------------------- #
-
-
-def _merged_geometry_um(gds_path):
-    """Every drawn layer's merged polygon set, expressed in *micrometres* --
-    `{(layer, datatype): (x0, y0, x1, y1, area_um2, polygon_count)}`, with the
-    micrometre values rounded to 1e-9um so two streams written at different
-    dbu (0.001 vs 0.0005) can be compared for drawn-*geometry* equality
-    rather than integer-coordinate equality (the whole point of #1496: a
-    finer grid changes the integers, never the shapes)."""
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    layout.read(str(gds_path))
-    dbu = layout.dbu
-    geometry = {}
-    for index in layout.layer_indexes():
-        info = layout.get_info(index)
-        region = kdb.Region(layout.top_cell().begin_shapes_rec(index)).merged()
-        bbox = region.bbox()
-        geometry[(info.layer, info.datatype)] = (
-            round(bbox.left * dbu, 9),
-            round(bbox.bottom * dbu, 9),
-            round(bbox.right * dbu, 9),
-            round(bbox.top * dbu, 9),
-            round(region.area() * dbu * dbu, 9),
-            region.count(),
-        )
-    return geometry
-
-
 def _write_gen_dbu_tech_lef(variant_dir, cell_library, corner, database_microns):
     """Write `libs.ref/<cell_library>/techlef/<cell_library>__<corner>.tlef`
     declaring only `DATABASE MICRONS <database_microns>` -- mirrors
-    `test_pdk.py`'s `_write_tech_lef` fixture shape, kept local to this file
-    since `generate()`'s dbu resolution needs no layer content at all, just
-    the `UNITS` block `pdk.resolve_pdk_dbu` reads."""
+    `test_gen_output_dbu.py`'s helper of the same name, kept local here for
+    the tests that stayed behind (the dbu resolution needs no layer content
+    at all, just the `UNITS` block `pdk.resolve_pdk_dbu` reads)."""
     techlef_dir = variant_dir / "libs.ref" / cell_library / "techlef"
     techlef_dir.mkdir(parents=True, exist_ok=True)
     (techlef_dir / f"{cell_library}__{corner}.tlef").write_text(
         f"UNITS\n  DATABASE MICRONS {database_microns} ;\nEND UNITS\n",
         encoding="utf-8",
     )
-
-
-def test_generate_resolves_dbu_from_gf180mcu_tech_lef(tmp_path):
-    """The core regression: a resolved PDK whose tech LEF declares
-    `DATABASE MICRONS 2000` (gf180mcu-shaped) must produce a GDS at dbu
-    0.0005, not the generator's hardcoded 0.001 default."""
-    root = tmp_path / "pdk_install"
-    variant_dir = _make_install(root, "gf180mcuD")
-    _write_gen_dbu_tech_lef(
-        variant_dir, "gf180mcu_fd_sc_mcu9t5v0", "nom", database_microns=2000
-    )
-    output = tmp_path / "guard_ring.gds"
-
-    report = generate(
-        {
-            "generator": "guard_ring",
-            "pdk": {"variant": "gf180mcuD", "root": str(root)},
-            "options": {"output": str(output)},
-        }
-    )
-
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    layout.read(str(output))
-    assert layout.dbu == pytest.approx(0.0005)
-    # The response reports the resolved dbu too, so a caller can confirm two
-    # blocks agree before handing them to `klt gen-compose` without a
-    # separate `klt stats` round-trip (issue #1496).
-    assert report["dbu_um"] == pytest.approx(0.0005)
-
-
-def test_generate_bbox_um_is_reported_at_the_resolved_dbu(tmp_path):
-    """`bbox_um` is derived from the layout's integer bbox times its dbu --
-    resolving a finer dbu must not scale the *micrometre* geometry, only the
-    integer grid it is stored on. The ring's default 10x10um inner region is
-    the same size whichever dbu it was written at."""
-    coarse_root = tmp_path / "coarse"
-    _write_gen_dbu_tech_lef(
-        _make_install(coarse_root, "gf180mcuD"),
-        "gf180mcu_fd_sc_mcu9t5v0",
-        "nom",
-        database_microns=1000,
-    )
-    fine_root = tmp_path / "fine"
-    _write_gen_dbu_tech_lef(
-        _make_install(fine_root, "gf180mcuD"),
-        "gf180mcu_fd_sc_mcu9t5v0",
-        "nom",
-        database_microns=2000,
-    )
-
-    def _run(root, output_name):
-        return generate(
-            {
-                "generator": "guard_ring",
-                "pdk": {"variant": "gf180mcuD", "root": str(root)},
-                "options": {"output": str(tmp_path / output_name)},
-            }
-        )
-
-    coarse = _run(coarse_root, "coarse.gds")
-    fine = _run(fine_root, "fine.gds")
-
-    assert coarse["dbu_um"] == pytest.approx(0.001)
-    assert fine["dbu_um"] == pytest.approx(0.0005)
-    for key in ("x0", "y0", "x1", "y1"):
-        assert fine["bbox_um"][key] == pytest.approx(coarse["bbox_um"][key])
 
 
 def test_generate_sky130_dbu_unaffected_by_resolver(tmp_path):
@@ -10155,59 +10028,6 @@ def test_generate_dbu_falls_back_to_default_with_unparsable_tech_lef(tmp_path):
     assert layout.dbu == pytest.approx(0.001)
 
 
-@pytest.mark.parametrize("generator_name", _PHASE2_GENERATORS)
-def test_phase2_generator_stays_drc_clean_at_pdk_resolved_finer_dbu(
-    generator_name, tmp_path, both_pdk_root
-):
-    """The geometry-correctness half of #1496: writing at the PDK's own finer
-    dbu (0.0005 from `DATABASE MICRONS 2000`) must not corrupt any
-    generator's geometry. Every phase-2 generator's documented default
-    `params` stays `klt drc --deck gf180mcu` clean at the resolved dbu, and
-    the *drawn micrometre* geometry is identical to the same generator's
-    0.001-dbu output -- a finer grid changes the integer coordinates, never
-    the shapes."""
-    techlef_dir = (
-        both_pdk_root / "gf180mcuD" / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "techlef"
-    )
-    coarse = tmp_path / f"{generator_name}_coarse.gds"
-    generate(
-        {
-            "generator": generator_name,
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "options": {"output": str(coarse)},
-        }
-    )
-
-    techlef_dir.mkdir(parents=True, exist_ok=True)
-    (techlef_dir / "gf180mcu_fd_sc_mcu9t5v0__nom.tlef").write_text(
-        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n", encoding="utf-8"
-    )
-    fine = tmp_path / f"{generator_name}_fine.gds"
-    report = generate(
-        {
-            "generator": generator_name,
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "options": {"output": str(fine)},
-        }
-    )
-    assert report["dbu_um"] == pytest.approx(0.0005)
-
-    drc_report = run_drc(str(fine), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
-
-    assert _merged_geometry_um(coarse) == _merged_geometry_um(fine), (
-        f"{generator_name}: drawn geometry differs between 0.001 and 0.0005 dbu"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# `examples/dogbone-terminal/` (issue #1574) -- the documented, hand-drawn
-# recipe for a unit device below `UNIT_MIN_W_UM`, checked in as a worked
-# example rather than a generator param. See that directory's README and
-# `docs/cli/gen.md`'s "Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by
-# hand".
-# --------------------------------------------------------------------------- #
-
 _DOGBONE_EXAMPLE_DIR = (
     Path(__file__).resolve().parents[1] / "examples" / "dogbone-terminal"
 )
@@ -10265,10 +10085,10 @@ def test_dogbone_terminal_example_regenerates_byte_identical(tmp_path, family):
     on both families, silently invalidating the committed streams while
     every existing test stayed green.
 
-    A byte compare (rather than a geometry compare) is deliberate: the GDS
-    carries `mos_array`'s PCell context-info properties too, so a parameter
-    added to the generator drifts the fixture without moving a single
-    polygon. When this fails, regenerate with
+    A byte compare (rather than a geometry compare) is deliberate: it pins the
+    stream's *record order*, which a `klayout.db` compare cannot see -- the
+    #5499 gap. PCell context info is no longer pinned (`write_layout()` stopped
+    writing it), so parameter drift is invisible. When this fails, regenerate with
     `uv run --extra dev python3 examples/dogbone-terminal/generate.py` and
     review the resulting diff as a deliberate fixture update.
     """
@@ -10515,18 +10335,8 @@ def _sd_implant_absence_note(family: str, flavor: str) -> str:
 
 
 @pytest.mark.parametrize("flavor", ["nfet", "pfet"])
-def test_mos_array_sd_implant_absence_noted_on_sg13g2(
-    tmp_path, sg13g2_pdk_root, flavor
-):
-    """Issue #2580's own repro: ``mos_array`` on ``ihp-sg13g2`` draws no
-    source/drain implant (``nSD`` 7/0 for an nfet, ``pSD`` 14/0 for a pfet)
-    and nothing DRC-side flags the missing mask -- the family's curated deck
-    recognises a MOS from ``Activ``/``GatPoly``/well alone. The omission must
-    be *reported* via ``drc_hints.notes`` (mirroring the ``voltage_flavor``
-    contract) while the drawn geometry stays byte-for-byte unchanged: the
-    issue's own observed layer set, implant layers absent. The repro's
-    sub-default gate length additionally keeps its own pre-existing note
-    (``l_um`` 0.13), so the implant note is asserted by membership."""
+def test_mos_array_sg13g2_device_implant(tmp_path, sg13g2_pdk_root, flavor):
+    """The hint and streamed layers distinguish PFET pSD from NFET ring pSD."""
     import klayout.db as kdb
 
     output = tmp_path / f"mos_array_sg13g2_sd_implant_{flavor}.gds"
@@ -10548,8 +10358,11 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
             "options": {"output": str(output)},
         }
     )
-    assert report["drc_hints"]["sd_implant_present"] is False
-    assert _sd_implant_absence_note("sg13g2", flavor) in report["drc_hints"]["notes"]
+    pfet = flavor == "pfet"
+    assert report["drc_hints"]["sd_implant_present"] is pfet
+    assert (
+        _sd_implant_absence_note("sg13g2", flavor) in report["drc_hints"]["notes"]
+    ) is not pfet
 
     layout = kdb.Layout()
     layout.read(str(output))
@@ -10557,13 +10370,9 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
         (layout.get_info(i).layer, layout.get_info(i).datatype)
         for i in layout.layer_indexes()
     }
-    # The issue's own observed stream: Activ (1/0), GatPoly (5/0), Cont
-    # (6/0), Metal1 (8/0) -- plus NWell (31/0) for the pfet well -- and no
-    # implant shape on either `nSD` (7/0) or `pSD` (14/0). The curated
-    # dummy marker (99/50, issue #2590) joins it because this repro requests
-    # `dummy: 1`; it is a deck-local extraction marker, not an implant.
-    expected = {(1, 0), (5, 0), (6, 0), (8, 0), _SG13G2_DUMMY_LAYER}
-    if flavor == "pfet":
+    # The NFET guard ring carries pSD on the substrate tap (#5231).
+    expected = {(1, 0), (5, 0), (6, 0), (8, 0), (14, 0), _SG13G2_DUMMY_LAYER}
+    if pfet:
         expected.add((31, 0))
     assert present == expected
 
@@ -11980,9 +11789,9 @@ def _gds_layers(path):
 @pytest.mark.parametrize(
     "params",
     (
-        {"w_um": 1.0},
-        {"w_um": 0.22},  # LV COMP min width (DF.1a_LV)
-        {"w_um": 0.30, "voltage_flavor": "medium_voltage"},  # MV min (DF.1a_MV)
+        {"w_um": 1.0},  # DF.1c floor: the narrowest legal MOSCAP
+        {"w_um": 2.0},
+        {"w_um": 1.0, "voltage_flavor": "medium_voltage"},
         {"w_um": 1.0, "fingers": 3},
         {"w_um": 1.0, "rows": 2, "cols": 2, "dummy": 1},
         {"w_um": 1.0, "flavor": "pfet"},
@@ -11995,10 +11804,11 @@ def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean(
     assert _GF180_MOS_CAP_MARK in _gds_layers(output)
     names = {p["name"] for p in report["ports"]}
     assert {"U0_SD", "U0_G"} <= names
-    # S and D are one tied terminal, not two, and the body tie is the ring.
     assert "U0_S" not in names and "U0_D" not in names
     assert any(n.startswith("TAP_") for n in names)
-    assert run_drc(str(output), "gf180mcu")["status"] == "clean"
+    # Clean incl. DF.1c `comp.width.moscap.1` (#6170): the marker covers the
+    # unit devices only, so the 0.42 um guard ring is not under it.
+    assert run_drc(str(output), "gf180mcu")["rule_counts"] == {}
 
 
 def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
@@ -12029,12 +11839,11 @@ def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
 
 
 def test_mos_cap_rejects_width_below_deck_comp_rule(tmp_path, both_pdk_root):
-    with pytest.raises(GenError, match=r"comp\.width\.1"):
-        _gen_mos_cap(tmp_path, both_pdk_root, w_um=0.2)
-    with pytest.raises(GenError, match=r"comp\.width\.mv\.1"):
-        _gen_mos_cap(
-            tmp_path, both_pdk_root, w_um=0.25, voltage_flavor="medium_voltage"
-        )
+    """The channel is `w_um` wide, so DF.1c (1 um under the marker, #6170) is the
+    floor -- above DF.1a's 0.22 (LV) / 0.30 (MV)."""
+    for p in ({"w_um": 0.99}, {"w_um": 0.3, "voltage_flavor": "medium_voltage"}):
+        with pytest.raises(GenError, match=r"comp\.width\.moscap\.1"):
+            _gen_mos_cap(tmp_path, both_pdk_root, **p)
 
 
 def test_mos_cap_unsupported_pdk_family_is_a_clear_generror(tmp_path, both_pdk_root):
@@ -12089,7 +11898,7 @@ def test_sky130_ring_tap_implant_and_npc_geometry(
     """Phase B of issue #2934: the guard ring's tap is covered by the implant
     matching the well underneath it (nsdm for the pfet's n-tap well tie, psdm
     for the nfet's p-tap substrate tie) with ``n/psdm.5b``'s 0.125um margin,
-    and ``npc`` caps every poly-contact licon with ``npc.2`` spacing met."""
+    and ``npc`` caps every poly-contact licon (licon.15) with ``npc.2`` met."""
     import klayout.db as kdb
 
     output = tmp_path / f"{generator}_sky130_phase_b_{flavor}.gds"
@@ -12126,7 +11935,7 @@ def test_sky130_ring_tap_implant_and_npc_geometry(
 
     gate_licons = licon.inside(poly)
     assert not gate_licons.is_empty()
-    assert (gate_licons.sized(95) - npc).is_empty()
+    assert (gate_licons.sized(100) - npc).is_empty()
     assert npc.space_check(270).count() == 0
     assert npc.width_check(270).count() == 0
     # No npc over source/drain or tap licons.

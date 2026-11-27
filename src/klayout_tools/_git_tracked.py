@@ -1,0 +1,235 @@
+"""Git-index facts a grading render needs about the tree it runs in.
+
+Issue #5857 made the git index -- not the producing host's working tree --
+the grading basis for ``klt signoff``'s input-artifact verification. This
+module owns that predicate, :func:`is_untracked_working_tree_file`, plus
+the memoized bulk ``git ls-files`` machinery behind it. Before it, a
+gitignored scratch artifact cited by an envelope verified ``True`` on the
+host that happened to have the file and ``None`` in a fresh clone, moving
+``input_verified`` and, through it, the artifact-anchored T1 verdicts
+between hosts; with it, an evidence render is a function of the commit.
+Since #7195 the same predicate is the one basis for yield ``samples``
+candidates too (#6139's contract): a symlink or ``dir/..`` component a
+clone would not recreate is untracked, whatever artifact kind it leads to.
+
+The never-raise contract matches
+:func:`klayout_tools.build_identity._git`: git missing from ``$PATH``, a
+``.git`` entry with no functioning repository behind it, a command that
+does not finish promptly -- each degrades to "not a functioning checkout
+here", and callers keep their filesystem-presence behaviour. A tree with
+no VCS metadata at all (a ``.git``-less archive unpack, a vendored copy, a
+``--repo-root`` grading, issue #2878) has no index to ask, so it keeps
+that behaviour everywhere.
+
+:func:`repo_scoped_candidates` is the other half of the same choke point:
+the repo-root discovery for a ``{path, scope: "repo"}`` input-artifact
+value, extracted from ``signoff._resolve_input_artifact_value`` so the
+resolution convention and the index-basis filter cannot drift apart.
+
+Split out of ``_provenance.py`` in the same issue: that module is at its
+trusted file-size ceiling, and first-party growth must land in files under
+the size ratchet's hard limit (issue #2766).
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from .env_provenance import find_repo_root
+
+#: Memoized ``git ls-files`` listing per checkout root, keyed by the root's
+#: real path *and* its git index's stat signature -- so a mid-process
+#: ``git add`` (tests do this between two grades) invalidates exactly that
+#: root's entry while an unchanged index is answered from memory. One render
+#: is one process, which is what makes this the "one ``ls-files`` per
+#: distinct root per render" budget issue #5857 sets for ``klt signoff``'s
+#: citations, however many of them name artifacts under the same root.
+_TRACKED_FILES_CACHE: dict[tuple[str, int, int, int], frozenset[str] | None] = {}
+
+
+def _git_stdout(cwd: str, *args: str) -> bytes | None:
+    """Stdout of ``git -C <cwd> <args>``, or ``None`` when git is missing
+    from ``$PATH``, the command fails, or it does not finish promptly.
+    Never raises -- the trackedness probe below must not be able to break a
+    render (:func:`klayout_tools.build_identity._git` is the precedent for
+    this never-raise contract)."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", cwd, *args], capture_output=True, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _git_index_signature(root: str) -> tuple[int, int, int] | None:
+    """``(st_ino, st_size, st_mtime_ns)`` of the git index behind ``root``
+    -- the file a ``git add`` rewrites -- or ``None`` when there is no
+    index to stat. A ``.git`` directory names its index directly; a
+    ``.git`` *file* (a linked worktree) points at the gitdir holding it."""
+    entry = os.path.join(root, ".git")
+    try:
+        if os.path.isdir(entry):
+            index = os.path.join(entry, "index")
+        else:
+            with open(entry, encoding="utf-8", errors="replace") as handle:
+                pointer = handle.readline().strip()
+            if not pointer.startswith("gitdir:"):
+                return None
+            gitdir = pointer[len("gitdir:") :].strip()
+            if not os.path.isabs(gitdir):
+                gitdir = os.path.join(root, gitdir)
+            index = os.path.join(gitdir, "index")
+        stat = os.stat(index)
+        return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _tracked_files_under(root: str) -> frozenset[str] | None:
+    """The set of POSIX ``root``-relative paths git's index tracks, or
+    ``None`` when ``root`` is not a functioning checkout of its own.
+
+    Memoized per root (see :data:`_TRACKED_FILES_CACHE`). ``git ls-files``
+    searches upwards when its ``-C`` directory is not itself a repository,
+    so ``rev-parse --show-toplevel`` must name ``root`` back before the
+    listing is believed: anything else (a ``.git``-marked directory with no
+    repository behind it) is "not a checkout here" -- never the parent
+    repository's paths re-keyed against ``root``."""
+    signature = _git_index_signature(root)
+    if signature is None:
+        return None
+    real_root = os.path.realpath(root)
+    key = (real_root, *signature)
+    if key not in _TRACKED_FILES_CACHE:
+        top = _git_stdout(root, "rev-parse", "--show-toplevel")
+        listing = (
+            _git_stdout(root, "ls-files", "-z")
+            if top is not None
+            and os.path.realpath(top.decode("utf-8", errors="surrogateescape").strip())
+            == real_root
+            else None
+        )
+        _TRACKED_FILES_CACHE[key] = (
+            frozenset(
+                item.decode("utf-8", errors="surrogateescape")
+                for item in listing.split(b"\0")
+                if item
+            )
+            if listing is not None
+            else None
+        )
+    return _TRACKED_FILES_CACHE[key]
+
+
+def _untracked_entry(path: str, *, directory: bool = False) -> bool:
+    """Check an entry, or the indexed children that create a directory."""
+    root = find_repo_root(path if directory else os.path.dirname(path))
+    if root is None:
+        return False
+    tracked = _tracked_files_under(root)
+    if tracked is None:
+        return False
+    relative = os.path.relpath(path, root).replace(os.sep, "/")
+    if directory:
+        prefix = relative + "/"
+        return relative != "." and not any(p.startswith(prefix) for p in tracked)
+    return relative not in tracked
+
+
+def _untracked_path_components(absolute: Path) -> bool:
+    """Check every link and directory a lookup traverses before resolving
+    its target (#6139 for yield samples, #7195 for every input artifact)."""
+    pending = [absolute]
+    visited: set[Path] = set()
+    while pending:
+        target = pending.pop()
+        for part in (target, *target.parents):
+            # Opening dir/../file requires dir even though realpath discards it.
+            if part.name == ".." and _untracked_entry(
+                os.path.realpath(part.parent), directory=True
+            ):
+                return True
+            if not os.path.islink(part):
+                continue
+            link = Path(os.path.realpath(part.parent)) / part.name
+            if link in visited:
+                continue
+            visited.add(link)
+            if _untracked_entry(str(link)):
+                return True
+            try:
+                pending.append(link.parent / os.readlink(link))
+            except OSError:
+                continue
+    return False
+
+
+def is_untracked_working_tree_file(path: str) -> bool:
+    """Whether ``path`` names a file inside a functioning git checkout
+    whose index does not track it (issue #5857) -- gitignored scratch, a
+    never-``git add``ed file, a stale leftover, or a file reached only
+    through one (issues #6139 and #7195: every symlink in the chain and
+    every directory a ``dir/..`` step traverses must itself be tracked by
+    its checkout's index, so a purely local link to committed bytes is as
+    untracked as a local copy of them). The one shared basis for input
+    artifacts and yield samples alike.
+
+    ``False`` -- never an exception -- in every case that is not that:
+    ``path`` with no ``.git`` ancestry at all (a ``.git``-less archive
+    copy, a vendored tree), a ``.git`` entry with no functioning repository
+    behind it, git absent from ``$PATH``, a git failure, or a name no
+    filesystem call can represent (an embedded NUL byte -- it stays an
+    attempted, unhashable candidate). Callers keep their filesystem-
+    presence behaviour in all of those, so grading over a tree without
+    VCS metadata is unchanged. The file whose bytes would be hashed is
+    the file git is asked about."""
+    try:
+        resolved = os.path.realpath(path)
+    except ValueError:
+        # An unrepresentable name remains an attempted, unhashable candidate.
+        return False
+    if _untracked_entry(resolved):
+        return True
+    absolute = Path(path).absolute()
+    if str(absolute) == resolved:
+        return False
+    return _untracked_path_components(absolute)
+
+
+def repo_scoped_candidates(
+    value: Any,
+    spec: Mapping[str, Any],
+    evidence_dir: str | None,
+    repo_root: str | Path | None = None,
+) -> list[str]:
+    """Every filesystem path a ``{path, scope: "repo"}`` input-artifact
+    ``value`` could mean from this grading context -- ``[]`` when the value
+    is not that shape, names no usable path, or no repo root can be found.
+
+    The root is ``repo_root`` when given (``klt signoff --repo-root``,
+    issue #2878 -- an explicit root is never second-guessed by a ``.git``
+    walk), the one discovered from the evidence file's own location
+    otherwise, which is what ``scope: "repo"`` means by construction.
+    Extracted from ``signoff._resolve_input_artifact_value`` (issue #5857)
+    so the resolution convention and the index-basis filter live beside
+    each other."""
+    if not (isinstance(value, Mapping) and value.get("scope") == "repo"):
+        return []
+    repo_relative = value.get("path")
+    if not (isinstance(repo_relative, str) and repo_relative):
+        return []
+    root = (
+        repo_root
+        if repo_root is not None
+        else find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
+    )
+    if root is None:
+        return []
+    return [os.path.join(root, repo_relative)]

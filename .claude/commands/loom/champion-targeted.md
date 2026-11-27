@@ -1,3 +1,6 @@
+---
+disable-model-invocation: true
+---
 # Champion: Targeted and Non-Item Modes (#11859)
 
 **Load when:** `$ARGUMENTS` carries `--pr N`, `--issue N` or `--non-item`
@@ -39,7 +42,7 @@ release (`--reason <gate>`), from this closed list, so the lease comment and
 | `reason=` | Stopped at |
 |---|---|
 | `facts_unread` | "0. PR facts" could not be read (or comments unauthenticated) |
-| `janitor_rc3` | Verdict-State Janitor Part 1 (`champion-hold classify`) exit 3: a foreign park or a failed read |
+| `janitor_rc3` | Verdict-State Janitor Part 1 (`champion-hold classify`) exit 3: a foreign park, a failed read, or a PR stacked on a Loom stack branch (`state=stacked-on-loom-branch`; the work finder passes those as `stacked`, #13737) |
 | `verdict_rc11` | Verdict-State Janitor Part 2 (`verdict-staleness-guard.sh`) exit 11: UNVERIFIABLE approval |
 | `ci_pending` | CI checks were still running when you read them (say it only if that is what you saw) |
 | `mergeable_unknown` | `mergeable` read `UNKNOWN` (GitHub still computing) |
@@ -154,7 +157,11 @@ add `loom:pr`.
    `/pull/` URL, a failed read, or a closed issue: outcome `not-eligible`. It
    must carry a proposal label (`loom:curated`, `loom:architect`, `loom:hermit`
    or `loom:auditor`) and neither `loom:issue` nor `loom:building`; otherwise
-   `not-eligible`; so is `loom:operator`. `loom:blocked` (#11860, #12078): the
+   `not-eligible`; so is `loom:operator`. A proposal carrying `loom:triage` is
+   `not-eligible` too: a revise verdict sent it back to Curator, which keeps
+   the proposal label, so it stays Curator's until Curator restores
+   `loom:curated` — the same turn-based exclusion Priority 3 applies
+   (#13906, #13902). `loom:blocked` (#11860, #12078): the
    work finder draws a curated, dependency-parked issue every time it comes up,
    without checking the blockers first, so this check is the only one. Re-read
    them now: when every blocker `loom-daemon park-record parse` reads from the
@@ -166,7 +173,7 @@ add `loom:pr`.
    ("Issue Promotion Batch Processing" → "Per-issue order in the loop"): the
    Dependency-Defer Fast Path, the Idempotency check, the Claim with `loom:evaluating`
    (staleness-aware: Pass 0b for this issue), Steps 1-4, and the verdict-time
-   recheck. The per-pass level cap and the promotion slice do not apply.
+   recheck.
 3. **Exactly one outcome**, from the verdict set below.
 
 ### Promotion verdict set

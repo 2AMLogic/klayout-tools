@@ -9,7 +9,7 @@ Two tiers, per the issue's testing requirement (#91):
   exercised without ever invoking the real `ngspice` binary. These always
   run, everywhere, and are the ones a classification/parsing regression
   actually gets caught by.
-- **Integration tests** (`@pytest.mark.skipif(not HAVE_NGSPICE, ...)`) run
+- **Integration tests** (`@_SKIP_NO_NGSPICE`) run
   the real `ngspice -b` subprocess end to end -- corner expansion, `.lib`
   process-corner selection, `alter`-based supply sweep, `.temp`, `.meas`
   extraction, and the optional waveform artifact -- against tiny, synthetic,
@@ -35,26 +35,25 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import (
+    _STUB_VERSION_BANNER,
+    _stub_subprocess_run,
+    fake_completed,
+)
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
+from klayout_tools import sim_batch_hints as sbh
+from klayout_tools import sim_expr_hint as expr_hint
+from klayout_tools import sim_measurement_grading as smg
+from klayout_tools import sim_measurement_results as smr
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures(
     "real_build_identity_git", "bare_name_ngspice_resolution"
 )
 
-
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "sim"
 
@@ -644,7 +643,7 @@ def test_run_sim_netlist_source_invalid_value_raises(tmp_path):
             "analysis": {"kind": "tran", "args": "1n 1u"},
         },
     )
-    with pytest.raises(sim.SimError, match="unsupported netlist_source"):
+    with pytest.raises(sim.SimError, match="unsupported netlist_source .*gate-level"):
         sim.run_sim(str(request))
 
 
@@ -938,16 +937,16 @@ def test_validate_measurement_forms_rejects_expr_colliding_with_a_later_card():
         )
 
 
-def test_validate_measurement_forms_ignores_duplicate_spice_only_names():
-    """Two `.meas` cards sharing a name is ngspice's own business, exactly as
-    before this issue -- the new uniqueness rule is scoped to `expr` so no
-    previously-accepted request starts failing."""
-    sim._validate_measurement_forms(
-        [
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
-        ]
-    )  # must not raise
+def test_validate_measurement_forms_rejects_duplicate_spice_only_names():
+    """Issue #6289: two `.meas` cards sharing a byte-identical name are refused
+    up front -- before that issue they crashed coverage as a bare `ValueError`."""
+    with pytest.raises(sim.SimError, match="'vout' is declared more than once"):
+        sim._validate_measurement_forms(
+            [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
+            ]
+        )
 
 
 def test_validate_measurement_forms_rejects_case_insensitive_duplicate_expr_name():
@@ -1932,7 +1931,8 @@ def test_mismatch_scale_rejects_bad_values(value):
         sim._resolve_mismatch_scale({"mismatch_scale": value}, "sky130A")
 
 
-@pytest.mark.parametrize("pdk", ["sg13g2", None, "bogus"])
+# sg13g2 resolves through its libraries instead: tests/test_sim_mismatch_scale.py.
+@pytest.mark.parametrize("pdk", [None, "bogus"])
 def test_mismatch_scale_refuses_unsupported_family(pdk):
     with pytest.raises(sim.SimError, match="mismatch_scale.*family"):
         sim._resolve_mismatch_scale({"mismatch_scale": 2}, pdk)
@@ -1940,14 +1940,10 @@ def test_mismatch_scale_refuses_unsupported_family(pdk):
 
 def test_mismatch_scale_resolves_per_family_param():
     assert sim._resolve_mismatch_scale({}, "sky130A") is None
-    assert sim._resolve_mismatch_scale({"mismatch_scale": 0}, "sky130A") == (
-        0.0,
-        "mc_mm_switch",
-    )
-    assert sim._resolve_mismatch_scale({"mismatch_scale": 2.5}, "gf180mcuD") == (
-        2.5,
-        "sw_stat_mismatch",
-    )
+    sky = sim._resolve_mismatch_scale({"mismatch_scale": 0}, "sky130A")
+    assert (sky.scale, sky.cards) == (0.0, (("mc_mm_switch", 0.0),))
+    gf = sim._resolve_mismatch_scale({"mismatch_scale": 2.5}, "gf180mcuD")
+    assert (gf.scale, gf.cards) == (2.5, (("sw_stat_mismatch", 2.5),))
 
 
 def test_mismatch_scale_default_shape_is_unchanged():
@@ -1964,7 +1960,7 @@ def test_mismatch_scale_echo_and_deck_card_follows_the_lib(tmp_path):
     sampled, info = sim._expand_monte_carlo(
         points,
         {"n": 2, "seed": 1, "vary": "mismatch"},
-        mismatch_scale=(2.5, "mc_mm_switch"),
+        mismatch_scale=sim._resolve_mismatch_scale({"mismatch_scale": 2.5}, "sky130A"),
     )
     assert info["mismatch_scale"] == 2.5
     assert info["mismatch_param"] == "mc_mm_switch"
@@ -1983,7 +1979,7 @@ def test_mismatch_scale_zero_deck_card_is_integral(tmp_path):
     sampled, _ = sim._expand_monte_carlo(
         points,
         {"n": 1, "seed": 1, "vary": "mismatch"},
-        mismatch_scale=(0.0, "sw_stat_mismatch"),
+        mismatch_scale=sim._resolve_mismatch_scale({"mismatch_scale": 0}, "gf180mcuD"),
     )
     assert ".param sw_stat_mismatch=0" in _write_deck(tmp_path, sampled[0])
 
@@ -2001,7 +1997,7 @@ def test_mismatch_scale_rides_the_fleet_wire():
     sampled, _ = sim._expand_monte_carlo(
         points,
         {"n": 1, "seed": 1, "vary": "mismatch"},
-        mismatch_scale=(3.0, "mc_mm_switch"),
+        mismatch_scale=sim._resolve_mismatch_scale({"mismatch_scale": 3}, "sky130A"),
     )
     back = sim._corner_points_from_wire(sim._corner_points_to_wire(sampled))
     assert back[0].mc_seed["mismatch_scale"] == 3.0
@@ -2014,10 +2010,11 @@ def test_mismatch_scale_changes_checkpoint_fingerprint(tmp_path):
     points = sim._expand_corners({"process": ["tt_mm"]}, [])
 
     def fp(scale):
+        declared = {} if scale is None else {"mismatch_scale": scale}
         sampled, _ = sim._expand_monte_carlo(
             points,
             {"n": 2, "seed": 1, "vary": "mismatch"},
-            mismatch_scale=None if scale is None else (scale, "mc_mm_switch"),
+            mismatch_scale=sim._resolve_mismatch_scale(declared, "sky130A"),
         )
         return sim._checkpoint_fingerprint(
             netlist_path=str(netlist),
@@ -2329,16 +2326,16 @@ def test_classify_diagnostics_modelname_with_wide_w_names_culprit(tmp_path):
 
 
 def test_classify_diagnostics_modelname_with_wide_nf_names_culprit(tmp_path):
-    # nf= hits the identical bin-range check w= does (issue #1214) -- the
-    # diagnostic must report the *effective* width (w * nf), not just w.
+    # Keys on w as written (issue #4976): nf= is reported, never multiplied.
     netlist = tmp_path / "netlist.spice"
-    netlist.write_text("X5 d g s b nfet_06v0 w=50u l=0.6u nf=450 m=1\n")
+    netlist.write_text("X5 d g s b nfet_06v0 w=128u l=0.6u nf=64 m=1\n")
 
     (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
 
     assert diag["code"] == "model_bin_range"
-    assert "nf=450" in diag["message"]
-    assert "22500" in diag["message"]  # 50 um * 450 fingers
+    assert "nf=64" in diag["message"]
+    assert "w=128u" in diag["message"]
+    assert "effective" not in diag["message"]
 
 
 def test_classify_diagnostics_modelname_with_m_workaround_finds_no_culprit(tmp_path):
@@ -2400,7 +2397,7 @@ def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
     body.write_text(
         ".param vdd=1.0\n"
         "Vdd vdd 0 DC {vdd}\n"
-        "X5 vdd g out 0 nfet_06v0 w=50u l=0.6u nf=450 m=1\n"
+        "X5 vdd g out 0 nfet_06v0 w=128u l=0.6u nf=64 m=1\n"
     )
     request = _write_request(
         tmp_path,
@@ -2421,7 +2418,7 @@ def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
     assert corner["status"] == "error"
     (diag,) = [d for d in corner["diagnostics"] if d["code"] == "model_bin_range"]
     assert "X5" in diag["message"]
-    assert "nf=450" in diag["message"]
+    assert "nf=64" in diag["message"]
     assert "m=" in diag["message"]
 
 
@@ -3513,30 +3510,6 @@ def test_parse_ascii_rawfile_missing_file_raises(tmp_path):
 # --------------------------------------------------------------------------- #
 # run_sim with a stubbed ngspice subprocess (no binary required)
 # --------------------------------------------------------------------------- #
-
-
-_STUB_VERSION_BANNER = "ngspice-99 : stub banner\n"
-
-
-def _stub_subprocess_run(
-    monkeypatch,
-    *,
-    log_text: str = "",
-    stdout: str = "** ngspice-99\n",
-    side_effect=None,
-    returncode: int = 0,
-):
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
-        if "--version" in cmd:  # the once-per-sweep engine_build probe (#3095)
-            return fake_completed(_STUB_VERSION_BANNER)
-        log_path = cmd[cmd.index("-o") + 1]
-        if side_effect is not None:
-            raise side_effect
-        with open(log_path, "w", encoding="utf-8") as handle:
-            handle.write(log_text)
-        return fake_completed(stdout, returncode=returncode)
-
-    monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
 
 def test_run_sim_stubbed_missing_binary_is_corner_error(tmp_path, monkeypatch):
@@ -4860,14 +4833,14 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("netlist_source", ["schematic", "extracted"])
+@pytest.mark.parametrize("netlist_source", ["schematic", "extracted", "gate-level"])
 def test_run_sim_stubbed_netlist_source_echoed_in_environment(
     tmp_path, monkeypatch, netlist_source
 ):
     # request.netlist_source, when present and valid, is echoed verbatim
     # into environment.netlist_source (see docs/cli/sim.md's "Post-layout
     # verification" section) -- this is how a caller distinguishes a
-    # pre-layout (S6) sim pass from a post-layout (S9) one.
+    # pre-layout (S6), post-layout (S9), or gate-level (#5638) sim pass.
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,
@@ -5299,6 +5272,7 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
     """Issue #2961: sg13g2 MOS subcircuit calls classify as `mosfet` (not
     `other`) and `active` follows whether the selected section is a
     `*_mismatch` one; unknown section -> `None`."""
+    (tmp_path / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
     (tmp_path / "body.spice").write_text(
         "Vdd vdd 0 DC 1.2\n"
         "XM1 mid g out b sg13_lv_nmos L=0.13u W=1u\n"
@@ -5306,7 +5280,7 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
     )
     spec: dict = {
         "netlist": "body.spice",
-        "models": {"pdk": "ihp-sg13g2"},
+        "models": {"pdk": "ihp-sg13g2", "pdk_root": str(tmp_path)},
         "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
         "analysis": {"kind": "tran", "args": "1n 1u"},
     }
@@ -5316,13 +5290,6 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
         (tmp_path / "corner.lib").write_text(f".lib {section}\n.endl {section}\n")
     request = _write_request(tmp_path, spec)
     _stub_subprocess_run(monkeypatch)
-    # No ihp-sg13g2 install on CI: stub PDK resolution (the section libs
-    # above are absolute paths, so only the resolution call itself matters).
-    monkeypatch.setattr(
-        sim,
-        "find_pdk",
-        lambda **_kw: {"root": str(tmp_path), "variant": "ihp-sg13g2"},
-    )
 
     report = sim.run_sim(str(request))
 
@@ -5398,7 +5365,7 @@ def test_noise_sources_in_text_covers_v_i_subckt_continuation_case():
         "Vplain d 0 DC 1 ; trnoise(1 1 1 1)\n"
         "R1 a b 1k\n"
     )
-    assert sim._noise_sources_in_text(text) == [
+    assert sim.sim_tn._noise_sources_in_text(text) == [
         ("vn1", "trnoise"),
         ("iq", "trrandom"),
         ("vin", "trnoise"),
@@ -5446,7 +5413,7 @@ def test_run_sim_tran_discloses_transient_noise_coverage(tmp_path, monkeypatch):
     _stub_subprocess_run(monkeypatch)
 
     env = sim.run_sim(str(request))["environment"]
-
+    del env["transient_noise"]["reproducibility_note"]  # test_sim_transient_noise.py
     assert env["transient_noise"] == {
         "engine": "ngspice",
         "sources": [
@@ -5680,7 +5647,7 @@ def test_rollup_measurements_without_monte_carlo_config_is_unchanged():
         [{"name": "vref", "unit": "V", "limits": {"max": 1.21}}], corners
     )
 
-    assert set(entry) == {"name", "unit", "limits", "status", "worst_case"}
+    assert set(entry) == set("name unit limits status worst_case min max".split())
 
 
 def test_rollup_measurements_monte_carlo_config_but_no_sampled_corners():
@@ -6022,7 +5989,7 @@ def test_run_sim_without_monte_carlo_has_no_statistics_block(tmp_path, monkeypat
     report = sim.run_sim(str(request))
 
     (entry,) = report["measurements"]
-    assert set(entry) == {"name", "unit", "limits", "status", "worst_case"}
+    assert set(entry) == set("name unit limits status worst_case min max".split())
 
 
 def test_run_sim_monte_carlo_sigma_window_pass_keeps_run_passing(tmp_path, monkeypatch):
@@ -6307,13 +6274,13 @@ def _stripped_report(report: dict) -> dict:
     compared for byte-identical equality (see docs/cli/sim.md's
     byte-exact-fixture caveat)."""
     clone = json.loads(json.dumps(report))
-    clone["environment"].pop("engine_version", None)
     # `environment.backend.source` (issue #2977) records how the backend was
     # chosen (flag/request/default), which differs by design between runs
     # that otherwise execute identically.
     clone["environment"].pop("backend", None)
-    # Issue #2970: legitimately differs between `local` and `local-parallel`.
-    clone["environment"].pop("threads_per_worker", None)
+    # Issues #2970/#5648: thread pin + its `.spiceinit` differ by backend.
+    for key in ("engine_version", "threads_per_worker", "ngspice_init"):
+        clone["environment"].pop(key, None)
     for corner in clone["corners"]:
         corner.pop("runtime_s", None)
     return clone
@@ -10264,61 +10231,6 @@ def test_integration_waveform_artifact(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_measurement_diagnostic_hints_extracts_signal_window_and_target():
-    hints = sim._measurement_diagnostic_hints(
-        ".meas tran vout_avg AVG v(out) FROM=100n TO=900n"
-    )
-    assert hints["signal"] == "v(out)"
-    assert hints["window"] == pytest.approx((1e-7, 9e-7))
-    assert hints["target"] is None
-
-
-def test_measurement_diagnostic_hints_extracts_when_target():
-    hints = sim._measurement_diagnostic_hints(
-        ".meas tran startup_time WHEN v(out)=1.5 RISE=1"
-    )
-    assert hints["signal"] == "v(out)"
-    assert hints["window"] is None
-    assert hints["target"] == pytest.approx(1.5)
-
-
-def test_measurement_diagnostic_hints_unrecognised_card_returns_all_none():
-    """A `TRIG`/`TARG` delay measurement has no single window/target this
-    simple parser understands, and no `v(...)`/`i(...)` token at all when
-    both endpoints are parameters -- must degrade to all-`None`, never
-    raise."""
-    hints = sim._measurement_diagnostic_hints(".meas tran tphl PARAM='a+b'")
-    assert hints == {"signal": None, "window": None, "target": None}
-
-
-def test_measurement_diagnostic_hints_is_case_insensitive_and_lowercases_signal():
-    hints = sim._measurement_diagnostic_hints(
-        ".MEAS TRAN VOUT FIND V(OUT) WHEN V(OUT)=1"
-    )
-    assert hints["signal"] == "v(out)"
-
-
-@pytest.mark.parametrize(
-    ("corner_id", "expected"),
-    [
-        ("tt/1.800V/27C", "tt_1p800V_27C"),
-        ("ss/1.620V/-40C", "ss_1p620V_n40C"),
-        ("tt/1.800V/27C/mc3", "tt_1p800V_27C_mc3"),
-    ],
-)
-def test_slugify_corner_id_matches_cornerpoint_slug(corner_id, expected):
-    """Mirrors :attr:`sim.CornerPoint.slug`'s own transform exactly -- a
-    plain corner report dict has no live `CornerPoint` to ask, so this is a
-    deliberate, tested duplication of that same string transform."""
-    assert sim._slugify_corner_id(corner_id) == expected
-
-
-def test_slugify_signal_produces_filesystem_safe_name():
-    assert sim._slugify_signal("v(out)") == "v_out"
-    assert sim._slugify_signal("I(Vdd)") == "i_vdd"
-    assert sim._slugify_signal("") == "signal"
-
-
 def _write_ascii_rawfile(
     path: Path, *, plotname: str, sweep_name: str, signal_name: str, points
 ) -> None:
@@ -10746,7 +10658,7 @@ def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):
         calls.append((args, kwargs))
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(sim, "find_pdk", spy)
+    monkeypatch.setattr(pdk, "find_pdk", spy)
 
     install_root = tmp_path / "install"
     variant_dir = install_root / "sky130A" / "libs.tech"
@@ -10904,15 +10816,12 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 # --------------------------------------------------------------------------- #
 # options.fail_on_diagnostic -> status: "inconclusive" (issue #2492)
 # --------------------------------------------------------------------------- #
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sbh, expr_hint, sim_steps)
+_DIAGNOSTIC_SOURCE_MODULES += (smr, sim.sim_noise_mechanism, sim.sim_homotopy, smg)
 
-
-#: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps)
-
-#: Emission sites where the code is supplied by the site's *caller* or by a
-#: table it iterates, so the literal cannot be read off the site itself --
-#: each is a fan-in whose vocabulary this test derives by a separate rule
-#: (the pattern tables; the `_unrun_corner_report` call-site scan).
+#: Emission sites whose code comes from the site's *caller* or a table it
+#: iterates, so no literal can be read off the site; each fan-in's vocabulary
+#: is derived by a separate rule (pattern tables; `_unrun_corner_report` calls).
 #:
 #: This is a list of **mechanisms**, not of codes: adding a new diagnostic
 #: code never changes it, which is the whole point. Adding a new *way* to
@@ -10927,8 +10836,8 @@ _EXPECTED_INDIRECT_CODE_SITES = {
     ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
     # `stop_reason = probe_abort["code"]` -- forwards a code the fail-fast
     # probe's own abort diagnostic already carries as a literal (rule 3).
-    ("klayout_tools.sim", "_run_local", "stop_reason"),
-    ("klayout_tools.sim", "_run_local_parallel", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_sequentially", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_pooled", "stop_reason"),
 }
 
 
@@ -11123,10 +11032,7 @@ def test_diagnostic_codes_is_a_superset_of_every_emittable_code():
     assert {"batch_job_failed", "batch_job_timeout", "batch_poll_timeout"} <= emittable
 
     assert emittable - sim._GRADING_MARKER_CODES <= sim.DIAGNOSTIC_CODES
-    # The two marker diagnostics the grading step itself attaches are
-    # deliberately NOT selectable: both are emitted on a corner already being
-    # graded `inconclusive`, downstream of the `options.fail_on_diagnostic`
-    # code match, so listing either could never change a verdict.
+    # Codes emitted during or after grading are outside the selectable vocabulary.
     assert sim._GRADING_MARKER_CODES <= emittable
     assert not (sim._GRADING_MARKER_CODES & sim.DIAGNOSTIC_CODES)
 
@@ -12098,9 +12004,8 @@ def test_run_sim_runner_resolved_osdi_preload_goes_offhost_unchecked(
     assert seen["request_dir"] == str(tmp_path)
     environment = report["environment"]
     assert "osdi_preload" not in environment  # nothing hashed on this host
-    assert environment["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "env_var"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "env_var", "sha256": None}
+    assert environment["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monkeypatch):
@@ -12121,9 +12026,8 @@ def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monke
 
     report = sim.run_sim(str(request), backend="batch")
 
-    assert report["environment"]["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "pdk_root"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "pdk_root", "sha256": None}
+    assert report["environment"]["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_runner_resolved_osdi_keeps_a_host_default_batch_backend(
@@ -12996,7 +12900,6 @@ def test_staged_worker_directory_reproduces_model_cards_and_provenance(
         str(src / "body.spice"),
         corner_count=len(points),
         timeout_s=30.0,
-        keep_artifacts=False,
         request_dir=str(src),
     )
     # Both transports ship the same assets, in the same order, with the same
@@ -14606,11 +14509,6 @@ def test_expand_corners_units_defaults_and_bundle():
         ({"units": [{"temperature_c": "hot"}]}, [], "temperature_c"),
         ({"units": [{"bogus": 1}]}, [], "unknown key"),
         ({"units": [{"process": "tt"}, {"process": "tt"}]}, [], "duplicates"),
-        (
-            {"units": [{"supply_v": {"vdd": 0.1004}}, {"supply_v": {"vdd": 0.1001}}]},
-            [],
-            "duplicates",
-        ),
     ],
 )
 def test_expand_corners_units_validation(corners, exclude, match):
@@ -14627,17 +14525,6 @@ def test_expand_corners_units_compose_with_monte_carlo():
     assert len(expanded) == 6
     assert [p.sample_index for p in expanded] == [0, 1, 2, 0, 1, 2]
     assert info["n"] == 3
-
-
-def test_xyce_boundary_refuses_supply_in_units():
-    with pytest.raises(sim.SimError, match="corners.supply_v"):
-        sim._enforce_xyce_support_boundary(
-            engine="xyce",
-            backend="local",
-            corners_spec={"units": [{"supply_v": {"vdd": 1.8}}]},
-            monte_carlo_declared=False,
-            fail_fast_probe=False,
-        )
 
 
 # --------------------------------------------------------------------------- #
@@ -14863,9 +14750,9 @@ def test_apply_engine_host_xyce_stays_null_and_client_null():
 
 
 def test_pex_side_environment_carries_engine_host():
-    from klayout_tools import pex
+    from klayout_tools.pex_sim_evidence import SIDE_ENVIRONMENT_KEYS
 
-    assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)
+    assert {"engine_host", "client_ngspice_binary"} <= set(SIDE_ENVIRONMENT_KEYS)
 
 
 # ---------------------------------------------------------------------------
@@ -15704,8 +15591,6 @@ def test_param_brace_in_analysis_args_rejected_for_ngspice(tmp_path):
 
 
 def test_param_brace_in_step_analysis_args_rejected():
-    from klayout_tools import sim_steps
-
     with pytest.raises(sim.SimError, match="brace"):
         sim_steps._resolve_step_analysis({"kind": "tran", "args": "1n {stop_s}"}, "s1")
 

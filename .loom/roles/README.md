@@ -42,7 +42,7 @@ To edit a role definition:
 > removed in v0.10.0. Use `/loom:sweep <issue>` for the same single-issue
 > lifecycle, or `mcp__loom__dispatch_sweep` against the Rust `loom-daemon` for
 > multi-account dispatch — see
-> [the migration guide](https://github.com/rjwalters/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md)
+> [the migration guide](https://github.com/2AMLogic/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md)
 > (upstream Loom repo — `docs/migration/` is not shipped to consumer installs).
 
 ## Metadata Files (*.json)
@@ -53,9 +53,6 @@ Each role can have an optional JSON metadata file with default settings:
 {
   "name": "Builder",
   "description": "Implements features and fixes",
-  "defaultInterval": 0,
-  "defaultIntervalPrompt": "",
-  "autonomousRecommended": false,
   "suggestedWorkerType": "claude"
 }
 ```
@@ -65,9 +62,6 @@ Each role can have an optional JSON metadata file with default settings:
 - **`name`** (string): Display name for this role
 - **`description`** (string): Brief description
 - **`suggestedModel`** (string): Default model alias for this role (`haiku`, `sonnet`, `opus`) or a pinned model ID; the role-default tier of the model-selection precedence chain
-- **`defaultInterval`** (number): Default interval in milliseconds (0 = disabled)
-- **`defaultIntervalPrompt`** (string): Default prompt sent at each interval
-- **`autonomousRecommended`** (boolean): Whether autonomous mode is recommended
 - **`suggestedWorkerType`** (string): "claude" or "codex"
 - **`stuckThresholds`** (object): Per-role stuck-detection limits (e.g. `maxNoOutput`, `maxNeedsInput`, in milliseconds)
 - **`toolPolicy`** (object): Per-role sensitive-capability allowlist — see below

@@ -87,6 +87,16 @@ class DerivedArc:
     timing_sense: str
     measured_sense: str
     side_inputs: tuple[tuple[str, bool], ...]
+    #: ``"combinational"`` or, for a clock-to-output arc of a sequential cell
+    #: (issue #4755), ``"rising_edge"`` / ``"falling_edge"``.
+    timing_type: str = "combinational"
+    #: Sequential arcs only: the data-pin state under which the output is
+    #: *low* (``side_inputs`` is the state under which it is high).
+    fall_side_inputs: tuple[tuple[str, bool], ...] = ()
+
+    @property
+    def is_sequential(self) -> bool:
+        return self.timing_type != "combinational"
 
     @property
     def side_input_map(self) -> dict[str, bool]:
@@ -159,6 +169,49 @@ def derive_arcs(
             )
         )
     return tuple(arcs)
+
+
+def derive_sequential_arc(
+    *,
+    output_pin: str,
+    next_state: str,
+    data_pins: tuple[str, ...],
+    clock_pin: str,
+    clock_edge: str,
+) -> DerivedArc:
+    """The clock-to-output arc of a sequential cell's ``output_pin``.
+
+    ``next_state`` is the output's value after an active clock edge as a
+    Liberty expression over the *data* pins (``D`` for a Q, ``!D`` for a QN).
+    The clock pin is deliberately not an allowed name: a function that
+    references it raises :class:`FunctionError`. The first assignment (in the
+    deterministic enumeration order) making the expression true is the state
+    the output-rise edge is measured under, the first making it false the
+    output-fall state.
+    """
+    expr = parse_function(next_state, allowed_pins=frozenset(data_pins))
+    referenced = tuple(pin for pin in data_pins if pin in expr.pins)
+    high = low = None
+    for assignment in _enumerate_assignments(referenced):
+        value = expr.evaluate(dict(assignment))
+        if value and high is None:
+            high = assignment
+        if not value and low is None:
+            low = assignment
+    if high is None or low is None:
+        raise FunctionError(
+            f"next-state expression {next_state!r} is constant over the data "
+            "pins, so the output never toggles on a clock edge"
+        )
+    return DerivedArc(
+        output_pin=output_pin,
+        related_pin=clock_pin,
+        timing_sense="non_unate",
+        measured_sense="positive_unate",
+        side_inputs=high,
+        timing_type="rising_edge" if clock_edge == "rising" else "falling_edge",
+        fall_side_inputs=low,
+    )
 
 
 def _enumerate_assignments(

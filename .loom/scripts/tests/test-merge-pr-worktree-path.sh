@@ -64,19 +64,6 @@ merge_pr() { (cd "$MP_FIX/repo" && PATH="$MP_FIX/bin:$PATH" "$MERGE_PR" "$@"); }
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-# An assertion that CANNOT survive the port to Rust, retired under the
-# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
-# deleted: a reader must be able to see what was removed, why, and what proves
-# the property now. Counted as run so the totals stay honest.
-YELLOW='\033[0;33m'
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
-
 [[ -x "$MERGE_PR" ]] || { echo "ERROR: $MERGE_PR not executable" >&2; exit 1; }
 
 # --- Test 1: CLI parsing rejects bad input early ---
@@ -909,6 +896,47 @@ for ni_branch in fix/foo-bar feature/issue-8195-slice-13; do
         fail "T10c ($ni_branch): expected exactly one removal and no judge-pr site; got: $ni_out"
     fi
 done
+
+# --- Test 11: ignored-data guard on the --worktree-path override (#13599) ---
+#
+# `git status --porcelain` never lists ignored files, so a non-Loom worktree
+# whose only valuable content is gitignored used to be force-removed. The REAL
+# wrapper and verb against a real override worktree.
+ig_run() { # <ignored-file-rel-path> <remove-ignored:true|false> -> sets IG_OUT, IG_WT
+    sim_repo
+    IG_WT="$SIM_D/ovr"; sim_wt "$IG_WT" "feature/ovr" false
+    printf 'node_modules/\nresults/\n' >> "$R/.git/info/exclude"
+    mkdir -p "$IG_WT/$(dirname "$1")"; echo data > "$IG_WT/$1"
+    # shellcheck disable=SC2034  # read by the extracted wrapper
+    REPO_ROOT="$R"; PR_NUMBER=777; PR_BRANCH="feature/ovr"; PR_HEAD_SHA="0000000000000000000000000000000000000000"
+    CLEANUP_WORKTREE=true; WORKTREE_PATH_OVERRIDE="$IG_WT"
+    PMC_CLOSE_TARGETS="999"; PMC_ISSUE_STATE=""
+    REMOVE_IGNORED="$2"
+    IG_OUT="$(LOOM_PRESERVE_WORKTREE=0 _post_merge_cleanup 2>&1)" || true
+    REMOVE_IGNORED=false
+}
+
+ig_run "results/out.json" false
+if [[ -f "$IG_WT/results/out.json" && "$IG_OUT" == *"ignored-data guard"* && "$IG_OUT" == *"results/"* \
+      && "$IG_OUT" == *"KiB"* && "$IG_OUT" == *"--remove-ignored"* && "$IG_OUT" != *"Removing worktree"* ]]; then
+    pass "T11a: ignored non-artifact data keeps the override worktree, lists it with a size, names the flag"
+else
+    fail "T11a: expected a kept worktree and a guard message; got: $IG_OUT"
+fi
+
+ig_run "results/out.json" true
+if [[ ! -d "$IG_WT" ]]; then
+    pass "T11b: --remove-ignored removes the same worktree"
+else
+    fail "T11b: expected removal with --remove-ignored; got: $IG_OUT"
+fi
+
+ig_run "node_modules/pkg/index.js" false
+if [[ ! -d "$IG_WT" ]]; then
+    pass "T11c: only allowlisted artifacts (node_modules) are ignored -> removed without the flag"
+else
+    fail "T11c: node_modules must not trigger the guard; got: $IG_OUT"
+fi
 
 # --- Summary ---
 echo ""
