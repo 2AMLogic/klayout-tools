@@ -93,7 +93,7 @@ wrapper and rediscovering the same tool behaviours, one of which is silent
 | Behaviour | What a hand-rolled wrapper does wrong | What `klt netlist` does |
 | --- | --- | --- |
 | Omitting `-x` **hangs** instead of failing | A command line without `-x` starts the GUI, writes a plausible-looking netlist, then never exits | The flag set is not caller-supplied — `-n -s -q -x -r` is always passed |
-| Batch netlisting **exits non-zero on success** | `set -e` kills the script, or the script swallows `$?` and then has no error signal at all | The exit status is recorded, not trusted; the verdict is the fresh output file |
+| Batch netlisting **exits non-zero on success** | `set -e` kills the script, or the script swallows `$?` and then has no error signal at all | A fresh output file can pass with a non-zero exit. A disk-undo failure rejects the export. |
 | A committed netlist **drifts silently** | Nothing asks whether the committed netlist still matches the schematics | `--check` regenerates and diffs, exit `3` on drift |
 
 ### The forced flag set
@@ -252,17 +252,18 @@ print `Error: Net shorted: A - B`, so `--erc` exits `1` with
 
 ## Success is the output file, not the exit status
 
-`xschem -n -s -q -x` returns a **non-zero** status after a *successful* batch
-netlist. So the verdict is not `$?`; it is:
+`xschem -n -s -q -x` can return a **non-zero** status after a successful batch
+netlist. The export requires a file in the private output directory with an
+mtime at or after launch. This keeps `--check` from comparing against a stale
+file from an earlier run. A one-second tolerance accommodates filesystems with
+whole-second mtime granularity.
 
-> a file exists in the private output directory **and** its mtime is at or
-> after the moment xschem was launched.
-
-Both halves matter. Existence alone would accept a netlist left behind by an
-earlier run — the exact drift failure `--check` exists to catch, re-introduced
-one layer down. (A one-second tolerance is allowed on the mtime comparison,
-because HFS+ and some network/container filesystems carry whole-second mtime
-granularity.)
+xschem uses undo snapshots while walking a hierarchy. If it reports a snapshot
+write or restore failure, a fresh deck can still contain the top-level instance
+and `.end` while omitting the child definition. `klt netlist` exits 1, quotes
+the diagnostic (for example, `gzip: stdout: No space left on device`), and
+leaves the destination untouched. Subcircuits supplied by an external
+`.include` remain valid.
 
 xschem's exit status is still reported, in `xschem.exit_status`, alongside
 `xschem.exit_status_trusted: false` — so a consumer reading the payload is
@@ -1009,7 +1010,7 @@ $ klt netlist <sch> -o <spice> --block --format json \
 | Code | Meaning |
 | --- | --- |
 | `0` | The netlist was exported (`status: "generated"`), or `--check` found the committed netlist still matches (`"match"`). |
-| `1` | Failed to run — unreadable schematic, missing `--rcfile`, xschem not found or unlaunchable, xschem hung (timeout, after SIGTERM→SIGKILL escalation), no fresh output file, or an unwritable `--output`. Under `--backend batch`, also every batch failure (see [Batch backend](#batch-backend)), with `error.code` set. |
+| `1` | Failed to run — unreadable schematic, missing `--rcfile`, xschem not found or unlaunchable, xschem hung (timeout, after SIGTERM→SIGKILL escalation), disk-undo failure, no fresh output file, or an unwritable `--output`. Under `--backend batch`, also every batch failure (see [Batch backend](#batch-backend)), with `error.code` set. |
 | `2` | Usage error (missing `--output`, bad `--format` value) — from argparse. |
 | `3` | `--check` found the committed netlist drifted (or is absent). |
 

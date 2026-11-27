@@ -23,9 +23,9 @@ is the whole point, not an implementation detail:
 2. **Batch netlisting exits non-zero on success** (edge #1). ``xschem -n -s -q
    -x`` returns a non-zero status after a *successful* export, so the exit
    status is recorded (``xschem.exit_status``) and explicitly **not** the
-   verdict (``xschem.exit_status_trusted: false``). Success is "the expected
-   output file exists and its mtime is at or after the moment we launched
-   xschem" -- see :func:`_resolve_produced_netlist`.
+   verdict (``xschem.exit_status_trusted: false``). Selecting the export requires
+   a fresh output file and no disk-undo failure in xschem's diagnostics
+   -- see :func:`_resolve_produced_netlist`.
 3. **A committed netlist drifts from its schematics silently** (edge #4). The
    netlist is a generated artifact repos commit (so simulation and CI need no
    schematic-capture tool installed), and nothing told them when it went
@@ -879,7 +879,7 @@ def run_netlist(
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
-    escalation), no fresh output file, or an unwritable ``output``.
+    escalation), disk-undo failure, no fresh output file, or an unwritable ``output``.
     """
     output = export_destination(
         output, output_dir, check, block, relative_paths, canonical_wrap
