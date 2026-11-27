@@ -23,6 +23,14 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def candidate_report(netlist, count):
+    report = netlist.with_suffix(".report.json")
+    report.write_text(
+        json.dumps({"netlist_sha256": digest(netlist), "instance_count": count})
+    )
+    return report.name
+
+
 def inputs(tmp_path, counts):
     lib = tmp_path / "cells.lib"
     lib.write_text("fixture liberty")
@@ -30,7 +38,11 @@ def inputs(tmp_path, counts):
     baseline, pairs = [], []
     for i, (before, after) in enumerate(counts):
         top = f"design_{i}"
-        identity = {"macro": top, "commit": f"{i:040x}"}
+        identity = {
+            "macro": top,
+            "commit": f"{i:040x}",
+            "source_sha256": f"{i + 1:064x}",
+        }
         baseline.append({**identity, "instance_count": before})
         row = {
             **identity,
@@ -43,6 +55,9 @@ def inputs(tmp_path, counts):
             path.write_text(f"// {side}\nmodule {top}; endmodule\n")
             row[f"{side}_netlist"] = path.name
             row[f"{side}_sha256"] = digest(path)
+        row["candidate_report"] = candidate_report(
+            tmp_path / row["candidate_netlist"], after
+        )
         pairs.append(row)
     return {"pins": pins, "designs": baseline}, {"pins": pins, "designs": pairs}, lib
 
@@ -152,6 +167,55 @@ def test_zero_and_unusable_counts_keep_proof_verdict(gate, tmp_path, monkeypatch
     assert "zero" in b["exclusion_reason"] and "count" in c["exclusion_reason"]
 
 
+def test_candidate_count_requires_matching_synthesis_evidence(
+    gate, tmp_path, monkeypatch
+):
+    baseline, pairs, lib = inputs(tmp_path, [(38, 39)] * 3)
+    monkeypatch.setattr(
+        gate, "run_equiv", lambda req: {"engine": "yosys", "status": "equivalent"}
+    )
+    saved = cli(gate, tmp_path, baseline, pairs, lib)
+    assert saved["included"] == 3
+    wrong_count, wrong_digest, missing = pairs["designs"]
+    wrong_count["candidate_count"] = 0
+    # Counts agree, but this report measures another candidate.
+    wrong_digest["candidate_report"] = wrong_count["candidate_report"]
+    (tmp_path / missing["candidate_report"]).unlink()
+    for evidence in (None, saved):
+        report = cli(gate, tmp_path, baseline, pairs, lib, saved=evidence)
+        assert report["headline"] == "mean unavailable across 0 designs, 3 excluded"
+        for row, reason in zip(
+            report["designs"],
+            ["count", "netlist", missing["candidate_report"]],
+            strict=True,
+        ):
+            assert row["verdict"] == "equivalent"
+            assert row["proof"]["status"] == "equivalent"
+            assert "reduction_pct" not in row
+            assert reason in row["exclusion_reason"]
+
+
+def test_conflicting_source_archive_excludes_fresh_and_replayed_proofs(
+    gate, tmp_path, monkeypatch
+):
+    baseline, pairs, lib = inputs(tmp_path, [(38, 39)])
+    monkeypatch.setattr(
+        gate, "run_equiv", lambda req: {"engine": "yosys", "status": "equivalent"}
+    )
+    saved = cli(gate, tmp_path, baseline, pairs, lib)
+    assert saved["included"] == 1
+    pairs["designs"][0]["source_sha256"] = "0" * 64
+    monkeypatch.setattr(
+        gate, "run_equiv", lambda req: pytest.fail("unexpected fresh proof")
+    )
+    for evidence in (None, saved):
+        report = cli(gate, tmp_path, baseline, pairs, lib, saved=evidence)
+        assert report["headline"] == "mean unavailable across 0 designs, 1 excluded"
+        row = report["designs"][0]
+        assert row["verdict"] == "unestablished" and "proof" not in row
+        assert "source archive" in row["exclusion_reason"]
+
+
 @pytest.mark.parametrize(
     "top,engine", [("tt_um_ALU", "yosys"), ("tt_um_LFSR_shivam", "yosys-sequential")]
 )
@@ -220,12 +284,14 @@ def test_mapped_tt06_pair_through_yosys(gate, tmp_path, monkeypatch, top, engine
         "candidate_netlist": candidate.name,
         "baseline_sha256": synth["netlist_sha256"],
         "candidate_sha256": digest(candidate),
+        "candidate_report": candidate_report(candidate, count + 1),
     }
     pairs = {"pins": pins, "designs": [pair]}
     saved = cli(gate, tmp_path, baseline, pairs, lib)
     passing = saved["designs"][0]
     assert passing["verdict"] == "equivalent", passing
     assert passing["proof"]["engine"] == engine
+    assert saved["included"] == 1
     assert (
         cli(gate, tmp_path, baseline, pairs, lib, saved=saved)["headline"]
         == saved["headline"]

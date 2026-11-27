@@ -5,8 +5,9 @@ r"""Gate the pinned Tiny Tapeout instance-count distribution on formal equivalen
         --output verdicts.json
 
 The Phase 2.B pairs.json carries the baseline's pins and a designs array. Each
-mapped row has macro, commit, top and, for each of baseline and candidate, a
-_netlist (path relative to pairs.json), _sha256 (hex) and _count (instances).
+mapped row has macro, commit, source_sha256 and top. Both baseline and candidate
+have a _netlist (path relative to pairs.json), _sha256 (hex) and _count (instances).
+candidate_report points to the synthesis report measuring the candidate netlist.
 An upstream failure carries exclusion_reason. The Phase 2.A baseline determines
 the sample and its order. The corpus design kind selects the Yosys engine.
 For other samples a row may specify engine (default yosys).
@@ -119,7 +120,7 @@ def classify(proof: dict, engine: str) -> tuple[str, str | None]:
     return "unestablished", reason
 
 
-def admit_counts(row: dict, pair: dict) -> None:
+def admit_counts(row: dict, pair: dict, root: Path) -> None:
     before, after = row["baseline_count"], pair.get("candidate_count")
     if not all(
         type(n) is int and n >= 0 for n in (before, after, pair.get("baseline_count"))
@@ -127,6 +128,20 @@ def admit_counts(row: dict, pair: dict) -> None:
         raise ValueError("missing or invalid instance count")
     if before != pair["baseline_count"]:
         raise ValueError("baseline instance count differs from the pinned measurement")
+    path = pair.get("candidate_report")
+    if not isinstance(path, str) or not path:
+        raise ValueError("missing candidate synthesis report path")
+    report = json.loads((root / path).read_text())
+    if (
+        not isinstance(report, dict)
+        or report.get("netlist_sha256") != row["candidate_sha256"]
+    ):
+        raise ValueError("candidate synthesis report does not match the proven netlist")
+    measured = report.get("instance_count")
+    if type(measured) is not int or measured != after:
+        raise ValueError(
+            f"candidate instance count {after} differs from measured count {measured!r}"
+        )
     if before == 0:
         raise ValueError("percentage undefined for a zero baseline")
     row.update(candidate_count=after, reduction_pct=100 * (before - after) / before)
@@ -157,6 +172,8 @@ def check_design(
             "top", base["macro"]
         ):
             raise ValueError("pair source commit or top differs from pinned design")
+        if pair.get("source_sha256") != base.get("source_sha256"):
+            raise ValueError("pair source archive digest differs from pinned design")
         if not deck:
             raise ValueError("missing or mismatched synthesis pins")
         with tempfile.TemporaryDirectory() as tmp:
@@ -173,7 +190,7 @@ def check_design(
         if reason:
             row["exclusion_reason"] = reason
         else:
-            admit_counts(row, pair)
+            admit_counts(row, pair, root)
     except (EquivError, OSError, KeyError, TypeError, ValueError) as exc:
         row["exclusion_reason"] = str(exc)
     return row
