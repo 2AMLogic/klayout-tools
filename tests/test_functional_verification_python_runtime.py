@@ -10,10 +10,13 @@ the probe's forked child run inline; the real-Icarus tier lives in
 
 from __future__ import annotations
 
+import asyncio
 import collections
+import ctypes
 import importlib.metadata
 import json
 import os
+import runpy
 import subprocess
 import sys
 import time
@@ -170,13 +173,34 @@ def test_release_of_this_interpreter_is_sys_version_info():
     assert rt._klt_release() == tuple(sys.version_info)
 
 
-def test_probe_test_module_agrees_with_its_driver():
-    """klt never imports the probe module (it needs a simulator), so their
-    one shared contract -- the result file's environment variable, and the
-    two keys read back -- is pinned here by reading the source."""
-    source = (REPO_ROOT / "src" / "klayout_tools" / rt._PROBE_TEST_SOURCE).read_text()
-    assert f'RESULT_ENV = "{rt.PROBE_RESULT_ENV}"' in source
-    assert '"py_get_version"' in source and '"library"' in source
+@pytest.fixture
+def probe_module(monkeypatch):
+    """Load the shipped probe with only cocotb's test registration stubbed."""
+    monkeypatch.setitem(
+        sys.modules, "cocotb", types.SimpleNamespace(test=lambda: lambda fn: fn)
+    )
+    return runpy.run_module(
+        "klayout_tools.functional_verification_python_runtime_probe"
+    )
+
+
+def test_probe_records_the_host_runtime(probe_module, tmp_path, monkeypatch):
+    result = tmp_path / "result.json"
+    monkeypatch.setenv(rt.PROBE_RESULT_ENV, str(result))
+    asyncio.run(probe_module["probe"](None))
+
+    measured = json.loads(result.read_text())
+    assert measured["py_get_version"] == sys.version
+    assert Path(measured["library"]).is_file()
+
+
+def test_probe_library_lookup_can_be_inconclusive(probe_module, monkeypatch):
+    supplying_library = probe_module["supplying_library"]
+    assert supplying_library(None) is None  # No mapping contains the null pointer.
+
+    version_address = ctypes.cast(ctypes.pythonapi.Py_GetVersion, ctypes.c_void_p).value
+    monkeypatch.setattr(ctypes, "CDLL", lambda name: object())  # dladdr unavailable
+    assert supplying_library(version_address) is None
 
 
 # -- the entry point ---------------------------------------------------------
