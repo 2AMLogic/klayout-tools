@@ -2,6 +2,15 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-27
+
+- **PR #2566**: fix(sim): case-fold spice-form measurement name lookup for ngspice
+- **PR #2548**: fix(loom): unpin merge-pr.sh/forge-helpers.sh so repo-aware merge-method detection lands
+- **Issue #2557** (closed): [curator probe, safe to close] testing cross-repo issue-filing access from gf180-parasynth Curator session
+- **Issue #2546** (closed): bug: an upper- or mixed-case measurements[].spice name never harvests, because ngspice lower-cases the .meas name in its own report
+- **Issue #2543** (closed): merge-pr.sh hardcodes squash merge; fails on repos with squash disabled (klayout-tools)
+- **Issue #2498** (closed): klt characterize: no verb emits a Liberty model from SPICE — the last stage of a cell flow with no open answer
+
 ### 2026-09-26
 
 - **PR #2539**: fix(sim): validate models.pdk on the batch backend before any S3 write

@@ -6,8 +6,32 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-27
+
+- **PR #7976**: refactor(sim): resolve model paths without loading the runner
+- **PR #7971**: docs: record the full GF180 Tiny Tapeout corpus run on Spot
+- **Issue #7973** (closed): Resolve model-library paths without importing the simulation runner
+
 ### 2026-11-26
 
+- **PR #7972**: fix(artifact): create missing parent directories for get output
+- **PR #7968**: fix: stream config tiers to jq on stdin to avoid argv limit
+- **PR #7965**: feat: add binary digest result to engine_build_comparison
+- **PR #7963**: fix: reject gen-compose routes on non-metal layers to metal pins
+- **PR #7961**: fix(drc): subtract SRAMCORE from gf180mcu CO.4's contact operand
+- **PR #7958**: refactor: share one deck_vars validator between the runset engines
+- **PR #7951**: feat: verify per-job paid launch limits before batch simulation
+- **PR #7929**: Keep the ordered Xyce request checks in the refusal module
+- **PR #6254**: fix: kill the openroad docker container when the wrapper dies; record launch-time engine evidence
+- **Issue #7967** (closed): klt artifact get: -o under a missing parent directory fails with a raw FileNotFoundError traceback
+- **Issue #7966** (closed): create-pr.sh aborts with exit 126 when the host's private Loom defaults exceed 128 KiB (config-resolver passes a tier as one jq --argjson argument)
+- **Issue #7959** (closed): klt sim batch report: engine_build_comparison reads match while the worker and client ngspice digests differ
+- **Issue #7957** (closed): gen-compose can report an uncontacted poly backbone as routed to metal terminals
+- **Issue #7954** (closed): GF180 CO.4 flags contacts inside SRAMCORE
+- **Issue #7952** (closed): Share JSON deck_vars validation between the LVS and extraction runset engines
+- **Issue #7950** (closed): Carry a paid launch-attempt limit into klt sim batch job contracts
+- **Issue #7928** (closed): Consolidate the Xyce request gate in the existing refusal module
+- **Issue #5726** (closed): openroad docker wrapper leaks the container when klt is killed, so an orphaned route writes unattributable artefacts into the caller's repo hours later
 - **PR #7949**: fix: preserve independent root clocks through place and route
 - **PR #7948**: fix: share batch approval validation and reject rooted generator paths
 - **PR #7944**: Check substrate ties derived from sparse drawn wells
@@ -5297,13 +5321,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #2580** (closed): gen: mos_array draws no source/drain implant on ihp-sg13g2, and no rule or hint reports the omission
 - **Issue #2577** (closed): klt gen --help still says every generator but resistor_strip is sky130/gf180mcu-only, and that an 'other' family is an application error — sg13g2 invocations succeed
 - **Issue #2560** (closed): klt pdk stackup: substrate entry lacks resistivity/thickness fields
-
-### 2026-09-27
-
-- **PR #2566**: fix(sim): case-fold spice-form measurement name lookup for ngspice
-- **PR #2548**: fix(loom): unpin merge-pr.sh/forge-helpers.sh so repo-aware merge-method detection lands
-- **Issue #2557** (closed): [curator probe, safe to close] testing cross-repo issue-filing access from gf180-parasynth Curator session
-- **Issue #2546** (closed): bug: an upper- or mixed-case measurements[].spice name never harvests, because ngspice lower-cases the .meas name in its own report
-- **Issue #2543** (closed): merge-pr.sh hardcodes squash merge; fails on repos with squash disabled (klayout-tools)
-- **Issue #2498** (closed): klt characterize: no verb emits a Liberty model from SPICE — the last stage of a cell flow with no open answer
 
