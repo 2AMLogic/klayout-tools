@@ -7,7 +7,7 @@ shipped to the same S3 job contract ``klt sim`` and ``klt netlist`` already
 use. Like :mod:`klayout_tools.netlist_batch`, **this module owns no transport
 of its own**: submit, launch, poll, collect, the runner-version preflight and
 the fleet-config / job-ceiling resolution are all :mod:`klayout_tools.sim_batch`'s,
-and the git-tracked input tree is :mod:`klayout_tools.netlist_batch`'s. What is
+and the git-tracked input tree is :mod:`klayout_tools._batch_tree`'s. What is
 extract-specific:
 
 1. **What is uploaded.** One ``tree.tar.gz`` of the git-tracked files under
@@ -36,23 +36,26 @@ extract-specific:
 from __future__ import annotations
 
 import functools
-import io
 import json
 import math
 import os
 import sys
-import tarfile
 import tempfile
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from . import _batch_collect, _batch_common, _warn, remote_transport, sim_batch
-from . import netlist_batch as _nb
+from . import (
+    _batch_collect,
+    _batch_common,
+    _batch_tree,
+    _warn,
+    remote_transport,
+    sim_batch,
+)
 from .extract_base import REQUEST_SCHEMA
 from .extract_netlist_target import _default_output_path
 from .extract_spef import ExtractError
-from .netlist import NetlistError
 
 #: ``--backend`` > ``$KLT_EXTRACT_BACKEND`` > ``local``. A dedicated variable,
 #: not ``$KLT_SIM_BACKEND``: a dispatch host's blanket sim default would
@@ -88,10 +91,6 @@ def resolve_backend(flag: str | None) -> str:
     return _batch_common.resolve_backend_value(
         flag, BACKEND_ENV, SUPPORTED_BACKENDS, ExtractError
     )
-
-
-def _translate(exc: NetlistError) -> ExtractError:
-    return ExtractError(str(exc), code=exc.code, job_id=exc.job_id, details=exc.details)
 
 
 # --------------------------------------------------------------------------- #
@@ -149,10 +148,15 @@ def _root_relative_request(
     runner_request = dict(request)
 
     def _input(path: str, what: str) -> str:
-        rel = _nb._relative_tracked(
-            _abs(path, base_dir), root, tracked, what=what, flag=""
+        rel = _batch_tree.relative_tracked(
+            _abs(path, base_dir),
+            root,
+            tracked,
+            what=what,
+            flag="",
+            err_cls=ExtractError,
         )
-        _nb._require_selected(rel, selected, what=what)
+        _batch_tree.require_selected(rel, selected, what=what, err_cls=ExtractError)
         return rel
 
     runner_request["file"] = _input(layout, "layout")
@@ -165,28 +169,6 @@ def _root_relative_request(
     return runner_request
 
 
-def _measure_tree(
-    root: str, files: Sequence[str], selected: set[str]
-) -> tuple[list[str], int]:
-    """The selected files that exist on disk (directories skipped) and their
-    total uncompressed size."""
-    present: list[str] = []
-    total = 0
-    for rel in files:
-        if rel not in selected:
-            continue
-        path = os.path.join(root, rel)
-        try:
-            info = os.lstat(path)
-        except OSError:
-            continue
-        if os.path.isdir(path) and not os.path.islink(path):
-            continue
-        present.append(rel)
-        total += info.st_size
-    return present, total
-
-
 def package(
     request: dict[str, Any],
     base_dir: str,
@@ -195,67 +177,48 @@ def package(
     include: Sequence[str],
     exclude: Sequence[str],
     max_bytes: int | None = None,
-) -> tuple[_nb.BatchTree, dict[str, Any]]:
+) -> tuple[_batch_tree.TrackedTree, dict[str, Any]]:
     """Validate ``request`` and select the input tree, **without** building
     the archive. Returns the tree and the runner request: ``request`` with
     every input path made root-relative, the output pinned to the runner's
     ``netlist.spice`` (or absent under ``no_netlist``) and ``progress`` on.
     """
     layout = _checked_layout(request, base_dir)
-    try:
-        root = _nb._resolve_root(layout, batch_root)
-        files = _nb._tracked_files(root)
-        selected = set(_nb._select_files(files, include, exclude))
-        runner_request = _root_relative_request(
-            request, base_dir, layout, root, set(files), selected
-        )
-    except NetlistError as exc:
-        raise _translate(exc) from exc
+    root = _batch_tree.resolve_root(
+        layout, batch_root, what="layout", err_cls=ExtractError
+    )
+    files = _batch_tree.tracked_files(root, err_cls=ExtractError)
+    selected = set(_batch_tree.select_files(files, include, exclude))
+    runner_request = _root_relative_request(
+        request, base_dir, layout, root, set(files), selected
+    )
 
     runner_request.pop("output", None)
     if not request.get("no_netlist"):
         runner_request["output"] = BATCH_NETLIST_FILENAME
     runner_request["progress"] = True
 
-    present, total = _measure_tree(root, files, selected)
-    cap = max_bytes if max_bytes is not None else _nb.MAX_BATCH_TREE_BYTES
-    if total > cap:
+    tree = _batch_tree.measure_tree(root, selected)
+    cap = max_bytes if max_bytes is not None else _batch_tree.MAX_BATCH_TREE_BYTES
+    if tree.total_bytes > cap:
         raise ExtractError(
-            f"--backend batch input tree under {root} is {total} bytes "
-            f"uncompressed across {len(present)} git-tracked files, above the "
+            f"--backend batch input tree under {root} is {tree.total_bytes} bytes "
+            f"uncompressed across {len(tree.files)} git-tracked files, above the "
             f"{cap}-byte cap; pass a narrower --batch-root, or select the "
             "needed files with --batch-include <glob> / --batch-exclude <glob>",
-            code=_nb.BATCH_INPUT_TOO_LARGE_CODE,
+            code=_batch_tree.BATCH_INPUT_TOO_LARGE_CODE,
         )
-    tree = _nb.BatchTree(
-        root=root,
-        files=tuple(present),
-        total_bytes=total,
-        schematic=runner_request["file"],
-        rcfile_arg=None,
-        rcfile_pdk_relative=False,
-    )
     return tree, runner_request
 
 
 def build_tarball(
-    tree: _nb.BatchTree, runner_request: dict[str, Any], path: str
+    tree: _batch_tree.TrackedTree, runner_request: dict[str, Any], path: str
 ) -> None:
     """The tracked files plus the generated ``request.json`` member."""
     body = json.dumps(runner_request, indent=2, sort_keys=True).encode("utf-8")
-    with tarfile.open(path, "w:gz") as archive:
-        for rel in tree.files:
-            archive.add(
-                os.path.join(tree.root, rel),
-                arcname=rel,
-                recursive=False,
-                filter=_batch_common.scrub_tarinfo,
-            )
-        info = tarfile.TarInfo(BATCH_REQUEST_FILENAME)
-        info.size = len(body)
-        info.mode = 0o644
-        _batch_common.scrub_tarinfo(info)
-        archive.addfile(info, io.BytesIO(body))
+    _batch_tree.write_tarball(
+        tree.root, tree.files, path, extra_members={BATCH_REQUEST_FILENAME: body}
+    )
 
 
 # --------------------------------------------------------------------------- #
