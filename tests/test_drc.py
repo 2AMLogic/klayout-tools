@@ -17,6 +17,9 @@ import jsonschema
 import klayout.db as kdb
 import pytest
 
+from golden_deck.generate_golden_deck import is_curated_topology_rule
+from helpers.gf180mcu_landings import landed
+from helpers.sky130_drc_landings import landed_cuts
 from klayout_tools.cli import main
 from klayout_tools.decks import (
     get_deck,
@@ -32,6 +35,7 @@ from klayout_tools.drc import (
     rerun_drc_report,
     run_drc,
 )
+from test_drc_sg13g2_cut_containment import draw_cut_landings
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
 _POLY_WIDTH_THRESHOLD_DBU = 150
@@ -1338,7 +1342,7 @@ def test_run_drc_gf180mcu_comp_lv_rules_run_without_any_dualgate(tmp_path):
 def test_run_drc_gf180mcu_dualgate_still_warns_for_unsplit_rules(tmp_path):
     """The marker registry is still live for the rules #1110 did *not*
     split: a `Comp`/`Contact` stack inside `Dualgate` is checked by
-    `comp.enclosing.contact.1` (`CO.4`), which reads no marker at all, so
+    `comp.enclosing.contact.1` (`CO.4`), which reads no voltage marker, so
     `coverage.voltage_domain_warnings` fires again.
 
     Together with the `voltage_domain_warnings == []` assertion in the
@@ -1714,7 +1718,7 @@ def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
 
     metal1 = layout.layer(34, 0)
     layout.set_info(metal1, kdb.LayerInfo(34, 0, "Metal1"))
-    top.shapes(metal1).insert(kdb.Box(3000, 0, 3300, 2000))
+    top.shapes(metal1).insert(kdb.Box(1900, -100, 2320, 2000))  # lands the contact
 
     _exempt_gf180mcu_comp_from_df12(layout)
     return layout
@@ -2274,7 +2278,7 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
     path = tmp_path / "mim_enclosing_via4_clean.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -2369,7 +2373,7 @@ def test_run_drc_gf180mcu_via_width_violation(
     path = tmp_path / f"{rule_prefix}_width_violation.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
@@ -2400,7 +2404,7 @@ def test_run_drc_gf180mcu_via_space_violation(
     path = tmp_path / f"{rule_prefix}_space_violation.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {f"{rule_prefix}.space.1": 1}
@@ -2428,7 +2432,7 @@ def test_run_drc_gf180mcu_via_clean(rule_prefix, layer_tuple, layer_name, tmp_pa
     path = tmp_path / f"{rule_prefix}_clean.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -2466,7 +2470,7 @@ def test_run_drc_gf180mcu_via_layers_now_covered_by_their_own_rules(tmp_path):
     path = tmp_path / "via_layers_covered.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "clean"
     for _rule_prefix, layer_tuple, _layer_name in _GF180MCU_VIA_LAYERS:
@@ -2592,7 +2596,7 @@ def test_run_drc_gf180mcu_contact_fixed_size_boundaries(
     path = tmp_path / f"contact_{case_id}.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["rule_counts"].get("contact.width.1", 0) == expected_count
     if expected_count == 0:
@@ -2624,7 +2628,7 @@ def test_run_drc_gf180mcu_via_width_max_violation(
     path = tmp_path / f"{rule_prefix}_width_max_violation.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
@@ -2654,7 +2658,7 @@ def test_run_drc_gf180mcu_via_width_max_elongated_bar_violation(
     path = tmp_path / f"{rule_prefix}_width_max_bar.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
@@ -2741,12 +2745,11 @@ def _gf180mcu_legal_cut_box(cut: tuple[int, int], left: int, bottom: int) -> kdb
     """A cut square of exactly the size its own fixed-size rule requires --
     0.22um for Contact (`CO.1`), 0.26um for Via1-Via4 (`Vn.1`).
 
-    Both rules bound the cut from *both* sides (issue #2370), so there is no
-    single "comfortably legal" size that works for every cut layer the
-    enclosure fixtures below parametrize over: the one 300x300 dbu square
-    they shared while only the minimum half was enforced is now over CO.1's
-    and Vn.1's maxima alike, and would add a `<cut>.width.1` violation to
-    every enclosure case.
+    Both rules bound the cut from *both* sides (issue #2370), so no single
+    "comfortably legal" size works for every cut layer parametrized below:
+    the 300x300 dbu square they shared while only the minimum half was
+    enforced is over CO.1's and Vn.1's maxima alike, and would add a
+    `<cut>.width.1` violation to every enclosure case.
     """
     size = 220 if cut == (33, 0) else 260
     return kdb.Box(left, bottom, left + size, bottom + size)
@@ -2792,7 +2795,7 @@ def test_run_drc_gf180mcu_cut_enclosure_escape_violation(
         _gf180mcu_legal_cut_box(cut, 1000, 1000),  # exactly CO.1/Vn.1 size
     )
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {rule_id: 1}
@@ -2846,7 +2849,7 @@ def test_run_drc_gf180mcu_cut_enclosure_marginal_violation(
         _gf180mcu_legal_cut_box(cut, 1000, 1000),
     )
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
     rule_counts, violations = _without_grid_findings(report)
 
     assert report["status"] == "violations"
@@ -2876,7 +2879,7 @@ def test_run_drc_gf180mcu_cut_enclosure_clean(
         _gf180mcu_legal_cut_box(cut, 1000, 1000),
     )
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -3228,7 +3231,7 @@ def _sky130_diff_licon_stack(tmp_path, name, diff_boxes, licon_box):
     layout.set_info(licon1, kdb.LayerInfo(66, 44, "licon1.drawing"))
     for box in diff_boxes:
         top.shapes(diff).insert(box)
-    top.shapes(licon1).insert(licon_box)
+    landed_cuts(layout, top, licon1, [licon_box])
     path = tmp_path / f"{name}.gds"
     layout.write(str(path))
     return path
@@ -3307,8 +3310,7 @@ def _sky130_tap_layout(tmp_path, name, tap_boxes, licon_boxes):
     layout.set_info(licon1, kdb.LayerInfo(66, 44, "licon1.drawing"))
     for box in tap_boxes:
         top.shapes(tap).insert(box)
-    for box in licon_boxes:
-        top.shapes(licon1).insert(box)
+    landed_cuts(layout, top, licon1, licon_boxes)
     path = tmp_path / f"{name}.gds"
     layout.write(str(path))
     return path
@@ -3884,7 +3886,7 @@ def test_run_drc_sky130_via_width_violation(tmp_path):
     top = layout.create_cell("TOP")
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(via).insert(kdb.Box(0, 0, 100, 100))  # 100 dbu < 150
+    landed_cuts(layout, top, via, [kdb.Box(0, 0, 100, 100)])  # 100 dbu < 150
     path = tmp_path / "via_width_violation.gds"
     layout.write(str(path))
 
@@ -3904,7 +3906,7 @@ def test_run_drc_sky130_via_width_clean(tmp_path):
     top = layout.create_cell("TOP")
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(via).insert(kdb.Box(0, 0, 150, 150))  # 150 >= 150
+    landed_cuts(layout, top, via, [kdb.Box(0, 0, 150, 150)])  # 150 >= 150
     path = tmp_path / "via_width_clean.gds"
     layout.write(str(path))
 
@@ -4235,7 +4237,8 @@ def test_run_drc_two_shape_violation(
         other, kdb.LayerInfo(other_layer[0], other_layer[1], other_layer_name)
     )
     top.shapes(main).insert(kdb.Box(*box))
-    top.shapes(other).insert(kdb.Box(*other_box))
+    landed_cuts(layout, top, other, [kdb.Box(*other_box)])
+    draw_cut_landings(layout, top, other_layer, layer, kdb.Box(*other_box))
     path = tmp_path / f"{rule.replace('.', '_')}_violation.gds"
     layout.write(str(path))
 
@@ -4407,7 +4410,8 @@ def test_run_drc_two_shape_clean(
         other, kdb.LayerInfo(other_layer[0], other_layer[1], other_layer_name)
     )
     top.shapes(main).insert(kdb.Box(*box))
-    top.shapes(other).insert(kdb.Box(*other_box))
+    landed_cuts(layout, top, other, [kdb.Box(*other_box)])
+    draw_cut_landings(layout, top, other_layer, layer, kdb.Box(*other_box))
     path = tmp_path / f"{rule.replace('.', '_')}_clean.gds"
     layout.write(str(path))
 
@@ -5229,7 +5233,7 @@ def test_run_drc_single_shape_violation(
     top = layout.create_cell("TOP")
     lay = layout.layer(*layer)
     layout.set_info(lay, kdb.LayerInfo(layer[0], layer[1], layer_name))
-    top.shapes(lay).insert(kdb.Box(*box))
+    landed_cuts(layout, top, lay, [kdb.Box(*box)])
     path = tmp_path / f"{rule.replace('.', '_')}_violation.gds"
     layout.write(str(path))
 
@@ -5464,8 +5468,7 @@ def test_run_drc_space_violation(
     top = layout.create_cell("TOP")
     lay = layout.layer(*layer)
     layout.set_info(lay, kdb.LayerInfo(layer[0], layer[1], layer_name))
-    top.shapes(lay).insert(kdb.Box(*box))
-    top.shapes(lay).insert(kdb.Box(*other_box))
+    landed_cuts(layout, top, lay, [kdb.Box(*box), kdb.Box(*other_box)])
     path = tmp_path / f"{rule.replace('.', '_')}_violation.gds"
     layout.write(str(path))
 
@@ -6123,7 +6126,7 @@ def test_run_drc_sky130_upper_stack_layers_now_covered(tmp_path):
     # Upper-right quadrant: via2/via3 landing under a capm top plate, all
     # margins comfortably >= every applicable enclosure/separation
     # threshold (max 140 dbu).
-    top.shapes(via2).insert(kdb.Box(2700, 2700, 2900, 2900))
+    landed_cuts(layout, top, via2, [kdb.Box(2700, 2700, 2900, 2900)])
     top.shapes(via3).insert(kdb.Box(2700, 2700, 2900, 2900))
     top.shapes(capm).insert(kdb.Box(2300, 2300, 3800, 3800))
 
@@ -6889,31 +6892,22 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 # extension) already have full golden violate/clean coverage via
 # `tests/golden_deck/sg13g2/manifest.json` (parametrized by
 # `tests/test_golden_deck.py`, which also asserts their `provenance` is
-# populated). The 13 rules below (`gatpoly.separation.activ.1`,
-# `activ.enclosing.cont.1`, `gatpoly.enclosing.cont.1`,
-# `metal1.enclosing.via1.1`, `metal2.enclosing.via2.1`, plus issue #1243's
-# `metal3.enclosing.via3.1`, `metal4.enclosing.via4.1`,
-# `metal5.enclosing.topvia1.1`, `topmetal1.enclosing.topvia1.1`,
-# `topmetal1.enclosing.topvia2.1`, `topmetal2.enclosing.topvia2.1` and issue
-# #2581's `metal5.enclosing.mim.1`, `mim.enclosing.topvia1.1`) are
-# `enclosing`/`separation` checks, out of that manifest's width/space-only
-# scope (see its own README.md) -- mirroring how sky130/gf180mcu's own
-# enclosing/separation rules are hand-tested directly in this module (e.g.
-# the consolidated two-shape family's `met1.enclosing.via.1` row above).
+# populated). The 13 `enclosing`/`separation` rules below (the Cont pair,
+# the eight sg13g2 via/TopVia enclosures, and #2581's `metal5.enclosing.mim.1`/
+# `mim.enclosing.topvia1.1`) are out of that manifest's width/space-only
+# scope (see its own README.md) -- hand-tested directly in this module,
+# mirroring how sky130/gf180mcu's own enclosing/separation rules are.
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 63 curated `DrcRule` entries carries a populated
-    `provenance` citation (issue #905's own acceptance criterion: "every
-    compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
-    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
-    group, issue #3571's NWell rules and issue #3585's NW.c/d/e/f* NWell
-    enclosure/space rules) -- not just the
-    36 width/space rules `tests/test_golden_deck.py`'s generic check already
-    covers."""
+    """Every one of sg13g2's 68 curated `DrcRule` entries carries a populated
+    `provenance` citation (issue #905 + its follow-ons #1243/#2581/#3787/
+    #3571/#3585), not just the 36 width/space golden-manifest rules; the five
+    #5916 curated topology assertions are exempt (`is_curated_topology_rule`:
+    no upstream rule to cite)."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 63
-    for rule in deck:
+    assert len(deck) == 68
+    for rule in (r for r in deck if not is_curated_topology_rule(r)):
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
         assert rule.provenance.source_path, f"sg13g2/{rule.id}: empty source_path"
@@ -7294,6 +7288,7 @@ def _sg13g2_cut_stack(
     layout.set_info(cut_layer, kdb.LayerInfo(cut[0], cut[1], cut_name))
     top.shapes(cond_layer).insert(conductor_box)
     top.shapes(cut_layer).insert(cut_box)
+    draw_cut_landings(layout, top, cut, conductor, cut_box)
     path = tmp_path / f"{name}.gds"
     layout.write(str(path))
     return path
@@ -7488,12 +7483,14 @@ def test_run_drc_sg13g2_fixed_size_cut_boundaries(
 ):
     """Each of sg13g2's newly-max-bounded cut/via rules is checked as a
     fixed size, mirroring `test_run_drc_gf180mcu_contact_fixed_size_boundaries`
-    (issue #2388)."""
+    (issue #2388). The cut's landings are drawn enclosing it so the #5916
+    containment rules stay quiet and only the width rule can fire."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     cut = layout.layer(*layer)
     layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
     top.shapes(cut).insert(cut_box)
+    draw_cut_landings(layout, top, layer, None, cut_box)
     path = tmp_path / f"{rule_id}_{case_id}.gds"
     layout.write(str(path))
 
@@ -7841,7 +7838,9 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     # implemented in the modular `5_1_nwell.drc`. Only NW.f1 / NW.f1.digibnd
     # (`nwell.space.pactiv.hv.1` and `nwell.space.pactiv.dig.1`) cite the modular deck.
     assert {
-        rule.id for rule in deck if "maximal" in (rule.provenance.source_path or "")
+        rule.id
+        for rule in deck
+        if rule.provenance and "maximal" in rule.provenance.source_path
     } == {
         "psd.width.1",  # #3787
         "psd.space.1",
@@ -7972,7 +7971,7 @@ def test_run_drc_sky130_via_fixed_size_boundaries(
     top = layout.create_cell("TOP")
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(via).insert(cut_box)
+    landed_cuts(layout, top, via, [cut_box])
     path = tmp_path / f"via_fixed_{case_id}.gds"
     layout.write(str(path))
 
@@ -8022,7 +8021,7 @@ def test_run_drc_sky130_via2_to_via4_fixed_size_boundaries(
     top = layout.create_cell("TOP")
     cut = layout.layer(*layer)
     layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
-    top.shapes(cut).insert(cut_box)
+    landed_cuts(layout, top, cut, [cut_box])
     path = tmp_path / f"{rule_id}_{case_id}.gds"
     layout.write(str(path))
 
@@ -8086,17 +8085,12 @@ def test_sg13g2_extraction_deck_declares_mos_recognition():
     # then the two curated antenna diodes added by issue #1234. The
     # thick-oxide MOS flavour added by #1231 deliberately shares the
     # `nfet`/`pfet` labels (see `MOSFlavour`). The two MoM capacitors added
-    # by issue #1466 trail the two MIM capacitors.
+    # by issue #1466 trail the two MIM capacitors. The spiral inductor
+    # (`"inductor"`, issue #6726) is the last entry, trailing the antenna
+    # diodes.
     assert deck.device_classes == (
-        "nfet",
-        "pfet",
-        "cap_cmim",
-        "rfcmim",
-        "cap_cmomi",
-        "cap_cmomf",
-        "resistor",
-        "dantenna",
-        "dpantenna",
+        *("nfet", "pfet", "cap_cmim", "rfcmim", "cap_cmomi", "cap_cmomf"),
+        *("resistor", "dantenna", "dpantenna", "inductor"),
     )
 
 
@@ -9503,12 +9497,6 @@ def test_legacy_enclosing_unchanged_without_opt_in(tmp_path, monkeypatch):
         [((31, 0), kdb.Box(0, 0, 100, 100)), ((30, 0), kdb.Box(5000, 0, 5500, 500))],
     )
     assert not _synthetic_hits(path)
-    gf = get_deck("gf180mcu")
-    # Only MDP.6 opts in: upstream's `mvpsd.not_inside(ldmos_xtor)` flags an
-    # MVPSD not wholly inside LDMOS_XTOR, which interaction-scoped enclosing
-    # cannot express. Every other gf180mcu rule keeps the legacy semantics.
-    opted_in = {r.id for r in gf if getattr(r, "require_containment", False)}
-    assert opted_in == {"ldmos_xtor.enclosing.mvpsd.1"}
 
 
 @pytest.fixture
@@ -10235,8 +10223,7 @@ def test_waivers_move_matching_markers_to_waived(tmp_path):
 def test_waivers_do_not_apply_to_other_rule_or_cell(tmp_path):
     gds = _hier_gds(tmp_path)
     waivers = _waivers_file(
-        tmp_path,
-        [_waiver(rule="poly.space.1"), _waiver(cell="block_a")],
+        tmp_path, [_waiver(rule="poly.space.1"), _waiver(cell="block_a")]
     )
 
     report = run_drc(gds, "sky130", waivers_file=waivers)
@@ -10415,7 +10402,8 @@ def test_cli_waivers_rejected_with_klayout_engine(tmp_path, capsys):
         capsys,
         [gds, "--engine", "klayout", "--deck-file", waivers, "--waivers", waivers],
     )
-    assert "--waivers is not supported with --engine klayout" in message
+    assert "only the curated engine matches waivers" in message
+    assert "docs/cli/drc.md, 'Waivers'" in message
 
 
 def test_waived_report_check_and_rerun_replay_waivers(tmp_path):

@@ -34,23 +34,24 @@ argument parsing stays cheap (same convention as ``economy.py``).
 from __future__ import annotations
 
 import json
-import math
 import os
 from typing import Any
 
 from ._annotation import CANONICAL_ANNOTATION_LAYER, is_reserved_annotation_layer
-from ._jsonnum import is_number
+from ._jsonnum import require_finite_number
 from ._layout import bbox_um_dict
 
 _TOP_KEYS = {"moves", "reshape"}
 
 
 def _number(value: Any, where: str, error_cls: type[Exception]) -> float:
-    if not is_number(value):
-        raise error_cls(f"{where} must be a number, got {value!r}")
-    if not math.isfinite(value):
-        raise error_cls(f"{where} must be finite, got {value!r}")
-    return float(value)
+    return require_finite_number(
+        value,
+        error_cls,
+        where,
+        number_message="{field} must be a number, got {value!r}",
+        finite_message="{field} must be finite, got {value!r}",
+    )
 
 
 def _read_spec_object(path: str, error_cls: type[Exception]) -> dict[str, Any]:
@@ -165,7 +166,7 @@ def _resolve_selector(
     return picked
 
 
-def _layer_regions(kdb: Any, layout: Any, cell: Any, layer_index: int) -> Any:
+def _layer_regions(kdb: Any, cell: Any, layer_index: int) -> Any:
     return kdb.Region(cell.begin_shapes_rec(layer_index))
 
 
@@ -185,7 +186,7 @@ def _broken_contacts(
         info = layout.get_info(li)
         if is_reserved_annotation_layer(info.layer, info.datatype):
             continue
-        geometry = _layer_regions(kdb, layout, child["cell"], li)
+        geometry = _layer_regions(kdb, child["cell"], li)
         if geometry.is_empty():
             continue
         geo_before = geometry.transformed(before)
@@ -227,9 +228,7 @@ def _broken_contacts(
     return found
 
 
-def _overlaps(
-    kdb: Any, children: list[dict[str, Any]], dbu: float
-) -> list[dict[str, Any]]:
+def _overlaps(children: list[dict[str, Any]], dbu: float) -> list[dict[str, Any]]:
     out = []
     for i, a in enumerate(children):
         for b in children[i + 1 :]:
@@ -411,7 +410,7 @@ def apply_what_if(
             key=lambda m: (m["instance"]["index"], m["dx_um"], m["dy_um"]),
         ),
         "reshaped_cells": sorted(reshaped_cells, key=lambda r: r["cell"]),
-        "overlaps": _overlaps(kdb, children, dbu),
+        "overlaps": _overlaps(children, dbu),
         "broken_contacts": sorted(broken, key=_contact_sort_key),
         "utilization_basis": (
             "excludes_reshaped_footprints" if reshaped_cells else "measured"

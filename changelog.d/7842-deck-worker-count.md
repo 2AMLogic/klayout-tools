@@ -1,0 +1,1 @@
+- `klt sim` now honors `options.max_workers` for local-parallel deck lists and staged workers. An explicit `--max-workers` takes precedence, and the executing host's `KLT_SIM_MAX_WORKERS` cap still applies (#7842).

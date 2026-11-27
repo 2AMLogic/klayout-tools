@@ -1,88 +1,16 @@
 #!/usr/bin/env python3
-"""Monotonic per-file line-size ratchet, checked against the merge-base
-(issue #2766).
+"""Monotonic per-file line-size ratchet for tracked Python, Rust, and shell.
 
-Agent PRs tend to grow files, and nothing stopped them:
-`src/klayout_tools/extract.py` passed ~9.4k lines while the complexity
-ratchet (#2034) only watched per-function cyclomatic complexity. This is the
-missing per-FILE gate, and it is deliberately stricter than the complexity
-ratchet in one key way: it is validated against the baseline read from the
-**comparison revision** (the PR's merge-base, or a push-to-main's before
-SHA), not from the working tree, so a PR can never loosen its own gate by
-editing `file-size-baseline.json` (repo root).
+The baseline at the comparison revision authorizes existing debt paths and
+vendor hash exemptions. The measured size at that revision caps each
+oversized file, including the source of a permitted rename. An existing
+oversized path can carry forward a larger trusted entry or record its exact
+candidate size. This allows independent shrinks without ledger edits while
+preventing regrowth and preserving exact re-seeds of lagging entries (#4748).
 
-Two baselines are inputs to every check:
-
-1. The **trusted** baseline, read from the comparison revision. It alone
-   establishes permitted paths, ceilings, and content-hash vendor
-   exemptions.
-2. The **proposed** baseline, read from the candidate tree (the working
-   tree this checkout represents -- in CI, the PR merge result or the
-   pushed main tip). It must exactly reflect the candidate's remaining
-   debt: a surviving entry must equal the file's measured size, a file at
-   or under the hard limit (or deleted) must have no entry, and every
-   vendor hash must match the actual bytes of a candidate file.
-
-Checking only candidate sizes would let stale proposed ceilings through;
-trusting only the proposed baseline would let a PR self-approve growth.
-
-What fails (exit 1):
-
-- a governed tracked file grows above its trusted ceiling (or, if larger,
-  its size in the comparison tree: re-seed race, #4748);
-- an unbaselined file exceeds the hard limit (new oversized file, or an
-  old file that grew across the limit) -- unless the diff proves a
-  non-growing rename from a trusted-baselined path;
-- a proposed ceiling is stale: not exactly the file's current size;
-- a proposed entry survives for a file that shrank to the limit/was deleted;
-- a proposed debt entry or vendor hash is not present in the trusted
-  baseline (a PR cannot mint new debt or new exemptions), subject to the
-  narrow vendor-refresh exception below;
-- a vendor hash entry that no longer matches a candidate file's actual
-  bytes (changed exempt bytes cease to be exempt: the file falls under
-  ordinary checking).
-
-What never fails: a baselined file staying unchanged or shrinking (with
-its proposed entry tightened to match, or removed once at/below the
-limit), and the removal of debt entries or vendor hashes. Tightening is
-always allowed; loosening never is.
-
-Counting is physical lines: blank and comment lines count, as does a
-final line without a trailing newline. An empty file is 0 lines. Governed
-source is tracked first-party Python (`.py`), Rust (`.rs`), and shell
-(`.sh`), including tests, scripts, and examples; the vendored
-agent-tooling trees in `EXCLUDED_PREFIXES` (the same ones `pyproject.toml`'s
-`[tool.ruff]` exclude scopes ruff to) are not governed, nor are docs,
-binary fixtures, or generated reports.
-
-Vendored code is identified by **content hash, never by directory name**:
-a hash exemption in the trusted baseline covers a candidate file only when
-the file's actual bytes hash to the recorded value. Moving first-party
-code under a directory named `vendor/` exempts nothing; renaming a pinned
-vendor file (path changes) or touching its bytes (hash changes) drops it
-out of exemption and under ordinary checking.
-
-The narrow vendor-refresh exception: when the candidate's entire diff
-against the comparison revision touches only the baseline file itself and
-paths already pinned in the trusted vendor inventory, replacing a pinned
-entry's hash (same path, new reviewed upstream bytes) is permitted. A PR
-that touches any first-party file alongside the vendor refresh keeps the
-strict rule. It can never authorize first-party growth or mint a pin for
-a file the trusted baseline never pinned.
-
-**Bootstrap** is the case where the comparison revision predates this
-checker (no baseline file at that revision -- true of this gate's own
-landing PR). The trusted baseline is then derived from the comparison
-tree's actual measured content (every governed file over the hard limit
-gets a ceiling equal to its measured size there), and the vendor inventory
-starts empty: a bootstrap authorizes no hash exemptions. Brand-new
-oversized files that only exist in the candidate (the landing PR's own
-implementation, say) may enter the baseline at exactly their measured
-landing size -- the landing diff is the review, and the must-equal rule
-pins the ceiling to reality, so nothing beyond the visible diff is
-authorized. Bootstrap forbids raising any pre-existing file's ceiling
-above its comparison-tree size, and minting vendor pins.
-The proposed initial baseline passes only by exactly recording content.
+Remove entries for deleted files and files at or below the hard limit. New
+entries for permitted renames and bootstrap must record the exact size.
+See scripts/README.md for the full policy, including vendor refreshes.
 
 Usage::
 
@@ -91,8 +19,7 @@ Usage::
     python scripts/check_file_size_baseline.py \
         --comparison-rev "$(git merge-base HEAD origin/main)"
 
-    # regenerate the proposed baseline from the candidate tree after a
-    # reduction (never adds exemptions; check mode still validates it)
+    # optionally regenerate the proposed baseline from the candidate tree
     python scripts/check_file_size_baseline.py --update-baseline
 
 Exit codes: 0 = pass, 1 = ratchet violations (real content failures),
@@ -242,28 +169,28 @@ def tracked_worktree_files(repo_root: Path) -> list[str]:
     return sorted(paths)
 
 
-def tracked_rev_files(repo_root: Path, rev: str) -> list[str]:
-    """Governed tracked blob paths at a revision, sorted (NUL-safe)."""
+def tracked_rev_blobs(repo_root: Path, rev: str) -> dict[str, bytes]:
+    """Map governed regular-file paths to their blob IDs at a revision."""
     out = _git_out(repo_root, "ls-tree", "-r", "-z", rev)
-    paths = []
+    objects: dict[str, bytes] = {}
     for entry in out.split(b"\0"):
         if not entry:
             continue
         meta, _, raw_path = entry.partition(b"\t")
         fields = meta.split(b" ")
-        if len(fields) < 2 or fields[1] != b"blob":
+        if len(fields) != 3 or fields[1] != b"blob":
             continue  # trees, submodules
         if fields[0].decode() not in ("100644", "100755"):
             continue
         path = _decode(raw_path)
         if is_governed(path):
-            paths.append(path)
-    return sorted(paths)
+            objects[path] = fields[2]
+    return objects
 
 
-def read_rev_blobs(repo_root: Path, rev: str, paths: list[str]) -> dict[str, bytes]:
-    """Read many blobs from one revision via a single `git cat-file --batch`."""
-    if not paths:
+def read_rev_blobs(repo_root: Path, objects: dict[str, bytes]) -> dict[str, bytes]:
+    """Read blobs by ID via one batch process, regardless of path spelling."""
+    if not objects:
         return {}
     proc = subprocess.Popen(
         ["git", "-C", str(repo_root), "cat-file", "--batch"],
@@ -273,17 +200,17 @@ def read_rev_blobs(repo_root: Path, rev: str, paths: list[str]) -> dict[str, byt
     assert proc.stdin is not None and proc.stdout is not None
     blobs: dict[str, bytes] = {}
     try:
-        for path in paths:
-            request = f"{rev}:{path}\n".encode("utf-8", "surrogateescape")
-            proc.stdin.write(request)
+        for path, oid in objects.items():
+            proc.stdin.write(oid + b"\n")
             proc.stdin.flush()
             header = proc.stdout.readline().split()
-            if len(header) == 3 and header[2].isdigit():
-                size = int(header[2])
-                blobs[path] = proc.stdout.read(size)
-                proc.stdout.read(1)  # trailing LF after the content
-            # anything else ("<request> missing") cannot happen for a path
-            # ls-tree just listed at this same immutable revision; skip it.
+            if len(header) != 3 or header[1] != b"blob" or not header[2].isdigit():
+                raise GitError(f"could not read comparison blob for {path!r}")
+            size = int(header[2])
+            data = proc.stdout.read(size)
+            if len(data) != size or proc.stdout.read(1) != b"\n":
+                raise GitError(f"incomplete comparison blob for {path!r}")
+            blobs[path] = data
     finally:
         proc.stdin.close()
         proc.wait()
@@ -453,12 +380,11 @@ def load_trusted_baseline(
     return parse_baseline(data, f"trusted baseline at {rev}:{baseline_name}")
 
 
-def derive_bootstrap_baseline(repo_root: Path, rev: str) -> Baseline:
+def derive_bootstrap_baseline(repo_root: Path, objects: dict[str, bytes]) -> Baseline:
     """Bootstrap: the comparison revision predates this checker, so the
     permitted debt is that tree's actual measured content and the vendor
     inventory starts empty (a bootstrap authorizes no hash exemptions)."""
-    paths = tracked_rev_files(repo_root, rev)
-    blobs = read_rev_blobs(repo_root, rev, paths)
+    blobs = read_rev_blobs(repo_root, objects)
     debts = {
         path: count_lines(data)
         for path, data in blobs.items()
@@ -513,8 +439,8 @@ def diff_against_rev(repo_root: Path, rev: str) -> tuple[dict[str, str], set[str
 
     Returns (renames, changed_paths) where `renames` maps each rename
     destination to its source path. Rename policy: `git diff -M` (50%
-    similarity) proves `old -> new` is a rename; the *size* guard (new size
-    <= the old path's trusted ceiling) proves it did not grow.
+    similarity) proves `old -> new` is a rename. The size guard then
+    compares the destination with the source's measured comparison size.
     """
     out = _git_out(repo_root, "diff", "--name-status", "--no-color", "-M", "-z", rev)
     tokens = [_decode(t) for t in out.split(b"\0")]
@@ -569,7 +495,7 @@ def _candidate_debt_failures(
     trusted: Baseline,
     renames: dict[str, str],
     exemptions: dict[str, str],
-    comparison_sizes: dict[str, int] | None = None,
+    comparison_sizes: dict[str, int],
 ) -> tuple[dict[str, int], list[str]]:
     """Which governed files may carry debt, and does any exceed its
     trusted permission? Returns (expected debts, failures)."""
@@ -581,32 +507,23 @@ def _candidate_debt_failures(
             continue  # content-hash exempt: not subject to line ceilings
         if size <= HARD_LIMIT:
             continue
-        ceiling = trusted.debts.get(path)
-        if ceiling is None:
-            source = renames.get(path)
-            if source is not None and source in trusted.debts:
-                old_ceiling = trusted.debts[source]
-                expected_debts[path] = size
-                if size > old_ceiling:
-                    failures.append(
-                        f"{path}: {size} lines, but as a rename of "
-                        f"{source} it may not exceed that path's trusted "
-                        f"ceiling of {old_ceiling} lines; shrink it to "
-                        f"{old_ceiling} lines or fewer"
-                    )
-                continue
+        source = path if path in trusted.debts else renames.get(path, path)
+        if source not in trusted.debts:
             failures.append(
                 f"{path}: {size} lines exceeds the {HARD_LIMIT}-line "
                 "limit with no trusted baseline ceiling; new oversized "
                 f"files must stay at or under {HARD_LIMIT} lines"
             )
             continue
+        allowed = comparison_sizes.get(source)
+        if allowed is None:
+            raise GitError(f"could not measure {source!r} in the comparison revision")
         expected_debts[path] = size
-        allowed = max(ceiling, (comparison_sizes or {}).get(path, 0))
         if size > allowed:
+            rename = f" as a rename of {source}" if source != path else ""
             failures.append(
-                f"{path}: grew to {size} lines, above its trusted "
-                f"ceiling of {ceiling} lines; shrink it back to {allowed} "
+                f"{path}: grew to {size} lines{rename}, above the comparison "
+                f"size of {allowed} lines. Shrink it to {max(HARD_LIMIT, allowed)} "
                 "lines or fewer"
             )
     return expected_debts, failures
@@ -633,24 +550,25 @@ def _stale_entry_reason(path: str, candidate: Candidate) -> str:
 
 
 def _mirror_failures(
-    proposed: Baseline, expected_debts: dict[str, int], candidate: Candidate
+    proposed: Baseline,
+    expected_debts: dict[str, int],
+    candidate: Candidate,
+    carry_forward: dict[str, int],
 ) -> list[str]:
-    """The proposed baseline must exactly mirror the candidate's
-    remaining debt."""
+    """Validate debt entries against the measured sizes and trusted ledger."""
     failures: list[str] = []
-    for path in sorted(proposed.debts):
-        lines = proposed.debts[path]
-        if path not in expected_debts:
+    for path, lines in sorted(proposed.debts.items()):
+        size = expected_debts.get(path)
+        if size is None:
             reason = _stale_entry_reason(path, candidate)
             failures.append(
                 f"{path}: stale baseline entry ({lines} lines) -- "
                 f"{reason}; remove the entry"
             )
-        elif lines != expected_debts[path]:
+        elif lines != size and not (lines == carry_forward.get(path) and lines > size):
             failures.append(
-                f"{path}: baseline ceiling {lines} lines must equal the "
-                f"file's current size ({expected_debts[path]} lines); "
-                f"set it to {expected_debts[path]}"
+                f"{path}: ledger ({lines} lines) must equal file size ({size} lines). "
+                "Compare the candidate file and ledger with the comparison revision."
             )
     for path in sorted(expected_debts):
         if path not in proposed.debts:
@@ -701,7 +619,9 @@ def compare(
     renames: dict[str, str],
     changed_paths: set[str],
     baseline_name: str,
-    comparison_sizes: dict[str, int] | None = None,
+    comparison_sizes: dict[str, int],
+    *,
+    bootstrap: bool = False,
 ) -> list[str]:
     """Return sorted, actionable failure lines; empty means the candidate
     passes."""
@@ -719,7 +639,10 @@ def compare(
     expected_debts, failures = _candidate_debt_failures(
         candidate, trusted, renames, exemptions, comparison_sizes
     )
-    failures.extend(_mirror_failures(proposed, expected_debts, candidate))
+    carry_forward = {} if bootstrap else trusted.debts
+    failures.extend(
+        _mirror_failures(proposed, expected_debts, candidate, carry_forward)
+    )
     failures.extend(_vendor_pin_failures(proposed, trusted, refresh, candidate))
     return sorted(failures)
 
@@ -756,10 +679,7 @@ def _fail(problems: list[str]) -> None:
     for line in problems:
         print(line, file=sys.stderr)
     print(
-        "\nReduce the file sizes listed above, tighten the proposed "
-        "baseline to match (after a reduction):\n"
-        f"  python {BASELINE_RELATIVE} --update-baseline\n"
-        "then re-run the check:\n"
+        "\nFix the file sizes or ledger entries listed above, then re-run:\n"
         f"  python {BASELINE_RELATIVE} --comparison-rev <revision>\n"
         "Policy: scripts/README.md (per-file size ratchet).",
         file=sys.stderr,
@@ -778,15 +698,28 @@ def _cmd_check(repo_root: Path, baseline_path: Path, comparison_rev: str) -> int
 
     trusted = load_trusted_baseline(repo_root, rev, baseline_name)
     bootstrap = trusted is None
-    if bootstrap:
-        trusted = derive_bootstrap_baseline(repo_root, rev)
+    objects = tracked_rev_blobs(repo_root, rev)
+    if trusted is None:
+        trusted = derive_bootstrap_baseline(repo_root, objects)
         seed_bootstrap_debt_for_new_files(trusted, candidate)
+        sizes = trusted.debts
+    else:
+        debt_objects = {
+            path: objects[path] for path in sorted(trusted.debts.keys() & objects)
+        }
+        blobs = read_rev_blobs(repo_root, debt_objects)
+        sizes = {path: count_lines(data) for path, data in blobs.items()}
 
     renames, changed_paths = diff_against_rev(repo_root, rev)
-    blobs = read_rev_blobs(repo_root, rev, sorted(trusted.debts))
-    sizes = {p: count_lines(d) for p, d in blobs.items()}
     failures = compare(
-        candidate, proposed, trusted, renames, changed_paths, baseline_name, sizes
+        candidate,
+        proposed,
+        trusted,
+        renames,
+        changed_paths,
+        baseline_name,
+        sizes,
+        bootstrap=bootstrap,
     )
 
     mode = (
@@ -807,8 +740,8 @@ def _cmd_check(repo_root: Path, baseline_path: Path, comparison_rev: str) -> int
     over = sum(1 for size in candidate.sizes.values() if size > HARD_LIMIT)
     print(
         f"OK: {len(candidate.sizes)} governed tracked source files; "
-        f"{over} over the {HARD_LIMIT}-line limit, all matching the "
-        f"{mode}."
+        f"{over} over the {HARD_LIMIT}-line limit, all within policy "
+        f"(comparison: {mode})."
     )
     return EXIT_OK
 
@@ -835,10 +768,7 @@ def _cmd_update(repo_root: Path, baseline_path: Path) -> int:
             f"::warning::{len(untracked)} untracked governed source file(s) "
             f"are NOT measured (the inventory is git ls-files): "
             f"{', '.join(untracked[:10])}"
-            f"{' ...' if len(untracked) > 10 else ''}",
-            file=sys.stderr,
-        )
-        print(
+            f"{' ...' if len(untracked) > 10 else ''}\n"
             "Stage or commit them before regenerating, or the baseline "
             "will silently omit their debt.",
             file=sys.stderr,
@@ -847,36 +777,38 @@ def _cmd_update(repo_root: Path, baseline_path: Path) -> int:
     # Carry forward only vendor entries still matching actual candidate
     # bytes; regeneration never mints new exemptions.
     carried: dict[str, str] = {}
+    ceilings: dict[str, int] = {}
     if baseline_path.exists():
         try:
             existing = parse_baseline(
                 baseline_path.read_bytes(), f"existing baseline {baseline_path}"
             )
         except BaselineError as exc:
-            print(f"::error::{exc}", file=sys.stderr)
             print(
-                "Fix or hand-edit the baseline first; --update-baseline "
-                "refuses to build on malformed data.",
+                f"::error::{exc}\nFix or hand-edit the baseline first; "
+                "--update-baseline refuses to build on malformed data.",
                 file=sys.stderr,
             )
             return EXIT_UNUSABLE
+        ceilings = existing.debts
         for sha, recorded_path in existing.vendor_hashes.items():
             if candidate.hashes.get(recorded_path) == sha:
                 carried[sha] = recorded_path
 
+    # Carry a still-covering recorded ceiling verbatim so a shrinking PR
+    # leaves the ledger byte-identical (#7414); new or grown paths and
+    # paths with no entry record their exact measured size.
     debts = {
-        path: size
+        path: max(size, ceilings.get(path, 0))
         for path, size in candidate.sizes.items()
         if size > HARD_LIMIT and candidate.hashes[path] not in carried
     }
     write_baseline(baseline_path, debts, carried)
     print(
         f"Wrote {len(debts)} debt entr{'y' if len(debts) == 1 else 'ies'} "
-        f"and {len(carried)} vendor hash exemption(s) to {baseline_path}. "
-        "Regeneration never adds exemptions or authorizes growth -- "
-        "validate with check mode:"
-    )
-    print(
+        f"and {len(carried)} vendor hash exemption(s) to {baseline_path} "
+        "(still-covering ceilings carried verbatim). Regeneration never "
+        "adds exemptions or authorizes growth -- validate with check mode:\n"
         f"  python {BASELINE_RELATIVE} --comparison-rev "
         '"$(git merge-base HEAD origin/main)"'
     )
@@ -920,8 +852,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "regenerate the proposed baseline from the candidate tree "
-            "(after a reduction) instead of checking; never adds debt "
-            "permission or exemptions"
+            "instead of checking; carries still-covering ceilings and "
+            "matching pins verbatim, never adds debt permission"
         ),
     )
     args = parser.parse_args(argv)

@@ -54,17 +54,7 @@ acceptance criteria:
 - **Budget check and reference deltas** (``budget_um2``/``reference_area_um2``
   request parameters) -- absent from the placeholder entirely.
 
-## Why not `congestion.py`'s native grid machinery
-
-The issue's own text suggests "the whitespace grid can share [congestion.py's]
-machinery" -- but ``congestion.py``'s Rust extension estimates *routing
-demand* from a net list (RUDY/RSMT family), which requires DEF placement +
-connectivity data this command does not have (it takes a bare GDS/OASIS
-stream, not a DEF). What *is* shared is the idiom -- a grid of cells each
-reporting one scalar metric -- re-implemented here in pure
-``klayout.db`` region math (:func:`_whitespace_grid`), matching this
-module's already-lighter dependency footprint (no native extension required
-to run ``klt economy`` at all).
+The whitespace grid uses ``klayout.db`` region math directly on GDS/OASIS geometry.
 """
 
 from __future__ import annotations
@@ -75,7 +65,8 @@ from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_cell
 from ._provenance import build_provenance
 from .economy_bands import leaf_bands
-from .economy_leaves import collect_leaf_placements, gap_position
+from .economy_gaps import gap_rows, top_level_pieces
+from .economy_leaves import collect_leaf_placements
 from .economy_pnr import attach_pnr, check_pnr_args
 from .economy_whatif import what_if_block_or_none
 
@@ -509,6 +500,12 @@ def _attribution_block(
     ``flatten_wrappers`` a child holding two or more direct instances is
     recursively expanded into leaf placements named by hierarchical path
     (``COMP[0]/OTA[0]``).
+
+    Each gap row also carries its drawn coverage (issue #6941, geometry in
+    :mod:`klayout_tools.economy_gaps`): ``drawn_area_um2`` plus the
+    ``drawn_components`` the top cell draws inside the gap polygon.
+    Component areas describe a gap's *contents* and never enter the bbox
+    partition above.
     """
     drawn_cache: dict[int, float] = {}
 
@@ -544,26 +541,19 @@ def _attribution_block(
     sum_children = sum(ibox.area() for _, ibox in placed)
     overlap = sum_children - union.area()
 
+    top_local = _merged_region(kdb, layout, top_cell, annotation_pairs, recursive=False)
     remainder = (kdb.Region(bbox) - union).merged()
-    gaps: list[dict[str, Any]] = []
-    gap_total = 0
-    for polygon in remainder.each():
-        area = polygon.area()
-        if area <= 0:
-            continue
-        gap_total += area
-        gb = polygon.bbox()
-        gaps.append(
-            {
-                "position": gap_position(gb, bbox, placed),
-                "bbox_um": bbox_um_dict(gb, dbu),
-                "area_um2": area * dbu * dbu,
-            }
-        )
-    gaps.sort(key=lambda g: (-g["area_um2"], g["position"], g["bbox_um"]["left"]))
+    gap_total, gaps = gap_rows(
+        kdb,
+        remainder,
+        bbox,
+        placed,
+        top_local,
+        top_level_pieces(layout, top_cell, annotation_pairs),
+        dbu,
+    )
 
     unattributed = bbox.area() - (sum_children - overlap) - gap_total
-    top_local = _merged_region(kdb, layout, top_cell, annotation_pairs, recursive=False)
     block: dict[str, Any] = {
         "children": children,
         "gap_components": gaps,

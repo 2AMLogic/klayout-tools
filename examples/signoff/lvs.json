@@ -56,6 +56,7 @@
     "reason": "no request.layout.deck was given (the pre-extracted request.layout.netlist form), so nothing establishes this layout's substrate/well-tap convention and no synthesized body net can be told apart from a real one -- this run verified nothing about the device bodies either way",
     "device_classes": [],
     "device_count": 0,
+    "inspected_count": 0,
     "findings": [],
     "finding_count": 0
   },
@@ -89,6 +90,7 @@
       ]
     }
   ],
+  "mismatches_omitted": false,
   "mismatch_count": 0,
   "error_count": 0,
   "category_counts": {},
@@ -110,10 +112,21 @@
       "matched": 3
     }
   },
+  "pin_set_difference": {
+    "deck_synthesized_layout_pins": [],
+    "layout_only_pins": [],
+    "layout_only_pins_count": 0,
+    "layout_only_pins_truncated": false,
+    "reference_only_pins": [],
+    "reference_only_pins_count": 0,
+    "reference_only_pins_truncated": false
+  },
+  "ignored_layers": [],
+  "warnings": [],
   "device_classes": null,
   "environment": {
     "engine": "klayout",
-    "engine_version": "0.30.12",
+    "engine_version": "0.30.13",
     "netgen_binary": null,
     "layout_sha256": "1bc1899ad636c1bac4c903b45d7fecd99112056a2bf633cf50c13b5bd93ba692",
     "reference_sha256": "b3db003a75370b595c42edd12c525cfec7d6595b0b63fb312c1c46fd70aacb99",
@@ -123,7 +136,7 @@
     "klt_version": null,
     "klt_git_commit": null,
     "klt_reinstall_spec": null,
-    "klayout_version": "0.30.12",
+    "klayout_version": "0.30.13",
     "pdk": null,
     "deck": null,
     "input": {
@@ -136,17 +149,23 @@
   "net_correspondence": [
     {
       "layout": "VIN",
+      "layout_id": 0,
       "reference": "VIN",
+      "reference_id": 0,
       "pin": true
     },
     {
       "layout": "VOUT",
+      "layout_id": 1,
       "reference": "VOUT",
+      "reference_id": 1,
       "pin": true
     },
     {
       "layout": "VSS",
+      "layout_id": 2,
       "reference": "VSS",
+      "reference_id": 2,
       "pin": true
     }
   ]

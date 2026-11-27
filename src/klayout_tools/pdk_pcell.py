@@ -78,6 +78,7 @@ from .pdk import (
     find_pdk,
     resolve_pdk_dbu,
 )
+from .pdk_pcell_checks import check_pcell_variant
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import klayout.db as kdb
@@ -100,7 +101,7 @@ _SETTABLE_PARAM_TYPES = frozenset({0, 1, 2, 3, 4, 6})
 
 #: ``TypeLayer``. Held as its own constant because it is the one settable type
 #: :func:`klayout_tools.gen._coerce_param` does not handle (no built-in
-#: generator exposes a layer parameter -- they are all in ``_HIDDEN_PARAMS``).
+#: generator exposes a request-facing layer parameter -- all hidden, #6757).
 _TYPE_LAYER = 4
 
 
@@ -290,24 +291,20 @@ def list_pdk_pcells(
 
 
 def generate_pdk_pcell(request: dict[str, Any]) -> dict[str, Any]:
-    """Instantiate one PDK-shipped PCell and write it out (``klt gen
-    --pdk-pcell``).
+    """Instantiate one PDK-shipped PCell and write it out (``klt gen --pdk-pcell``).
 
     ``request`` mirrors :func:`klayout_tools.gen.generate`'s envelope, with
-    ``pdk_pcell`` (``"<library>/<cell>"``) where that one carries
-    ``generator``::
+    ``pdk_pcell`` (``"<library>/<cell>"``) in place of ``generator``::
 
         {
             "schema": "klt.gen.request/1",
             "pdk_pcell": "SG13_native_pcell_lib/Via",
-            "pdk": {"variant": "ihp-sg13g2", "root": None},
-            "params": {"w": 1.0},
+            "pdk": {"variant": "ihp-sg13g2", "root": None}, "params": {"w": 1.0},
             "options": {"cell_name": "via_0", "output": "via_0.gds"},
         }
 
-    The response is the same shape ``generate()`` returns -- so an existing
-    ``klt gen-compose`` block consumer needs no change -- plus one additive
-    ``pdk_pcell`` object naming what was instantiated::
+    The response is the same shape ``generate()`` returns -- an existing
+    ``klt gen-compose`` block consumer needs no change -- plus additive::
 
         {
             ..., as `klt gen`,
@@ -316,15 +313,14 @@ def generate_pdk_pcell(request: dict[str, Any]) -> dict[str, Any]:
         }
 
     ``device_count`` is always 1 and ``ports`` always empty: a vendor PCell is
-    instantiated as an **opaque** cell. klt does not interpret its geometry to
-    infer devices or pins, which would be exactly the "transcribe a vendor
-    artifact" step this feature exists to avoid. ``drc_hints.notes`` carries a
-    line saying so.
+    an **opaque** cell -- klt never interprets its geometry to infer devices
+    or pins (the "transcribe a vendor artifact" step this feature avoids) and
+    ``drc_hints.notes`` says so.
 
     Raises :class:`PdkPCellError` for an unresolvable PDK, a PDK shipping no
-    PyCell library, an unknown library or cell name, a vendor package that
-    cannot be imported in this environment (naming the missing dependency), an
-    invalid ``params`` value, or a write failure.
+    PyCell library, an unknown library or cell name, a ``cell_name`` equal to
+    the vendor PCell's own name, a vendor package that cannot be imported in
+    this environment, an invalid ``params`` value, or a write failure.
     """
     if not isinstance(request, dict):
         raise PdkPCellError("request must be a JSON object")
@@ -349,6 +345,11 @@ def generate_pdk_pcell(request: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(options, dict):
         raise PdkPCellError("request.options must be a JSON object")
     cell_name = options.get("cell_name") or f"{cell_name_ref}_0"
+    if cell_name == cell_name_ref:
+        raise PdkPCellError(
+            f"--cell-name '{cell_name}' equals the vendor PCell's own name, which"
+            " the child keeps: the two would collide -- pick another --cell-name"
+        )
     output_path = options.get("output") or f"{cell_name}.gds"
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
@@ -915,14 +916,12 @@ def _produce_pdk_pcell(
     raw_params: dict[str, Any],
     pdk_info: dict[str, Any],
 ) -> tuple[kdb.Layout, kdb.Cell]:
-    """Instantiate ``entry``'s ``pcell_name`` into a fresh layout.
-
-    Identical in shape to :func:`klayout_tools.gen._produce` -- resolve the
-    declaration, ``add_pcell_variant``, insert into a fresh top cell -- except
-    the declaration comes from the *vendor's* library rather than klt's own.
-    The output dbu is resolved from the PDK's tech LEF the same way, so a
-    ``--pdk-pcell`` block and a built-in-generator block resolved against one
-    PDK agree by construction (a `klt gen-compose` precondition).
+    """Instantiate ``entry``'s ``pcell_name`` into a fresh layout, then
+    validate the variant -- KLayout swallows a vendor ``produce`` failure
+    and leaves an unnamed cell (issue #5936). Otherwise identical in shape
+    to klt's own ``_produce``: resolve the declaration, ``add_pcell_variant``,
+    insert into a fresh top cell; the dbu comes from the PDK's tech LEF (a
+    `klt gen-compose` precondition). See :mod:`klayout_tools.pdk_pcell_checks`.
     """
     import klayout.db as kdb
 
@@ -952,6 +951,7 @@ def _produce_pdk_pcell(
     _apply_tkinter_workaround(entry["package"])
     try:
         variant = layout.add_pcell_variant(handle, declaration.id(), values)
+        check_pcell_variant(layout, variant, entry["library"], pcell_name)
         top = layout.create_cell(cell_name)
         top.insert(kdb.CellInstArray(variant, kdb.Trans()))
     except PdkPCellError:

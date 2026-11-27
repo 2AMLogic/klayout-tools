@@ -16,6 +16,9 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
+from . import env_provenance
+from .sim_errors import SimError
+
 # ``ExtractError``/``NetlistError`` share a ``code``/``job_id``/``details``
 # keyword shape that ``type[Exception]`` cannot express, so construction goes
 # through ``Any`` while the return type stays the caller's own class.
@@ -29,6 +32,30 @@ BATCH_POLL_TIMEOUT_CODE = "batch_poll_timeout"
 
 def _ctor(err_cls: type[_E]) -> Any:
     return err_cls
+
+
+def repo_relative_str(
+    path: str | os.PathLike[str],
+    *,
+    repo_root: str | os.PathLike[str] | None = None,
+) -> str:
+    """The plain-string counterpart of
+    ``env_provenance.repo_relative_path``: the repo-relative POSIX path
+    when ``path`` lies inside a repo, else the unchanged absolute path.
+
+    For a string-typed field that must not change shape (``environment
+    .remote.shard_map``, issue #5542): ``repo_relative_path``'s
+    ``{"path": null, "scope": "external"}`` answer would retype the field to
+    ``null``, so the absolute path is kept instead. Such a field honours the
+    committed-artifact rule only when the run's outdir lies inside a repo --
+    the caller documents that boundary; the stderr hints keep printing the
+    absolute path either way, since those are read at a terminal, not
+    committed.
+
+    Hosted here, not in ``env_provenance``, so that module stays within its
+    file-size ratchet ceiling (714 lines)."""
+    entry = env_provenance.repo_relative_path(path, repo_root=repo_root)
+    return entry["path"] if entry["path"] is not None else str(path)
 
 
 def make_job_id(kind: str) -> str:
@@ -143,12 +170,26 @@ def job_failure_parts(
     return message, code, details
 
 
+def set_shared_launch_limit(
+    environment: dict[str, Any], shards: Sequence[dict[str, Any] | None]
+) -> None:
+    """Keep a fleet-wide limit only when every reported job has that limit."""
+    limits = {(entry or {}).get("max_launch_attempts") for entry in shards}
+    limit = limits.pop() if len(limits) == 1 else None
+    if limit is None:
+        environment.pop("max_launch_attempts", None)
+    else:
+        environment["max_launch_attempts"] = limit
+
+
 def resumable(
     environment: dict[str, Any] | None, manifest: Any
 ) -> dict[str, Any] | None:
     """``environment`` plus the additive "incomplete, resumable" signal
     (issue #4856) when ``manifest`` (a shard manifest) still has shards that
-    were submitted but never launched; ``environment`` unchanged otherwise."""
+    were submitted but never launched; ``environment`` unchanged otherwise.
+    ``shard_map`` is repo-relative when the map lies inside a git repo
+    (issue #5542) -- the stderr hint keeps the absolute path."""
     count = manifest.unlaunched() if manifest is not None else 0
     if not count:
         return environment
@@ -156,7 +197,7 @@ def resumable(
         **(environment or {}),
         "unlaunched_shards": count,
         "resumable": True,
-        "shard_map": str(manifest.path),
+        "shard_map": repo_relative_str(manifest.path),
     }
 
 
@@ -167,13 +208,14 @@ def with_unrun_signal(
     corners that never ran (``lost_shard``, ``batch_job_interrupted``, ...;
     issue #5364): ``unrun_units`` (count), ``resumable: true`` and -- unless
     :func:`resumable` already set it -- ``shard_map`` (``state_path``, the
-    retained shard map or checkpoint). Returns ``(environment, hint_needed)``;
+    retained shard map or checkpoint, repo-relative when it lies inside a
+    git repo; issue #5542). Returns ``(environment, hint_needed)``;
     ``hint_needed`` is False when the unlaunched-shard hint already covers
     the rerun. Unchanged for ``unrun == 0`` or no retained state."""
     if not unrun or not state_path or environment is None:
         return environment, False
     out = {**environment, "unrun_units": unrun, "resumable": True}
-    out.setdefault("shard_map", state_path)
+    out.setdefault("shard_map", repo_relative_str(state_path))
     return out, "unlaunched_shards" not in environment
 
 
@@ -233,11 +275,13 @@ def resolve_batch_config(
     request, so the fleet config resolves exactly as for ``klt sim``. Its
     ``SimError``/``BatchError`` becomes ``err_cls``."""
     from . import sim_batch
-    from .sim import SimError
 
     try:
         return sim_batch._resolve_batch_config(
-            {"models": {"pdk": pdk}}, corner_count=1, timeout_s=timeout_s
+            {"models": {"pdk": pdk}},
+            corner_count=1,
+            timeout_s=timeout_s,
+            sim_image_profiles=False,
         )
     except (SimError, sim_batch.BatchError) as exc:
         raise _ctor(err_cls)(

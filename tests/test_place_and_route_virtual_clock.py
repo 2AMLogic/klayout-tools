@@ -96,9 +96,9 @@ def test_virtual_clock_lines_and_io_delays():
     ]
     # No period, no port: nothing (unchanged behavior).
     assert _io_delay_lines(None, None, None) == []
-    # Clocked flows keep the pre-existing Tcl.
+    # The real clock binds to its resolved port.
     assert _clock_lines("clk", 5.0)[-1] == (
-        "create_clock -name clk -period 5.0 [get_ports clk]"
+        "create_clock -name clk -period 5.0 $klt_root"
     )
 
 
@@ -121,12 +121,4 @@ def test_run_constraints_virtual_period_must_be_positive(tmp_path, period):
         _base_request(constraints={"clock_period_ns": period}),
     )
     with pytest.raises(PlaceAndRouteError, match="clock_period_ns must be"):
-        run_place_and_route(request_path)
-
-
-def test_run_target_stage_place_error_mentions_virtual_clock(tmp_path, monkeypatch):
-    request_path = _setup_success_env(
-        tmp_path, monkeypatch, target_stage="place", constraints=None
-    )
-    with pytest.raises(PlaceAndRouteError, match="accepted as a virtual clock"):
         run_place_and_route(request_path)

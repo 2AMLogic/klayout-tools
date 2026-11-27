@@ -27,12 +27,17 @@ and 10"):
   exists; every cited evidence envelope exists and its declared ``--check``
   command exits ``0``; every declared spec row cites at least one envelope;
   and, for a digital partition, Fmax, area and power are each bound to a
-  numeric field of a cited envelope for every declared corner. Item 8 stays
+  numeric field of a cited envelope for every declared corner. A committed
+  record produced outside klt is citable through ``external_records``
+  (issue #6939), and a metric binding may declare a ``reciprocal``
+  transform (a period binds its frequency). A required metric nobody
+  measured is declared in ``unmeasured_metrics`` (issue #7259) and
+  disclosed as a passing check, not hidden. Item 8 stays
   open to a bare generic envelope in the grader -- this producer is the
   tool-produced alternative, disclosed as such on the citation.
-- **Item 9 (Testbenches shipped)** -- every listed testbench exists; the
-  declared cold-start invocation exits ``0``; the PDK name + revision and at
-  least one tool version are pinned.
+- **Item 9 (Testbenches shipped)** -- every listed testbench exists; each
+  ``depends_on``-declared dependency is hashed (#5850); the declared
+  cold-start exits ``0``; PDK name + revision and a tool version are pinned.
 - **Item 10 (Repo hygiene)** -- every listed hygiene artifact exists; every
   declared CI/audit command exits ``0``.
 
@@ -49,48 +54,55 @@ Two failure classes, deliberately distinct:
 
 Hashing is raw-byte SHA-256 (``sha256:<hex>``), the same
 :func:`~klayout_tools._provenance.sha256_file` convention the grader re-hashes
-with. Nothing is normalised.
+with. The one normalisation is ``attest: "yaml"`` (issue #5862), binding
+:mod:`.signoff_attest_canonical_yaml`'s named digest so comments are not drift.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
-import re
-import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item8 as item8
 from . import signoff_attest_item9 as item9
-from ._jsonnum import is_int, is_number
-from ._provenance import sha256_file
+from ._jsonnum import is_finite_number, is_int
 from ._report_verify import load_committed_report
 from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
 from .signoff import (
-    _COMMAND_EVIDENCE_TIMEOUT_S,
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
-    _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
-    SCHEMA_VERSION,
-    SignoffError,
     _classify,
-    _finite_json_float,
     _generic_item_binding_refusal,
-    _reject_json_constant,
 )
+from .signoff_attest_command import _run_command, reset_command_side_channels
 from .signoff_attest_drift import drift_result
-from .signoff_attest_input import input_binding
+from .signoff_attest_env import klt_shim_scope
+from .signoff_attest_glob import expand_entry
+from .signoff_attest_input import attestation_block, input_binding
+from .signoff_attest_pins import item9_pin_checks
+from .signoff_attest_presence import file_check as _file_check
+from .signoff_attest_presence import git_source_checks, path_checks, split_entries
+from .signoff_attest_recorded import recorded_hash_check, validated_recorded
+from .signoff_base import (
+    ATTESTABLE_ITEMS,
+    CHARACTERIZATION_ITEM,
+    SCHEMA_VERSION,
+)
+from .signoff_base import STREAM_ATTESTABLE_ITEM as STREAM_ATTESTABLE_ITEM
+from .signoff_base import AttestationError as AttestationError
+from .signoff_base import SignoffError as SignoffError
+from .signoff_git_source import GitPath, git_entry, git_source
 
-#: The attestation-inventory schema versions this build reads. An inventory
-#: declaring any other version is refused (exit ``1``) rather than read with
-#: guessed semantics -- the inventory is a public, versioned contract
-#: (``docs/json-contract.md``).
-INVENTORY_SCHEMA_VERSION = 1
+#: The attestation-inventory schema version this build mints against. The
+#: inventory is a public, versioned contract (``docs/json-contract.md``);
+#: older versions stay readable so an inventory never breaks the ``klt``
+#: that wrote it.
+INVENTORY_SCHEMA_VERSION = 2
 SUPPORTED_INVENTORY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {INVENTORY_SCHEMA_VERSION}
+    {1, INVENTORY_SCHEMA_VERSION}
 )
 
 #: The literal ``kind`` every inventory must declare, so an unrelated JSON
@@ -108,24 +120,6 @@ PRODUCER = "klt signoff --attest"
 #: part of the evidence, not an implicit convention.
 HASH_ALGORITHM = "sha256-raw-bytes"
 
-#: T1 item 8 (Characterization report, issue #4311): attestable from an
-#: inventory but deliberately *not* in ``_ITEMS_REQUIRING_ATTESTED_EVIDENCE``,
-#: so a bare hand-written generic envelope still grades.
-CHARACTERIZATION_ITEM = 8
-
-#: The T1 items this producer attests from an inventory -- the items whose
-#: evidence :data:`~klayout_tools.signoff._ITEMS_REQUIRING_ATTESTED_EVIDENCE`
-#: restricts to a generic envelope, plus item 8. Item 2 (Layout) stays out of
-#: scope: its binding is the committed stream itself (issue #2718), unchanged
-#: by issue #2844.
-ATTESTABLE_ITEMS: tuple[int, ...] = tuple(
-    sorted(_ITEMS_REQUIRING_ATTESTED_EVIDENCE | {CHARACTERIZATION_ITEM})
-)
-
-#: The one T1 item attested from a committed layout stream rather than an
-#: inventory (issue #4188): ``--attest 2 --input STREAM``. Item 2's binding is
-#: the stream itself, so there is no inventory to hand-write.
-STREAM_ATTESTABLE_ITEM = 2
 
 _ITEM_TITLES = {
     1: "Design sources",
@@ -142,12 +136,10 @@ _ITEM_TITLES = {
 _COMMON_KEYS = frozenset({"schema_version", "kind", "t1_item", "description"})
 _ITEM_KEYS: dict[int, frozenset[str]] = {
     1: frozenset({"sources", "derived"}),
-    # Item 2's inventory is optional (issue #4767) and declares only commands;
-    # the stream is always the ``--input`` artifact, never an inventory field.
-    2: frozenset({"checks"}),
-    8: frozenset(
-        {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
-    ),
+    # Item 2's inventory is optional (#4767): commands (``checks``) and/or the
+    # generator's input files (``inputs``, #5724); the stream is the ``--input``.
+    2: frozenset({"checks", "inputs"}),
+    8: item8.ITEM8_KEYS,
     9: item9.ITEM9_KEYS,
     10: frozenset({"hygiene", "checks"}),
 }
@@ -165,25 +157,13 @@ _PATH_LISTS: dict[int, tuple[tuple[str, str], ...]] = {
 }
 
 
-class AttestationError(SignoffError):
-    """A malformed inventory or committed envelope -- nothing was attested.
-
-    A :class:`~klayout_tools.signoff.SignoffError` subclass so the CLI's
-    existing ``except SignoffError`` reports it through the ordinary error
-    envelope (exit ``1``)."""
-
-
 # --------------------------------------------------------------------------- #
 # Inventory reading and structural validation
 # --------------------------------------------------------------------------- #
 
 
-def _read_inventory(path: str) -> tuple[dict[str, Any], str]:
-    """Read ``path`` once and return ``(inventory, content_hash)``.
-
-    The hash and the parse are taken from the **same** bytes, so the
-    envelope can never record the hash of one revision of the inventory and
-    the checks of another."""
+def _read_inventory(path: str, raw: bytes | None = None) -> tuple[dict[str, Any], str]:
+    """Hash and parse the same inventory bytes, including a proposed tool-pin edit."""
     if path == "-":
         raise AttestationError(
             "--inventory must be a file path, not '-': the inventory is the "
@@ -199,11 +179,14 @@ def _read_inventory(path: str) -> tuple[dict[str, Any], str]:
     if not os.path.isfile(path):
         raise AttestationError(f"inventory is not a file: {path}")
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read()
+        if raw is None:
+            with open(path, "rb") as handle:
+                raw = handle.read()
     except OSError as exc:
         raise AttestationError(f"could not read inventory '{path}': {exc}") from exc
     digest = hashlib.sha256(raw).hexdigest()
+    from .signoff_base import _finite_json_float, _reject_json_constant
+
     try:
         inventory = json.loads(
             raw.decode("utf-8"),
@@ -291,8 +274,15 @@ def _normalize_repo_path(raw: Any, field: str, root: str) -> str:
 
 
 def _path_list(
-    inventory: Mapping[str, Any], field: str, root: str, seen: dict[str, str]
+    inventory: Mapping[str, Any],
+    field: str,
+    root: str,
+    seen: dict[str, str],
+    git_sources: dict[GitPath, str] | None = None,
 ) -> list[str]:
+    """The normalised members of one path-list field, each claimed in
+    ``seen``. A member is accepted -- and a ``{"glob": ...}`` entry expanded
+    -- by :func:`~klayout_tools.signoff_attest_glob.expand_entry`."""
     value = inventory.get(field)
     if not isinstance(value, list):
         raise AttestationError(f"inventory field '{field}' must be a list of paths")
@@ -301,15 +291,20 @@ def _path_list(
             f"inventory field '{field}' is empty -- an empty inventory attests nothing"
         )
     paths = []
-    for raw in value:
-        path = _normalize_repo_path(raw, field, root)
-        if path in seen:
-            raise AttestationError(
-                f"path '{path}' is listed more than once (in '{seen[path]}' and "
-                f"'{field}') -- each inventoried file must appear exactly once"
-            )
-        seen[path] = field
-        paths.append(path)
+    for index, raw in enumerate(value):
+        if git_sources is not None and git_entry(raw):
+            if inventory["schema_version"] < 2:
+                raise AttestationError("Git sources require inventory schema_version 2")
+            location, digest = git_source(raw, f"{field}[{index}]")
+            if location in git_sources:
+                raise AttestationError(
+                    f"Git source {location} is listed more than once"
+                )
+            git_sources[location] = digest
+            continue
+        paths.extend(
+            expand_entry(raw, field, root, seen, inventory.get("schema_version"))
+        )
     return paths
 
 
@@ -353,9 +348,7 @@ def _command_spec(
     if "timeout_s" in raw:
         timeout_s = raw["timeout_s"]
         if (
-            isinstance(timeout_s, bool)
-            or not isinstance(timeout_s, (int, float))
-            or not math.isfinite(timeout_s)
+            not is_finite_number(timeout_s)
             or timeout_s <= 0
             or timeout_s > COMMAND_TIMEOUT_CEILING_S
         ):
@@ -401,23 +394,32 @@ def _validated_inventory(
     normalised form the checks run against. Raises :class:`AttestationError`
     for anything malformed."""
     _validate_header(inventory, item, source)
-    bench_specs: dict[str, Any] = {}
+    bench_extra: dict[str, Any] = {}
     if item == 9:
-        inventory, bench_specs = item9.split_testbenches(
+        inventory, bench_extra = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
+    inventory, presence, yaml_selects = split_entries(
+        inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
+    )
     seen: dict[str, str] = {}
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
+    if yaml_selects:
+        normalized["yaml"] = dict(sorted(yaml_selects.items()))
+    git_sources: dict[GitPath, str] = {}
     for field, _role in _PATH_LISTS[item]:
-        normalized[field] = _path_list(inventory, field, root, seen)
+        normalized[field] = _path_list(
+            inventory, field, root, seen, git_sources if item == 1 else None
+        )
     if item == 1:
+        normalized["git_sources"] = git_sources
         normalized["derived"] = _validated_derived(
-            inventory, root, seen, set(normalized["sources"])
+            inventory, root, seen, {*normalized["sources"], *git_sources}
         )
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
     elif item == 9:
-        item9.validate_into(normalized, inventory, bench_specs, root, _command_spec)
+        item9.validate_into(normalized, inventory, bench_extra, root, _command_spec)
     else:
         normalized["checks"] = _validated_command_checks(inventory, root, 10)
     return normalized
@@ -428,9 +430,10 @@ def _validated_characterization(
 ) -> dict[str, Any]:
     """Item 8's structure (issue #4311): the report path, the declared spec
     rows, row -> cited-envelope paths, a freshness command per cited envelope,
-    and (digital) the corner set with the metric bindings. A row with no
-    citation, or a missing metric, is a *failed check*, not a malformed
-    inventory -- the inventory is well-formed, the evidence is incomplete."""
+    and (digital) the corner set with the metric bindings and any declared
+    unmeasured pairs (issue #7259). A row with no citation, or a missing
+    metric nobody declared, is a *failed check*, not a malformed inventory --
+    the inventory is well-formed, the evidence is incomplete."""
     if "report" not in inventory:
         raise AttestationError(
             "item 8 inventory must declare 'report' -- the aggregated "
@@ -439,6 +442,7 @@ def _validated_characterization(
     report = _normalize_repo_path(inventory["report"], "report", root)
     rows = _validated_spec_rows(inventory)
     citations = _validated_citations(inventory, rows, root)
+    uncited = item8.validated_uncited_rows(inventory, rows, citations)
     cited = sorted({path for paths in citations.values() for path in paths})
     if report in cited:
         raise AttestationError(
@@ -446,14 +450,25 @@ def _validated_characterization(
             "summarises the evidence, it is not itself evidence"
         )
     envelope_checks = _validated_envelope_checks(inventory, cited, root)
-    corners, metrics = _validated_metrics(inventory, root)
+    corners, metrics = item8.validated_metrics(
+        inventory, root, AttestationError, _normalize_repo_path, _REQUIRED_METRICS
+    )
+    unmeasured = item8.validated_unmeasured_metrics(
+        inventory, corners, metrics, AttestationError, _REQUIRED_METRICS
+    )
+    external_records = item8.validated_external_records(
+        inventory, cited, root, AttestationError, _normalize_repo_path
+    )
     return {
         "report": report,
         "spec_rows": list(rows),
         "citations": citations,
+        "uncited_rows": uncited,
         "envelope_checks": envelope_checks,
+        "external_records": external_records,
         "corners": corners,
         "metrics": metrics,
+        "unmeasured_metrics": unmeasured,
     }
 
 
@@ -526,121 +541,11 @@ def _validated_envelope_checks(
     return envelope_checks
 
 
-def _validated_metrics(
-    inventory: Mapping[str, Any], root: str
-) -> tuple[list[str], dict[str, dict[str, dict[str, str]]]]:
-    """``(corners, metrics)`` for a digital partition; ``([], {})`` for an
-    analog one (neither key declared). ``metrics[corner][name]`` binds a
-    required metric to ``{"envelope": path, "field": dotted.path}``."""
-    has_corners, has_metrics = "corners" in inventory, "metrics" in inventory
-    if has_corners != has_metrics:
-        raise AttestationError(
-            "'corners' and 'metrics' go together (a digital partition's corner "
-            "set and the metric bindings for it)"
-        )
-    if not has_corners:
-        return [], {}
-    corners = inventory["corners"]
-    if (
-        not isinstance(corners, list)
-        or not corners
-        or not all(isinstance(c, str) and c for c in corners)
-        or len(set(corners)) != len(corners)
-    ):
-        raise AttestationError("'corners' must be a non-empty list of unique names")
-    raw = inventory["metrics"]
-    if not isinstance(raw, Mapping):
-        raise AttestationError("'metrics' must map corner -> metric bindings")
-    unknown = sorted(set(raw) - set(corners))
-    if unknown:
-        raise AttestationError(
-            f"'metrics' names corner(s) not in 'corners': {', '.join(unknown)}"
-        )
-    metrics = {
-        corner: _validated_corner_metrics(corner, raw.get(corner, {}), root)
-        for corner in corners
-    }
-    return list(corners), metrics
-
-
-def _validated_corner_metrics(
-    corner: str, bound: Any, root: str
-) -> dict[str, dict[str, str]]:
-    if not isinstance(bound, Mapping):
-        raise AttestationError(f"'metrics.{corner}' must be an object")
-    unknown = sorted(set(bound) - set(_REQUIRED_METRICS))
-    if unknown:
-        raise AttestationError(
-            f"'metrics.{corner}' has unknown metric(s): {', '.join(unknown)} "
-            f"(accepted: {', '.join(_REQUIRED_METRICS)})"
-        )
-    result: dict[str, dict[str, str]] = {}
-    for name, binding in bound.items():
-        field = f"metrics.{corner}.{name}"
-        if (
-            not isinstance(binding, Mapping)
-            or set(binding) != {"envelope", "field"}
-            or not isinstance(binding["field"], str)
-            or not binding["field"]
-        ):
-            raise AttestationError(
-                f'\'{field}\' must be {{"envelope": path, "field": "dotted.path"}}'
-            )
-        result[name] = {
-            "envelope": _normalize_repo_path(binding["envelope"], field, root),
-            "field": binding["field"],
-        }
-    return result
-
-
-_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
-
-
-def _hex_digest(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value):
-        raise AttestationError(
-            f"'{field}' must be a 64-character lowercase hex sha256 digest"
-        )
-    return value
-
-
-def _validated_recorded(
-    raw: Any, field: str, root: str, sources: set[str]
-) -> dict[str, Any]:
-    """Validate a ``derived[]`` entry's ``recorded`` freshness record: the
-    derived file's digest plus the digest of every source it was built from."""
-    if not isinstance(raw, Mapping):
-        raise AttestationError(f"'{field}' must be an object")
-    unknown = sorted(set(raw) - {"derived_sha256", "sources"})
-    if unknown:
-        raise AttestationError(f"'{field}' has unknown field(s): {', '.join(unknown)}")
-    derived_sha256 = _hex_digest(raw.get("derived_sha256"), f"{field}.derived_sha256")
-    recorded_sources = raw.get("sources")
-    if not isinstance(recorded_sources, Mapping) or not recorded_sources:
-        raise AttestationError(
-            f"'{field}.sources' must be a non-empty object mapping each source "
-            "path to its sha256 -- a hash of the artifact alone proves nothing "
-            "about the sources it was built from"
-        )
-    normalized: dict[str, str] = {}
-    for raw_path, digest in recorded_sources.items():
-        path = _normalize_repo_path(raw_path, f"{field}.sources", root)
-        if path not in sources:
-            raise AttestationError(
-                f"'{field}.sources' lists '{path}', which is not in the "
-                "inventory's top-level 'sources'"
-            )
-        if path in normalized:
-            raise AttestationError(f"'{field}.sources' lists '{path}' more than once")
-        normalized[path] = _hex_digest(digest, f"{field}.sources[{path}]")
-    return {"derived_sha256": derived_sha256, "sources": normalized}
-
-
 def _validated_derived(
     inventory: Mapping[str, Any],
     root: str,
     seen: dict[str, str],
-    sources: set[str],
+    sources: set[str | GitPath],
 ) -> list[dict[str, Any]]:
     derived = inventory.get("derived")
     if not isinstance(derived, list) or not derived:
@@ -683,8 +588,12 @@ def _validated_derived(
         if "check" in raw:
             entry["check"] = _command_spec(raw["check"], f"{field}.check", root)
         else:
-            entry["recorded"] = _validated_recorded(
-                raw["recorded"], f"{field}.recorded", root, sources
+            entry["recorded"] = validated_recorded(
+                raw["recorded"],
+                f"{field}.recorded",
+                root,
+                sources,
+                inventory["schema_version"],
             )
         entries.append(entry)
     return sorted(entries, key=lambda entry: entry["path"])
@@ -693,128 +602,6 @@ def _validated_derived(
 # --------------------------------------------------------------------------- #
 # Checks
 # --------------------------------------------------------------------------- #
-
-
-def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
-    digest = sha256_file(os.path.join(root, path))
-    return {
-        "check": "present",
-        "role": role,
-        "path": path,
-        "passed": digest is not None,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
-    }
-
-
-def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
-    """Compare the derived file and each recorded source against the digests
-    the inventory recorded; no command is run. ``mismatches`` names every
-    differing path with its expected and actual digest (``None`` = missing)."""
-    recorded = entry["recorded"]
-    expected = {entry["path"]: recorded["derived_sha256"], **recorded["sources"]}
-    mismatches = []
-    for path in sorted(expected):
-        actual = sha256_file(os.path.join(root, path))
-        if actual != expected[path]:
-            mismatches.append(
-                {"path": path, "expected": expected[path], "actual": actual}
-            )
-    check: dict[str, Any] = {
-        "check": "recorded_hash",
-        "role": "freshness",
-        "target": entry["path"],
-        "generator": entry["generator"],
-        "passed": not mismatches,
-    }
-    if mismatches:
-        check["mismatches"] = mismatches
-    return check
-
-
-# Bounded tail of a failing command's captured output (issue #4698). Held out
-# of band (never in a check dict built here) because it is host-specific and
-# the envelope -- and its content hash -- must stay reproducible. The CLI adds
-# it to the live ``--format json`` result via :func:`attach_output_tails`,
-# after any ``--output`` write and ``--check`` diff.
-_OUTPUT_TAIL_MAX_LINES = 20
-_OUTPUT_TAIL_MAX_BYTES = 2048
-_failed_output: dict[tuple[tuple[str, ...], str], str] = {}
-
-
-def _bounded_tail(text: str) -> str:
-    lines = text.rstrip().splitlines()[-_OUTPUT_TAIL_MAX_LINES:]
-    tail = "\n".join(lines)
-    encoded = tail.encode("utf-8")
-    if len(encoded) > _OUTPUT_TAIL_MAX_BYTES:
-        tail = encoded[-_OUTPUT_TAIL_MAX_BYTES:].decode("utf-8", errors="replace")
-    return tail
-
-
-def failed_output_tail(check: Mapping[str, Any]) -> str:
-    """Bounded tail of the captured stdout+stderr of the failing command
-    ``check`` in the most recent attestation run, or ``""`` (a passing,
-    skipped or unlaunchable check has none)."""
-    return _failed_output.get(
-        (tuple(check.get("argv") or ()), check.get("cwd", "")), ""
-    )
-
-
-def attach_output_tails(envelope: Mapping[str, Any]) -> None:
-    """Add the additive ``output_tail`` string to each failing command check of
-    ``envelope`` (in place). Live-result only: call after the envelope has
-    been written or diffed, never before."""
-    for check in (envelope.get("attestation") or {}).get("checks") or []:
-        if check.get("check") == "command" and not check.get("passed"):
-            tail = failed_output_tail(check)
-            if tail:
-                check["output_tail"] = tail
-
-
-def _command_env() -> dict[str, str]:
-    """Environment for a declared command: the caller's, minus the tool
-    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
-    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
-    rather than the tool's. Outside a venv the environment is unchanged."""
-    env = dict(os.environ)
-    if sys.prefix == sys.base_prefix or "PATH" not in env:
-        return env
-    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in env["PATH"].split(os.pathsep)
-        if os.path.normcase(entry) != venv_bin
-    )
-    return env
-
-
-def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
-    """Run one declared command; return ``(exit_status, error)``. ``error``
-    is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
-    messages, so the envelope stays reproducible) or ``None``. A failing
-    command's output tail is kept for :func:`failed_output_tail`."""
-    cwd = os.path.join(root, spec["cwd"]) if spec["cwd"] != "." else root
-    key = (tuple(spec["argv"]), spec["cwd"])
-    _failed_output.pop(key, None)
-    try:
-        completed = subprocess.run(
-            spec["argv"],
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
-            check=False,
-            env=_command_env(),
-        )
-    except subprocess.TimeoutExpired:
-        return None, "timeout"
-    except OSError:
-        return None, "launch_failed"
-    if completed.returncode != 0:
-        tail = _bounded_tail(completed.stdout.decode("utf-8", errors="replace"))
-        if tail:
-            _failed_output[key] = tail
-    return completed.returncode, None
 
 
 def _command_check(
@@ -871,49 +658,18 @@ def _skipped_check(
     }
 
 
-def _metric_value(root: str, path: str, field: str) -> float | int | None:
-    """The finite number at dotted ``field`` of the JSON envelope at ``path``
-    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric."""
-    try:
-        with open(os.path.join(root, path), "rb") as handle:
-            node: Any = json.loads(
-                handle.read().decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                parse_float=_finite_json_float,
-            )
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-    for segment in field.split("."):
-        if isinstance(node, Mapping) and segment in node:
-            node = node[segment]
-        elif isinstance(node, list) and segment.isdigit() and int(segment) < len(node):
-            node = node[int(segment)]
-        else:
-            return None
-    return node if is_number(node) else None
-
-
 def _characterization_checks(
     root: str, normalized: Mapping[str, Any], command: Any
 ) -> list[dict[str, Any]]:
-    """Item 8's checks, in fixed order: report present, cited envelopes
-    present, one citation check per spec row, each envelope's own freshness
-    command, then (digital) one metric check per corner x required metric."""
+    """Item 8's checks, in order: report, cited envelopes present + recognised,
+    a citation or declared gap per row, freshness commands, then digital metrics."""
     checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
-    cited = sorted({p for paths in normalized["citations"].values() for p in paths})
-    present = {path: _file_check(root, path, "evidence") for path in cited}
-    checks.extend(present.values())
-    for row in sorted(normalized["spec_rows"]):
-        paths = normalized["citations"][row]
-        checks.append(
-            {
-                "check": "citation",
-                "role": "spec_row",
-                "row": row,
-                "envelopes": paths,
-                "passed": bool(paths) and all(present[p]["passed"] for p in paths),
-            }
-        )
+    cites = normalized["citations"]
+    cited, present, envelopes = item8.evidence_checks(
+        root, cites, _file_check, set(normalized.get("external_records", ()))
+    )
+    checks.extend((*present.values(), *envelopes.values()))
+    checks.extend(item8.row_checks(normalized, envelopes))
     for path in cited:
         checks.append(
             command(
@@ -922,24 +678,7 @@ def _characterization_checks(
                 target=path,
             )
         )
-    for corner in sorted(normalized["corners"]):
-        for name in _REQUIRED_METRICS:
-            binding = normalized["metrics"].get(corner, {}).get(name)
-            value = None
-            if binding is not None and binding["envelope"] in present:
-                value = _metric_value(root, binding["envelope"], binding["field"])
-            checks.append(
-                {
-                    "check": "metric",
-                    "role": "digital",
-                    "corner": corner,
-                    "metric": name,
-                    "envelope": binding["envelope"] if binding else None,
-                    "field": binding["field"] if binding else None,
-                    "value": value,
-                    "passed": value is not None,
-                }
-            )
+    checks.extend(item8.metric_checks(root, normalized, present, _REQUIRED_METRICS))
     return checks
 
 
@@ -947,11 +686,12 @@ def _derived_freshness_check(
     root: str,
     entry: Mapping[str, Any],
     command: Callable[..., dict[str, Any]],
+    git_hashes: Mapping[GitPath, str | None],
 ) -> dict[str, Any]:
     """The freshness check for one item-1 ``derived`` entry: the recorded
     hash comparison, or the entry's ``check`` command."""
     if "recorded" in entry:
-        return _recorded_hash_check(root, entry)
+        return recorded_hash_check(root, entry, git_hashes)
     return command(
         entry["check"],
         "freshness",
@@ -981,10 +721,10 @@ def _run_checks(
     normalized: Mapping[str, Any],
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every check for ``item``, in a deterministic order: file-presence
-    checks sorted by path (independent of inventory listing order), then
-    the item's command and pin checks. With ``committed_checks`` (the
-    ``--check`` path) every ``local_only`` command is skipped, not run."""
+    """Run the item's artifact and command checks in deterministic order.
+    Item 9's pin checks follow once the envelope's build version is known.
+    With ``committed_checks`` (the ``--check`` path) local-only commands skip."""
+    reset_command_side_channels()
     checks: list[dict[str, Any]] = []
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
@@ -993,21 +733,21 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
-        checks.extend(
-            _file_check(root, path, role) for path in sorted(normalized[field])
-        )
+        checks.extend(path_checks(root, normalized, field, role))
     if item == 1:
+        sources = normalized["git_sources"]
+        git_hashes = {location: location.sha256(root) for location in sources}
+        checks.extend(git_source_checks(sources, git_hashes))
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
         checks.extend(
-            _derived_freshness_check(root, entry, command)
+            _derived_freshness_check(root, entry, command, git_hashes)
             for entry in normalized["derived"]
         )
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.extend(item9.item9_checks(normalized, command))
-        checks.extend(item9.pin_checks(normalized["pins"]))
+        checks.extend(item9.item9_checks(normalized, command, root, _file_check))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks
@@ -1022,6 +762,8 @@ def build_attestation(
     item: int,
     inventory_path: str,
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    inventory_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --attest ITEM --inventory PATH``: run every check
     ``PATH`` declares for T1 item ``item`` and return the artifact-anchored
@@ -1041,7 +783,7 @@ def build_attestation(
             f"--attest supports T1 items {', '.join(map(str, ATTESTABLE_ITEMS))}; "
             f"got {item}"
         )
-    inventory, inventory_hash = _read_inventory(inventory_path)
+    inventory, inventory_hash = _read_inventory(inventory_path, inventory_bytes)
     absolute = os.path.realpath(os.path.abspath(inventory_path))
     root = find_repo_root(os.path.dirname(absolute))
     if root is None:
@@ -1051,10 +793,15 @@ def build_attestation(
         )
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
     normalized = _validated_inventory(inventory, item, root, inventory_path)
-    checks = _run_checks(item, root, normalized, committed_checks)
+    with klt_shim_scope():
+        checks = _run_checks(item, root, normalized, committed_checks)
+    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
+    klt_version = build_version()
+    if item == 9:
+        pins = normalized["pins"]
+        checks.extend(item9_pin_checks(pins, root, _normalize_repo_path, klt_version))
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
-    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "generic",
@@ -1065,16 +812,15 @@ def build_attestation(
             f"attestation checks passed ({PRODUCER})"
         ),
         "source": inventory_rel,
-        "attestation": {
-            "producer": PRODUCER,
-            "inventory_schema_version": inventory["schema_version"],
-            "hash_algorithm": HASH_ALGORITHM,
-            "check_count": len(checks),
-            "passed_count": passed_count,
-            "checks": checks,
-        },
+        "attestation": attestation_block(
+            PRODUCER,
+            HASH_ALGORITHM,
+            checks,
+            passed_count,
+            inventory=inventory,
+        ),
         "provenance": {
-            "klt_version": build_version(),
+            "klt_version": klt_version,
             "klayout_version": klayout_version(),
             "pdk": None,
             "deck": None,
@@ -1142,11 +888,11 @@ def check_attestation(
     plus ``fresh_status`` -- the re-attested envelope's own ``status``. The
     CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
     "pass"``: a faithfully reproduced failing attestation is still not a
-    passing gate. Only the producing build's version strings are excluded
-    from the diff
-    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`); a change to
-    the inventory, to any inventoried file, to a check's outcome, or to the
-    committed envelope itself is drift.
+    passing gate. Only the producing build's version strings
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`) and a yaml
+    check's informational ``raw_content_hash`` (issue #5862, a live note
+    instead) are excluded; a change to the inventory, to any inventoried
+    file, to a check's outcome, or to the committed envelope is drift.
 
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
     (never counted as passed by this run) and its committed outcome is carried

@@ -1,0 +1,1 @@
+- Single-top PEX comparison and extract-only reports identify each substrate DC tie written by the extractor, including its reference node, resistance and mode (#7066).

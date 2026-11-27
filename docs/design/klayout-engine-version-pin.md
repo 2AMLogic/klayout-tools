@@ -152,16 +152,25 @@ history table. `klt version --format json`'s `klayout_version_expected`
 keeps the live-probe fallback, since it is a single explicit command, not a
 per-report hot path.
 
-## Why only `drc`/`lvs`, not every `build_provenance` caller
+## Why only `drc`/`lvs`/`extract`, not every `build_provenance` caller
 
 `klayout_version_mismatch` is opt-in
 (`build_provenance(include_klayout_version_mismatch=True)`, default `False`)
-and is passed only by `klt drc` and `klt lvs`. Those are the two verbs whose
+and is passed by `klt drc` and `klt lvs`. Those are the two verbs whose
 output is most commonly committed as a byte-comparable regression baseline
 and re-verified later (`docs/json-contract.md`'s `--check`/`--rerun`
 section) — extending the same field to every provenance-carrying verb
-(`extract`, `sim`, `size`, `precheck`, …) is a reasonable future extension
+(`sim`, `size`, `precheck`, …) is a reasonable future extension
 but is out of this issue's scope; this decision does not preclude it.
+
+`klt extract`'s default in-process engine joined them in issue #7824: an
+extracted netlist's measured device parameters and parasitic R/C are
+first-class KLayout engine outputs (not bookkeeping around a verdict), so
+a pinned `klayout-tools==X.Y.Z` used as an evidence standard has the same
+provenance hole DRC/LVS had — the pin does not cover the engine, and the
+drift is otherwise only discovered by byte-diffing committed reports. The
+`--engine klayout-runset` path stays out: its engine is the standalone
+`klayout` application, which `--with klayout==` does not pin.
 
 ## Interaction with `--check`/`--rerun` (`_report_verify.py`)
 
@@ -185,9 +194,21 @@ Once a caller has `klt version --format json`'s `klayout_version_expected`
 override, not a new `klt`-specific flag (option (b) above):
 
 ```bash
+# released install:
+uv tool install "klayout-tools==<klt version>" \
+  --with klayout==<klayout_version_expected>
+
+# dev/git checkout:
 uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
   --with klayout==<klayout_version_expected>
 ```
+
+Since issue #5601, the mismatch warning itself prints whichever of the two
+forms matches the running build, derived from `reinstall_spec()` — the
+version-pin form on a released install, a real git-commit form on a clean
+dev checkout, and no fabricated command when the build is not reinstallable
+(dirty tree / no recorded commit). Options (a) and (b) above stand
+unchanged.
 
 See `docs/json-contract.md`'s "Shared `provenance` block" section for the
 field reference and this same recipe alongside the existing
@@ -242,7 +263,8 @@ written by the 0.28.x serializer, issue
   `src/klayout_tools/extract_parasitics.py:622,624,991,993,1603,2058`;
   `src/klayout_tools/power.py:1287,1327,2138`;
   `src/klayout_tools/tap_distance.py:266` — re-derive with
-  `git grep -n 'polygons_of_net(net,' -- src`.
+  `git grep -nE 'polygons_of_net\([a-z_]+,' -- src`, dropping the two
+  docstring/comment mentions it also matches.
 
   Installing an older engine anyway means bypassing the floor
   (`pip install --no-deps klayout-tools==<ver>` next to the older

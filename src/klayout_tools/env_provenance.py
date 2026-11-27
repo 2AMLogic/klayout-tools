@@ -1,22 +1,9 @@
 """Committable environment provenance for evidence records (issue #1254).
 
-An evidence record (``docs/design/sim-evidence-discipline-spike.md``) is
-published, permanent, and append-only: a record that names the machine that
-produced it names it forever, in public, and cannot be scrubbed without
-breaking the record-ID/commit-SHA chain that makes the evidence checkable in
-the first place. A 2026-08 disclosure audit of the public canary repos found
-~3,937 committed records carrying three identifier classes written *by
-design* by each canary's own harness:
-
-    - PDK: volare `gf180mcuD`, open_pdks `f6eeac7`
-      (/Users/<author>/.volare/gf180mcuD, found via search_root:~/.volare)
-    - Host: macOS-26.6.1-arm64-arm-64bit-Mach-O (<hostname>)
-
--- an absolute home-directory path, the dispatch host's name, and (elsewhere)
-the author's login. This module is the reference emitter those harnesses call
-instead of collecting that themselves, so the hygiene rule stated in
-``docs/design-evidence-tiers.md`` ("Provenance hygiene in evidence records")
-has one implementation to converge on rather than N drifting copies:
+Evidence records are permanent. A 2026-08 audit found roughly 3,937 public
+canary records exposing home paths, dispatch hostnames, or logins. This module
+implements the shared emitter described in ``docs/design-evidence-tiers.md``
+("Provenance hygiene in evidence records").
 
 - **Repo-relative paths only.** :func:`repo_relative_path` reports a path
   inside the repo relative to its root, and reports a path *outside* it as
@@ -74,6 +61,7 @@ import socket
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from . import _jsongz
 from .env_provenance_scrub import scrub_payload
 from .env_provenance_walk import walk_lintable_string_fields, walk_string_fields
 
@@ -345,17 +333,15 @@ def scan_files(paths: Iterable[str]) -> dict[str, Any]:
 
     Returns ``{schema_version, status, leak_count, files[]}`` where ``status``
     is ``"clean"`` or ``"leaked"`` and each ``files[]`` entry is
-    ``{file, leaks[]}``. Raises :class:`EnvironmentProvenanceError` for a file
-    that cannot be read -- an unreadable file is an error, never a silent
-    "clean" verdict.
+    ``{file, leaks[]}``. Unreadable files raise :class:`EnvironmentProvenanceError`.
     """
     entries: list[dict[str, Any]] = []
     total = 0
     for path in paths:
         try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
+            with _jsongz.open_text(path, errors="replace") as handle:
                 text = handle.read()
-        except OSError as exc:
+        except _jsongz.READ_ERRORS as exc:
             raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
         leaks = find_leaks(text)
         total += len(leaks)
@@ -377,10 +363,10 @@ def scan_files(paths: Iterable[str]) -> dict[str, Any]:
 #: emitted once per :func:`lint_envelope_files` payload so a consumer reading
 #: only the JSON still gets the remedy, not just the complaint.
 ENVELOPE_LINT_RECOMMENDATION = (
-    "replace each absolute host path with a repo-relative reference (the "
-    "{path, scope} shape env_provenance.repo_relative_path() builds) or with "
-    "a content hash (provenance.input.content_hash) -- an absolute path is "
-    "not reproducible on another checkout. Declare a genuinely machine-wide "
+    "for a klt-produced envelope, re-run with request.portable_paths: true so "
+    "the writer rewrites absolute host paths to a committable form; otherwise "
+    "replace each with a repo-relative reference or a content hash -- an absolute "
+    "path is not reproducible on another checkout. Declare a genuinely machine-wide "
     "PDK/tool install prefix with --allow-prefix if it must appear."
 )
 
@@ -540,12 +526,20 @@ def lint_envelope_files(
 
 def _load_json_envelope(path: str) -> Any:
     try:
-        with open(path, encoding="utf-8") as handle:
+        with _jsongz.open_text(path) as handle:
             return json.load(handle)
-    except OSError as exc:
-        raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise EnvironmentProvenanceError(f"{path} is not valid JSON: {exc}") from exc
+    except FileNotFoundError as exc:
+        raise EnvironmentProvenanceError(f"file not found: {path}") from exc
+    except IsADirectoryError as exc:
+        raise EnvironmentProvenanceError(f"not a file: {path}") from exc
+    except _jsongz.READ_ERRORS as exc:
+        raise EnvironmentProvenanceError(
+            f"could not read request '{path}': {exc}"
+        ) from exc
+    except ValueError as exc:
+        raise EnvironmentProvenanceError(
+            f"request '{path}' is not valid JSON: {exc}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -662,18 +656,18 @@ def _assert_no_leaks(report: Mapping[str, Any]) -> None:
             )
 
 
-def render_path_field(entry: Mapping[str, Any] | None) -> str:
+def render_path_field(entry: Mapping[str, Any] | str | None) -> str:
     """Human-readable rendering of one :func:`repo_relative_path` entry.
 
-    Shared by :func:`render_text_lines` and any other ``--format text``
-    renderer that reports a normalised ``{path, scope}`` input field (e.g.
-    ``klt pex``/``klt sim``'s own ``layout``/``netlist``/``reference_netlist``/
-    ``request``/``schematic_netlist``/``checkpoint_path`` fields, issue
-    #1261) -- ``"repo"`` renders the repo-relative path itself, ``"external"``
-    renders ``<outside repo>`` (the absolute path is never rendered, even in
-    text mode), and anything else (``"absent"``, or a missing/malformed
-    entry) renders ``<unresolved>``.
+    Shared by :func:`render_text_lines` and any ``--format text`` renderer
+    of a normalised ``{path, scope}`` field (issue #1261): ``"repo"`` renders
+    the repo-relative path, ``"external"`` ``<outside repo>`` (never the
+    absolute path), anything else ``<unresolved>``; a bare ``str`` (a
+    request's own string echo) renders verbatim (issue #5666) so a schema
+    slip degrades to a less-informative line, never a traceback.
     """
+    if isinstance(entry, str):
+        return entry
     if not entry:
         return "<unresolved>"
     scope = entry.get("scope")

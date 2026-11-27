@@ -83,6 +83,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from ._jsonnum import is_int, is_number
+
 __all__ = [
     "Aggregator",
     "MetricDomain",
@@ -153,12 +155,10 @@ class MetricDef:
         if isinstance(value, float) and not math.isfinite(value):
             return "non_finite"
         if self.domain == "nonnegative_integer":
-            if not isinstance(value, int) or isinstance(value, bool):
-                return "expected_integer"
-            return "below_minimum" if value < 0 else None
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            return "expected_number"
-        return None
+            if is_int(value):
+                return "below_minimum" if value < 0 else None
+            return "expected_integer"
+        return None if is_number(value) else "expected_number"
 
 
 #: The module-level registry. Populated only by :func:`register` (never

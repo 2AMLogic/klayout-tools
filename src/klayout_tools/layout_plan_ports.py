@@ -1,13 +1,23 @@
-"""Port-name and pin/unrouted-reason helpers for ``layout_plan_execute``
-(#4966): device-owned port lookup, netlist-port pin promotion, and parsing
-of ``compose()``'s unrouted-net notes. Split out to keep
-``layout_plan_execute.py`` under its file-size ceiling.
-"""
+"""Layout-plan ports, ring binding, group parameters and routing diagnostics."""
 
 from __future__ import annotations
 
 import re
 from typing import Any
+
+from ._jsonnum import is_number
+from .layout_plan_flavors import (
+    _MOS_FLAVOR_GENERATORS as _MOS_FLAVOR_GENERATORS,
+)
+from .layout_plan_flavors import (
+    apply_derived_flavors as apply_derived_flavors,
+)
+from .layout_plan_flavors import (
+    apply_mos_flavor as apply_mos_flavor,
+)
+from .layout_plan_flavors import (
+    apply_resistor_flavor as apply_resistor_flavor,
+)
 
 
 def device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
@@ -73,6 +83,93 @@ def apply_gate_contact(
     if "gate_contact" in overrides:
         return []
     return [gate_contact_warning(group["id"])]
+
+
+#: Digest dimensions accepted by each generator, in micrometres.
+_SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
+    "mos_array": {"L": "l_um", "W": "w_um"},
+    "diff_pair": {"L": "l_um", "W": "w_um"},
+    "esd_device": {"L": "l_um", "W": "finger_width_um"},
+    "res_array": {"L": "length_um", "W": "width_um"},
+}
+
+
+def _netlist_derived_size_params(
+    generator: str, device_params: dict[str, Any]
+) -> dict[str, float]:
+    """Map positive digest dimensions to generator parameters.
+
+    KLayout reports zero for the unspecified L and W of a bare SPICE resistor.
+    Omitting those dimensions lets the generator apply its geometry defaults.
+    """
+    targets = _SIZE_PARAM_TARGETS.get(generator)
+    if not targets:
+        return {}
+    resolved: dict[str, float] = {}
+    for digest_key, gen_param in targets.items():
+        value = device_params.get(digest_key)
+        value_is_number = is_number(value)
+        if value_is_number and value > 0:
+            resolved[gen_param] = float(value)
+    return resolved
+
+
+def diff_pair_leg_error(
+    group: dict[str, Any],
+    digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
+    *,
+    mirror: bool,
+) -> str | None:
+    """Reject a repeated MOS, folded fingers or shorted differential inputs.
+
+    The mirror form may share a gate when the two drains are distinct and one
+    is tied to that gate. Other generators use their own terminal conventions.
+    """
+    if group["generator"] != "diff_pair" or len(group["devices"]) < 2:
+        return None
+    resolved = [
+        (
+            device_ref["name"],
+            digest_devices_by_key.get((device_ref["name"], device_ref["device_class"])),
+        )
+        for device_ref in group["devices"]
+    ]
+    for index, (name_i, device_i) in enumerate(resolved):
+        for name_j, device_j in resolved[index + 1 :]:
+            if device_i is None or device_j is None:
+                # An unresolvable device reference is Phase B's own
+                # validation error (exit 1, "does not resolve"); skip it
+                # here exactly like derive_gate_contact does.
+                continue
+            left, right = device_i["terminals"], device_j["terminals"]
+            shared = {
+                t: left[t]
+                for t in ("G", "D")
+                if left.get(t) is not None and left.get(t) == right.get(t)
+            }
+            if (
+                mirror
+                and shared.keys() == {"G"}
+                and shared["G"] in (left.get("D"), right.get("D"))
+            ):
+                continue
+            if shared:
+                terminals = " and ".join(
+                    f"terminal {t} on net '{net}'" for t, net in shared.items()
+                )
+                return (
+                    f"device_groups (id '{group['id']}'): declared diff_pair "
+                    f"devices '{name_i}' and '{name_j}' are not electrically "
+                    f"distinct legs -- they share {terminals}. Differential "
+                    "inputs need separate gates and drains. A current mirror "
+                    "may share its diode-connected gate with params.mirror=true. "
+                    "Declare one digest device per leg, write the matched pair "
+                    "with no nf (or nf=1) and let params.splits "
+                    "do the folding -- or drive klt gen-compose directly with "
+                    "explicit connectivity[] (see "
+                    "docs/cli/layout-plan-execute.md)."
+                )
+    return None
 
 
 def extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -184,147 +281,3 @@ def bind_ring_nets(
         pin = {"block": group["id"], "port": names[0]}
         if pin not in net_pins.setdefault(ring_net, []):
             net_pins[ring_net].append(pin)
-
-
-#: Generators whose declared devices carry a MOS body (``B``) terminal *and*
-#: whose generated ``ports[]`` can expose a group-level tie to it -- the
-#: contacted ``TAP_PAD<k>`` pads a ring-less array draws (#4143), or, when the
-#: group draws its own guard ring instead, that ring's ``TAP_<side>`` ports.
-#: Exactly the generators ``layout_plan_execute._TERMINAL_SUFFIXES`` gives an
-#: ``S``/``D``/``G`` map (#5546).
-BODY_TIE_GENERATORS = frozenset({"mos_array", "diff_pair", "esd_device"})
-
-#: The digest terminal name a MOS body sits on (``device_class.
-#: terminal_definitions()``; see ``netlist_digest``).
-BODY_TERMINAL = "B"
-
-#: A ring-less array's contacted tie pad (#4143). Checked before
-#: :data:`_RING_TAP_PREFIX`, of which it is a prefix-extension.
-_TAP_PAD_PREFIX = "TAP_PAD"
-
-#: A ``mos_array``/``diff_pair``/``esd_device`` guard ring's own tap port
-#: (``gen_describe._ring_ports`` is called with ``tap_prefix="TAP_"`` by all
-#: three). ``GAP_<side>`` -- a marker, never a conductor -- cannot collide.
-_RING_TAP_PREFIX = "TAP_"
-
-
-def body_tie_port(ports: list[dict[str, Any]]) -> str | None:
-    """The single generated port a group's body net should be bound to, or
-    ``None`` when the generator drew no tie (#5546).
-
-    A ring-less array's ``TAP_PAD<k>`` pads win over a drawn ring's
-    ``TAP_<side>`` ports purely so the choice is stable if a generator ever
-    reports both -- today they are mutually exclusive
-    (``gen._optional_tap_pads`` returns ``None`` whenever a ring is drawn).
-    **One** port per group is enough either way, exactly as for
-    :func:`bind_ring_nets`: a group's pads all contact the one well (pfet) or
-    the one substrate (nfet), and a ring is a single conductor, so binding
-    more would only wire the tie to itself.
-    """
-    names = [
-        port["name"]
-        for port in ports
-        if isinstance(port, dict) and isinstance(port.get("name"), str)
-    ]
-    for prefix in (_TAP_PAD_PREFIX, _RING_TAP_PREFIX):
-        for name in names:
-            if name.startswith(prefix):
-                return name
-    return None
-
-
-def group_body_nets(
-    group: dict[str, Any],
-    digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
-) -> list[str]:
-    """The distinct, non-null ``B`` nets of every device ``group`` declares,
-    in first-declared order (#5546). Empty for a group whose generator has no
-    body terminal, whose devices are 3-terminal, or which declares none."""
-    if group["generator"] not in BODY_TIE_GENERATORS:
-        return []
-    nets: list[str] = []
-    for device_ref in group["devices"]:
-        digest_device = digest_devices_by_key.get(
-            (device_ref["name"], device_ref["device_class"])
-        )
-        if digest_device is None:
-            continue
-        net = digest_device["terminals"].get(BODY_TERMINAL)
-        if isinstance(net, str) and net not in nets:
-            nets.append(net)
-    return nets
-
-
-def body_net_conflict_message(group_id: str, nets: list[str]) -> str:
-    return (
-        f"device_groups (id '{group_id}'): the declared devices' body "
-        f"('{BODY_TERMINAL}') terminals sit on more than one net "
-        f"({', '.join(repr(net) for net in nets)}), but the group has a "
-        "single body tie -- binding it would short them together; split the "
-        "group so each body net gets its own"
-    )
-
-
-def unbound_body_net_warning(group_id: str, generator: str, net: str) -> str:
-    return (
-        f"device_groups (id '{group_id}'): generator '{generator}' reported "
-        f"no tap/ring port, so the declared devices' body net '{net}' is "
-        "left untied -- the layout can route and pass DRC while every body "
-        "extracts onto an anonymous well/substrate net and fails LVS"
-    )
-
-
-def bind_body_nets(
-    device_groups: list[dict[str, Any]],
-    digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
-    generated: dict[str, dict[str, Any]],
-    net_pins: dict[str, list[dict[str, str]]],
-    warnings: list[str],
-) -> None:
-    """Bind each device group's own body tie to the net the netlist already
-    puts that group's devices' ``B`` terminal on (#5546).
-
-    The MOS body is deliberately absent from the per-device terminal map
-    (``layout_plan_execute``'s scope decision 5) because a tie is a property
-    of the *group*, not of a device: it is one well or substrate contact
-    shared by every device in the array, with no ``_B``-suffixed per-device
-    port to resolve. So it is bound here, group-level, beside
-    :func:`bind_ring_nets` -- one :func:`body_tie_port` pin appended to the
-    body net's pin set, after which the existing ``connectivity[]`` /
-    ``pins[]`` / ``unmapped_netlist_nets[]`` logic carries it unchanged.
-
-    Two cases do not bind:
-
-    * **More than one body net in one group** -- an application error
-      (:class:`~klayout_tools.layout_plan_execute.LayoutPlanExecuteError`,
-      exit 1) naming the group and the nets, rather than the silent short
-      one shared tie would draw between them.
-    * **No tie port** (a family with no tap-distance rule and no requested
-      ring, e.g. a ring-less sky130 array) -- one ``warnings[]`` entry per
-      untied body net, so the caller learns in this run that the bodies are
-      untied rather than from a later LVS compare. Suppressed for a net a
-      ``guard_ring`` group's own ``net`` (#5095) already names: the plan
-      ties it.
-    """
-    from .layout_plan_execute import LayoutPlanExecuteError
-
-    ring_nets = {
-        group["net"] for group in device_groups if isinstance(group.get("net"), str)
-    }
-    for group in device_groups:
-        nets = group_body_nets(group, digest_devices_by_key)
-        if not nets:
-            continue
-        tie_port = body_tie_port(generated[group["id"]].get("ports") or [])
-        if tie_port is None:
-            for net in nets:
-                if net not in ring_nets:
-                    warnings.append(
-                        unbound_body_net_warning(group["id"], group["generator"], net)
-                    )
-            continue
-        if len(nets) > 1:
-            raise LayoutPlanExecuteError(body_net_conflict_message(group["id"], nets))
-        pin = {"block": group["id"], "port": tie_port}
-        if pin not in net_pins.setdefault(nets[0], []):
-            net_pins[nets[0]].append(pin)

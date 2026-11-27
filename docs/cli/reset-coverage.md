@@ -12,9 +12,20 @@ klt reset-coverage <netlist.v> --cell-models <models.v> [--cell-models ...]
 - `--cell-models` -- PDK functional Verilog model file(s) (e.g. sky130's
   `libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v`); resolved by the caller,
   nothing is vendored. A cell is *sequential* when its model instantiates a
-  `udp_dff*`/`udp_dlatch*` primitive; its async pins are the model's
-  `RESET_B`/`SET_B`/`RESET`/`SET`/`RN`/`SETN` inputs. A pure buffer/inverter
-  cell is a model made only of `buf`/`not`/power-good primitives.
+  state-holding UDP: any `primitive` declared in the supplied files whose
+  output is a register and whose table rows read `inputs : current : next`
+  (a combinational UDP's single row is `inputs : output`). ASAP7's
+  `altos_dff*`/`altos_latch*` family is recognised this way — including its
+  instantiation without an instance name (`altos_dff (q, v, clk, d, xcr)`)
+  and its `altos_dff*_err` notifier companions, which share the shape. The
+  UDP declarations are indexed across every supplied file before any module
+  is classified, so a primitive declared in a separate file is recognised
+  regardless of source order; a `udp_dff*`/`udp_dlatch*` primitive is also
+  matched by name (the sky130 spelling, so cell wrappers supplied without
+  their primitives' declarations still classify). A cell's async pins are
+  the model's `RESET_B`/`SET_B`/`RESET`/`SET`/`RN`/`SETN` inputs. A pure
+  buffer/inverter cell is a model made only of `buf`/`not`/power-good
+  primitives (named or unnamed).
 - `--reset-port` / `--reset-polarity` -- the top-module port and the level
   (default `low`) at which it is asserted.
 - `--top` -- required when the netlist holds more than one module.

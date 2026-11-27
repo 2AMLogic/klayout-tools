@@ -291,12 +291,6 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/equiv_sequential.py",
-      "code": "arg-type",
-      "message": "Argument \"resume_block\" to \"_resume_report_from_committed_stage1\" has incompatible type \"dict[str, Any] | None\"; expected \"dict[str, Any]\"",
-      "count": 1
-    },
-    {
       "file": "src/klayout_tools/erc.py",
       "code": "index",
       "message": "Invalid index type \"str | None\" for \"dict[str, str]\"; expected type \"str\"",
@@ -399,12 +393,6 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/functional_verification.py",
-      "code": "arg-type",
-      "message": "Argument 5 to \"_apply_sdf_physical_only_drop\" has incompatible type \"list[tuple[str, str, str]]\"; expected \"list[tuple[str, int, str]]\"",
-      "count": 1
-    },
-    {
       "file": "src/klayout_tools/functional_verification_sdf.py",
       "code": "call-overload",
       "message": "No overload variant of \"list\" matches argument type \"object\"",
@@ -473,7 +461,7 @@
     {
       "file": "src/klayout_tools/gen_compose_routing.py",
       "code": "no-redef",
-      "message": "Name \"ladder\" already defined on line 312",
+      "message": "Name \"ladder\" already defined on line 321",
       "count": 1
     },
     {
@@ -929,6 +917,12 @@
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"pitch_x_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"poly_layer\"",
       "count": 1
     },
@@ -1009,6 +1003,24 @@
       "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"splits\"",
       "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"strap_metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"strap_splits\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"strap_via_layer\"",
+      "count": 1
     },
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
@@ -1380,12 +1392,6 @@
       "file": "src/klayout_tools/gen_pcells/guard_ring.py",
       "code": "attr-defined",
       "message": "\"_GuardRingPCell\" has no attribute \"ring_implant_layer\"",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
-      "code": "attr-defined",
-      "message": "\"_GuardRingPCell\" has no attribute \"ring_implant_margin_um\"",
       "count": 1
     },
     {
@@ -2069,12 +2075,6 @@
     {
       "file": "src/klayout_tools/gen_pcells/well_island.py",
       "code": "attr-defined",
-      "message": "\"_WellIslandPCell\" has no attribute \"ring_implant_margin_um\"",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/gen_pcells/well_island.py",
-      "code": "attr-defined",
       "message": "\"_WellIslandPCell\" has no attribute \"ring_width_um\"",
       "count": 1
     },
@@ -2139,21 +2139,15 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/layout_plan_execute.py",
+      "file": "src/klayout_tools/layout_plan_ports.py",
       "code": "arg-type",
       "message": "Argument 1 to \"float\" has incompatible type \"Any | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
       "count": 1
     },
     {
-      "file": "src/klayout_tools/layout_plan_execute.py",
+      "file": "src/klayout_tools/layout_plan_ports.py",
       "code": "operator",
       "message": "Unsupported operand types for < (\"int\" and \"None\")",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/lef_abstract.py",
-      "code": "misc",
-      "message": "List comprehension has incompatible type List[Box]; expected List[PolygonWithProperties]",
       "count": 1
     },
     {
@@ -2296,12 +2290,6 @@
     },
     {
       "file": "src/klayout_tools/place_and_route.py",
-      "code": "arg-type",
-      "message": "Argument 1 to \"row_rail_fallback_warning\" has incompatible type \"str | None\"; expected \"str\"",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
       "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"str | None\", variable has type \"str\")",
       "count": 1
@@ -2310,6 +2298,12 @@
       "file": "src/klayout_tools/place_and_route_pdn_fit.py",
       "code": "attr-defined",
       "message": "\"object\" has no attribute \"__iter__\"; maybe \"__dir__\" or \"__str__\"? (not iterable)",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_warnings.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"row_rail_fallback_warning\" has incompatible type \"str | None\"; expected \"str\"",
       "count": 1
     },
     {

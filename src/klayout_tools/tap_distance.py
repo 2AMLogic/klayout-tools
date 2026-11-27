@@ -44,12 +44,12 @@ The distance is Euclidean (corner-to-corner diagonals count as
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from typing import Any
 
 from ._layout import bbox_um_dict, clip_box, load_layout, region, resolve_top_cell
+from ._paths import _load_request_json, parse_layer_datatype
 from ._provenance import sha256_file
 
 #: Stable rule ids -- never renumbered/repurposed once shipped.
@@ -123,16 +123,6 @@ def _expr_region(layout: Any, cell: Any, terms: list[tuple[str, tuple[int, int]]
     return result.merged()
 
 
-def _parse_layer(raw: Any, path: str, field: str) -> tuple[int, int]:
-    match = _LAYER_TOKEN.fullmatch(str(raw))
-    if match is None:
-        raise TapDistanceError(
-            f"--net-spec '{path}': {field} must be '<layer>/<datatype>' with "
-            f"integer layer/datatype (got {raw!r})"
-        )
-    return int(match.group(1)), int(match.group(2))
-
-
 def _parse_vias(
     spec: dict[str, Any], path: str, stackup_names: list[str]
 ) -> list[dict[str, Any]]:
@@ -160,7 +150,9 @@ def _parse_vias(
         vias.append(
             {
                 "name": name,
-                "layer": _parse_layer(entry["layer"], path, f"vias[{i}].layer"),
+                "layer": parse_layer_datatype(
+                    entry["layer"], path, f"vias[{i}].layer", TapDistanceError
+                ),
                 "between": (between[0], between[1]),
             }
         )
@@ -170,13 +162,7 @@ def _parse_vias(
 def _load_net_spec(path: str) -> dict[str, Any]:
     """Validate a ``--net-spec`` file: ``stackup`` (name/layer/label_layer),
     optional ``vias`` and ``tap_connect_to`` (a stackup name)."""
-    try:
-        with open(path, encoding="utf-8") as handle:
-            spec = json.load(handle)
-    except OSError as exc:
-        raise TapDistanceError(f"could not read --net-spec '{path}': {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise TapDistanceError(f"--net-spec '{path}' is not valid JSON: {exc}") from exc
+    spec = _load_request_json(path, TapDistanceError)
     if not isinstance(spec, dict):
         raise TapDistanceError(f"--net-spec '{path}' must be a JSON object")
 
@@ -201,10 +187,14 @@ def _load_net_spec(path: str) -> dict[str, Any]:
         stackup.append(
             {
                 "name": name,
-                "layer": _parse_layer(entry["layer"], path, f"stackup[{i}].layer"),
+                "layer": parse_layer_datatype(
+                    entry["layer"], path, f"stackup[{i}].layer", TapDistanceError
+                ),
                 "label_layer": None
                 if label is None
-                else _parse_layer(label, path, f"stackup[{i}].label_layer"),
+                else parse_layer_datatype(
+                    label, path, f"stackup[{i}].label_layer", TapDistanceError
+                ),
             }
         )
     names = [s["name"] for s in stackup]

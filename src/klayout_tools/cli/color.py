@@ -48,10 +48,17 @@ class Palette(NamedTuple):
     red: str
     green: str
     reset: str
+    # Issue #6927: "evidence exists but is not a pass" -- a composed
+    # signoff row is real evidence that still does not satisfy the tier,
+    # which is neither of the two colours above. Defaults to empty so
+    # `PLAIN` (and any palette built before the field existed) needs no
+    # change and renders it uncoloured, like every other field.
+    yellow: str = ""
 
 
-#: The colouring palette: red for "wrong/missing", green for "met/ok".
-COLOR = Palette(red="\033[31m", green="\033[32m", reset="\033[0m")
+#: The colouring palette: red for "wrong/missing", green for "met/ok",
+#: yellow for "present but not a pass" (issue #6927).
+COLOR = Palette(red="\033[31m", green="\033[32m", reset="\033[0m", yellow="\033[33m")
 
 #: The escape-free palette used whenever colour is suppressed.
 PLAIN = Palette(red="", green="", reset="")

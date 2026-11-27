@@ -36,19 +36,25 @@ maps a :class:`GeneratorOutcome` onto its ``_REASON_*`` constants.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import posixpath
-import re
 import shlex
 import tarfile
 import tempfile
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import _batch_common, _provenance, netlist_batch, remote_transport, sim_batch
+from . import (
+    _batch_approvals,
+    _batch_common,
+    _provenance,
+    netlist_batch,
+    remote_transport,
+    sim_batch,
+)
+from ._jsonnum import is_number
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -59,7 +65,7 @@ from . import _batch_common, _provenance, netlist_batch, remote_transport, sim_b
 APPROVALS_ENV = "KLT_SIGNOFF_GENERATOR_APPROVALS"
 
 #: ``schema_version`` of the approvals file.
-APPROVALS_SCHEMA_VERSION = 1
+APPROVALS_SCHEMA_VERSION = _batch_approvals.APPROVALS_SCHEMA_VERSION
 
 #: Default and ceiling for one generator run's inner ``timeout`` (seconds).
 DEFAULT_TIMEOUT_S = 600.0
@@ -101,10 +107,6 @@ FAIL_OUTPUT_INCOMPLETE = "output_incomplete"
 STATE_FRESH = "fresh"
 STATE_STALE = "stale"
 STATE_FAILED = "failed"
-
-_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_INTERPRETER_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
 
 _APPROVAL_KEYS = frozenset(
     {
@@ -165,58 +167,34 @@ class GeneratorExecution:
 
 
 def _relative_posix(value: Any, what: str) -> str:
-    if not isinstance(value, str) or not value.strip() or "\0" in value:
-        raise GeneratorApprovalError(f"{what} must be a non-empty string")
-    if value.startswith("/") or os.path.isabs(value):
-        raise GeneratorApprovalError(f"{what} must be repo-relative (got {value!r})")
-    normal = posixpath.normpath(value.replace("\\", "/"))
-    if normal in (".", "") or normal == ".." or normal.startswith("../"):
-        raise GeneratorApprovalError(f"{what} must stay inside the repo ({value!r})")
-    return normal
+    return _batch_approvals.validate_relative_posix(
+        value, what, scope="repo", make_error=GeneratorApprovalError
+    )
 
 
 def _parse_approval(index: int, raw: Any) -> GeneratorApproval:
-    label = f"approvals[{index}]"
-    if not isinstance(raw, Mapping):
-        raise GeneratorApprovalError(f"{label} must be an object")
-    unknown = sorted(set(raw) - _APPROVAL_KEYS)
-    if unknown:
-        raise GeneratorApprovalError(f"{label} has unknown keys: {', '.join(unknown)}")
-    ident = raw.get("id")
-    if not isinstance(ident, str) or not _ID_RE.match(ident):
-        raise GeneratorApprovalError(f"{label}.id must match [A-Za-z0-9._-]+")
-    interpreter = raw.get("interpreter")
-    if not isinstance(interpreter, str) or not _INTERPRETER_RE.match(interpreter):
-        raise GeneratorApprovalError(
-            f"{label}.interpreter must be a bare command name or path without "
-            "whitespace or shell metacharacters"
-        )
+    label, ident, interpreter = _batch_approvals.parse_approval_header(
+        index, raw, allowed_keys=_APPROVAL_KEYS, make_error=GeneratorApprovalError
+    )
     script = _relative_posix(raw.get("script"), f"{label}.script")
     script_sha256 = raw.get("script_sha256")
-    if not isinstance(script_sha256, str) or not _SHA256_RE.match(script_sha256):
+    if not isinstance(script_sha256, str) or not _batch_approvals.SHA256_RE.match(
+        script_sha256
+    ):
         raise GeneratorApprovalError(
             f"{label}.script_sha256 is required: sha256:<64 lowercase hex> of "
             "the approved script's bytes (an approval binds content, not a name)"
         )
-    allowed_raw = raw.get("allowed_arguments", [[]])
-    if not isinstance(allowed_raw, list) or not all(
-        isinstance(item, list) and all(isinstance(arg, str) for arg in item)
-        for item in allowed_raw
-    ):
-        raise GeneratorApprovalError(
-            f"{label}.allowed_arguments must be a list of string lists"
-        )
+    allowed = _batch_approvals.parse_allowed_arguments(
+        raw, label, GeneratorApprovalError
+    )
     timeout_s = raw.get("timeout_s", DEFAULT_TIMEOUT_S)
-    if (
-        isinstance(timeout_s, bool)
-        or not isinstance(timeout_s, (int, float))
-        or not 0 < timeout_s <= MAX_TIMEOUT_S
-    ):
+    if not is_number(timeout_s) or not 0 < timeout_s <= MAX_TIMEOUT_S:
         raise GeneratorApprovalError(
             f"{label}.timeout_s must be a number in (0, {int(MAX_TIMEOUT_S)}]"
         )
     pdk = raw.get("pdk", DEFAULT_PDK)
-    if not isinstance(pdk, str) or not _ID_RE.match(pdk):
+    if not isinstance(pdk, str) or not _batch_approvals.ID_RE.match(pdk):
         raise GeneratorApprovalError(f"{label}.pdk must be a PDK variant name")
     include_raw = raw.get("include", [])
     if not isinstance(include_raw, list) or not all(
@@ -230,7 +208,7 @@ def _parse_approval(index: int, raw: Any) -> GeneratorApproval:
         script_sha256=script_sha256,
         artifact=_relative_posix(raw.get("artifact"), f"{label}.artifact"),
         output=_relative_posix(raw.get("output"), f"{label}.output"),
-        allowed_arguments=tuple(tuple(item) for item in allowed_raw),
+        allowed_arguments=allowed,
         pdk=pdk,
         timeout_s=float(timeout_s),
         include=tuple(include_raw),
@@ -239,36 +217,12 @@ def _parse_approval(index: int, raw: Any) -> GeneratorApproval:
 
 def load_approvals(path: str) -> tuple[GeneratorApproval, ...]:
     """Read and strictly validate the trusted approvals file."""
-    try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-    except OSError as exc:
-        raise GeneratorApprovalError(
-            f"cannot read generator approvals file {path}: {exc}"
-        ) from exc
-    except ValueError as exc:
-        raise GeneratorApprovalError(
-            f"generator approvals file {path} is not valid JSON: {exc}"
-        ) from exc
-    if (
-        not isinstance(document, Mapping)
-        or document.get("schema_version") != APPROVALS_SCHEMA_VERSION
-        or not isinstance(document.get("approvals"), list)
-        or set(document) - {"schema_version", "approvals"}
-    ):
-        raise GeneratorApprovalError(
-            f"generator approvals file {path} must be an object "
-            f'{{"schema_version": {APPROVALS_SCHEMA_VERSION}, "approvals": [...]}}'
-        )
-    approvals = tuple(
-        _parse_approval(index, raw) for index, raw in enumerate(document["approvals"])
+    return _batch_approvals.load_approvals_file(
+        path,
+        kind="generator",
+        parse_entry=_parse_approval,
+        make_error=GeneratorApprovalError,
     )
-    ids = [approval.id for approval in approvals]
-    if len(set(ids)) != len(ids):
-        raise GeneratorApprovalError(
-            f"generator approvals file {path} repeats an approval id"
-        )
-    return approvals
 
 
 def resolve_execution(
@@ -551,10 +505,9 @@ def run_approved_generator(
     committed_hash: str,
     artifact: str,
 ) -> GeneratorOutcome:
-    """Run ``approval`` on the batch runner and compare its output with the
-    committed artifact (``committed_hash`` is what ``artifact`` just
-    re-hashed to). Never raises for an execution problem: every failure is a
-    ``failed`` outcome, and no path here runs the generator on this host.
+    """Run the approved generator on the fleet and compare its output to the
+    committed artifact. ``committed_hash`` is the freshly computed artifact hash.
+    Execution problems return a failed outcome.
     """
     evidence: dict[str, Any] = {
         "backend": "batch",
@@ -572,6 +525,7 @@ def run_approved_generator(
             {"models": {"pdk": approval.pdk}},
             corner_count=1,
             timeout_s=approval.timeout_s,
+            sim_image_profiles=False,
         )
     except Exception as exc:  # SimError / BatchError: unresolvable fleet config
         return _fail(FAIL_CONFIG, f"batch backend not usable: {exc}", evidence)

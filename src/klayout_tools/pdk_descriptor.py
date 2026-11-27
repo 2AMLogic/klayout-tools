@@ -31,6 +31,8 @@ import json
 import os
 from typing import Any
 
+from .liberty_merge import LibertyMergeError, merge_liberty
+
 #: Descriptor filename at a variant's root.
 DESCRIPTOR_FILENAME = "klt-pdk.json"
 
@@ -75,7 +77,7 @@ def load_descriptor(directory: str) -> dict[str, Any]:
     Returns ``{"variant": str | None, "assets": {key: abs dir | None},
     "liberty": {cell_library: {corner: abs path | [abs path, ...]}},
     "views": {cell_library: {"cell_lef": path, "tech_lef": {corner: path},
-    "gds": path}}}``. Asset directories that do
+    "gds": path, "verilog": [path, ...]}}}``. Asset directories that do
     not exist on disk resolve to ``None`` (same posture as the structural
     layouts); a malformed field, an escaping path, or a missing ``liberty``
     target raises :class:`DescriptorError` naming the file and field.
@@ -152,6 +154,26 @@ def _resolve_liberty(
     return liberty
 
 
+def mapped_liberty_path(
+    mapped: str | list[str],
+    cell_library: str,
+    corner: str,
+    error_cls: type[Exception],
+    *,
+    merge_hint: str = "",
+) -> str:
+    """Return the same explicit deck for single-corner and sweep sessions."""
+    if isinstance(mapped, str):
+        return mapped
+    try:
+        return merge_liberty(mapped)
+    except LibertyMergeError as exc:
+        raise error_cls(
+            f"liberty not found for deck: cannot merge '{cell_library}' "
+            f"corner '{corner}': {exc}{merge_hint}"
+        ) from exc
+
+
 def _resolve_liberty_entry(directory: str, rel: Any, where: str) -> str | list[str]:
     """One corner value: a path string, or a non-empty list of path strings."""
     if not isinstance(rel, list):
@@ -165,14 +187,17 @@ def _resolve_liberty_entry(directory: str, rel: Any, where: str) -> str | list[s
 
 
 #: Keys a ``views.<cell_library>`` object may carry.
-VIEW_KEYS: tuple[str, ...] = ("cell_lef", "tech_lef", "gds")
+VIEW_KEYS: tuple[str, ...] = ("cell_lef", "tech_lef", "gds", "verilog")
 
 
 def _resolve_views(
     directory: str, path: str, raw_views: Any
 ) -> dict[str, dict[str, Any]]:
     """Resolve ``views`` to ``{cell_library: {cell_lef/gds: path, tech_lef:
-    {corner: path}}}``; every mapped file must exist."""
+    {corner: path}, verilog: [path, ...]}}``; every mapped file must exist.
+
+    ``verilog`` (issue #7695) is the library's behavioural-model sources in
+    the order a simulator must compile them: a non-empty list, kept verbatim."""
     if not isinstance(raw_views, dict):
         raise DescriptorError(f"{path}: field 'views' must be an object")
     views: dict[str, dict[str, Any]] = {}
@@ -199,6 +224,8 @@ def _resolve_views(
                     )
                     for corner, rel in value.items()
                 }
+            elif key == "verilog":
+                resolved[key] = _resolve_view_files(directory, value, f"{where}.{key}'")
             else:
                 resolved[key] = _resolve_view_file(directory, value, f"{where}.{key}'")
         views[cell_library] = resolved
@@ -211,6 +238,19 @@ def _resolve_view_file(directory: str, rel: Any, where: str) -> str:
     if not os.path.isfile(resolved):
         raise DescriptorError(f"{where}: '{rel}' does not exist")
     return resolved
+
+
+def _resolve_view_files(directory: str, rels: Any, where: str) -> list[str]:
+    """Resolve an ordered view file list; non-empty, every entry an existing
+    file under the root. The declared order is returned unchanged."""
+    if not isinstance(rels, list) or not rels:
+        raise DescriptorError(
+            f"{where}: must be a non-empty list of root-relative file paths"
+        )
+    return [
+        _resolve_view_file(directory, rel, f"{where}[{index}]")
+        for index, rel in enumerate(rels)
+    ]
 
 
 def _resolve_liberty_file(directory: str, rel: Any, where: str) -> str:

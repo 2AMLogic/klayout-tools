@@ -55,7 +55,36 @@
 # temp dir, not under `$PWD`; without this mount `openroad` fails with
 # `cannot open '<tmp_path>/.../pnr_*.tcl'` the moment a caller's request
 # lives outside `$PWD` (verified live against this exact failure while
-# building #1353).
+# building #1353). While `$TMPDIR` is unset (or `/tmp`) that mount is what
+# incidentally makes `/tmp` visible as a whole -- but the moment a caller
+# exports any other `$TMPDIR`, `/tmp` stops being mounted and an input under
+# `/tmp`-but-not-`$TMPDIR` fails inside the container with an opaque
+# `[ERROR STA-0340] cannot open '<path>'` for a file the caller can still
+# `cat` on the host (measured, issue #5878). So when `$TMPDIR` differs from
+# `/tmp` the wrapper keeps `/tmp` mounted as well (skipped when they are
+# equal -- docker rejects a duplicate mount point; all trailing slashes
+# on `$TMPDIR` are stripped before the comparison so `/tmp/` or `/tmp//`
+# does not duplicate it either).
+#
+# And it mounts the klt cache root (issue #5626): the merged `.lib` that a
+# descriptor's LIST-form `liberty` entry produces is written under
+# `$KLT_CACHE_DIR` itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`
+# -- the selection `src/klayout_tools/liberty_merge.py`'s `cache_root()`
+# performs -- and that absolute path is embedded in the
+# generated Tcl (`read_liberty <path>`), so a container that cannot see it
+# fails on its first OpenROAD stage with an opaque `cannot read file` no
+# matter how well everything else is mounted. The mount is read-only
+# (klt writes the merged file host-side before ever invoking the wrapper;
+# OpenROAD only ever `read_liberty`s it), mirroring the `$PDK_ROOT:ro`
+# precedent. Two guards the one-liner needs: the directory is `mkdir -p`'d
+# by the wrapper BEFORE `docker run` (Docker creates a missing bind-mount
+# source as root -- issue #3151's exact hazard, reachable whenever no
+# list-form corner has ever created `~/.cache/klt`), and the mount is
+# skipped when its path equals a path already mounted after stripping trailing
+# slashes (`docker run` rejects a duplicate mount point, so
+# `KLT_CACHE_DIR=$TMPDIR/` must not become a second `-v` for it). A leading
+# `~` or `~/` in KLT_CACHE_DIR expands to ${HOME:-/tmp} before mkdir or
+# comparison; unlike Python's expanduser, `~user` is left literal.
 #
 # The wrapper forwards a narrow allowlist of the caller's environment into the
 # container (issue #3821): `PLATFORM_DIR` (the ORFS idiom, read by Tcl as
@@ -65,14 +94,37 @@
 # The whole environment is deliberately NOT forwarded (it would leak unrelated
 # host state and break reproducibility). Because values are verbatim, a
 # host-path `PLATFORM_DIR` only resolves in the container if it lies under a
-# mounted path ($PWD, $PDK_ROOT, $TMPDIR).
+# mounted path ($PWD, $PDK_ROOT, $TMPDIR, plus /tmp itself when $TMPDIR
+# differs from it -- issue #5878 -- or the klt cache root).
+#
+# Container lifetime (issue #5726): the container is started with `--cidfile`
+# and is killed by the wrapper's own EXIT/INT/TERM/HUP handler whenever the
+# wrapper is signalled before the `docker run` client completes. Without
+# this, a caller that kills `klt` (its timeout, or a harness reaping its
+# agent) kills the docker client but NOT the container: OpenROAD keeps
+# routing for hours and writes `*.def`/`*.odb`/`*_route_drc.rpt` into the
+# caller's repository with no `klt` process and no `invocation.json` to
+# attribute them to. Two things make that window close or at least
+# attributable:
+#
+# 1. The client is backgrounded and `wait`ed instead of `exec`ed. `exec`
+#    replaces the wrapper's shell with the docker client, so no shell
+#    survives to run a `trap`; a signalled client dies with default signal
+#    disposition and the container outlives it.
+# 2. Docker writes its ID directly to the invocation's dedicated cidfile.
+#    The engine records the ID and checks Docker's ownership label before cleanup.
+#
+# The trap deliberately does NOT `docker kill` after a normal (unsignalled)
+# completion: the client was reaped, `--rm` already removed the container,
+# and the handler only cleans up the cid file.
 
 set -euo pipefail
 
 DEST_DIR="${1:-/usr/local/bin}"
 
-# Pinned image -- bump the digest and CHANGELOG.md together in the same change
-# if this is ever refreshed, exactly as install-yosys.sh/install-verilator.sh/
+# Pinned image -- bump the digest and a changelog fragment
+# (`changelog.d/README.md`) together in the same change if this is ever
+# refreshed, exactly as install-yosys.sh/install-verilator.sh/
 # install-magic.sh/install-icarus-verilog.sh/install-xyce.sh bump a pinned
 # version + asset checksum together. `openroad/orfs` publishes ONLY a moving
 # `:latest` tag (no versioned tags), so the digest is the only pin available --
@@ -88,7 +140,8 @@ DEST_DIR="${1:-/usr/local/bin}"
 # consulting the `:latest` tag at all. Re-pin with:
 #   docker pull --platform linux/amd64 openroad/orfs:latest
 #   docker image inspect openroad/orfs:latest --format '{{index .RepoDigests 0}}'
-# then record the resulting `openroad -version` string below and in CHANGELOG.md.
+# then record the resulting `openroad -version` string below and in a
+# changelog fragment (`changelog.d/README.md`).
 ORFS_IMAGE_REPO="openroad/orfs"
 # Pinned 2026-09-25: the `:latest` image created 2026-08-24, whose bundled
 # binary reports `openroad -version` == 26Q3-1510-g6cb3f2b704. Multi-platform
@@ -114,7 +167,10 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # hand, re-run that script instead. Mirrors docs/cli/place-and-route.md's
 # "Docker: extract the binary onto \$PATH" recipe, plus a \$PDK_ROOT mount
 # (falling back to \`klt pdk find\` when \$PDK_ROOT is unset -- issue #1868,
-# see this generator's own header comment for why) and a \$TMPDIR mount.
+# see this generator's own header comment for why), a \$TMPDIR mount, and
+# /tmp itself kept mounted whenever \$TMPDIR differs from it (issue #5878),
+# and the klt cache root that holds the merged Liberty file a list-form
+# descriptor's \`liberty\` entry produces (issue #5626).
 #
 # Runs the image by PINNED DIGEST, never by the moving \`:latest\` tag, so this
 # wrapper keeps executing the exact OpenROAD build it was installed against
@@ -127,10 +183,21 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # mounts are owned by the caller on Linux (a root-owned directory there blocks
 # worktree/scratch cleanup -- issue #3151). \$HOME is pointed at \$TMPDIR
 # because that uid usually has no passwd entry (hence no home) in the image.
+#
+# The container is RECORDED and KILLED when this wrapper dies before the
+# client completes (issue #5726): \`--cidfile\` names it, and the EXIT/INT/
+# TERM/HUP handler below \`docker kill\`s only the container carrying this invocation’s label.
+# The client is backgrounded and waited (not exec'd) precisely so this
+# shell survives to run the handler. After a normal completion the handler
+# only removes the cid file: the client was reaped and \`--rm\` already
+# removed the container. A SIGKILL to this wrapper is uncatchable -- the
+# dedicated cidfile and launch record identify any surviving container.
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
+MOUNTED_PATHS=("\$PWD")
 if [[ -n "\${PDK_ROOT:-}" ]]; then
     MOUNTS+=(-v "\$PDK_ROOT:\$PDK_ROOT:ro")
+    MOUNTED_PATHS+=("\$PDK_ROOT")
 elif command -v klt >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     # \$PDK_ROOT unset -- mirror \`klt place-and-route\`'s own PDK resolution
     # (find_pdk()'s search order) so the mount matches what it will actually
@@ -139,9 +206,65 @@ elif command -v klt >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     RESOLVED_PDK_ROOT="\$(klt pdk find --format json 2>/dev/null | jq -r '.root // empty' 2>/dev/null || true)"
     if [[ -n "\$RESOLVED_PDK_ROOT" ]]; then
         MOUNTS+=(-v "\$RESOLVED_PDK_ROOT:\$RESOLVED_PDK_ROOT:ro")
+        MOUNTED_PATHS+=("\$RESOLVED_PDK_ROOT")
     fi
 fi
-MOUNTS+=(-v "\${TMPDIR:-/tmp}:\${TMPDIR:-/tmp}")
+TMPDIR_MOUNT="\${TMPDIR:-/tmp}"
+MOUNTS+=(-v "\$TMPDIR_MOUNT:\$TMPDIR_MOUNT")
+MOUNTED_PATHS+=("\$TMPDIR_MOUNT")
+# A \$TMPDIR other than /tmp stops /tmp itself being visible inside the
+# container, but callers legitimately pass /tmp-resident paths (issue #5878:
+# with any other TMPDIR exported, an input under /tmp failed with an opaque
+# "[ERROR STA-0340] cannot open" for a file the caller could read on the
+# host). Keep /tmp mounted too unless TMPDIR already resolves to it --
+# docker rejects a duplicate mount point, and all trailing slashes are
+# stripped from the comparison so TMPDIR=/tmp/ or /tmp// does not
+# produce one. /tmp is recorded in MOUNTED_PATHS so the klt cache-root
+# dedupe below also sees it (KLT_CACHE_DIR=/tmp must not become a second
+# -v for it).
+strip_trailing_slashes() {
+    local path="\$1"
+    while [[ "\$path" == */ && "\$path" != / ]]; do
+        path="\${path%/}"
+    done
+    printf '%s' "\$path"
+}
+TMPDIR_CMP="\$(strip_trailing_slashes "\$TMPDIR_MOUNT")"
+if [[ "\$TMPDIR_CMP" != "/tmp" ]]; then
+    MOUNTS+=(-v "/tmp:/tmp")
+    MOUNTED_PATHS+=("/tmp")
+fi
+# klt cache root (issue #5626): the merged .lib a list-form \`liberty\`
+# descriptor produces is written under it and embedded as an absolute path
+# in the generated Tcl, so the container must see it. Uses the same selection
+# as src/klayout_tools/liberty_merge.py's cache_root(), expanding only ~ and
+# ~/ in KLT_CACHE_DIR (not ~user), with HOME defaulting to /tmp. mkdir -p
+# BEFORE docker run -- Docker would otherwise create a missing bind-mount
+# source as root (issue #3151). The mount is skipped when the path already
+# equals one mounted above after stripping trailing slashes from both paths
+# (keeping /) -- docker run rejects a duplicate mount point. Only comparisons
+# are normalized; existing mount arguments and permissions stay intact.
+# \$HOME is defaulted (\${HOME:-/tmp}) and a failed mkdir degrades to no
+# cache mount instead of killing the run: this block executes on EVERY
+# invocation under \`set -euo pipefail\`, and an unset or unwritable HOME
+# must not stop \`openroad -version\` et al. A missing cache root only
+# matters for list-form corners, which produce their own diagnostic.
+KLT_CACHE_ROOT="\${KLT_CACHE_DIR:-\${XDG_CACHE_HOME:-\${HOME:-/tmp}/.cache}/klt}"
+if [[ "\${KLT_CACHE_DIR:-}" == \~ || "\${KLT_CACHE_DIR:-}" == \~/* ]]; then
+    KLT_CACHE_ROOT="\${HOME:-/tmp}\${KLT_CACHE_DIR:1}"
+fi
+mkdir -p "\$KLT_CACHE_ROOT" 2>/dev/null || KLT_CACHE_ROOT=""
+KLT_CACHE_CMP="\$(strip_trailing_slashes "\$KLT_CACHE_ROOT")"
+CACHE_DUPE=0
+for m in "\${MOUNTED_PATHS[@]}"; do
+    if [[ "\$KLT_CACHE_CMP" == "\$(strip_trailing_slashes "\$m")" ]]; then
+        CACHE_DUPE=1
+        break
+    fi
+done
+if [[ -n "\$KLT_CACHE_ROOT" && "\$CACHE_DUPE" -eq 0 ]]; then
+    MOUNTS+=(-v "\$KLT_CACHE_ROOT:\$KLT_CACHE_ROOT:ro")
+fi
 # Forward PLATFORM_DIR and OPENROAD_* by name (issue #3821).
 ENV_ARGS=()
 if [[ -n "\${PLATFORM_DIR+x}" ]]; then
@@ -150,14 +273,55 @@ fi
 while IFS= read -r v; do
     [[ -n "\$v" ]] && ENV_ARGS+=(-e "\$v")
 done < <(compgen -e OPENROAD_ || true)
-exec docker run --rm -i \\
+CID_DIR=
+if [[ -n "\${KLT_OPENROAD_CIDFILE:-}" && -n "\${KLT_OPENROAD_INVOCATION_ID:-}" ]]; then
+    CID_FILE="\$KLT_OPENROAD_CIDFILE"
+    OWNER="\$KLT_OPENROAD_INVOCATION_ID"
+else
+    CID_DIR="\$(mktemp -d "\${TMPDIR:-/tmp}/klt-openroad-cid.XXXXXXXXXXXX")"
+    CID_FILE="\$CID_DIR/container.cid"
+    OWNER="\${CID_DIR##*/}"
+fi
+CLIENT_PID=
+FINISHED=0
+cleanup() {
+    if [[ "\$FINISHED" == 0 ]]; then
+        CID="\$(head -c 65 "\$CID_FILE" 2>/dev/null || true)"
+        if [[ "\$CID" =~ ^[0-9a-f]{64}\$ ]]; then
+            # Verify the immutable label before stopping this invocation's container.
+            (
+                recorded=\$(docker container inspect --format '{{ index .Config.Labels "org.klayout-tools.openroad-invocation" }}' "\$CID" 2>/dev/null) &&
+                    [[ "\$recorded" == "\$OWNER" ]] && docker kill "\$CID"
+            ) >/dev/null 2>&1 &
+        fi
+        if [[ -n "\$CLIENT_PID" ]]; then
+            kill "\$CLIENT_PID" >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -n "\$CID_DIR" ]]; then
+        rm -f "\$CID_FILE"
+        rmdir "\$CID_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+docker run --rm -i \\
     --platform linux/amd64 \\
+    --label "org.klayout-tools.openroad-invocation=\$OWNER" \\
+    --cidfile "\$CID_FILE" \\
     --user "\$(id -u):\$(id -g)" \\
     -e HOME="\${TMPDIR:-/tmp}" \\
     \${ENV_ARGS[@]+"\${ENV_ARGS[@]}"} \\
     "\${MOUNTS[@]}" \\
     $IMAGE \\
-    $IN_IMAGE_BINARY "\$@"
+    $IN_IMAGE_BINARY "\$@" 0<&0 &
+CLIENT_PID=\$!
+STATUS=0
+wait "\$CLIENT_PID" || STATUS=\$?
+FINISHED=1
+exit "\$STATUS"
 WRAPPER_EOF
 chmod +x "$WRAPPER"
 

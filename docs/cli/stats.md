@@ -11,12 +11,12 @@ klt stats <file> [--per-layer] [--geometry-digest] [--top <cell>] [--density-win
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
 - `--per-layer` — also report the same statistics broken down per layer.
+  Without this flag, only the `total` figures are computed (`layers` is
+  `null`).
 - `--geometry-digest` — also compute `geometry_digest` (a sha256 of the
   stream's decoded geometry). Off by default: it re-reads and walks the whole
   layout (~2.5x the runtime of the rest of the report on large flat layouts),
   so the field is `null` unless this flag is given.
-  Without this flag, only the `total` figures are computed (`layers` is
-  `null`).
 - `--top` — top cell to report on when the stream has more than one
   (required in that case; optional otherwise), matching `klt extract --top`.
   When given, **both** `bbox_um` and every area/polygon/vertex count
@@ -261,7 +261,10 @@ upgrade — see
 The digest covers the **whole stream** and is never scoped by `--top`, unlike
 the area/density/count figures. Two runs over the same file with different
 `--top` values report the same `geometry_digest`. It is `null` unless
-`--geometry-digest` is given (or the digest cannot be computed).
+`--geometry-digest` is given (or the digest cannot be computed). This is also
+the value [`klt gen-compose`](gen-compose.md) records per composed block as
+`blocks[].source_digest` for the same stream — run this command on a composed
+input to recompute and re-verify it (a raw-byte `sha256sum` never matches).
 
 ### Producing a signoff regeneration hash (issue #5551)
 

@@ -9,6 +9,7 @@ CI), not part of the `klt` CLI.
 scripts/
   README.md                    # this file
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
+  assemble-asap7-pdk-root.py     # generate an audited ASAP7 descriptor root
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
   fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
   fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of the IHP-Open-PDK ihp-sg13cmos5l/ subtree into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
@@ -17,18 +18,21 @@ scripts/
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
+  install-xschem.sh              # install the fleet-pinned xschem from the 2AMLogic/xschem fork's public release asset, sha256-verified before unpack; self-contained for chip-CI copy (#6219)
   install-sv2v.sh                # install the pinned, checksum-verified sv2v release binary `klt synthesize`'s sv2v front end shells out to (CI provisioning, #5956)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
   install-symbiyosys.sh          # install a pinned SymbiYosys (sby) + Bitwuzla backend for sequential equivalence checking (CI provisioning, #1312)
   install-magic.sh               # build + install a pinned, checksum-verified magic from source for the DRC/extract cross-validation oracle (#2014)
   fetch-magic-tech.sh            # generate the open_pdks magic decks (sky130A, gf180mcuC) that oracle runs against, from pinned open_pdks source (#2014)
-  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
+  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh and fetch-*.sh scripts (#687, #5635)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   bootstrap-auditor-python.sh    # pinned, checksum-verified uv + managed CPython + host-local .venv + `klt` startup smoke for a Python-less Linux audit host (#2829)
   release_prep.py                # mechanical release edits for release.yml (#4920)
+  release_notes.py               # build the GitHub Release notes from a CHANGELOG section for publish.yml (#5861)
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
   check_file_size_baseline.py    # per-file line-size ratchet vs the merge-base, with file-size-baseline.json (#2766)
+  check_changelog_fragments.py   # CI gate: every changelog.d/ fragment is a `- ` bullet carrying a `#<issue>` reference (#7619)
   native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
   install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
   place-and-route-smoke.sh       # synth -> place-and-route -> GDS -> `klt lvs` -> `klt drc` smoke pipeline (#1328)
@@ -40,7 +44,7 @@ scripts/
   mom_nec_reference.py           # standalone NEC2++ reference solve for `klt mom` S-parameter cross-validation (#895)
   design_agent_benchmark.py      # design-agent benchmark harness: task set x PDK, S4->S6->S10 slice scored with pass@k (#1719)
   design_agent_benchmark_interactive.py  # multi-turn, tool-using agent provider for the benchmark harness (imported by the above, #1739)
-  research/                      # measurement harnesses behind docs/design/ findings (FLUTE congestion #785, SDF annotate #962, klt erc runtime profile #2229)
+  research/                      # measurement harnesses behind docs/design/ findings (SDF annotate #962, klt erc runtime profile #2229)
   aws/build-remote-sim-ami.sh    # build/publish the remote-sim AMI (see docs/cli/sim.md)
 ```
 
@@ -81,6 +85,14 @@ what lands where.
 ```
 scripts/fetch-pdks.sh
 ```
+
+## `assemble-asap7-pdk-root.py`
+
+Builds an ASAP7 root from an initialized upstream checkout. It stages the
+physical views, checks and merges the selected Liberty files, and records
+source commits and file hashes. Run
+`uv run python scripts/assemble-asap7-pdk-root.py --asap7 "$ASAP7" -o "$ROOT"`.
+[Selection and output details](../docs/cli/pdk.md#assembling-an-asap7-root)
 
 ## `fetch-cell-netlists.sh`
 
@@ -144,6 +156,22 @@ upstream release's prebuilt, checksum-verified `sv2v-Linux.zip` binary
 ```
 scripts/install-sv2v.sh
 uv run pytest tests/test_synthesize_netlist_normalize.py -rs
+```
+
+## `install-xschem.sh`
+
+Credential-free install of the fleet's pinned xschem (issue #6219, fleet rule
+2am#7275): downloads the public release asset of the `2AMLogic/xschem` fork
+(`tools.xschem.release_repo` / `release_tag` / `asset` in
+`docker/eda-sim/pdk-versions.json`), checks it against `tools.xschem.sha256`
+**before** unpacking, and unpacks it as shipped at `/opt/eda/xschem` (via
+`sudo -n` when that is not writable): the build is not relocatable, so there is
+no other supported prefix. Self-contained so chip CI can copy the single file.
+See `docker/eda-sim/README.md` for the full route.
+
+```
+scripts/install-xschem.sh [--force]
+uv run pytest tests/test_xschem_release_asset.py
 ```
 
 ## `install-icarus-verilog.sh` / `install-verilator.sh`
@@ -370,7 +398,12 @@ mounting `$PDK_ROOT` alongside `$PWD` so a real PDK install resolves inside
 the container too — falling back to `klt pdk find`'s own resolved root when
 `$PDK_ROOT` is unset, so the mount always matches what `klt
 place-and-route` will actually reference (issue #1868) — see the script's
-own header comment for why that matters. The container runs as the caller's
+own header comment for why that matters. It also mounts `$TMPDIR` and the
+klt cache root (`$KLT_CACHE_DIR` itself when set, else
+`${XDG_CACHE_HOME:-$HOME/.cache}/klt`, `mkdir -p`'d as the caller and
+mounted `:ro`, skipped if it duplicates an already-mounted path) so the
+merged `.lib` a list-form `liberty` descriptor produces is readable inside
+the container (issue #5626). The container runs as the caller's
 uid:gid (`--user "$(id -u):$(id -g)"`, with `HOME` set to `$TMPDIR`) so files it
 writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
 #3151); re-run the installer to upgrade an older wrapper. It also forwards
@@ -378,7 +411,8 @@ writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
 the caller into the container by name (`-e NAME`, issue #3821) so ORFS-style Tcl
 reading `$::env(PLATFORM_DIR)` works; the rest of the environment is not
 forwarded. Values pass verbatim, so a host-path `PLATFORM_DIR` only resolves if
-it lies under a mounted path (`$PWD`, `$PDK_ROOT`, `$TMPDIR`).
+it lies under a mounted path (`$PWD`, `$PDK_ROOT`, `$TMPDIR`, plus `/tmp` when
+`$TMPDIR` differs from it, or the klt cache root).
 
 The image is **pinned by digest** (`ORFS_IMAGE_DIGEST` near the top of the
 script), not by the moving `:latest` tag: both the `docker pull` and the
@@ -386,8 +420,8 @@ generated wrapper's `docker run` reference `openroad/orfs@sha256:…`, so every
 host and CI run executes the same OpenROAD build. Upstream publishes only a
 moving `:latest` tag, and before this pin two identically-provisioned fleet
 workers held different images under it (issue #2465). Bump the digest
-deliberately — with a `CHANGELOG.md` line, as with the pinned
-version + checksum in `install-yosys.sh`/`install-verilator.sh`/
+deliberately — with a [changelog fragment](../changelog.d/README.md), as with
+the pinned version + checksum in `install-yosys.sh`/`install-verilator.sh`/
 `install-magic.sh`/`install-icarus-verilog.sh`/`install-xyce.sh` — and record
 the new `openroad -version` string alongside it; the script's header comment
 carries the exact re-pin commands.
@@ -447,17 +481,12 @@ guesses from; an unknown name exits `1`, and an unguessable slug with no
 
 ## `check_file_size_baseline.py`
 
-Monotonic per-file line-size ratchet, gated in CI's `lint` job next to the
-complexity ratchet (issue #2766). Agent PRs tend to grow files; this stops
-the growth. It is deliberately stricter than
-[`check_complexity_baseline.py`](check_complexity_baseline.py) in one key
-way: the **trusted** baseline is read from the **comparison revision**,
-never from the working tree, so a PR cannot loosen its own gate by editing
-the committed `file-size-baseline.json` (repo root). The **proposed**
-baseline in the candidate tree must exactly mirror the candidate's
-remaining debt — both sides are checked, because only checking sizes
-against the old baseline would let stale ceilings through, and only
-trusting the proposed baseline would let a PR self-approve growth.
+CI's `lint` job enforces the per-file line-size ratchet (issue #2766).
+The checker reads the **trusted** baseline and measures file sizes at
+the **comparison revision**. The trusted
+`file-size-baseline.json` (repo root) authorizes existing oversized paths
+and vendor pins. The measured comparison size caps each oversized file's
+growth, even when the trusted entry records a larger or smaller value.
 
 **Scope.** Tracked first-party Python (`.py`), Rust (`.rs`), and shell
 (`.sh`) source — including tests, scripts, and examples. The vendored
@@ -466,24 +495,21 @@ agent-tooling trees `.loom/`, `.claude/`, `.agents/` are not governed
 neither are docs, binary fixtures, or generated reports (not source
 extensions). Counting is physical lines: blank and comment lines count,
 a final line without a trailing newline counts, an empty file is 0 lines.
-The hard limit is 500 lines: files at or under it carry no baseline
-entry; files over it carry exactly one, equal to their current size.
+The hard limit is 500 lines. Files at or under it carry no baseline entry.
+An existing oversized file can carry forward its trusted entry if
+that value still covers the file, so concurrent shrinks can merge without
+ledger edits. You can also record the exact candidate size, including
+when re-seeding a lagging entry. A permitted rename must be proven by
+`git diff -M`, stay within the source's measured comparison size, and
+record the exact destination size.
 
-**What fails** (exit 1): a file grows above its trusted ceiling; an
-unbaselined file exceeds the limit (new oversized file, or growth across
-the limit — including a renamed file, unless the diff proves a
-non-growing rename from a trusted-baselined path via `git diff -M` plus a
-size check against the old path's ceiling); a proposed ceiling is not
-exactly the file's current size (stale, too high after a reduction, or
-invented); an entry survives for a file that shrank to the limit or was
-deleted; a proposed debt entry or vendor hash is absent from the trusted
-baseline; a vendor hash no longer matches a candidate file's actual
-bytes. What never fails: unchanged or shrunken files (with the entry
-tightened to match, or removed at/below the limit), and any removal of
-debt entries or exemptions — tightening is always allowed, loosening
-never is. Exit 2 means the gate could not run (missing/malformed
-baseline, unresolvable comparison revision, git failure), with an
-actionable diagnostic either way.
+**What fails** (exit 1). Oversized files fail if they lack trusted
+permission, exceed their measured comparison size, or lack a proposed
+entry. An edited entry must match the current size. Entries for deleted
+files and files that are now at or below the hard limit must be removed.
+Vendor pins must match the candidate bytes and pass the policy below.
+Missing or malformed input, an unresolvable comparison revision, or a
+required comparison size that cannot be measured produces exit 2.
 
 **Vendored code is identified by content hash, never by directory name.**
 A hash pin in the trusted baseline exempts a file only while its actual
@@ -520,13 +546,18 @@ git fetch origin main
 python scripts/check_file_size_baseline.py --comparison-rev "$(git merge-base HEAD origin/main)"
 ```
 
-After shrinking a file (and only then), regenerate the proposed baseline
-— it records the candidate's actual debt and carries forward only vendor
-pins whose bytes still match; it never adds exemptions or authorizes
-growth, and the next check validates that:
+To explicitly regenerate the proposed baseline, use `--update-baseline`.
+It carries forward vendor pins whose bytes still match, keeps a recorded
+entry whose ceiling still covers the measured file (so a shrinking PR
+leaves the ledger byte-identical and cannot conflict with main, #7414),
+and records exact sizes only for new or grown paths. Do not edit a
+ledger entry just because a file shrank. On a ledger conflict in a
+long-lived PR, take main's version of the line, then validate:
 
 ```
 python scripts/check_file_size_baseline.py --update-baseline
+python scripts/check_file_size_baseline.py \
+  --comparison-rev "$(git merge-base HEAD origin/main)"
 ```
 
 CI (`.github/workflows/ci.yml`, `lint` job) compares PRs against the
@@ -535,7 +566,13 @@ merge result, so concurrent main changes are represented; the job's
 checkout uses `fetch-depth: 0` for the history) and pushes to main
 against the push's before SHA (covering multi-commit pushes). A missing
 comparison ref fails with fetch instructions instead of silently
-comparing against nothing.
+comparing against nothing. Pushes to `main` additionally get a dedicated
+per-commit verdict from `.github/workflows/file-size-ratchet-main.yml`
+(issue #6285): a merge commit can grow a file past the size either
+parent-side run measured, and the shared `ci.yml` main-run can be
+superseded while pending, so this sibling workflow keys its concurrency
+group on `github.sha` and runs only this checker against the push's
+before SHA.
 
 ## `check_import_boundaries.py`
 
@@ -579,3 +616,29 @@ followed; a name bound more than once in a scope is not resolved for
 `alias._x` access; internal `from x import *` is rejected outright.
 `import-linter` 2.15 was evaluated and rejected: it models module-to-module
 edges only and cannot allow `_a` but forbid `_b` from the same module.
+
+## `check_changelog_fragments.py`
+
+CI gate (issue #7619) for the format `changelog.d/README.md` documents.
+`release_prep.py prepare` copies each pending fragment into `CHANGELOG.md`
+verbatim, so a bare paragraph or a bullet with no issue number would be
+released untraceable; this checks the shape at PR time instead. Pure stdlib,
+reads only `changelog.d/`, and runs as a non-`continue-on-error` step of the
+`lint` job ("Changelog fragment shape").
+
+```
+python scripts/check_changelog_fragments.py            # check changelog.d/
+python scripts/check_changelog_fragments.py --dir DIR  # check another directory
+```
+
+A fragment passes when its first non-blank line starts with `- ` **and** its
+text contains a `#<digits>` reference (`(#1234)`, `(issue #1234)`,
+`org/repo#1234`). A date is not required -- only 6 of the 1465 released
+bullets carry one, and the release heading already dates the section. It does
+not check that the number equals the filename's, or the shape of later
+bullets. Files in scope mirror `release_prep`: `*.md`, minus `README.md`,
+non-files and empty / whitespace-only files.
+
+Exit `0` clean, `1` offending fragments (each named on stderr with the
+reason), `2` the directory is missing. Fix a failure by editing the named
+fragment; the message suggests the `(#N)` taken from its filename.

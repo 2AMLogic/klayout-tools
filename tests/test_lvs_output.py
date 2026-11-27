@@ -7,7 +7,7 @@ import os
 import pytest
 
 from klayout_tools.cli import main
-from klayout_tools.lvs import check_lvs_report, run_lvs
+from klayout_tools.lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
 
 _SPICE = """
 .subckt inv A Y VPWR VGND
@@ -27,6 +27,16 @@ def tmp_path(tmp_path):
 
 def _write(path, text):
     path.write_text(text)
+    return str(path)
+
+
+def _write_request(path, request):
+    path.write_text(json.dumps(request))
+    return str(path)
+
+
+def _write_report(path, report):
+    path.write_text(json.dumps(report))
     return str(path)
 
 
@@ -90,3 +100,325 @@ def test_lvs_output_flag_writes_envelope_and_rejects_check(tmp_path, capsys):
     bad = tmp_path / "no_such_dir" / "r.json"
     assert main(["lvs", request, "-o", str(bad), "--format", "json"]) == 1
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
+# Explicit --reference alongside --check / --rerun (issue #5845)
+# ---------------------------------------------------------------------------
+
+
+def _external_reference_report(tmp_path_factory):
+    """A committed report inside a repo whose layout is repo-scoped (so it
+    resolves by itself) but whose reference is outside any repo (`scope:
+    "external"`), plus the reference netlist's path. Only the reference
+    side needs rescuing."""
+    repo = tmp_path_factory.mktemp("lvs-repo")
+    (repo / ".git").mkdir()
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(repo / "layout.spice", _SPICE)
+    reference_path = _write(outside / "ref.spice", _SPICE)
+    report_path = repo / "lvs.json"
+    report = run_lvs(
+        _write_request(
+            repo / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
+    )
+    assert report["reference"]["scope"] == "external"
+    assert report["layout"]["scope"] == "repo"
+    _write_report(report_path, report)
+    return repo, reference_path, report_path
+
+
+def test_check_lvs_report_explicit_reference_verifies_an_external_reference(
+    tmp_path_factory,
+):
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+
+    result = check_lvs_report(str(report_path), reference_path=reference_path)
+
+    assert result["status"] == "match"
+
+
+@pytest.mark.parametrize("scope", ["external", "absent"])
+def test_check_lvs_report_explicit_reference_rescues_unresolvable_scopes(
+    tmp_path_factory, scope
+):
+    """Both no-path scopes (`external`, `absent`) are unverifiable without
+    the override and rescued by it (issue #5845)."""
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+    report = json.loads(report_path.read_text())
+    report["reference"] = {"path": None, "scope": scope}
+    report_path.write_text(json.dumps(report))
+
+    without = check_lvs_report(str(report_path))
+    assert without["status"] == "unverifiable"
+    fields = {check["field"]: check for check in without["checks"]}
+    assert fields["environment.reference_sha256"]["actual"] is None
+
+    with_override = check_lvs_report(str(report_path), reference_path=reference_path)
+    assert with_override["status"] == "match"
+
+
+def test_lvs_explicit_reference_overrides_a_recorded_reference(tmp_path_factory):
+    """Precedence rule (always override): a disagreeing explicit reference is
+    reported `drifted`, never silently accepted."""
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+    other = _write(tmp_path_factory.mktemp("other") / "other.spice", _SPICE + "* x\n")
+
+    result = check_lvs_report(str(report_path), reference_path=other)
+
+    assert result["status"] == "drifted"
+
+
+def test_rerun_lvs_report_explicit_reference_reruns_an_external_reference(
+    tmp_path_factory,
+):
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+
+    result = rerun_lvs_report(str(report_path), reference_path=reference_path)
+
+    assert result["status"] == "match"
+
+
+def test_rerun_lvs_report_explicit_reference_rescues_a_missing_reference_echo(
+    tmp_path_factory,
+):
+    """Issue #6461: the rerun guard tests the *post-override* reference (the
+    layout arm's rule), so `--reference` rescues even a report whose
+    `reference` echo is missing entirely -- byte-identically to what
+    `--layout` does for a missing layout echo: the rerun proceeds, and the
+    absent echo field is the sole drift (content is still verified via
+    ``environment.reference_sha256``)."""
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+    report = json.loads(report_path.read_text())
+    del report["reference"]
+    report_path.write_text(json.dumps(report))
+
+    result = rerun_lvs_report(str(report_path), reference_path=reference_path)
+
+    assert result["status"] == "drifted"
+    assert [entry["field"] for entry in result["drift"]] == ["reference"]
+
+
+def test_rerun_lvs_report_refuses_an_external_reference_cleanly(tmp_path_factory):
+    """Issue #6461: mirror of the external-layout refusal -- the guard tests
+    the resolved reference, so an unresolvable external echo raises the same
+    clean `LvsError` a report missing the field entirely raises (the error
+    docs/cli/lvs.md already documents for either side), never a late
+    reconstruction error."""
+    _, _, report_path = _external_reference_report(tmp_path_factory)
+
+    with pytest.raises(LvsError, match="no 'layout'/'reference' field to rerun"):
+        rerun_lvs_report(str(report_path))
+
+
+def test_lvs_explicit_reference_wins_over_a_pre_4984_bare_string(
+    tmp_path_factory,
+):
+    """A report whose `reference` is a bare string (pre-#4984 echo) still
+    honours the override."""
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+    report = json.loads(report_path.read_text())
+    report["reference"] = reference_path
+    report_path.write_text(json.dumps(report))
+    other = _write(tmp_path_factory.mktemp("other") / "other.spice", _SPICE + "* y\n")
+
+    result = check_lvs_report(str(report_path), reference_path=other)
+
+    assert result["status"] == "drifted"
+    fields = {check["field"]: check for check in result["checks"]}
+    assert fields["environment.reference_sha256"]["actual"] is not None
+
+
+def test_cli_lvs_check_with_explicit_reference_on_external_report(
+    tmp_path_factory, capsys
+):
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+    capsys.readouterr()
+
+    code = main(
+        [
+            "lvs",
+            "--check",
+            str(report_path),
+            "--reference",
+            reference_path,
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+    # A different file drifts (exit 3), naming the reference check.
+    other = _write(tmp_path_factory.mktemp("other") / "other.spice", _SPICE + "* z\n")
+    assert (
+        main(
+            [
+                "lvs",
+                "--check",
+                str(report_path),
+                "--reference",
+                other,
+                "--format",
+                "json",
+            ]
+        )
+        == 3
+    )
+    result = json.loads(capsys.readouterr().out)
+    checks = {check["field"]: check for check in result["checks"]}
+    assert checks["environment.reference_sha256"]["match"] is False
+
+
+def test_cli_lvs_check_rerun_with_explicit_reference(tmp_path_factory, capsys):
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+    capsys.readouterr()
+
+    code = main(
+        [
+            "lvs",
+            "--check",
+            str(report_path),
+            "--rerun",
+            "--reference",
+            reference_path,
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+
+def test_cli_lvs_layout_and_reference_compose(tmp_path_factory, capsys):
+    """Both overrides at once replace both recorded inputs."""
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(outside / "layout.spice", _SPICE)
+    reference_path = _write(outside / "ref.spice", _SPICE)
+    report_path = outside / "lvs.json"
+    report = run_lvs(
+        _write_request(
+            outside / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
+    )
+    assert report["layout"]["scope"] == "external"
+    _write_report(report_path, report)
+    capsys.readouterr()
+
+    code = main(
+        [
+            "lvs",
+            "--check",
+            str(report_path),
+            "--layout",
+            layout_path,
+            "--reference",
+            reference_path,
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+
+def test_cli_lvs_reference_without_check_is_rejected(tmp_path, capsys):
+    assert main(["lvs", "{}", "--reference", "x.spice", "--format", "json"]) == 1
+    assert (
+        "--reference requires --check"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+def test_cli_lvs_reference_naming_a_missing_file_is_unverifiable(
+    tmp_path_factory, capsys
+):
+    """A nonexistent override is a clean `unverifiable` (with the
+    `input_not_found` diagnostic), never a traceback."""
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+    capsys.readouterr()
+
+    code = main(
+        [
+            "lvs",
+            "--check",
+            str(report_path),
+            "--reference",
+            str(tmp_path_factory.mktemp("gone") / "nope.spice"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 4
+    result = json.loads(capsys.readouterr().out)
+    checks = {check["field"]: check for check in result["checks"]}
+    assert "input_not_found" in checks["environment.reference_sha256"]
+
+
+def test_check_input_not_found_names_the_resolved_repo_root(tmp_path, monkeypatch):
+    """Issue #5845: a repo-scoped echo that resolves to a missing file names
+    the repo root `--check` anchored on (additive key)."""
+    repo = tmp_path / "repo"
+    (repo / "nested").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    report = repo / "nested" / "lvs.json"
+    committed = {
+        "schema_version": 3,
+        "layout": {"path": "layout.spice", "scope": "repo"},
+        "reference": {"path": "ref.spice", "scope": "repo"},
+        "environment": {
+            "layout_sha256": "sha256:aaa",
+            "reference_sha256": "sha256:bbb",
+        },
+    }
+    report.write_text(json.dumps(committed))
+    (repo / "layout.spice").write_text(_SPICE)  # layout resolves; ref does not
+
+    result = check_lvs_report(str(report))
+    checks = {check["field"]: check for check in result["checks"]}
+    missing = checks["environment.reference_sha256"]["input_not_found"]
+
+    assert missing["resolved_repo_root"] == str(repo)
+    assert missing["resolved"] == str(repo / "ref.spice")
+    # The layout check (which resolved) carries no diagnostic at all.
+    assert "input_not_found" not in checks["environment.layout_sha256"]
+
+    # An explicit relative path resolves from the caller's cwd.
+    monkeypatch.chdir(tmp_path)
+    result = check_lvs_report(str(report), reference_path="missing.spice")
+    checks = {check["field"]: check for check in result["checks"]}
+    missing = checks["environment.reference_sha256"]["input_not_found"]
+    assert missing["resolved"] == str(tmp_path / "missing.spice")
+    assert missing["resolved_repo_root"] is None
+
+
+def test_check_text_renders_the_resolved_repo_root(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    report = repo / "lvs.json"
+    committed = {
+        "schema_version": 3,
+        "layout": {"path": "layout.spice", "scope": "repo"},
+        "reference": {"path": "ref.spice", "scope": "repo"},
+        "environment": {
+            "layout_sha256": "sha256:aaa",
+            "reference_sha256": "sha256:bbb",
+        },
+    }
+    report.write_text(json.dumps(committed))
+    (repo / "layout.spice").write_text(_SPICE)
+    capsys.readouterr()
+
+    assert main(["lvs", "--check", str(report), "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert f"repo root: {repo}" in out

@@ -272,8 +272,8 @@ done
 
 # The route the two SHA-shaped arms cannot both take. A response naming BOTH
 # branches must go to head-mismatch: routing it to base-modified would answer a
-# head that moved past the approved SHA with forge_update_branch and another
-# merge attempt. In the shell this was a property of which `grep` appeared first
+# head that moved past the approved SHA with a sleep and another merge
+# attempt. In the shell this was a property of which `grep` appeared first
 # in merge-pr.sh; it is now the classifier's own ordered match, and this drives
 # that through the real seam rather than reading source text.
 assert_eq "head-mismatch" \
@@ -369,7 +369,7 @@ else
 fi
 
 retired "the awk source-order scan asserting _is_head_mismatch_response appeared before the 'Base branch was modified' grep inside the MERGE_ATTEMPT loop" \
-  "A head-SHA-mismatch response must never be routed into the base-modified arm. That arm answers the failure with forge_update_branch and another merge attempt — i.e. it spends an irreversible operation on a head that has moved past the SHA the approving review described (#5579)." \
+  "A head-SHA-mismatch response must never be routed into the base-modified arm. That arm answers the failure with a sleep and another merge attempt — i.e. it spends an irreversible operation on a head that has moved past the SHA the approving review described (#5579)." \
   "Both greps are gone. There is no longer a pair of 'if' blocks whose relative order decides the route: merge-pr.sh classifies ONCE into a route token, and the precedence lives in a single ordered 'match' in loom-daemon/src/merge_pr/response.rs::classify. The two arms in the loop now test disjoint string values, so reordering them cannot change any outcome — the property this scan protected has become unrepresentable rather than merely guarded. (A source scan could not have asserted it anyway once the matchers left the file.)" \
   "loom-daemon/src/merge_pr/response/tests.rs::head_mismatch_wins_over_base_modified and ::merge_in_progress_wins_over_everything assert the precedence directly, in both textual orders; loom-daemon/tests/merge_pr_response_differential.rs replays every ORDERED PAIR of the five markers under three separators against the frozen retired grep ladder (tests/fixtures/merge-pr-response-retired.sh) and additionally proves, in swapping_the_two_sha_routes_would_be_caught, that its corpus distinguishes the correct ladder from a reordered one. Part 2 of THIS suite drives the same precedence through the real binary via _classify_merge_response. Strictly stronger: the scan checked where a line SAT; these check what the classifier ANSWERS."
 

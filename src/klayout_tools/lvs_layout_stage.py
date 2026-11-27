@@ -12,14 +12,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._provenance import INPUT_ROLE_LAYOUT, INPUT_ROLE_NETLIST
-from .lvs import _apply_finfet_bulk_policy, _resolve_layout, _select_circuit
+from .lvs import (
+    _apply_finfet_bulk_policy,
+    _reachable_circuits,
+    _resolve_layout,
+    _select_circuit,
+)
 from .lvs_combine import (
     _combine_circuit_devices_safely,
     _correct_combine_parameters,
     _resolve_combine_devices_per_circuit_targets,
     _unmatched_combine_devices_per_circuit_warnings,
 )
+from .lvs_coverage import _implausible_dimensions
 from .lvs_finfet_flatten import flatten_layout_netlist
+from .lvs_flatten import root_selected_circuit
+from .lvs_known_limits import count_unsupported_asap7_instances
+from .lvs_layout_short_nets import apply_layout_short_nets
 from .lvs_mos_options import split_layout_mos_flavours
 from .lvs_supply import supply_fragmentation_findings
 
@@ -39,6 +48,7 @@ class _LayoutStage(NamedTuple):
     layout_pin_renames: Any
     layout_abstracted_cells: Any
     supply_findings: list[dict[str, Any]]
+    dimensions: list[dict[str, Any]]
     layout_input_role: str
     flatten_warnings: list[dict[str, Any]]
     power_only_pruning_warnings: list[dict[str, Any]]
@@ -46,6 +56,8 @@ class _LayoutStage(NamedTuple):
     combine_per_circuit_warnings: list[dict[str, Any]]
     layout_circuit_names: set[str]
     finfet_bulk_records: Any
+    layout_known_limit_counts: dict[str, int]
+    layout_short_nets_warnings: list[dict[str, Any]]
 
 
 def _resolve_layout_stage(
@@ -54,6 +66,7 @@ def _resolve_layout_stage(
     request_dir: str,
     opts: _LvsRunOptions,
     progress: bool | str,
+    coverage: dict[str, Any] | None = None,
 ) -> _LayoutStage:
     """Resolve the layout netlist and take the pre-flatten snapshots.
 
@@ -87,6 +100,8 @@ def _resolve_layout_stage(
         opts.def_net_names,
         opts.def_pins,
         progress,
+        coverage,
+        join_same_named_nets=opts.join_same_named_nets,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
@@ -96,7 +111,25 @@ def _resolve_layout_stage(
         layout_net_label_positions,
     )
 
+    dimensions = _implausible_dimensions(
+        layout_netlist,
+        _reachable_circuits(layout_netlist, layout_spec.get("top"), "layout"),
+        "layout",
+    )
     split_layout_mos_flavours(layout_netlist, opts.compare_mos_flavour)
+
+    # Issue #5632: `hints.layout_short_nets` joins named layout nets on the
+    # selected top circuit before anything below can consume the joined
+    # result -- before the per-circuit and whole-netlist `combine_devices`
+    # steps, before `flatten_layout` (which merges sub-cell nets by
+    # connectivity, so a tie made here survives it -- the constraint
+    # `apply_finfet_bulk_hierarchy`'s docstring records for a layout-side
+    # `join_nets`), and before the gate-level power-only prune. A no-op
+    # (empty list) unless the request declares the hint.
+    layout_short_nets_warnings = apply_layout_short_nets(
+        opts.layout_short_nets,
+        _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
+    )
 
     # Issue #2027: which *kind* of artifact `layout_hash_source` is, for
     # `provenance.input.role`. `_resolve_layout` returns the original
@@ -203,7 +236,20 @@ def _resolve_layout_stage(
     finfet_bulk_records = _apply_finfet_bulk_policy(
         layout_netlist, layout_spec, opts.finfet_layout, opts.finfet_bulk
     )
+    # Issue #6931: census of pinned unsupported ASAP7 masters beneath the
+    # selected top, taken while the netlist still carries its hierarchy --
+    # the FinFET extractor names each circuit after its GDS cell (verified:
+    # `LayoutToNetlist` with a `RecursiveShapeIterator` keeps per-cell
+    # circuits and one subcircuit entry per placement), and the optional
+    # flatten right below is what discards it. Consumed by `note_known_limit`
+    # only on a mismatching FinFET compare; gathered unconditionally because
+    # the walk is O(circuits + subcircuit edges).
+    layout_known_limit_counts = count_unsupported_asap7_instances(
+        layout_netlist, layout_spec.get("top")
+    )
     if opts.flatten_layout:
+        if "netlist" in layout_spec:
+            root_selected_circuit(layout_netlist, layout_spec.get("top"))
         flatten_layout_netlist(layout_netlist, opts.finfet_layout, flatten_warnings)
     return _LayoutStage(
         layout_netlist,
@@ -212,6 +258,7 @@ def _resolve_layout_stage(
         layout_pin_renames,
         layout_abstracted_cells,
         supply_findings,
+        dimensions,
         layout_input_role,
         flatten_warnings,
         power_only_pruning_warnings,
@@ -219,4 +266,6 @@ def _resolve_layout_stage(
         combine_per_circuit_warnings,
         layout_circuit_names,
         finfet_bulk_records,
+        layout_known_limit_counts,
+        layout_short_nets_warnings,
     )

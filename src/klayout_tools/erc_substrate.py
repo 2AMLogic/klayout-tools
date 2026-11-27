@@ -20,8 +20,8 @@ Properties (each load-bearing, see the design note):
 
 Piece C (issue #5343) adds the *decidable-or-disclosed* rule (design section
 4). The pass is **evaluated** when isolation is derived (the deck declares
-``substrate_isolation``), asserted (``ties[].isolation_boxes``), or provably
-absent (a family whose isolation layers are known and none is drawn); otherwise
+``substrate_isolation``), asserted (isolation boxes or a common native substrate),
+or provably absent (no isolation islands on a known layer); otherwise
 ``erc.supply_short`` is disclosed ``inapplicable`` with reason
 ``substrate_isolation_undecidable`` and a ``missing`` list. A declared
 ``nets[].same_net_as`` pair suppresses the substrate-path short and satisfies
@@ -33,7 +33,12 @@ from __future__ import annotations
 import itertools
 from typing import Any, NamedTuple
 
-from ._unionfind import UnionFind
+from .erc_substrate_bodies import (
+    _assign_bodies,
+    _cluster_names,
+    _is_drawn_well,
+    _isolation_box_region,
+)
 
 #: ``erc_coverage.checked`` id for the substrate-path work.
 SUBSTRATE_WORK_ID = "erc.supply_short.substrate"
@@ -59,8 +64,7 @@ NO_TIES_MISSING = "ties[] entries declaring the substrate/well tap geometry"
 #: never had one (#5344); ``test_family_missing_has_no_deck_declared_family``
 #: fails if a stale entry comes back.
 _FAMILY_MISSING: dict[str, str] = {
-    "asap7": "no drawn substrate tap geometry to join through (asap7 cells draw "
-    "no substrate or well tie)",
+    "asap7": "the asap7 deck does not identify substrate isolation islands",
 }
 
 
@@ -73,169 +77,35 @@ class SubstrateOutcome(NamedTuple):
     asserted: bool = False
     assertions: list[dict[str, Any]] = []
     joins: list[dict[str, Any]] = []
-
-
-def _asserts_isolation(
-    tie_layers: list[dict[str, Any]], degenerate_ties: dict[str, str]
-) -> bool:
-    return any(
-        tie["isolation_boxes"] and tie["name"] not in degenerate_ties
-        for tie in tie_layers
-    )
+    common_native_substrate: bool = False
 
 
 def isolation_missing(
     *,
-    layout: Any,
-    top_cell: Any,
-    deck: Any,
+    deck_derives_isolation: bool,
     deck_name: str | None,
-    tie_layers: list[dict[str, Any]],
-    degenerate_ties: dict[str, str],
+    live_ties: list[dict[str, Any]],
+    asserts_boxes: bool,
+    common_native_substrate: bool,
 ) -> list[str]:
-    """The decidable-or-disclosed rule (design section 4): ``[]`` when the
-    substrate check can be evaluated, else the information still missing."""
-    if deck is not None and deck.substrate_isolation is not None:
-        return []  # derived from the deck's isolation layer
-    if _asserts_isolation(tie_layers, degenerate_ties):
-        return []  # asserted via ties[].isolation_boxes
-    if deck_name in _FAMILY_MISSING:
-        return [_FAMILY_MISSING[deck_name], "or assert ties[].isolation_boxes"]
-    return [
+    """Identify missing geometry separately from unknown substrate isolation."""
+    if not live_ties:
+        return ["a non-degenerate ties[] tap entry"]
+    if deck_derives_isolation or asserts_boxes:
+        return []
+    if not any(not tie["tap_region"].is_empty() for tie in live_ties):
+        return ["no qualifying drawn tap geometry in the non-degenerate ties[]"]
+    if common_native_substrate:
+        return []
+    family = _FAMILY_MISSING.get(
+        deck_name or "",
         "--deck naming the PDK family, so the isolation layers can be measured",
-        "or assert ties[].isolation_boxes",
-    ]
-
-
-def _is_drawn_well(tie: dict[str, Any]) -> bool:
-    """A tie naming a drawn ``well_layer`` taps that well; any other form
-    (``well_boxes`` / ``well_complement_of``) taps the substrate."""
-    return bool(
-        tie["well_layer"] and not tie["well_boxes"] and not tie["well_complement_of"]
     )
-
-
-def _tie_bodies(
-    tie: dict[str, Any], islands: list[Any], box_region: Any = None
-) -> list[tuple[tuple[str, str], Any]]:
-    """``[(body_key, tap_sites_in_body), ...]`` for one tie.
-
-    ``body_key`` is ``(kind, id)``: a well body is keyed by its merged
-    polygon's bounding box, the substrate by ``vsubs`` / ``vsubs_iso<n>``.
-    """
-    import klayout.db as kdb
-
-    from .erc_islands import partition_region_by_islands
-
-    sites = tie["tap_region"]
-    bodies: list[tuple[tuple[str, str], Any]] = []
-    if _is_drawn_well(tie):
-        for well_poly in tie["well_region"].merged().each():
-            here = sites.interacting(kdb.Region(well_poly))
-            if not here.is_empty():
-                box = well_poly.bbox()
-                key = f"{box.left},{box.bottom},{box.right},{box.top}"
-                bodies.append((("well", key), here))
-        return bodies
-    outside = sites
-    if box_region is not None and not box_region.is_empty():
-        from .erc_islands import sorted_islands
-
-        box_islands = sorted_islands(box_region)
-        outside, per_box = partition_region_by_islands(sites, box_islands)
-        for box, part in zip(box_islands, per_box, strict=True):
-            if not part.is_empty():
-                b = box.bbox()
-                bodies.append(
-                    (
-                        (
-                            "substrate",
-                            f"isolation_box[{b.left},{b.bottom},{b.right},{b.top}]",
-                        ),
-                        part,
-                    )
-                )
-    outside, per_island = partition_region_by_islands(outside, islands)
-    if not outside.is_empty():
-        bodies.append((("substrate", "vsubs"), outside))
-    for index, part in enumerate(per_island):
-        if not part.is_empty():
-            bodies.append((("substrate", f"vsubs_iso{index}"), part))
-    return bodies
-
-
-def _cluster_names(tie_circuit: Any, declared: set[str]) -> dict[int, set[str]]:
-    """Declared net names labelled on each tie-graph cluster."""
-    names: dict[int, set[str]] = {}
-    for net in tie_circuit.each_net():
-        if net.cluster_id == 0:
-            continue
-        for label in net.expanded_name().split(","):
-            if label in declared:
-                names.setdefault(net.cluster_id, set()).add(label)
-    return names
-
-
-def _isolation_box_region(
-    layout: Any, tie_layers: list[dict[str, Any]], degenerate_ties: dict[str, str]
-) -> Any:
-    """Union of every live ``isolation_boxes`` assertion. It is about where the
-    *substrate* is isolated, so it applies to every tie's tap sites there, not
-    just the asserting tie's (tap geometry is net-agnostic)."""
-    import klayout.db as kdb
-
-    from .erc_well_regions import _boxes_region
-
-    region = kdb.Region()
-    for tie in tie_layers:
-        if tie["isolation_boxes"] and tie["name"] not in degenerate_ties:
-            region += _boxes_region(kdb, layout, tie["isolation_boxes"])
-    return region
-
-
-def _assign_bodies(
-    tie_l2n: Any,
-    tie_circuit: Any,
-    tie_layers: list[dict[str, Any]],
-    degenerate_ties: dict[str, str],
-    islands: list[Any],
-    names_by_cluster: dict[int, set[str]],
-    box_region: Any,
-) -> tuple[UnionFind, dict[tuple[str, str], dict[str, Any]]]:
-    """Union-find tie-graph clusters over the bodies their tap sites touch.
-
-    Returns ``(union_find, bodies)``; ``bodies[key]`` carries the attributed
-    ``ties``, the merged tap ``sites`` and the touching ``clusters``.
-    """
-    uf = UnionFind()
-    bodies: dict[tuple[str, str], dict[str, Any]] = {}
-    for tie in tie_layers:
-        if tie["name"] in degenerate_ties:
-            continue
-        tie_bodies = _tie_bodies(tie, islands, box_region)
-        for net in tie_circuit.each_net():
-            net_taps = tie_l2n.polygons_of_net(net, tie["tap_index"])
-            if net.cluster_id == 0 or net_taps.is_empty():
-                continue
-            for body_key, body_sites in tie_bodies:
-                if net_taps.interacting(body_sites).is_empty():
-                    continue
-                info = bodies.setdefault(
-                    body_key,
-                    {"ties": set(), "sites": body_sites.dup(), "clusters": set()},
-                )
-                # Attribute the tie only where its declared net is the one
-                # reaching this body (a tie's tap geometry is net-agnostic).
-                if tie["net"] in names_by_cluster.get(net.cluster_id, ()):
-                    info["ties"].add(tie["name"])
-                info["clusters"].add(net.cluster_id)
-                uf.union(("c", net.cluster_id), ("b", body_key))
-        for body_key, body_sites in tie_bodies:
-            if body_key in bodies:
-                bodies[body_key]["sites"] = (
-                    bodies[body_key]["sites"] + body_sites
-                ).merged()
-    return uf, bodies
+    return [
+        family,
+        "declare ties[].isolation_boxes for isolated regions, or "
+        "common_native_substrate: true for a shared native substrate",
+    ]
 
 
 def _short_finding(
@@ -255,10 +125,36 @@ def _short_finding(
         bbox=_bbox_dict(info["sites"].bbox()),
     )
     finding["via"] = "substrate"
+    joins = [j for j in info["joins"] if j["net"] in (a, b)]
+    joins.sort(
+        key=lambda j: (
+            j["net"],
+            j["tie"],
+            j["bbox"]["left"],
+            j["bbox"]["bottom"],
+            j["bbox"]["right"],
+            j["bbox"]["top"],
+            j.get("well_box", -1),
+        )
+    )
+    seen: set[tuple[Any, ...]] = set()
+    deduped = []
+    for join in joins:
+        key = (
+            join["net"],
+            join["tie"],
+            tuple(sorted(join["bbox"].items())),
+            join.get("well_box"),
+        )
+        if key not in seen:
+            seen.add(key)
+            deduped.append(join)
     finding["body"] = {
         "kind": body_key[0],
         "id": body_key[1],
         "ties": sorted(info["ties"]),
+        # Issue #5745: name the tap sites that performed the merge, per side.
+        "joins": deduped,
     }
     return finding
 
@@ -274,6 +170,7 @@ def substrate_supply_shorts(
     nets_decl: list[dict[str, Any]],
     group_by_name: dict[str, int],
     metal_pairs: set[tuple[str, str]],
+    layout: Any,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[tuple[str, str]]]:
     """Run the body-merge pass.
 
@@ -283,9 +180,18 @@ def substrate_supply_shorts(
     declared-name pair that shares a body-merged group (what satisfies a
     ``same_net_as`` declaration through the substrate path).
     """
+    import klayout.db as kdb
+
     kind_by_name = {decl["name"]: decl["kind"] for decl in nets_decl}
     supplies = {name for name, kind in kind_by_name.items() if kind == "supply"}
     names_by_cluster = _cluster_names(tie_circuit, set(kind_by_name))
+    # Issue #5745: every drawn-well tie's well region, in one place. Taps
+    # inside them tap the well, never the substrate, whatever a substrate
+    # assertion asserts over that area.
+    wells = kdb.Region()
+    for tie in tie_layers:
+        if _is_drawn_well(tie):
+            wells += tie["well_region"]
     uf, bodies = _assign_bodies(
         tie_l2n,
         tie_circuit,
@@ -294,6 +200,8 @@ def substrate_supply_shorts(
         islands,
         names_by_cluster,
         box_region,
+        wells,
+        layout,
     )
 
     group_names: dict[Any, set[str]] = {}
@@ -350,6 +258,8 @@ def substrate_provenance(outcome: SubstrateOutcome) -> dict[str, Any]:
     if outcome.bodies is None:
         return {}
     extra: dict[str, Any] = {"substrate_bodies": outcome.bodies}
+    if outcome.common_native_substrate:
+        extra["common_native_substrate"] = True
     if outcome.assertions:
         extra["isolation_assertions"] = outcome.assertions
     if outcome.joins:
@@ -385,6 +295,7 @@ def run_substrate_pass(
     top_cell: Any,
     deck: Any,
     deck_name: str | None = None,
+    common_native_substrate: bool = False,
     tie_l2n: Any,
     tie_circuit: Any,
     tie_layers: list[dict[str, Any]],
@@ -395,15 +306,15 @@ def run_substrate_pass(
     """Gate and run the pass. Extends ``erc_findings`` in place and, for a
     ``same_net_as`` pair joined only through the substrate, drops the
     ``erc.expected_short_missing`` the primary graph raised for it."""
-    if not any(tie["name"] not in degenerate_ties for tie in tie_layers):
-        return SubstrateOutcome(missing=["a non-degenerate ties[] tap entry"])
+    live_ties = [tie for tie in tie_layers if tie["name"] not in degenerate_ties]
+    deck_derives_isolation = deck is not None and deck.substrate_isolation is not None
+    asserts_boxes = any(tie["isolation_boxes"] for tie in live_ties)
     missing = isolation_missing(
-        layout=layout,
-        top_cell=top_cell,
-        deck=deck,
+        deck_derives_isolation=deck_derives_isolation,
         deck_name=deck_name,
-        tie_layers=tie_layers,
-        degenerate_ties=degenerate_ties,
+        live_ties=live_ties,
+        asserts_boxes=asserts_boxes,
+        common_native_substrate=common_native_substrate,
     )
     if missing:
         return SubstrateOutcome(missing=missing)
@@ -423,7 +334,7 @@ def run_substrate_pass(
             if deck.substrate_isolation_needs_nwell_ring
             else None,
         )
-        if deck is not None and deck.substrate_isolation is not None
+        if deck_derives_isolation
         else []
     )
     findings, bodies, joined = substrate_supply_shorts(
@@ -438,6 +349,7 @@ def run_substrate_pass(
             nets_decl, _declared_same_net_pairs(nets_decl)
         ),
         metal_pairs=metal_pairs,
+        layout=layout,
     )
     erc_findings.extend(findings)
     joins: list[dict[str, Any]] = []
@@ -450,9 +362,11 @@ def run_substrate_pass(
                 continue
         kept.append(finding)
     erc_findings[:] = kept
+    used_common = common_native_substrate and not deck_derives_isolation
     return SubstrateOutcome(
         bodies=bodies,
-        asserted=_asserts_isolation(tie_layers, degenerate_ties),
+        asserted=asserts_boxes or used_common,
+        common_native_substrate=used_common,
         assertions=_assertion_echo(tie_layers, degenerate_ties, bodies),
         joins=sorted(joins, key=lambda j: (j["net"], j["other_net"])),
     )

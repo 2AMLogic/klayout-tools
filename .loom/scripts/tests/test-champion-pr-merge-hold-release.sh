@@ -14,6 +14,11 @@
 # The four risk axes are an LLM judgment with no executable form, so the
 # narrowed merge-risk rule and its kept set are pinned as doc literals
 # (Test 1); the precheck itself is shown never to hold an unheld PR.
+# #14833: the hold-notice idempotency guard is HEAD-SCOPED — a re-hold at a
+# moved head posts its notice for that head (Tests 11/11c), a same-head repeat
+# stays quiet with its digest refresh (Test 11b), and the EMITTED notice, fed
+# to the real `merge-pr release-hold` decision, authorizes the audited release
+# at the new head (Test 11d; daemon-gated, skipped without a build).
 #
 # Hermetic: no network, no forge, no tokens.
 #
@@ -63,11 +68,22 @@ extract_block() {
 
 PRECHECK="$(extract_block '**Run this precheck before judging the axes**')"
 HOLD_BEHAVIOR="$(extract_block '**Hold behavior** — name the')"
-CENSUS_RELEASED="$(grep -A3 -F 'RELEASED=$("$GH_READ" pr list' "$CHAMPION_MD")"
+# End-marker range, not a fixed -A<N> window (#14078): the `if ! RELEASED=$(…)`
+# wrapper pushed the echo past +3 and a fixed window truncated the block mid-`if`.
+CENSUS_RELEASED="$(awk -v m='RELEASED=$("$GH_READ" pr list' -v e='echo "Released holds, not yet merged:' '
+    f == 0 && index($0, m) { f = 1 }
+    f == 1                 { print }
+    f == 1 && index($0, e) { exit }
+' "$CHAMPION_MD")"
 
 WORK="$(mktemp -d)" && trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/.loom/scripts"
-printf '%s\n' '#!/usr/bin/env bash' 'echo "POST $*" >>"$STUB_LOG"' >"$WORK/.loom/scripts/post-comment.sh"
+cat >"$WORK/.loom/scripts/post-comment.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "POST $*" >>"$STUB_LOG"
+# #14833: the notice body, for the head-recording and release-decision legs.
+printf '%s' "$4" >"${POST_BODY:-/dev/null}"
+EOF
 chmod +x "$WORK/.loom/scripts/post-comment.sh"
 
 # ---- forge stubs ------------------------------------------------------------
@@ -101,6 +117,9 @@ gh() {
 loom-daemon() {
     # #11861: the hold label is loom:blocked, applied with its park record.
     [[ "$1 $2" == "park-record apply" ]] && { echo "PARK $*" >>"$STUB_LOG"; return 0; }
+    # #12933/#14833: the standing-authorization digest read; DIGEST_STUB
+    # simulates the configured digest (empty = none configured).
+    [[ "$1 $2 $3" == "config get champion.standingAuthorizations" ]] && { printf '%s\n' "${DIGEST_STUB:-}"; return 0; }
     [[ "$1 $2 $3" == "forge trusted-comments --fetch" ]] || { echo "unexpected loom-daemon: $*" >&2; return 99; }
     printf '%s\n' "$FIX_COMMENTS"
 }
@@ -150,11 +169,13 @@ run_precheck() {
 }
 
 # Run the precheck, then "Hold behavior" with $1 as this tick's concern bullet.
+# The posted notice body (if any) is left in "$WORK/last_post" for inspection.
 run_hold_behavior() {
     local concern="$1"
     (
         cd "$WORK" || exit 1
         export STUB_LOG="$WORK/log"; : >"$STUB_LOG"
+        export POST_BODY="$WORK/last_post"; : >"$POST_BODY"
         PR_NUMBER=10280
         GH_READ=gh_read
         write_facts "$PR_NUMBER"
@@ -301,12 +322,116 @@ assert_contains "$OUT" "POST 10280 --pr --body" "a fresh hold notice is posted, 
 assert_contains "$OUT" "PARK park-record apply --pr 10280 --reason champion merge-risk hold --by champion" "loom:blocked reapplied"
 echo
 
-echo "Test 11: Hold behavior — no human release, marker on record -> notice suppressed, label reasserted"
-FIX_PR=$(pr_json "abcdef1234567890" loom:pr loom:blocked)
+echo "Test 11: REGRESSION #14833 — hold at A, head at B, no release, axes red -> a FRESH notice for B"
+# The consumer-repo sequence: Champion held at A, Doctor pushed B, Judge
+# re-approved, Champion re-held — the old guard ("any notice exists") kept it
+# silent, so the newest hold-state record stayed at A and --release-hold
+# refused the release at B.
+B=fedcba0987654321fedcba0987654321fedcba09
+FIX_PR=$(pr_json "$B" loom:pr loom:blocked)
 OUT=$(run_hold_behavior "$BULLET")
 assert_contains "$OUT" "BLOCKED=true" "held"
-assert_lacks "$OUT" "POST" "idempotency guard suppresses the repeat notice"
+assert_contains "$OUT" "POST 10280 --pr --body" "a fresh hold notice is posted for the new head"
+NOTICE_B=$(cat "$WORK/last_post")
+assert_contains "$NOTICE_B" "<!-- champion:hold-state head=$B" "the fresh notice records head B for --release-hold"
 assert_contains "$OUT" "PARK park-record apply --pr 10280 --reason champion merge-risk hold --by champion" "label reasserted"
+# The next tick at B (the fresh notice now the hold on record): quiet — exactly
+# one notice for B. A Judge re-review releases the precheck so the axes are
+# re-judged red and "Hold behavior" runs again.
+B_NOTICE=$(jq -n --arg b "$NOTICE_B" '{author: {login: "loom-fleet-dispatch"}, body: $b, createdAt: "2026-10-12T00:00:00Z"}')
+JUDGE_AT_B=$(jq -n '{author: {login: "judge"}, body: "**Approved** with comments", createdAt: "2026-10-12T01:00:00Z"}')
+FIX_COMMENTS="[$HOLD_COMMENT, $B_NOTICE, $JUDGE_AT_B]"
+OUT=$(run_hold_behavior "$BULLET")
+assert_contains "$OUT" "BLOCKED=true" "held"
+assert_lacks "$OUT" "POST" "repeat tick at B posts no second notice for B"
+assert_contains "$OUT" "PARK park-record apply --pr 10280 --reason champion merge-risk hold --by champion" "label reasserted on the repeat tick"
+FIX_COMMENTS="[$HOLD_COMMENT]"
+echo
+
+echo "Test 11b: same-head repeat (a new Judge review released the precheck, axes still red) -> quiet, digest refresh preserved"
+JUDGE_REVIEW=$(jq -n '{author: {login: "judge"}, body: "**Approved** with comments", createdAt: "2026-10-11T00:00:00Z"}')
+FIX_PR=$(pr_json "$HOLD_HEAD" loom:pr loom:blocked)
+FIX_COMMENTS="[$HOLD_COMMENT, $JUDGE_REVIEW]"
+OUT=$(run_hold_behavior "$BULLET")
+assert_contains "$OUT" "BLOCKED=true" "held"
+assert_lacks "$OUT" "POST" "idempotency guard suppresses the repeat notice at the same head"
+assert_contains "$OUT" "PARK park-record apply --pr 10280 --reason champion merge-risk hold --by champion" "label reasserted"
+DIGEST_STUB=1c4b2a6d
+OUT=$(run_hold_behavior "$BULLET")
+assert_contains "$OUT" "POST 10280 --pr --body" "a changed standing-authorization digest still records once at the same head (#12933)"
+assert_contains "$(cat "$WORK/last_post")" "<!-- champion:hold-state head=$HOLD_HEAD auth=1c4b2a6d -->" "the re-read records the current digest at this head"
+assert_lacks "$(cat "$WORK/last_post")" "<!-- champion:merge-risk-hold -->" "the digest re-read is not a hold notice"
+DIGEST_STUB=""
+FIX_COMMENTS="[$HOLD_COMMENT]"
+echo
+
+echo "Test 11c: a legacy notice (no recorded head) + commits after it -> fresh notice records the head"
+LEGACY_HOLD=$(jq -n --arg b "<!-- champion:merge-risk-hold -->
+**Champion: Holding for Human Merge**
+
+$BULLET" --arg at "$HOLD_AT" '{author: {login: "loom-fleet-dispatch"}, body: $b, createdAt: $at}')
+FIX_PR=$(jq -n --arg h "$B" '{headRefOid: $h, commits: [{committedDate: "2026-10-11T00:00:00Z"}], labels: [{name: "loom:pr"}, {name: "loom:blocked"}]}')
+FIX_COMMENTS="[$LEGACY_HOLD]"
+FIX_EVENTS='[]'
+OUT=$(run_hold_behavior "$BULLET")
+assert_contains "$OUT" "POST 10280 --pr --body" "a legacy hold with no recorded head posts a fresh notice"
+assert_contains "$(cat "$WORK/last_post")" "<!-- champion:hold-state head=$B" "the fresh notice records the current head"
+echo
+
+echo "Test 11d: #14833 end-to-end — the EMITTED re-hold notice authorizes an audited release at B"
+# The real release decision (`loom-daemon merge-pr release-hold`), resolved
+# softly: this suite's own legs are hermetic and stay on the bash stubs, so the
+# strict require-daemon-bin harness would fail the hermetic CI job. The
+# CHECKOUT'S OWN BUILD wins over every env pin — a dispatched session exports
+# LOOM_DAEMON_SELF_BIN/LOOM_DAEMON_BIN naming the host install (#10662's
+# hazard), which is exactly the wrong binary to test a source change against.
+# CI runs this suite a second time in the merge-pr daemon job, where the
+# checkout's target/debug/loom-daemon exists (ci.yml, "merge-risk hold writer
+# -> release decision"); anywhere else the leg is skipped, never silently.
+RELEASE_DAEMON=""
+REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
+for _c in "$REPO_ROOT/target/debug/loom-daemon" "$REPO_ROOT/target/release/loom-daemon"; do
+    [[ -x "$_c" ]] && RELEASE_DAEMON="$_c" && break
+done
+if [[ -z "$RELEASE_DAEMON" && -n "${LOOM_DAEMON_SELF_BIN:-}" && -x "${LOOM_DAEMON_SELF_BIN:-}" ]]; then
+    RELEASE_DAEMON="$LOOM_DAEMON_SELF_BIN"   # an explicit pin, only when no build exists
+fi
+if [[ -z "$RELEASE_DAEMON" || ! -x "$RELEASE_DAEMON" ]]; then
+    echo "  SKIP: no loom-daemon build for this checkout - the real release-decision leg does not run"
+else
+    VERDICT_B="<!-- loom:verdict-sha sha=$B verdict=approved -->"
+    for digest in "" "1c4b2a6d"; do
+        DIGEST_STUB="$digest"
+        FIX_PR=$(pr_json "$B" loom:pr loom:blocked)
+        FIX_COMMENTS="[$HOLD_COMMENT]"
+        FIX_EVENTS='[]'
+        run_hold_behavior "$BULLET" >/dev/null
+        NOTICE=$(cat "$WORK/last_post")
+        assert_contains "$NOTICE" "<!-- champion:hold-state head=$B" "digest='${digest:-none}': Champion re-held at B"
+        HISTORY="$(jq -r '.body' <<<"$HOLD_COMMENT")
+$NOTICE
+$VERDICT_B"
+        RC=0
+        REL_OUT="$(printf '%s\n' "$HISTORY" | "$RELEASE_DAEMON" merge-pr release-hold --pr 10280 --head-sha "$B" --operator alice --labels $'loom:pr\nloom:blocked' 2>/dev/null)" || RC=$?
+        assert_eq 0 "$RC" "digest='${digest:-none}': the emitted history authorizes the audited release at B"
+        assert_contains "$REL_OUT" "LOOM-HOLD-RELEASE-OK" "digest='${digest:-none}': the release decision prints its sentinel"
+    done
+    DIGEST_STUB=""
+    # Stop the sequence BEFORE Champion re-holds: only the A marker and the B
+    # approval -> refuse, naming both SHAs and the next action, writing nothing.
+    STALE_HISTORY="$(jq -r '.body' <<<"$HOLD_COMMENT")
+$VERDICT_B"
+    RC=0
+    REL_OUT="$(printf '%s\n' "$STALE_HISTORY" | "$RELEASE_DAEMON" merge-pr release-hold --pr 10280 --head-sha "$B" --operator alice --labels $'loom:pr\nloom:blocked' 2>/dev/null)" || RC=$?
+    assert_eq 1 "$RC" "only the A marker and B approval: refused"
+    assert_contains "$REL_OUT" "hold-state head=$HOLD_HEAD" "refusal names the stale marker's head"
+    assert_contains "$REL_OUT" "current head=$B" "refusal names the current head"
+    assert_contains "$REL_OUT" "Rerun Champion on this PR" "refusal gives the next action"
+    assert_contains "$REL_OUT" "Nothing was written" "refusal performs no forge writes"
+fi
+FIX_PR=$(pr_json "$HOLD_HEAD" loom:pr loom:blocked)
+FIX_COMMENTS="[$HOLD_COMMENT]"
+FIX_EVENTS='[]'
 echo
 
 echo "Test 13: operator release condition (#12594) — survives a new head, no prior hold marker needed"
@@ -439,19 +564,21 @@ assert_contains "$OUT" "BLOCKED=true PRIOR=true" "quoting champion:merge-risk-ho
 assert_contains "$OUT" "release after #12000 merges; the champion:merge-risk-hold above stays until then" "text on the marker line is quoted"
 echo
 
-echo "Test 12: census lists hand-released, unmerged holds (merge-risk and critical-file), not quoted markers"
+echo "Test 12: census lists hand-released, unmerged holds (merge-risk, critical-file, ratification), not quoted markers"
 FIX_LIST=$(jq -n '[
   {number: 10280, comments: [{body: "<!-- champion:merge-risk-hold -->\nheld"}]},
   {number: 9001,  comments: [{body: "<!-- champion:critical-file-hold -->\nheld"}]},
   {number: 9002,  comments: [{body: "LGTM"}]},
   {number: 9003,  comments: [{body: "quoting <!-- champion:merge-risk-hold --> in prose"}]},
-  {number: 9004,  comments: [{body: "<!-- champion:critical-file-hold -->\nheld"}, {body: "<!-- champion:critical-file-hold-cleared -->\nnarrowed"}]}
+  {number: 9004,  comments: [{body: "<!-- champion:critical-file-hold -->\nheld"}, {body: "<!-- champion:critical-file-hold-cleared -->\nnarrowed"}]},
+  {number: 9005,  comments: [{body: "<!-- champion:ratification-hold -->\n<!-- champion:hold-state head=abc -->"}, {body: "<!-- champion:ratification-release-respected -->\n<!-- champion:hold-state head=abc -->"}]},
+  {number: 9006,  comments: [{body: "<!-- champion:ratification-hold -->"}, {body: "<!-- champion:ratification-hold-cleared -->"}]}
 ]')
 OUT=$(
     GH_READ=gh_read
     eval "$CENSUS_RELEASED"
 )
-assert_eq "Released holds, not yet merged: #10280 #9001" "$OUT" "exactly the marker-bearing PRs are listed (auto-cleared critical-file hold #9004 excluded)"
+assert_eq "Released holds, not yet merged: #10280 #9001 #9005" "$OUT" "exactly the marker-bearing PRs are listed: operator-released ratification #9005 in, auto-cleared critical-file #9004 and ratification-cleared #9006 out (#13875)"
 FIX_LIST='[]'
 OUT=$(
     GH_READ=gh_read

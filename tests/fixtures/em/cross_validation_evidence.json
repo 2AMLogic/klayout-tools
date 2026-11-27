@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "issue": 5618,
+  "description": "klt em (geode_fem FEM) vs klt mom (BEM/MoM) cross-validation on one shared GDS fixture: two coincident 10x10 um square plates on sky130 li1 (67/20, labels 67/5) and met1 (68/20, labels 68/5), run through klt's own GDS + stackup geometry path (sky130A). Issue #5618, Epic #708 Phase 1 brief 1.C.",
+  "fixture": {
+    "shape": "two coincident square plates, docs/design/mom-validation.md section 1's parallel-plate fixture realized on a PDK layer pair",
+    "plate_side_um": 10.0,
+    "layers": {
+      "lower": {"conductor": "li1", "gds_layer": "67/20", "z0_um": 0.9361, "z1_um": 1.0361},
+      "upper": {"conductor": "met1", "gds_layer": "68/20", "z0_um": 1.3761, "z1_um": 1.7361}
+    },
+    "gap_um": 0.34,
+    "eps_r": 3.9,
+    "aspect_ratio_L_over_d": 29.41,
+    "stackup": "sky130A"
+  },
+  "oracle": {
+    "kind": "closed_form_parallel_plate",
+    "formula": "C = eps_r * eps_0 * A / d",
+    "value_ff": 10.156274,
+    "note": "A lower bound for finite plates: fringing can only add capacitance. At L/d = 29 the open-space fringing excess is ~7-10%, so this oracle bounds the cross-check's sanity floor, not the 5% agreement bar (that bar is met at L/d ~ 148; see docs/design/em-validation.md section 1)."
+  },
+  "klt_em": {
+    "request": "klt em layout request (layout + region + stackup: sky130A), default mesh settings",
+    "mutual_ff": 10.921216,
+    "mesh_nodes": 99048,
+    "mesh_tets": 456154,
+    "engine": "geode_fem",
+    "engine_version": "0.9.0",
+    "engine_git_sha": "4215e958e7fb"
+  },
+  "klt_mom": {
+    "spec": {"background_permittivity": 3.9, "panel_size_um": 0.29, "stackup_z_from": "klt pdk stackup sky130A"},
+    "mutual_ff": 11.162504,
+    "panel_count": 4896,
+    "warnings": []
+  },
+  "difference": {
+    "abs_ff": 0.241288,
+    "relative_to_mom": 0.021616,
+    "relative_to_oracle": 0.023757
+  },
+  "tolerance_band": {
+    "metric": "|em - mom| / mom",
+    "max": 0.05,
+    "rationale": "The two methods solve different boundary-value problems on the same conductors: klt mom solves the open-space pair (flux to infinity wraps back to the plates), klt em solves inside geode's grounded box (grounded substrate plane, grounded top wall one stack height above the known stack, lateral walls one stack height out), whose walls absorb part of the fringing flux that mom wraps onto the counterplate. That model difference is bounded by the fringing excess itself (~10% of the oracle at L/d = 29, and shrinking with d/L), each solver's own discretisation residual is a fraction of a percent to a few percent (see docs/design/em-validation.md sections 1-2), and both sit above the physics lower bound. Measured 2.16%; the band is 5%, ~2.3x headroom."
+  },
+  "each_solver_bound": {
+    "metric": "mutual / oracle",
+    "min": 1.0,
+    "max": 1.25,
+    "rationale": "docs/design/mom-validation.md section 1's own stated band for a 10x10 um plate pair at this aspect ratio: the closed form is a strict lower bound (min = 1.0 by physics) and the ceiling leaves headroom over the ~10% fringing excess (measured: em 1.0753, mom 1.0991)."
+  },
+  "measured": {
+    "date": "2026-11-19",
+    "gmsh": "4.15.2",
+    "note": "Values reproduce bit-identically for a fixed geode/gmsh pair; other Gmsh versions mesh slightly differently (geode-fem's own docs note the same), which the 5% band absorbs."
+  }
+}

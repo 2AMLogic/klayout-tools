@@ -38,13 +38,21 @@ def add_netlist_parser(
     netlist_parser.add_argument(
         "schematic", help="path to the xschem schematic to netlist (.sch)"
     )
-    netlist_parser.add_argument(
+    destination = netlist_parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument(
         "-o",
         "--output",
-        required=True,
         help=(
             "path to write the SPICE netlist to (the committed artifact). "
             "Under --check this file is read and compared, never written"
+        ),
+    )
+    destination.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help=(
+            "export the top-level and split SPICE netlists with their original "
+            "names and bytes (local generate only)"
         ),
     )
     netlist_parser.add_argument(
@@ -155,6 +163,21 @@ def add_netlist_parser(
             "the written netlist is byte-identical to xschem's own export "
             "(for projects that hash-pin committed netlists). Off by default "
             "(issue #5085)"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--canonical-wrap",
+        dest="canonical_wrap",
+        action="store_true",
+        default=False,
+        help=(
+            "generate mode: fold every '+' continuation line onto the card "
+            "it continues and collapse whitespace runs inside non-comment "
+            "lines, writing the line layout --check already compares, so "
+            "regenerating on a host whose xschem wraps long cards "
+            "differently is byte-identical. Comment lines are left "
+            "byte-intact (xschem's '**.subckt' port order is not "
+            "rewritten). Off by default (issue #5715)"
         ),
     )
     netlist_parser.add_argument(

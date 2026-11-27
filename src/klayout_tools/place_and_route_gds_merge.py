@@ -7,51 +7,42 @@ subsystem: parsing a DEF's own ``DIEAREA`` in real microns
 into the DEF-derived layout at a consistent DBU (:func:`_merge_gds_view`),
 measuring a merged cell library's own abutment-box overhang
 (:func:`_cell_library_max_overhang_um`), resolving a LEF layer name to its
-routed-net GDS ``(layer, datatype)`` pair (:func:`_lef_net_layer_gds_map`),
-a region-based drawn-geometry coverage test
+routed-net GDS ``(layer, datatype)`` pair (``_lef_net_layer_gds_map``, now in
+``place_and_route_pin_conductor``), a region-based drawn-geometry coverage test
 (:func:`_box_is_inside_drawn_geometry`), stamping unrouted single-pin DEF
 nets with a recoverable name marker (:func:`_stamp_single_pin_def_net_names`,
 issue #1488), and the merge's own top-level orchestration
 (:func:`_merge_def_to_gds`). This mirrors the shape of the earlier
 ``extract.py``/``extract_abstract.py`` (#1303), ``gen.py``/``gen_pcells``
-(#1698), ``gen_compose.py``/``gen_compose_routing.py`` (#1708), and this same
-file's own STA split, ``place_and_route.py``/``place_and_route_sta.py``
-(#1808/#1819): a self-contained, single-purpose subsystem relocated verbatim
-out of a file that had grown past the point one module should hold stage
+(#1698), ``gen_compose.py``/``gen_compose_routing.py`` (#1708), and this
+file's own STA split (#1808/#1819): a self-contained, single-purpose
+subsystem relocated verbatim out of a file that had outgrown holding stage
 orchestration *and* this.
 
 Only :func:`_merge_def_to_gds` crosses the boundary back into
 ``place_and_route.py`` -- called exactly once, from that module's own
 :func:`~klayout_tools.place_and_route.run_place_and_route`. Everything else
-in this module is section-internal (the two DEF-property-id constants,
-``_DEF_INSTANCE_NAME_PROPERTY_ID``/``_SINGLE_PIN_NET_MARKER_HALF_DBU``, are
-also re-exported back into ``place_and_route.py``'s own namespace, since the
-test suite reaches them by that path from before this split -- see that
-module's own re-export block).
+is section-internal (the two DEF-property-id constants are also re-exported
+into ``place_and_route.py``'s namespace, since the test suite reaches them
+by that path from before this split -- see that module's re-export block).
 
 Dependency surface, same discipline the STA split documents for its own
 reverse dependency: ``write_layout`` (``_layout.py``),
 ``read_lef_macro_pin_ports`` (``lef_header.py``) and ``repair_min_area``
-(``place_and_route_min_area.py``, issue #2139 -- this merge's own
-post-route minimum-area repair pass, split off for the same reason this
-module was) are imported at module scope here directly from where they are
-actually defined -- none creates a cycle, since none of those modules
-imports back from here or from ``place_and_route.py``, and none is ever
-monkeypatched through ``place_and_route.<name>``. The handful of names still
-defined in (or re-exported through) ``place_and_route.py`` itself
-(``PlaceAndRouteError``,
-``read_lef_header``, ``_resolve_gds_view``) are
-imported *inside* the function that uses them, deferred rather than at
-module scope, both because ``place_and_route.py`` in turn imports this
-module's own :func:`_merge_def_to_gds` back (module scope, no cycle -- this
-module never imports ``place_and_route`` at its own module scope) and
-because the test suite monkeypatches ``place_and_route.read_lef_header``
-expecting :func:`_merge_def_to_gds` to observe it -- a deferred,
+(``place_and_route_min_area.py``, issue #2139, this merge's own post-route
+minimum-area repair pass) are imported at module scope straight from where
+they are defined -- none creates a cycle (none imports back from here or
+from ``place_and_route.py``) and none is monkeypatched through
+``place_and_route.<name>``. The names still defined in (or re-exported
+through) ``place_and_route.py`` itself (``read_lef_header``,
+``_resolve_gds_view``) are imported *inside* the function that uses them:
+``place_and_route.py`` imports this module's :func:`_merge_def_to_gds`
+back at module scope (no cycle -- this module never imports
+``place_and_route`` at its own module scope), and the test suite
+monkeypatches ``place_and_route.read_lef_header`` expecting
+:func:`_merge_def_to_gds` to observe it -- a deferred,
 looked-up-by-name-at-call-time import is what makes that monkeypatch
-visible here, exactly as it would if this code had never moved. This
-purely preserves ``klayout_tools.place_and_route._merge_def_to_gds``/
-``read_lef_header`` as working import/monkeypatch paths for callers and the
-test suite that used them before this split.
+visible here, purely preserving the pre-split import/monkeypatch paths.
 """
 
 from __future__ import annotations
@@ -62,15 +53,20 @@ import tempfile
 from collections.abc import Iterable
 from typing import Any
 
+from ._c_stdout import native_stdout_to_stderr
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
+from .place_and_route_base import PlaceAndRouteError
+from .place_and_route_m4_grid import repair_m4_grid
 from .place_and_route_min_area import repair_min_area
+from .place_and_route_pin_conductor import (
+    _lef_net_layer_gds_map,
+    _stage_pin_conductor_layer_map,
+)
+from .place_and_route_power_stack import repair_power_stack
 from .place_and_route_via_pad import trim_via_pads
 
-#: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
-#: ``_UNITS_RE`` (kept as a separate, module-local copy here rather than
-#: imported, matching this file's existing small-targeted-scan convention
-#: for DEF text, e.g. :func:`~klayout_tools.place_and_route_sta._def_pin_net_names`).
+#: Database units per micron in the input DEF.
 _DEF_UNITS_RE = re.compile(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;")
 #: ``DIEAREA ( x0 y0 ) ( x1 y1 ) ;`` -- DEF's ``DIEAREA`` is technically an
 #: arbitrary rectilinear polygon, but every point pair this regex captures
@@ -164,7 +160,6 @@ def _merge_gds_view(kdb: Any, main_layout: Any, gds_path: str) -> None:
     if scratch.dbu != main_layout.dbu:
         scratch.transform(kdb.ICplxTrans(scratch.dbu / main_layout.dbu))
         scratch.dbu = main_layout.dbu
-    from .place_and_route import PlaceAndRouteError
 
     # Temp-file round trip rather than ``Layout.write_bytes``/``read_bytes``:
     # the in-memory byte API is 0.30-only (issue #5768).
@@ -221,45 +216,6 @@ def _cell_library_max_overhang_um(
         )
         max_overhang_um = max(max_overhang_um, overhang_um)
     return max_overhang_um
-
-
-def _lef_net_layer_gds_map(map_path: str | None) -> dict[str, tuple[int, int]]:
-    """``{<LEF layer name>: (<GDS layer>, <GDS datatype>)}`` for the ``NET``
-    purpose of every entry in the open_pdks KLayout LEF/DEF layer-map file at
-    ``map_path`` -- i.e. the exact ``(layer, datatype)`` KLayout's own DEF
-    reader draws that LEF layer's *routed net* geometry on, which is also the
-    ``(layer, datatype)`` an extraction deck lists in its own ``metals``
-    (sky130: ``li1`` -> ``67/20``, ``met1`` -> ``68/20``, ...).
-
-    File shape is the same whitespace-delimited
-    ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``
-    :func:`~klayout_tools.pdk.load_gds_to_lef_layer_map` parses -- this is
-    the same file read in the opposite direction (LEF name -> GDS pair,
-    restricted to the one purpose that names drawn routing).
-
-    Returns ``{}`` for ``None`` (no map file resolved) or an unreadable/
-    malformed file -- callers treat that as "cannot resolve", never as an
-    error, matching :func:`~klayout_tools.pdk.resolve_klayout_layer_map`'s
-    own degrade-gracefully posture.
-    """
-    if map_path is None:
-        return {}
-    mapping: dict[str, tuple[int, int]] = {}
-    try:
-        with open(map_path, encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                parts = line.split("#", 1)[0].split()
-                if len(parts) < 4 or parts[0] in ("NAME", "DIEAREA"):
-                    continue
-                if "NET" not in parts[1].split(","):
-                    continue
-                try:
-                    mapping.setdefault(parts[0], (int(parts[-2]), int(parts[-1])))
-                except ValueError:
-                    continue
-    except OSError:
-        return {}
-    return mapping
 
 
 def _box_is_inside_drawn_geometry(
@@ -433,9 +389,6 @@ def _output_dbu_factor(current_dbu_um: float, output_dbu_um: float | None) -> in
     than snapping geometry."""
     if output_dbu_um is None:
         return 1
-    # Deferred like the other helpers here: place_and_route imports this module.
-    from .place_and_route import PlaceAndRouteError
-
     ratio = current_dbu_um / output_dbu_um
     factor = round(ratio)
     if factor < 1 or abs(ratio - factor) > 1e-6 * factor:
@@ -504,6 +457,13 @@ def _merge_def_to_gds(
     the PDK's own ``*.area.*`` rules. ``via_pad_trim`` is
     :func:`~klayout_tools.place_and_route_via_pad.trim_via_pads`'s report
     (issue #4495), surfaced as the sibling ``via_pad_trim`` response field.
+    ``power_stack_repair`` is
+    :func:`~klayout_tools.place_and_route_power_stack.repair_power_stack`'s
+    report (issue #6909), surfaced as the sibling ``power_stack_repair``
+    response field. ``m4_grid_repair`` is
+    :func:`~klayout_tools.place_and_route_m4_grid.repair_m4_grid`'s report
+    (issue #7817), surfaced as the sibling ``m4_grid_repair`` response field.
+    ``pin_conductor`` reports derived-map staging (issue #5700).
     """
     # Deferred import: `place_and_route.py` imports this function back at
     # module scope (to preserve `klayout_tools.place_and_route.
@@ -519,11 +479,7 @@ def _merge_def_to_gds(
     import klayout.db as kdb
 
     from .pdk import resolve_klayout_layer_map
-    from .place_and_route import (
-        PlaceAndRouteError,
-        _resolve_gds_view,
-        read_lef_header,
-    )
+    from .place_and_route import _resolve_gds_view, read_lef_header
 
     cell_gds = _resolve_gds_view(pdk_info, cell_library)
     layer_map_path, layer_map_resolution = resolve_klayout_layer_map(pdk_info)
@@ -531,25 +487,8 @@ def _merge_def_to_gds(
     opts = kdb.LoadLayoutOptions()
     lefdef_config = opts.lefdef_config
     lefdef_config.lef_files = [tech_lef, cell_lef, *(macro["lef"] for macro in macros)]
-    if layer_map_path is not None:
-        lefdef_config.map_file = layer_map_path
-
-    # Issue #1032: KLayout's DEF reader silently proceeds when the target
-    # layout DBU it is configured for does not match the DEF file's own
-    # declared `UNITS DISTANCE MICRONS` value, producing wrong/lossy
-    # via-cut geometry as a side effect (only a `Warning:` line, never a
-    # raised error). Left unset, `lefdef_config.dbu` inherits KLayout's
-    # compiled-in default (0.001, i.e. `DATABASE MICRONS 1000`), which
-    # happens to match sky130 but is wrong for any PDK whose own tech LEF
-    # declares a different `DATABASE MICRONS` value (e.g. gf180mcu's 2000).
-    # Resolve the tech LEF's own declared value and set the reader's target
-    # DBU to match; when the tech LEF doesn't declare one (or the
-    # regex-based parser can't extract it), fall back to KLayout's existing
-    # default DBU behavior -- `read_lef_header` never raises on malformed
-    # input, so `database_microns is None` is a normal, expected case here.
-    # Captured as the full header (not just `database_microns`) so the
-    # post-merge DIEAREA guard below can reuse its own `sites` entry rather
-    # than re-parsing `tech_lef` a second time.
+    # Match DATABASE MICRONS to preserve vias, defaulting to the reader DBU.
+    # Keep the full header for the DIEAREA site-height guard (#1032).
     tech_lef_header = read_lef_header(tech_lef)
     database_microns = tech_lef_header["database_microns"]
     if database_microns is not None:
@@ -557,7 +496,20 @@ def _merge_def_to_gds(
 
     main_layout = kdb.Layout()
     try:
-        main_layout.read(def_path, opts)
+        # Keep the PDK map unchanged; the derived map lives only for the read.
+        with tempfile.TemporaryDirectory(prefix="klt-pin-conductor-") as tmp:
+            staged_path = os.path.join(tmp, "layer.map")
+            pin_conductor_info = _stage_pin_conductor_layer_map(
+                layer_map_path, staged_path
+            )
+            if layer_map_path is not None:
+                lefdef_config.map_file = (
+                    staged_path
+                    if pin_conductor_info["status"] == "staged"
+                    else layer_map_path
+                )
+            with native_stdout_to_stderr():
+                main_layout.read(def_path, opts)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise PlaceAndRouteError(
             f"could not read DEF '{def_path}' for GDS merge: {exc}"
@@ -607,10 +559,9 @@ def _merge_def_to_gds(
     # Issue #1488: give each *unrouted single-pin* DEF net a shape carrying
     # its own DEF net name, since the reader only ever stamped
     # `net_property_name` onto routed geometry. Runs on the merged
-    # `top_only`/`top` pair (not `main_layout`) because the coverage guard
-    # inside needs the standard-cell GDS view's real drawn conductor, and
-    # before the checks below so everything they verify covers the final,
-    # as-written geometry.
+    # `top_only`/`top` pair (not `main_layout`: the coverage guard inside
+    # needs the cell GDS view's real drawn conductor), before the checks
+    # below so everything they verify covers the final, as-written geometry.
     def_net_names_info = _stamp_single_pin_def_net_names(
         kdb,
         layout=top_only,
@@ -649,18 +600,14 @@ def _merge_def_to_gds(
         )
 
     # Post-merge sanity check (issue #1090's second, independent fix): a
-    # merged top cell whose bounding box extends beyond the DEF's own
-    # `DIEAREA` is a defect no valid design can produce on its own (OpenROAD
-    # never places/routes outside the declared die boundary) -- exactly the
-    # symptom a DBU mismatch between the DEF-derived geometry and a
-    # subsequently-merged GDS view produces (a doubled/halved coordinate
-    # system silently blows the merged extent past the die). This is a
-    # regression guard, not just a check for *this* fix: it fires even if a
+    # merged top cell whose bbox extends beyond the DEF's `DIEAREA` is a
+    # defect no valid design produces on its own -- exactly what a DBU
+    # mismatch between the DEF-derived geometry and a merged GDS view
+    # produces. A regression guard, not just this fix: it fires even if a
     # future edit reintroduces a bare, DBU-unsafe `main_layout.read(...)`
-    # call in place of :func:`_merge_gds_view`. Skipped (rather than
-    # raising) when the DEF carries no parseable `DIEAREA`, matching
-    # `_parse_def_die_area_um`'s own "malformed/absent input never raises"
-    # convention.
+    # in place of :func:`_merge_gds_view`. Skipped (not raised) when the
+    # DEF carries no parseable `DIEAREA`, matching `_parse_def_die_area_um`'s
+    # own "malformed/absent input never raises" convention.
     die_area_um = _parse_def_die_area_um(def_path)
     if die_area_um is not None:
         die_x0, die_y0, die_x1, die_y1 = die_area_um
@@ -726,16 +673,15 @@ def _merge_def_to_gds(
 
     # Issue #2139: floor every routed-metal polygon against its own layer's
     # minimum-*area* rule before writing. The tech LEF's own via cells
-    # (sky130's `L1M1_PR_MR`/`M2M3_PR`) and OpenROAD's PDN via patches each
-    # draw metal that is legal in isolation but below the layer's
-    # `*.area.*` floor once it is the whole merged polygon -- the
-    # `place-and-route` half of the gap #2075 fixed for `gen-compose`'s
-    # landing pads and explicitly could not reproduce here. Runs last, on
-    # the final `top_only`/`top` geometry: after the DIEAREA guard above
-    # (which must judge the *merge's* own extent, not this pass's patches,
-    # and whose parsed die box is reused here to keep every patch inside
-    # it), and after the #1488 marker pass (whose markers are drawn inside
-    # existing conductor and so change no merged polygon's area).
+    # (sky130's `L1M1_PR_MR`/`M2M3_PR`) and OpenROAD's PDN via patches draw
+    # metal legal in isolation but below the `*.area.*` floor once it is the
+    # whole merged polygon -- the `place-and-route` half of the gap #2075
+    # fixed for `gen-compose`'s landing pads. Runs last, on the final
+    # `top_only`/`top` geometry: after the DIEAREA guard above (which must
+    # judge the *merge's* extent, not this pass's patches, and whose parsed
+    # die box is reused to keep every patch inside it) and after the #1488
+    # marker pass (drawn inside existing conductor, so no merged polygon's
+    # area changes).
     min_area_info = repair_min_area(
         kdb,
         layout=top_only,
@@ -743,6 +689,32 @@ def _merge_def_to_gds(
         variant=pdk_info["variant"],
         routing_layers=set(_lef_net_layer_gds_map(layer_map_path).values()),
         die_area_um=die_area_um,
+    )
+
+    # Issue #6909: repair the pdngen M2 -> M5 power stack's deck-measured
+    # V4 enclosure (V4.M4.EN.1 / V4.M5.EN.2) and M3 stub tip-to-side
+    # (M3.S.2) violations on the merged geometry -- ASAP7-only, a
+    # documented no-op everywhere else. After the min-area pass (whose area
+    # floors these patches can only grow) and BEFORE the via-pad trim, so
+    # that trim's tip_check measures the geometry this pass leaves behind.
+    power_stack_info = repair_power_stack(
+        kdb,
+        layout=top_only,
+        top_cell=top,
+        variant=pdk_info["variant"],
+        lef_to_gds=_lef_net_layer_gds_map(layer_map_path, ("NET", "VIA")),
+    )
+
+    # Issue #7817: repair the router's own off-grid M4 (M4.AUX.1/AUX.2
+    # track-grid, M4.W.3 even-multiple width) on the merged geometry --
+    # ASAP7-only, a no-op elsewhere. After repair_power_stack, before the
+    # via-pad trim (whose tip_check measures what this pass leaves).
+    m4_grid_info = repair_m4_grid(
+        kdb,
+        layout=top_only,
+        top_cell=top,
+        variant=pdk_info["variant"],
+        lef_to_gds=_lef_net_layer_gds_map(layer_map_path, ("NET", "VIA")),
     )
 
     # Issue #4495: ASAP7-only trim of redundant VIA_* M1 landing pads (a
@@ -771,5 +743,8 @@ def _merge_def_to_gds(
         "resolution": layer_map_resolution,
         "def_net_names": def_net_names_info,
         "min_area_repair": min_area_info,
+        "power_stack_repair": power_stack_info,
+        "m4_grid_repair": m4_grid_info,
         "via_pad_trim": via_pad_info,
+        "pin_conductor": pin_conductor_info,
     }

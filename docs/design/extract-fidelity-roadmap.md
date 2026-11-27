@@ -24,7 +24,12 @@ naming the issue that landed each increment and the flag that enables it:
   lumped totals along a terminal-position proxy, not the geometry-decomposed
   segment graph this stage describes. Its §3.D terminal-aware resistance-graph
   design is separately **shipped** behind `--resistance-graph` /
-  `--resistance-graph-r-cut` (#2982, #2983), consumed by `klt pex` (#4037).
+  `--resistance-graph-r-cut` (#2982, #2983), consumed by `klt pex` (#4037), and
+  the Stage 3 netlist step is **shipped for the multi-terminal case** as
+  `klt pex --resistance-network` (#6899): the Kron-reduced terminal network
+  written in place of the star per solved 3+-terminal net (see §3.D3's
+  "Stage 3 netlist step" note). A graph-aware ladder and per-node capacitance
+  from the graph remain open.
 - **Stage 4** — quasi-static field solve: **partial** — `klt mom` ships the
   quasi-static capacitance solve (#718) with closed-form and
   convergence-under-refinement validation (#719) plus PEEC partial
@@ -174,7 +179,7 @@ of this table; `docs/cli/extract.md` → "Parasitic model scope"):
 |---|---|---|
 | Net-to-substrate **area** capacitance | ✅ modelled, per conductor layer | `model.capacitance` |
 | Net-to-substrate **perimeter/fringe** capacitance | ✅ modelled, isolated-edge coefficient applied to the net's whole perimeter | `model.capacitance` |
-| **Lateral** net-to-net coupling (same layer, sidewall) | ⚠️ **partial** (#976) — computed only for a same-layer pair naming a declared `--critical-net` net, and only on a deck curating `metal_sidewalls` (sky130 today); exactly zero for every other pair | `model.coupling` |
+| **Lateral** net-to-net coupling (same layer, sidewall) | ⚠️ **partial** (#976) — computed only for a same-layer pair naming a declared `--critical-net` net, and only on a deck curating `metal_sidewalls` (sky130 and gf180mcu today, #5742); exactly zero for every other pair | `model.coupling` |
 | **Vertical** net-to-net coupling (crossover / plate overlap on adjacent layers) | ✅ **modelled** (#760) — overlap area charged between the two distinct nets and deducted from both nets' own ground area term, unconditionally under `--parasitics` wherever the deck curates `metal_overlaps` | `model.coupling` |
 | **Fringe shielding** (an edge facing a neighbour does not also see full substrate fringe) | ❌ not modelled — full substrate fringe charged regardless of neighbours | implied by `model.capacitance` |
 | Distributed RC (per-segment ladder) | ⚠️ **partial** (#977) — `--distributed-rc` (requires `--critical-net`) emits a multi-segment ladder for a declared critical net, ordered by terminal position rather than by decomposed routed geometry; every other net keeps one lumped R, star-apportioned | `model.resistance` |
@@ -215,7 +220,7 @@ of the five (#760, #976), with the scoping each carries given in the table:
 |---|---|---|---|
 | `defaultareacap` | area cap to the substrate plane | `allm1 metal1 25.78` aF/µm² | ✅ `cap_area_ff_um2` |
 | `defaultperimeter` | fringe cap from an edge to the substrate plane | `allm1 metal1 40.57` aF/µm | ✅ `cap_perim_ff_um` |
-| `defaultsidewall` | **lateral** coupling between same-plane conductors | `allm1 metal1 44 0.25` | ⚠️ **first parameter only**, as `metal_sidewalls` (#976) — sky130 deck only, and only for `--critical-net` pairs; the second parameter is still unread (see the caution below) |
+| `defaultsidewall` | **lateral** coupling between same-plane conductors | `allm1 metal1 44 0.25` | ⚠️ **first parameter only**, as `metal_sidewalls` (#976) — sky130 and gf180mcu decks (#5742), and only for `--critical-net` pairs; the second parameter is still unread (see the caution below) |
 | `defaultoverlap` | **vertical** plate coupling to a specific lower plane | `allm1 metal1 allli locali 114.20` aF/µm² | ✅ `metal_overlaps` (#760) — read unconditionally under `--parasitics` |
 | `defaultsideoverlap` | fringe from an edge down onto a specific lower plane | `allm1 metal1 allli locali 59.50` aF/µm | ❌ — Stage 2c, not started |
 
@@ -242,6 +247,31 @@ number (`0.25` for met1, `0.3` for met2, `0.14` for li1) is a
 distance/scaling parameter whose exact magic semantics must be read out of
 magic's own tech-file manual before transcription. This roadmap deliberately
 does not assume it, and Stage 2b's cost estimate includes reading it.
+
+#### gf180mcu transcription and 2× lookback rationale (#5742)
+
+The gf180mcu `metal_sidewalls` table (in `decks/gf180mcu_parasitics.py`)
+is transcribed from the resolved, pre-built `gf180mcuD.tech` for the
+pinned PDK commit `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` — the same
+source and nominal `variants ()` corner block the deck's `metal_overlaps`
+entry is cited from — with every row re-checked character-for-character
+against the generic `gf180mcu.tech` source at that same commit and against
+the `c6d73a35f524070e85faff4a6a9eef49553ebc2b` resolved install: the
+`defaultsidewall allm*` rows are unconditional across the #3540 re-pin.
+Metal5's entry is the `#ifdef METALS5` row (`114.86`), not the
+`#ifdef METALS6` alternative (`31.121`) — this deck's stack is the
+5-level one (`EXTRACTION_DECK.metals`). Only the first parameter is
+transcribed (aF/µm ÷ 1000 → fF/µm, the `cap_perim_ff_um` convention); the
+second parameter remains the open question above.
+
+The deck's `metal_sidewall_lookback_um` uses **2×** each level's own
+same-layer minimum-spacing rule — `metal1.space.1` 0.23 µm → 0.46 µm,
+`metal2-5.space.1` 0.28 µm → 0.56 µm — sky130's convention, in preference
+to magic's unread second parameter. 2× the bare minimum rather than the
+minimum itself because a `separation_check(d)` only reports edges *closer
+than* `d`, so a lookback of exactly the legal minimum could only ever
+fire on a DRC-illegal layout; the measured `gcd` corpus evidence behind
+the 2× choice is recorded on sky130's own table (`decks/sky130.py`).
 
 ### 1.5 What the measurements say the model *is* **[REPO-RUN]**
 
@@ -653,7 +683,9 @@ flag), and increment 4's cross-level scalar substitution landed as #2983
 consumed by `klt pex` in #4037. Increment 4's remaining items — graph-aware
 ladder segments, per-node capacitance, and the magic `extresist` measurement —
 were not traced for this status pass. The text below is the original design
-record, unchanged.
+record, unchanged. A later update: the multi-terminal netlist step landed as
+`klt pex --resistance-network` (#6899, §3.D3's "Stage 3 netlist step" note);
+graph-aware ladder segments and per-node capacitance are still open.
 
 **Status at filing: design and fixture specification only (2026-10-06).** No solver is
 implemented by this section and no extraction number changes. Verified against
@@ -906,6 +938,9 @@ test-only). The solve is `solve_ir_drop`'s pure-Python sparse CG over
 adjacency lists, and its default iteration cap is `max(500, 10*n)`.
 Exceeding a bound yields diagnostic `graph_too_large` (with the counts) and
 the legacy scalar stands; the builder never truncates silently.
+Since #6964 a caller raises any of these four bounds for one run with `klt
+extract` / `klt pex --resistance-graph-max-{terminals,cells,nodes,edges}`;
+the defaults above are unchanged and the diagnostic names the value applied.
 
 **Failure behaviour.** Geometry or coefficient problems never raise and never
 change the legacy output. Each produces a diagnostic with a stable code and
@@ -975,6 +1010,31 @@ scalar is the series sum, the ladder inherits the bias. If a graph-derived
 scalar is later substituted, the ladder consumes it unchanged and its
 conservation tests stay valid; a graph-aware ladder (segments taken from graph
 edges) is the later Stage 3 netlist step, not part of the DC increments.
+
+**Stage 3 netlist step — status: landed for the multi-terminal case
+(#6899).** `klt pex --resistance-network` (requires `--resistance-graph`)
+writes the **Kron-reduced terminal network** of the solved graph in place
+of the star for every net whose graph solved `ok` with three or more
+terminals and whose device terminals map one-to-one onto its graph
+terminals (`extract_resistance_network.reduce_terminal_network`: with `R`
+the pair matrix and `J = I - 11^T/T`, the reduced Laplacian is
+`pinv(-0.5 J R J)`, one resistor per surviving terminal pair — dense, at
+most `T(T-1)/2` = 2016 at the 64-terminal cap, only numerically-zero
+conductances dropped and a drop that would disconnect the terminals refused
+as `pair_resistance_unavailable`, so every written network reproduces every
+pair value; terminals of one device share its position and fall back as
+`terminal_mismatch`).
+This is deliberately *not* a graph-aware ladder: it replaces the star, not
+the `--distributed-rc` chain (the `--resistance-graph` +
+`--distributed-rc` refusal still stands; per-segment ladders taken from
+graph edges remain open). Two-terminal graph nets keep #4037's
+`selected_resistance_ohm` scalar; every other net keeps its established
+model with a per-net reason in `resistance_graph.network` (the #5747
+vocabulary plus `terminal_mismatch` / `mom_rlc_override` /
+`parasitic_variant`). Ground capacitance splits equally across the
+terminal nodes (first increment; per-node capacitance from the graph is
+still the open question below). Per-node capacitance and a graph-aware
+ladder remain the residual gaps of this step.
 
 ##### 3.D4 Fixture matrix
 

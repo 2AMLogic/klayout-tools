@@ -1,0 +1,1 @@
+- Batch simulation recognizes fleet capacity exit 75, including exhausted profile vCPU slices, so configured capacity waits retry the same job (#7975).

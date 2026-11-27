@@ -16,8 +16,10 @@ def apply_attach(
     submit_only: bool = False,
     collect_partial: bool = False,
 ) -> None:
-    """Issue #2978: route ``--attach <job_id>`` to the batch backend. Only the
-    single-job batch path has a job id to re-attach to."""
+    """Issue #2978: route ``--attach <job_id>`` to the batch backend. A bare job
+    id needs a single job (``hosts == 1``); a sharded run is re-attached
+    through its ``batch-shards.json`` shard map, which records its own shard
+    count, so ``hosts`` is not gated there (issue #5777)."""
     if collect_partial and (
         attach_job_id is None or not attach_job_id.endswith(".json")
     ):
@@ -28,10 +30,15 @@ def apply_attach(
         )
     if attach_job_id is None:
         return
-    if backend != "batch" or hosts != 1:
+    is_shard_map = attach_job_id.endswith(".json")
+    if backend != "batch":
         raise SimError(
-            "--attach requires backend 'batch' with a single job "
-            "(hosts = 1); a sharded run has one job id per shard"
+            f"--attach resolved to backend {backend!r}. Retry with --backend batch."
+        )
+    if hosts != 1 and not is_shard_map:
+        raise SimError(
+            "--attach with a bare job ID requires a single job (hosts = 1). "
+            "For a sharded run, attach with its batch-shards.json shard map."
         )
     if submit_only:
         raise SimError(

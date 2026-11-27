@@ -50,7 +50,6 @@ loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-sparse" "worktree-existing
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-YELLOW='\033[1;33m'
 
 assert_file_exists() {
     if [[ -f "$1" ]]; then pass "$2"; else fail "$2 (expected file: $1)"; fi
@@ -178,14 +177,6 @@ assert_file_exists "$REPO/.loom/worktrees/issue-44/.loom-managed" \
 # suite.
 echo ""
 echo "Test 5: unregistered-worktree exit-1 paths write no sentinel"
-
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
 
 retired \
     "static scan: no write_loom_sentinel on an unregistered-worktree exit-1 path" \

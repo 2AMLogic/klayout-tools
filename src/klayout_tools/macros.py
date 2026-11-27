@@ -32,7 +32,12 @@ Every verb accepts these fields with identical names and semantics:
     omitted -- so a typo is a request error rather than a silent
     "macro you declared is not the macro you supplied".
 ``lef``
-    **Required.** The macro's LEF abstract. Must declare exactly one
+    **Required** -- except in ``klt synthesize``, which alone accepts an
+    entry that omits it (issue #5612) when ``verilog_blackbox`` is given: the
+    macro's identity then comes from ``cell`` / the blackbox's declared
+    module, and the response echoes ``lef`` as ``{"path": null, "scope":
+    "absent"}``. ``klt sta`` and ``klt place-and-route`` still require it.
+    When given, it is the macro's LEF abstract and must declare exactly one
     ``MACRO``. This is the field that fixes ``ORD-2013``.
 ``lib``
     Optional. A **per-corner map** of liberty paths, ``{"<corner>":
@@ -86,7 +91,17 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from klayout_tools._macros_blackbox import (
+    _LIB_FIELD_ALIASES,
+    missing_lef_master_hint,  # noqa: F401 -- re-exported; macro_spec callers
+    validate_blackbox_entry,
+)
+from klayout_tools._paths import _resolve_relative
 from klayout_tools.lef_header import read_lef_header
+from klayout_tools.macro_blackbox import (
+    check_blackbox_declares_cell,
+    resolve_lefless_identity,
+)
 
 #: The reserved ``macros[].lib`` key meaning "use this liberty for any
 #: corner with no exact entry of its own". Spelled as a corner name rather
@@ -94,10 +109,6 @@ from klayout_tools.lef_header import read_lef_header
 #: ``dict[str, str]`` in the JSON contract -- no union type, no second
 #: shape for a caller's schema validator to learn.
 LIB_DEFAULT_CORNER = "default"
-
-#: The two accepted spellings of the per-corner liberty map, canonical
-#: first. See this module's own docstring for why both exist.
-_LIB_FIELD_ALIASES = ("lib", "liberty")
 
 #: LEF ``PIN DIRECTION`` -> Verilog port direction, for the blackbox module
 #: :func:`blackbox_verilog_text` generates when a macro supplies neither a
@@ -123,17 +134,6 @@ _SIMPLE_VERILOG_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*\Z")
 #: (``[]``): the bus base and the bit index.
 _LEF_BUS_BIT_RE = re.compile(r"(?P<base>.+)\[(?P<index>\d+)\]\Z")
 
-#: The ``ORD-2013`` diagnostic every OpenROAD-backed verb emits when the
-#: netlist instantiates a master no ``read_lef`` ever loaded -- i.e. exactly
-#: the "macro referenced in the netlist but absent from ``request.macros``"
-#: case. Captured so :func:`missing_lef_master_hint` can turn it into a
-#: request-level instruction instead of leaving a caller to search the
-#: OpenROAD source for what a LEF master is.
-_ORD_2013_RE = re.compile(
-    r"\[ERROR ORD-2013\]\s*instance\s+(?P<instance>\S+)\s+LEF master\s+"
-    r"(?P<master>\S+)\s+not found"
-)
-
 #: Yosys's counterpart diagnostic: a module instantiated but never read.
 #: Yosys prefixes a public identifier with a backslash in diagnostics
 #: (``\\sram_8x8``), which this strips so the hint names the cell the way a
@@ -149,9 +149,7 @@ def resolve_macro_path(value: str, request_dir: str) -> str:
     """``value`` as an absolute path, resolved against ``request_dir`` when
     relative -- the same "relative to the request file's own directory"
     convention every other path field in every ``klt`` request uses."""
-    return os.path.abspath(
-        value if os.path.isabs(value) else os.path.join(request_dir, value)
-    )
+    return os.path.abspath(_resolve_relative(value, request_dir))
 
 
 def _require_non_empty_string(
@@ -331,65 +329,44 @@ def macro_lib_for_corner(
     )
 
 
-_VERILOG_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
-_VERILOG_ATTRIBUTE_RE = re.compile(r"\(\*.*?\*\)", re.DOTALL)
-_VERILOG_MODULE_RE = re.compile(
-    r"(?<![\w$])(?:macro)?module\s+(?:\\(\S+)|([A-Za-z_][\w$]*))"
-)
-
-
-def verilog_declared_modules(text: str) -> list[str]:
-    """Module names declared in Verilog ``text``, in order. Comments and
-    ``(* ... *)`` attributes are stripped first, so a commented-out
-    ``module`` line is not a declaration; escaped identifiers
-    (``\\name``) are returned without the backslash."""
-    text = _VERILOG_COMMENT_RE.sub(" ", text)
-    text = _VERILOG_ATTRIBUTE_RE.sub(" ", text)
-    return [m.group(1) or m.group(2) for m in _VERILOG_MODULE_RE.finditer(text)]
-
-
-def check_blackbox_declares_cell(
-    path: str,
-    cell: str,
-    *,
-    label: str,
-    error_cls: type[Exception],
-) -> None:
-    """Reject a ``verilog_blackbox`` that declares no module named ``cell``.
-
-    Instance counts are keyed on the LEF-derived cell name, so a blackbox
-    declaring a differently named module would make the design's instances
-    silently count as zero macros. A file declaring several modules passes
-    when any one equals ``cell``."""
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        modules = verilog_declared_modules(handle.read())
-    if cell not in modules:
-        raise error_cls(
-            f"{label}.verilog_blackbox declares module(s) {modules} but the "
-            f"macro cell is '{cell}' (from its lef); rename the blackbox "
-            f"module to '{cell}' so the design's instances resolve to this "
-            "macro"
-        )
-
-
 def validate_macros(
     macros: Any,
     request_dir: str,
     *,
     error_cls: type[Exception],
     field: str = "request.macros",
+    allow_blackbox: bool = False,
+    allow_missing_lef: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate the shared, placement-free ``request.macros`` array that
     ``klt synthesize`` and ``klt sta`` accept, returning one normalized
     entry per macro::
 
-        {"cell": str, "lef": abs, "lib": {corner: abs} | None,
+        {"cell": str, "lef": abs | None, "lib": {corner: abs} | None,
          "gds": abs | None, "verilog_blackbox": abs | None,
          "width_um": float | None, "height_um": float | None}
 
     Returns ``[]`` when the field is omitted or ``None`` -- purely additive,
     so every request written before this field existed behaves exactly as
     it did.
+
+    ``allow_missing_lef`` (default ``False``; only ``klt synthesize`` passes
+    ``True``, issue #5612) lets an entry omit ``lef`` when it gives a
+    ``verilog_blackbox``: ``lef`` is then ``None`` and ``width_um`` /
+    ``height_um`` / ``pins`` are ``None`` / ``None`` / ``[]``. A ``lef`` that is
+    present but unusable is still an error.
+
+    ``allow_blackbox`` (issue #5707, only ``klt sta`` in ``verilog`` mode
+    passes it) additionally accepts an entry carrying ``cell`` and **neither**
+    ``lef`` **nor** ``lib``: an explicit, opt-in declaration that the master
+    is an untimed black box with no physical view. It normalizes to
+    ``{"cell": str, "lef": None, "lib": None, "gds": None,
+    "verilog_blackbox": None, "blackbox": True, ...}``; every other entry
+    carries ``"blackbox": False``. An entry with ``lib`` but no ``lef`` stays
+    an error (a liberty without a physical view is not a black box), and so
+    does ``gds``/``verilog_blackbox`` on a LEF-less entry. Without the flag a
+    missing ``lef`` is the same request error it always was, so an
+    accidentally forgotten LEF is still loud.
 
     ``cell`` values must be unique: two entries for one master would make
     "which liberty is this cell's" ambiguous, and the duplicate is always a
@@ -408,15 +385,11 @@ def validate_macros(
         label = f"{field}[{index}]"
         if not isinstance(entry, dict):
             raise error_cls(f"{label} must be an object")
-        lef_path, macro_record = resolve_macro_lef(
-            entry, label=label, request_dir=request_dir, error_cls=error_cls
-        )
-        cell = resolve_macro_cell_name(
-            entry,
-            label=label,
-            lef_cell_name=macro_record["name"],
-            error_cls=error_cls,
-        )
+        if allow_blackbox and entry.get("lef") is None:
+            validated.append(
+                validate_blackbox_entry(entry, label=label, error_cls=error_cls)
+            )
+            continue
         blackbox = resolve_optional_macro_file(
             entry,
             "verilog_blackbox",
@@ -424,10 +397,27 @@ def validate_macros(
             request_dir=request_dir,
             error_cls=error_cls,
         )
-        if blackbox is not None:
-            check_blackbox_declares_cell(
-                blackbox, cell, label=label, error_cls=error_cls
+        lef_path: str | None
+        macro_record: dict[str, Any]
+        if allow_missing_lef and entry.get("lef") is None:
+            lef_path, macro_record = None, {}
+            cell = resolve_lefless_identity(
+                entry, blackbox, label=label, error_cls=error_cls
             )
+        else:
+            lef_path, macro_record = resolve_macro_lef(
+                entry, label=label, request_dir=request_dir, error_cls=error_cls
+            )
+            cell = resolve_macro_cell_name(
+                entry,
+                label=label,
+                lef_cell_name=macro_record["name"],
+                error_cls=error_cls,
+            )
+            if blackbox is not None:
+                check_blackbox_declares_cell(
+                    blackbox, cell, label=label, error_cls=error_cls
+                )
         validated.append(
             {
                 "cell": cell,
@@ -449,6 +439,7 @@ def validate_macros(
                 "width_um": macro_record.get("width_um"),
                 "height_um": macro_record.get("height_um"),
                 "pins": macro_record.get("pins") or [],
+                "blackbox": False,
             }
         )
 
@@ -612,32 +603,6 @@ def blackbox_verilog_text(
         f"{header}module {_verilog_identifier(cell)} ({port_list});\n"
         + (f"{body}\n" if body else "")
         + "endmodule\n"
-    )
-
-
-def missing_lef_master_hint(text: str, *, field: str = "request.macros") -> str | None:
-    """``None``, or an actionable hint that an OpenROAD run failed because
-    the netlist instantiates a master no ``read_lef`` ever loaded -- the
-    ``ORD-2013`` shape.
-
-    Issue #2635's test plan calls this out explicitly: "a macro referenced
-    in the netlist but absent from ``request.macros`` must still produce a
-    clear, named error rather than ``ORD-2013``". ``ORD-2013`` names the
-    instance and the master but says nothing about *which request field*
-    would have supplied it, and the master name is exactly the ``cell``
-    value the caller needs -- so the hint restates it as the request edit to
-    make.
-    """
-    match = _ORD_2013_RE.search(text)
-    if match is None:
-        return None
-    master = match.group("master")
-    instance = match.group("instance")
-    return (
-        f"instance '{instance}' is a hard macro ('{master}') with no "
-        f"physical view loaded: declare it in {field} as "
-        f'{{"cell": "{master}", "lef": "<{master}.lef>"}} (add a per-corner '
-        '"lib" to time it too)'
     )
 
 

@@ -12,7 +12,17 @@ def _apply_pin_order_to_spice(
     """Issue #5255: reorder ``top_name``'s ``.SUBCKT`` header pins so the
     names in ``order`` (``--pins``, case-insensitive) come first in the given
     order; every other pin keeps its existing relative order. A no-op when
-    ``order`` is empty or the header is absent (device-free layout)."""
+    ``order`` is empty or the header is absent (device-free layout).
+
+    Match any component label on a promoted pin (#5534), or the complete
+    header token (#6021). The SPICE writer joins multiple drawn labels with
+    a pipe and hex-escapes a pipe inside a single drawn label. Compare each
+    component with the declared label's escaped spelling. Promotion itself
+    uses individual layout labels before the header reaches this function.
+
+    The pin's token text is never rewritten -- only its position moves -- and a
+    pin matching several declared names is emitted once, at the position of the
+    earliest name it matches (it leaves ``pool`` on that first hit)."""
     if not order:
         return
     with open(netlist_path, encoding="utf-8") as handle:
@@ -31,7 +41,13 @@ def _apply_pin_order_to_spice(
     pool = list(pins)
     first: list[str] = []
     for name in order:
-        for pin in [p for p in pool if p.lower() == name.lower()]:
+        wanted = name.lower()
+        written_label = wanted.replace("|", r"\x7c")
+        matches = [p for p in pool if written_label in p.lower().split("|")]
+        if not matches and "|" in wanted:
+            # The joined spelling is a fallback for an already promoted port.
+            matches = [p for p in pool if wanted == p.lower()]
+        for pin in matches:
             pool.remove(pin)
             first.append(pin)
     rebuilt = head + first + pool

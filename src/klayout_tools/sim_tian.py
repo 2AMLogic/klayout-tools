@@ -68,7 +68,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_transfer
+from . import sim_measurement_kind, sim_transfer
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_forms import normalize_selector as _normalize_voltage
 from .sim_forms import other_forms, validate_exclusive_form
@@ -237,12 +238,7 @@ def _validate_from(name: Any, body: dict[str, Any]) -> None:
             "alternative ways to choose the start: declare one"
         )
     value = body[given[0]]
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
+    if not is_finite_number(value) or value <= 0:
         raise SimError(
             f"measurement '{name}': tian.{given[0]} must be a finite number "
             f"> 0 (got {value!r})"
@@ -308,15 +304,9 @@ def validate_tian_context(
                     f"is not an analysis.passes name (declared: "
                     f"{sorted(p['name'] for p in passes)})"
                 )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a tian entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a tian entry"
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -74,3 +74,44 @@ def split_spice_tokens(line: str) -> list[str]:
             merged.append(token)
             index += 1
     return merged
+
+
+def spice_nodes(tokens: list[str]) -> list[str]:
+    """Read positional nodes, including comma-separated and parenthesized lists."""
+    nodes: list[str] = []
+    for token in tokens:
+        if token.startswith("(") and token.endswith(")"):
+            token = token[1:-1]
+        nodes.extend(split_spice_tokens(token.replace(",", " ")))
+    return nodes
+
+
+def split_card_assignments(
+    tokens: list[str],
+) -> tuple[list[tuple[str, str]], str | None]:
+    """Return assignments in source order and the model immediately before them.
+
+    Pass tokens after the card name. The parameter tail begins at an optional
+    ``PARAMS:`` separator or the first assignment. Preserve spelling and order
+    so callers can apply last-assignment-wins with case-insensitive names
+    while still reporting the original parameter names.
+    """
+    for index, token in enumerate(tokens):
+        if token.lower() == "params:" or "=" in token:
+            return _assignments(tokens[index:]), tokens[index - 1] if index else None
+    return [], None
+
+
+def _assignments(tokens: list[str]) -> list[tuple[str, str]]:
+    """Read ``name=value`` tokens, including brace-wrapped parameter lists."""
+    pairs = []
+    pending = list(reversed(tokens))
+    while pending:
+        token = pending.pop()
+        if token.startswith("{") and token.endswith("}"):
+            pending.extend(reversed(split_spice_tokens(token[1:-1])))
+            continue
+        name, sep, value = token.partition("=")
+        if sep and name:
+            pairs.append((name, value))
+    return pairs

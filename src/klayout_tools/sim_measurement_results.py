@@ -5,10 +5,13 @@ result-dict assembly that turns one corner's harvested values and sidecar
 outcomes into ``measurement_results`` entries. Behaviour-preserving move; the
 JSON contract is untouched.
 
-The grading and log-parsing helpers it shares with the rest of the runner still
-live in :mod:`klayout_tools.sim`, which imports this module at load time. To
+The log-parsing helpers it shares with the rest of the runner still live
+in :mod:`klayout_tools.sim`, which imports this module at load time. To
 avoid a circular import they are reached through a function-local
-``from . import sim as _sim`` rather than a module-level import.
+``from . import sim as _sim`` rather than a module-level import. The
+grading primitives and shared response builders this module's entries call
+live in the stdlib-only leaf :mod:`klayout_tools.sim_measurement_grading`
+(issue #7320), imported at module scope below.
 """
 
 from __future__ import annotations
@@ -21,8 +24,11 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_eye,
+    sim_noise_contributors,
+    sim_noise_mechanism,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_steps,
@@ -30,6 +36,19 @@ from . import (
     sim_tian,
     sim_transfer_meas,
 )
+from .sim_expr_log import discard_stale_expr_prints
+from .sim_measurement_grading import (
+    _INCONCLUSIVE_STATUS,
+    _grade_measurement_value,
+    _vector_measurement_result,
+)
+from .sim_measurement_template import expand_request as expand_request
+
+#: Re-exported for ``sim.py``'s load path (``load_request``), which applies
+#: the issue #5731 case expansion before anything else reads a request; this
+#: module is the measurement-side seam ``sim.py`` already imports names from,
+#: and ``sim.py``'s own size ratchet has no line to spare for a new import
+#: statement. Self-aliased per the repo's re-export convention.
 
 #: The ``code`` of the info diagnostic an ``on_unreached: "null"`` measurement
 #: whose target was never reached carries (its status is
@@ -58,6 +77,7 @@ def _corner_measurement_results(
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
     snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
+    slope_bands: dict[int, sim_slope_band_meas.SlopeBandOutcome] | None = None,
     eyes: dict[int, sim_eye.EyeOutcome] | None = None,
     step_resolutions: (
         dict[int, sim_step_resolution.StepResolutionOutcome] | None
@@ -65,6 +85,9 @@ def _corner_measurement_results(
     settleds: dict[int, sim_settled.SettledOutcome] | None = None,
     searches: dict[int, sim_search.SearchOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
+    noise_mechanisms: (
+        dict[int, sim_noise_mechanism.NoiseMechanismOutcome] | None
+    ) = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
@@ -87,11 +110,13 @@ def _corner_measurement_results(
     ``engine_diagnostics`` (issue #3108) are the corner's diagnostics so far
     (solver/timeout classification); a ``spice`` measurement declaring
     ``on_unreached: "null"`` is graded :data:`NOT_REACHED_STATUS` instead of
-    ``error`` only when none of them is error-severity. Not applied to an
-    ``analysis_steps[]`` corner.
+    ``error`` only when none of them is error-severity. The same guard
+    reaches ``analysis_steps[]`` corners through the step grader (#7072).
     """
     from . import sim as _sim
 
+    if not is_xyce:
+        discard_stale_expr_prints(measurement_values, log_text, measurements_spec)
     if sim_steps.is_steps_analysis(analysis):
         return sim_steps.grade_step_measurements(
             measurement_values,
@@ -99,6 +124,8 @@ def _corner_measurement_results(
             analysis=analysis,
             log_text=log_text,
             save_mode=save_mode,
+            engine_diagnostics=engine_diagnostics,
+            eyes=eyes,
         )
     measurement_results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
@@ -130,7 +157,12 @@ def _corner_measurement_results(
         ),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
         (sim_tian.is_tian, _sim._tian_measurement_result, tians),
-        (sim_snm_meas.is_snm, _sim._snm_measurement_result, snms),
+        (sim_snm_meas.is_snm, sim_snm_meas.snm_measurement_result, snms),
+        (
+            sim_slope_band_meas.is_slope_band,
+            sim_slope_band_meas.slope_band_measurement_result,
+            slope_bands,
+        ),
         (sim_eye.is_eye, _sim._eye_measurement_result, eyes),
         (
             sim_step_resolution.is_step_resolution,
@@ -139,6 +171,11 @@ def _corner_measurement_results(
         ),
         (sim_settled.is_settled, _sim._settled_measurement_result, settleds),
         (sim_search.is_search, _search_measurement_result, searches),
+        (
+            sim_noise_mechanism.is_mechanism,
+            sim_noise_mechanism.measurement_result,
+            noise_mechanisms,
+        ),
     )
     for position, spec in enumerate(measurements_spec):
         sidecar = next(
@@ -166,6 +203,7 @@ def _corner_measurement_results(
             spec,
             unreached_names=unreached_names,
             diagnostics=engine_diagnostics or [],
+            log_text=log_text,
         ):
             attributed.add(str(name).lower())
             measurement_results.append(
@@ -202,9 +240,7 @@ def _corner_measurement_results(
         # `_grade_measurement_value` owns the plausibility-pre-check ->
         # `limits` ordering (issue #2493) in one place, so there is no
         # second grading path where the pre-check could be skipped.
-        m_status, margin, grading_diagnostics = _sim._grade_measurement_value(
-            spec, value
-        )
+        m_status, margin, grading_diagnostics = _grade_measurement_value(spec, value)
         measurement_results.append(
             {
                 "name": name,
@@ -232,7 +268,33 @@ def _corner_measurement_results(
                     + "; ".join(unattributed[: _sim._MEAS_ERROR_MAX_ENTRIES]),
                 }
             )
+    # Additive per-result provenance (issue #5731): a measurement expanded
+    # from a `{case}` template carries its `case` on every result entry, the
+    # same additive move `grade_step_measurements` makes with `step`.
+    _attach_provenance(measurements_spec, measurement_results)
+    # `noise.top_n` on a total entry (issue #5558): additive, value untouched.
+    sim_noise_contributors.attach(
+        measurements_spec, measurement_results, noise_mechanisms, diagnostics, save_mode
+    )
     return measurement_results, diagnostics, {}
+
+
+def _attach_provenance(
+    measurements_spec: list[dict[str, Any]],
+    measurement_results: list[dict[str, Any]],
+) -> None:
+    """Attach each spec's additive provenance fields (``case`` for a
+    measurement expanded from a `{case}` template, issue #5731) onto its
+    result entry, in declared order -- one result per spec, so the zip is
+    exact. ``measurement_provenance`` is empty for every plain
+    scalar-``analysis`` spec, so requests declaring neither keep these
+    entries byte-identical. (``step``/``derived_from`` on the steps path are
+    attached by ``grade_step_measurements`` itself, which returns before this
+    runs.)"""
+    for spec, result in zip(measurements_spec, measurement_results, strict=True):
+        provenance = sim_steps.measurement_provenance(spec)
+        if provenance:
+            result.update(provenance)
 
 
 def _transfer_measurement_result(
@@ -252,51 +314,11 @@ def _transfer_measurement_result(
 
     The all-crossing margin tokens (issue #3088) are graded by
     :func:`_margin_measurement_result`."""
-    from . import sim as _sim
-
-    name = spec["name"]
-    unit = spec.get("unit")
     if outcome is not None and outcome.margins is not None:
         return _margin_measurement_result(spec, outcome)
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no transfer value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "transfer_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "transfer_vector_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _sim._grade_measurement_value(
-        spec, outcome.value
+    return _vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="transfer", report_with_spec=True
     )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "transfer": outcome.report(spec),
-    }
-    return result, grading_diagnostics
 
 
 def _search_measurement_result(
@@ -314,51 +336,24 @@ def _search_measurement_result(
     limit) with a ``code: "measurement"`` diagnostic whose message starts with
     a ``[<reason>]`` token from
     :data:`klayout_tools.sim_search.ERROR_CODES`."""
-    from . import sim as _sim
-
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no search value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "search_no_result"
-        )
-        if save_mode == "netlist" and reason == "search_probe_failed":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result: dict[str, Any] = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        if outcome is not None and outcome.iterations is not None:
-            result["search"] = outcome.report(spec)
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _sim._grade_measurement_value(
-        spec, outcome.value
+    result, diagnostics = _vector_measurement_result(
+        spec,
+        outcome,
+        save_mode=save_mode,
+        key="search",
+        default_reason="search_no_result",
+        hint_reason="search_probe_failed",
+        report_with_spec=True,
     )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "search": outcome.report(spec),
-    }
-    return result, grading_diagnostics
+    # The one-off that stays here: an errored search that still ran
+    # iterations echoes its report so the bracket is visible.
+    if (
+        result["value"] is None
+        and outcome is not None
+        and outcome.iterations is not None
+    ):
+        result["search"] = outcome.report(spec)
+    return result, diagnostics
 
 
 def _margin_measurement_result(
@@ -376,8 +371,6 @@ def _margin_measurement_result(
     Without ``limits`` the entry is report-only and the band never downgrades
     it; a valueless metric is then an ordinary ``transfer_metric_unavailable``
     error."""
-    from . import sim as _sim
-
     assert outcome.margins is not None
     name = spec["name"]
     metric = spec["transfer"]["metric"]
@@ -392,7 +385,7 @@ def _margin_measurement_result(
         if has_limits and sim_transfer_meas.is_vacuous(outcome, spec):
             status = "pass"
         elif has_limits and ambiguity:
-            status, downgrade = _sim._INCONCLUSIVE_STATUS, True
+            status, downgrade = _INCONCLUSIVE_STATUS, True
         else:
             reason = sim_transfer_meas.unavailable_reason(outcome, metric)
             return (
@@ -416,13 +409,13 @@ def _margin_measurement_result(
                 ],
             )
     else:
-        status, margin, diagnostics = _sim._grade_measurement_value(spec, outcome.value)
+        status, margin, diagnostics = _grade_measurement_value(spec, outcome.value)
         if (
             has_limits
             and ambiguity
             and (status == "pass" or (status == "fail" and outcome.verdict != "fail"))
         ):
-            status, margin, downgrade = _sim._INCONCLUSIVE_STATUS, None, True
+            status, margin, downgrade = _INCONCLUSIVE_STATUS, None, True
     if downgrade:
         diagnostics.append(
             {
@@ -431,7 +424,7 @@ def _margin_measurement_result(
                 "message": (
                     f"measurement {name!r}: {metric} cannot be graded -- the AC "
                     f"band is ambiguous ({', '.join(ambiguity)}) -- graded "
-                    f"{_sim._INCONCLUSIVE_STATUS} rather than pass/fail"
+                    f"{_INCONCLUSIVE_STATUS} rather than pass/fail"
                 ),
             }
         )

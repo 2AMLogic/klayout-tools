@@ -70,7 +70,12 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.place_and_route_merge import (
+    _skipped_m4_grid_repair,
+    _skipped_power_stack_repair,
+    _skipped_via_pad_trim,
+)
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route
@@ -82,6 +87,7 @@ from klayout_tools.place_and_route import (
     load_request,
     run_place_and_route,
 )
+from klayout_tools.place_and_route_deck_warnings import tap_distance_warning
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -436,7 +442,7 @@ def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
 def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
     from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
 
-    assert len(_ALLOWED_REQUEST_KEYS) == 26
+    assert len(_ALLOWED_REQUEST_KEYS) == 27
     request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
     for key in _ALLOWED_REQUEST_KEYS:
         request.setdefault(key, {} if key in ("backend", "batch", "outputs") else 1)
@@ -701,19 +707,6 @@ def test_run_constraints_design_rule_field_valid_without_clock(tmp_path, monkeyp
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-
-
-def test_run_target_stage_place_requires_clock(tmp_path, monkeypatch):
-    request_path = _setup_success_env(
-        tmp_path,
-        monkeypatch,
-        target_stage="place",
-        constraints=None,
-    )
-    with pytest.raises(
-        PlaceAndRouteError, match="required to reach target_stage 'place'"
-    ):
-        run_place_and_route(request_path)
 
 
 def test_run_target_stage_place_requires_io(tmp_path, monkeypatch):
@@ -2086,7 +2079,7 @@ def test_run_rejects_power_straps_too_wide_for_explicit_floorplan_core(
     def fail_if_called(cmd, **kwargs):
         raise AssertionError(f"OpenROAD must not be invoked: {cmd}")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fail_if_called)
+    patch_openroad_run(monkeypatch, fail_if_called)
 
     request_path = _setup_success_env(
         tmp_path,
@@ -2337,7 +2330,7 @@ def test_full_route_rejects_wired_port_less_macro_pin_before_openroad(
     def fail_if_called(cmd, **kwargs):
         raise AssertionError(f"OpenROAD must not be invoked: {cmd}")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fail_if_called)
+    patch_openroad_run(monkeypatch, fail_if_called)
 
     request_path = _setup_success_env(
         tmp_path,
@@ -2433,6 +2426,8 @@ def _stage_from_script_path(script_path: str) -> str:
             return stage
     raise AssertionError(f"could not determine stage from {script_path}")
 
+
+_CLOCK_METRICS = {"clock__period_ns__636c6b": 1.1, "clock__registers__636c6b": 2}
 
 #: Real per-stage `-metrics` shapes, trimmed from issue #425's own live
 #: worked example (a real `openroad/orfs` Docker run against a real
@@ -2613,8 +2608,8 @@ def _stub_openroad_success(
             # docstring.
             return fake_completed(stdout=f"{version} \n")
         assert cmd[0] == "openroad"
-        metrics_path = cmd[4]
-        script_path = cmd[5]
+        metrics_path = cmd[-2]
+        script_path = cmd[-1]
         if script_path.endswith("_route_corners.tcl"):
             # The post-route corner-sweep script (issue #949,
             # `_corner_sweep_script_lines`) -- a second, standalone OpenROAD
@@ -2679,10 +2674,9 @@ def _stub_openroad_success(
         Path(checkpoint_out).write_text("fake odb checkpoint\n")
 
         with open(metrics_path, "w", encoding="utf-8") as handle:
-            # Issue #1865: `stage_metrics` lets a test substitute a whole
-            # per-stage `-metrics` dump (e.g. OpenSTA's unconstrained
-            # `1e+39` sentinel) without rewriting the module-level default.
-            json.dump((stage_metrics or _STAGE_METRICS)[stage], handle)
+            json.dump(
+                {**_CLOCK_METRICS, **(stage_metrics or _STAGE_METRICS)[stage]}, handle
+            )
 
         stdout_lines = []
         if stage != "floorplan":
@@ -2742,7 +2736,7 @@ def _stub_openroad_success(
 
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
@@ -3191,14 +3185,13 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    # Issue #2086's additive `power.placed` block is asserted separately
-    # below (tmp-path `def_path`); every other member is still pinned here.
     assert _power_without_placed(report) == {
         # issue #2123: an explicit `straps[]`/`connects[]` request is not a
         # preset run -- echoed as `None`, never a fabricated recipe name.
         "preset": None,
         "connects_overridden": False,
         "pdn": True,
+        "library_rail_labels": {"VPWR": "VDD", "VGND": "VSS"},
         "global_connect": True,
         "power_net": "VDD",
         "ground_net": "VSS",
@@ -3683,6 +3676,7 @@ def _stub_openroad_success_with_post_route_spef(
     worst_slack_ns: float = -0.5,
     total_negative_slack_ns: float = -1.0,
     writes_sdf: bool | None = None,
+    stage_metrics: dict | None = None,
 ) -> None:
     """Layer the second, `_route_spef.tcl`-only `openroad` invocation on top
     of `_stub_openroad_success`'s existing per-stage fake -- that helper's
@@ -3695,18 +3689,18 @@ def _stub_openroad_success_with_post_route_spef(
     deliberately does not (OpenSTA reporting success while producing
     nothing), and `None` -- the default -- asserts no `write_sdf` line was
     generated at all."""
-    _stub_openroad_success(monkeypatch)
+    _stub_openroad_success(monkeypatch, stage_metrics=stage_metrics)
     base_fake_run = place_and_route.subprocess.run
 
     def fake_run(cmd, **kwargs):
-        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(
+        if cmd[:2] == ["openroad", "-version"] or not cmd[-1].endswith(
             "_route_spef.tcl"
         ):
             return base_fake_run(cmd, **kwargs)
 
         # Stand in for the script's own `write_sdf` call (issue #1002): read
         # the generated Tcl back and honour (or deliberately ignore) it.
-        script_text = Path(cmd[5]).read_text()
+        script_text = Path(cmd[-1]).read_text()
         write_sdf_lines = [
             line for line in script_text.splitlines() if line.startswith("write_sdf")
         ]
@@ -3717,7 +3711,7 @@ def _stub_openroad_success_with_post_route_spef(
             if writes_sdf:
                 Path(write_sdf_lines[0].split()[-1]).write_text("(DELAYFILE)\n")
 
-        metrics_path = cmd[4]
+        metrics_path = cmd[-2]
         with open(metrics_path, "w", encoding="utf-8") as handle:
             json.dump(
                 {
@@ -3748,7 +3742,7 @@ def _stub_openroad_success_with_post_route_spef(
         stdout_lines.append(place_and_route._HOLD_VIOLATIONS_END)
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_post_route_spef_omitted_defaults_false_and_leaves_spef_sta_null(
@@ -3888,16 +3882,16 @@ def _replay_check_family_capture(monkeypatch, scenario: str, *, script_suffix: s
 
     def fake_run(cmd, **kwargs):
         completed = base_fake_run(cmd, **kwargs)
-        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(script_suffix):
+        if cmd[:2] == ["openroad", "-version"] or not cmd[-1].endswith(script_suffix):
             return completed
-        region = _replayed_violation_region(scenario, Path(cmd[5]).read_text())
+        region = _replayed_violation_region(scenario, Path(cmd[-1]).read_text())
         return fake_completed(
             returncode=completed.returncode,
             stdout=_with_replayed_violations(completed.stdout, region),
             stderr=completed.stderr,
         )
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_pnr_violation_count_lines_request_every_check_family():
@@ -4074,14 +4068,14 @@ def _overlay_real_def_pins(monkeypatch, *, def_pins_text: str) -> None:
     def fake_run(cmd, **kwargs):
         result = base_fake_run(cmd, **kwargs)
         if cmd[:2] != ["openroad", "-version"]:
-            script_path = cmd[5]
+            script_path = cmd[-1]
             if not script_path.endswith("_route_corners.tcl"):
                 def_path = _script_write_def_path(script_path)
                 if def_path is not None:
                     Path(def_path).write_text(def_pins_text)
         return result
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_post_route_spef_declares_pins_from_def_pins_section(tmp_path, monkeypatch):
@@ -4290,15 +4284,15 @@ def test_post_route_spef_not_run_before_route_stage(tmp_path, monkeypatch):
     assert report["spef_sta"] is None
 
 
-def test_asap7_cell_library_resolves_to_the_asap7_extract_deck():
-    """Issue #4559: ASAP7 is accepted at validation time; the refusal message
-    for an unknown library lists it among the supported ones."""
-    assert (
-        place_and_route._require_extract_deck_for_cell_library("asap7sc7p5t_rvt")
-        == "asap7"
-    )
+def test_cell_libraries_resolve_to_their_extract_decks():
+    """Issues #4559/#5825: ASAP7 and both gf180mcu cell families (7t and 9t)
+    are accepted at validation time; unknown libraries are refused loudly."""
+    resolve = place_and_route._require_extract_deck_for_cell_library
+    assert resolve("asap7sc7p5t_rvt") == "asap7"
+    assert resolve("gf180mcu_fd_sc_mcu7t5v0") == "gf180mcu"
+    assert resolve("gf180mcu_fd_sc_mcu9t5v0") == "gf180mcu"
     with pytest.raises(PlaceAndRouteError, match=r"supported: .*asap7sc7p5t_rvt"):
-        place_and_route._require_extract_deck_for_cell_library("nope")
+        resolve("nope")
 
 
 def test_post_route_spef_unsupported_cell_library_raises(tmp_path, monkeypatch):
@@ -4332,7 +4326,7 @@ def test_post_route_spef_unsupported_cell_library_fails_before_engine(
     def engine_must_not_run(*args, **kwargs):
         raise AssertionError("engine invoked before request validation finished")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", engine_must_not_run)
+    patch_openroad_run(monkeypatch, engine_must_not_run)
 
     with pytest.raises(
         PlaceAndRouteError, match="post_route_spef requires a known klt extract deck"
@@ -4792,19 +4786,19 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-771-gdeadbeef \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         stage = _stage_from_script_path(script_path)
         if stage == "floorplan":
             checkpoint_out = _script_write_db_path(script_path)
             Path(checkpoint_out).write_text("fake odb\n")
-            with open(cmd[4], "w", encoding="utf-8") as handle:
-                json.dump(_STAGE_METRICS["floorplan"], handle)
+            with open(cmd[-2], "w", encoding="utf-8") as handle:
+                json.dump({**_CLOCK_METRICS, **_STAGE_METRICS["floorplan"]}, handle)
             return fake_completed(returncode=0)
         return fake_completed(
             returncode=1, stderr="[ERROR PPL-0001] no valid pin placement found\n"
         )
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(
         PlaceAndRouteError, match=r"openroad 'place' stage failed:.*PPL-0001"
@@ -5042,13 +5036,13 @@ def test_power_audit_specialnets_count_must_match_its_header():
 
 
 def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_path):
-    """End to end: the truncated DEF above must not satisfy the
-    complete-grid gate. Every count is `null`, `status` is `"unknown"`,
-    and the run is warned about rather than silently passing."""
-    def_path = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
-
-    placed = power_audit.audit_power_delivery(
-        def_path=def_path,
+    """End to end: the truncated DEF must not satisfy the complete-grid gate
+    (counts `null`, `status` `"unknown"`, the run warned), and that gate's
+    prose names the DEF by file name, never its host path (issue #6146)."""
+    unreadable = str(tmp_path / "gone.def")  # never written
+    truncated = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
+    no_components = _write(tmp_path / "empty.def", "VERSION 5.8 ;\nEND DESIGN\n")
+    kwargs = dict(
         unavailable_reason=None,
         tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
         endcap_master=None,
@@ -5057,25 +5051,25 @@ def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_p
         ground_net="VGND",
         expect_fillers=True,
     )
-
-    assert placed["evidence"] == "unavailable"
-    assert placed["status"] == "unknown"
-    assert placed["special_nets"] is None
-    assert placed["tapcells"] is None
-    assert "SPECIALNETS" in placed["unavailable_reason"]
-    assert power_audit.power_delivery_warnings(placed, power_requested=True)
-
-    # The same DEF with its final record terminated *is* a measurement --
-    # the gate rejects truncation, not this grid.
+    for def_path in (unreadable, truncated, no_components):
+        placed = power_audit.audit_power_delivery(def_path=def_path, **kwargs)
+        assert placed["evidence"] == "unavailable"
+        assert placed["status"] == "unknown"
+        assert placed["special_nets"] is None
+        assert placed["tapcells"] is None
+        assert placed["def_path"] == def_path  # field keeps the full path (#6146)
+        prose = [placed["unavailable_reason"]]
+        prose += power_audit.power_delivery_warnings(placed, power_requested=True)
+        prose += power_audit.power_delivery_warnings(placed, power_requested=False)
+        for text in prose:
+            assert str(tmp_path) not in text, text
+        assert f"'{os.path.basename(def_path)}'" in placed["unavailable_reason"]
+        if def_path == truncated:  # the truncated case alone names this gate
+            assert "SPECIALNETS" in placed["unavailable_reason"]
+            assert power_audit.power_delivery_warnings(placed, power_requested=True)
+    # The same DEF with its final record terminated *is* a measurement.
     complete = power_audit.audit_power_delivery(
-        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF),
-        unavailable_reason=None,
-        tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
-        endcap_master=None,
-        filler_masters=("sky130_fd_sc_hd__fill_1",),
-        power_net="VPWR",
-        ground_net="VGND",
-        expect_fillers=True,
+        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF), **kwargs
     )
     assert complete["evidence"] == "def"
     assert complete["status"] == "complete"
@@ -6159,6 +6153,7 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
             "max_capacitance_violation_count": 2,
             "max_transition_violation_count_vs_library": 3,
             "max_capacitance_violation_count_vs_library": 2,
+            "library_limit_report_path": report["library_limit_report_path"],
         }
     ]
 
@@ -6518,8 +6513,8 @@ def test_engine_error_message_flags_readable_file_openroad_cannot_read(tmp_path)
 def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     tmp_path, monkeypatch
 ):
-    """Issue #4191: a readable path outside the invocation directory gets the
-    `$PWD`/`$PDK_ROOT`/`$TMPDIR` mount rule and the common-ancestor advice."""
+    """Issue #4191 (rule extended by #5626): a readable path outside the
+    invocation directory gets the mount rule and common-ancestor advice."""
     cwd = tmp_path / "work"
     cwd.mkdir()
     outside = tmp_path / "elsewhere" / "macro.lef"
@@ -6534,7 +6529,7 @@ def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     message = place_and_route._engine_error_message("floorplan", completed)
 
     assert f"'{outside}' is outside the invocation directory" in message
-    assert "$PWD, $PDK_ROOT and $TMPDIR" in message
+    assert "(plus /tmp when $TMPDIR differs) and the klt cache root" in message
     assert "common ancestor" in message
 
     inside = cwd / "macro.lef"
@@ -6627,7 +6622,7 @@ def test_stubbed_floorplan_stage_unreadable_liberty_surfaces_mount_hint(
             ),
         )
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError) as exc_info:
         run_place_and_route(request_path)
@@ -6648,7 +6643,7 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-1080-gab6fd26351 \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         stage = _stage_from_script_path(script_path)
         if stage == "route":
             return fake_completed(
@@ -6656,11 +6651,11 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
             )
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
-        with open(cmd[4], "w", encoding="utf-8") as handle:
-            json.dump(_STAGE_METRICS[stage], handle)
+        with open(cmd[-2], "w", encoding="utf-8") as handle:
+            json.dump({**_CLOCK_METRICS, **_STAGE_METRICS[stage]}, handle)
         return fake_completed(returncode=0)
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError, match=r"DRT-0305.*zero_"):
         run_place_and_route(request_path)
@@ -6674,12 +6669,12 @@ def test_stubbed_missing_metrics_output(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-771-gdeadbeef \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
         return fake_completed(returncode=0)  # no metrics file written
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError, match="did not produce the expected"):
         run_place_and_route(request_path)
@@ -6693,7 +6688,7 @@ def test_stubbed_missing_openroad_binary(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError("no such file: openroad")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError, match="could not launch openroad"):
         run_place_and_route(request_path)
@@ -6707,14 +6702,14 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             raise FileNotFoundError("openroad vanished")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
-        with open(cmd[4], "w", encoding="utf-8") as handle:
-            json.dump(_STAGE_METRICS["floorplan"], handle)
+        with open(cmd[-2], "w", encoding="utf-8") as handle:
+            json.dump({**_CLOCK_METRICS, **_STAGE_METRICS["floorplan"]}, handle)
         return fake_completed(returncode=0)
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     report = run_place_and_route(request_path)
     assert report["engine_version"] is None
@@ -7906,7 +7901,7 @@ def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch)
 
 def test_corner_sweep_excludes_ccsnoise_variant(tmp_path, monkeypatch):
     """A `_ccsnoise` `.lib` view must not reach `define_corners`/
-    `read_liberty` -- see `pdk.list_lib_corners`'s own docstring for the
+    `read_liberty` -- see `pdk_cells.list_lib_corners`'s own docstring for the
     live-verified `STA-1140` collision this avoids (issue #949)."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     install_root = tmp_path / "install"
@@ -7979,11 +7974,9 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
             # design-rule verdict -- 0/0 here (the stub's clean-run default).
             "max_transition_violation_count": 0,
             "max_capacitance_violation_count": 0,
-            # Issue #2357: the library-only counterpart -- also 0/0 here,
-            # since no `constraints.max_transition_ns`/`.max_capacitance_pf`
-            # was given for this request.
             "max_transition_violation_count_vs_library": 0,
             "max_capacitance_violation_count_vs_library": 0,
+            "library_limit_report_path": None,
         }
     ]
     assert route_stage["corners"] == report["corners"]
@@ -8072,9 +8065,9 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         # entry -- 0/0 here (the stub's clean-run default).
         "max_transition_violation_count": 0,
         "max_capacitance_violation_count": 0,
-        # Issue #2357: the library-only counterpart, also 0/0 here.
         "max_transition_violation_count_vs_library": 0,
         "max_capacitance_violation_count_vs_library": 0,
+        "library_limit_report_path": None,
     }
     assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
     assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)
@@ -8319,14 +8312,11 @@ def test_cts_stage_guards_clock_tree_synthesis_against_zero_fanout_clock(
 
     cts_lines = _script_lines(_stage_script(request_path, "cts"))
 
-    guard_index = next(
-        i
-        for i, line in enumerate(cts_lines)
-        if line.startswith("set _klt_cts_seq_sinks [llength [all_registers")
+    guard_index = cts_lines.index(
+        "    if {[llength [all_registers -clock $clk]] > 0} {"
     )
-    assert "[get_clocks {clk}]]]" in cts_lines[guard_index]
-
-    if_index = cts_lines.index("if {$_klt_cts_seq_sinks > 0} {")
+    assert cts_lines.index("foreach clk [all_clocks] {") < guard_index
+    if_index = cts_lines.index("if {[llength $klt_cts_nets] > 0} {")
     cts_call_index = next(
         i for i, line in enumerate(cts_lines) if line.startswith("clock_tree_synthesis")
     )
@@ -8687,14 +8677,13 @@ def test_merge_def_to_gds_success(tmp_path):
         "output_dbu_um": 0.001,
         "path": None,
         "resolution": "none",
-        # This DEF declares no `NETS` section at all, so the issue #1488
-        # single-pin marker pass has nothing to do.
+        # This DEF declares no `NETS` section, so the #1488 marker pass is idle.
         "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
         # Issue #2139: no layer map resolved here either, so the merged
         # GDS's routed-net layers cannot be matched against the deck's own
-        # `*.area.*` rules -- reported as a named skip, never a silent
-        # clean. See `tests/test_place_and_route_min_area.py` for the pass
-        # exercised against a fixture that *does* carry a layer map.
+        # `*.area.*` rules -- a named skip, never a silent clean (see
+        # `tests/test_place_and_route_min_area.py` for the pass against a
+        # fixture that *does* carry a layer map).
         "min_area_repair": {
             "status": "skipped",
             "reason": (
@@ -8709,20 +8698,14 @@ def test_merge_def_to_gds_success(tmp_path):
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
+        "power_stack_repair": _skipped_power_stack_repair("sky130A"),
+        "m4_grid_repair": _skipped_m4_grid_repair("sky130A"),
+        "pin_conductor": {
+            "status": "skipped",
+            "reason": "no layer map resolved",
+            "layers": [],
+        },
     }
-
-
-def _skipped_via_pad_trim(variant: str) -> dict:
-    """Issue #4495: off ASAP7 both halves of the via-pad pass are a *named*
-    no-op: the GDS is untouched and `tip_check` reports the skip, not a clean."""
-    s = {
-        "status": "skipped",
-        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
-    }
-    counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
-    tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
-    tip["router_fill_violations"] = 0
-    return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -8733,9 +8716,8 @@ def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
     own wall-clock time; without the `time.sleep()` below (crossing a whole
     GDS2 timestamp second between the two runs) that pre-fix failure could
     be flaky -- passing by accident if both runs land within the same
-    wall-clock second -- rather than reliably reproducing the bug. The fix
-    removes the wall-clock dependency entirely, so this stays reliable
-    (and fast: the sleep is the only appreciable cost) either way."""
+    wall-clock second. The fix removes the wall-clock dependency entirely,
+    so this stays reliable either way."""
     root = tmp_path / "install"
     cell_name = "testcell"
     tech_lef = tmp_path / "tech.tlef"
@@ -8755,10 +8737,10 @@ def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
 
     for i, out_path in enumerate((out_path_1, out_path_2)):
         if i:
-            # Force the two runs to land in different wall-clock seconds so
-            # a pre-fix regression (a bare `.write()` stamping GDS2's
-            # whole-second-resolution BGNLIB/BGNSTR timestamp fields)
-            # reliably fails this assertion instead of merely being flaky.
+            # Force the two runs into different wall-clock seconds so a
+            # pre-fix regression (a bare `.write()` stamping GDS2's
+            # whole-second BGNLIB/BGNSTR fields) fails reliably, not
+            # just when the runs straddle a second boundary.
             time.sleep(1.1)
         place_and_route._merge_def_to_gds(
             def_path=str(def_path),
@@ -8821,10 +8803,9 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
         "path": str(map_path),
         "resolution": "family",
         "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
-        # Issue #2139: this fixture's map does resolve `met1` -> `68/20`, so
-        # the repair pass runs; the gf180mcu deck carries no plain
-        # `*.area.*` rule on that layer, so it has nothing to check and says
-        # so rather than reporting a clean it never measured.
+        # Issue #2139: this fixture's map resolves `met1` -> `68/20`, so the
+        # repair pass runs; the gf180mcu deck carries no plain `*.area.*`
+        # rule there, so it says so rather than reporting an unmeasured clean.
         "min_area_repair": {
             "status": "skipped",
             "reason": (
@@ -8838,6 +8819,10 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
+        "power_stack_repair": _skipped_power_stack_repair("gf180mcuC"),
+        "m4_grid_repair": _skipped_m4_grid_repair("gf180mcuC"),
+        # Issue #5700: no dual-purpose (split NET / PIN) layer in this map.
+        "pin_conductor": {"status": "unchanged", "layers": []},
     }
 
 
@@ -9294,7 +9279,7 @@ def test_merge_def_to_gds_without_fix_logs_dbu_mismatch_warning(
         out_path=str(out_path),
     )
     captured = capfd.readouterr()
-    assert "DEF UNITS does not match reader DBU" in captured.out
+    assert captured.out == "" and "DEF UNITS does not match reader DBU" in captured.err
     # Falls back to KLayout's own default rather than crashing (issue
     # #1032's second acceptance criterion) -- the merge still completes.
     assert out_path.is_file()
@@ -9941,22 +9926,15 @@ def _write_li1_pin_def(path: Path) -> None:
     )
 
 
-def test_li1_def_pin_geometry_is_invisible_to_extraction(tmp_path):
-    """Issue #2473, measured end to end through the real DEF->GDS merge: a
-    DEF `PINS` port declared on `li1` lands its rectangle on li1's
-    LEFPIN/PIN purpose (67/16) and its pin-name text on 67/5, with **no**
-    li1 conductor (67/20) under either -- so the label names no net and the
-    declared port promotes to no top-level pin at all (`pin_count: 0` here).
-
-    `klt extract --def-pins` now reports that as an `error`-severity
-    `def_pin_promotion` finding naming the offending layer/datatype and the
-    declared-vs-promoted disparity, instead of leaving it to a prose warning
-    nobody downstream reads: `klt drc` has no rule against a label over no
-    conductor, and `klt lvs` still reports `"match"` for a layout missing
-    top-level pins (see `tests/test_lvs.py`'s
-    `test_missing_top_level_pin_alone_still_reports_match`). The request-time
-    guard in `_validate_io` stops a *new* run from reaching this state; this
-    test covers a layout that already exists."""
+def test_li1_def_pin_geometry_is_invisible_to_extraction(tmp_path, monkeypatch):
+    """Legacy layouts with li1 pins only on 67/16 must still report the
+    #2473 extraction error. Disable #5700's conductor staging to reproduce
+    that old merge output; keep the real geometry and diagnostic assertions.
+    """
+    monkeypatch.setattr(
+        "klayout_tools.place_and_route_gds_merge._stage_pin_conductor_layer_map",
+        lambda map_path, staged_path: {"status": "unchanged", "layers": []},
+    )
     inputs = _tie_cell_merge_inputs(tmp_path)
     def_path = tmp_path / "design.def"
     _write_li1_pin_def(def_path)
@@ -10641,11 +10619,10 @@ def _run_preset_pdn_integration(
     at all -- only `{"preset": ...}` -- and return the report.
 
     This is the automated form of this issue's "a preset-driven run reaches
-    `power.placed.status == "complete"` and `warnings == []` under
-    #2086/#2122's audit on a real toolchain run (not a stub), for each
-    supported library" acceptance criterion. The two assertions that
-    criterion names are made by each caller below, so a failure names the
-    library it happened on.
+    `power.placed.status == "complete"` with no #2086/#2122 audit warning on
+    a real toolchain run (not a stub), for each supported library"
+    acceptance criterion. Each caller below makes both assertions (a
+    gf180mcu caller expects the #7311 tap-distance entry and nothing else).
     """
     root, variant = variant_gate
     monkeypatch.setenv("PDK_ROOT", root)
@@ -10756,7 +10733,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_9t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(
@@ -10798,7 +10775,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_7t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(
@@ -11077,10 +11054,8 @@ def test_check_place_and_route_report_clean_pass(tmp_path, monkeypatch):
     invocation at all."""
     request_path, report_path = _committed_pnr_report(tmp_path, monkeypatch)
 
-    monkeypatch.setattr(
-        place_and_route.subprocess,
-        "run",
-        lambda *a, **k: pytest.fail("--check must not invoke OpenROAD"),
+    patch_openroad_run(
+        monkeypatch, lambda *a, **k: pytest.fail("--check must not invoke OpenROAD")
     )
     result = place_and_route.check_place_and_route_report(report_path, request_path)
 
@@ -12077,7 +12052,7 @@ def test_ord_2013_failure_names_request_macros(tmp_path, monkeypatch):
             ),
         )
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError) as excinfo:
         run_place_and_route(request_path)
@@ -12358,9 +12333,10 @@ def test_documented_asap7_tracks_example_validates_and_emits_issue_4493():
 
 
 def test_place_and_route_clock_lines_pin_units_issue_4089():
-    assert place_and_route._clock_lines("clk", 1.0) == [
+    lines = place_and_route._clock_lines("clk", 1.0)
+    assert [lines[0], lines[-1]] == [
         "set_cmd_units -time ns -capacitance pF",
-        "create_clock -name clk -period 1.0 [get_ports clk]",
+        "create_clock -name clk -period 1.0 $klt_root",
     ]
     assert place_and_route._clock_lines(None, None) == []
 
