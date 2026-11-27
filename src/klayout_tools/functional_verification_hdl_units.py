@@ -45,18 +45,16 @@ def _hdl_code(text: str) -> str:
     return _HDL_LITERAL.sub(lambda m: m["keep"] or " ", text)
 
 
-def _hdl_tokens(text: str) -> Iterator[re.Match[str]]:
+def _hdl_tokens(text: str, system_verilog: bool) -> Iterator[re.Match[str]]:
     """Recognize SystemVerilog keywords only in an active IEEE 1800 region."""
-    system_verilog = [True]  # both runners compile with -g2012
+    modes = [system_verilog]
     for token in _TOKEN.finditer(text):
         if token["language"]:
-            system_verilog.append(token["language"].startswith("1800-"))
+            modes.append(token["language"].startswith("1800-"))
         elif token[0] == "`end_keywords":
-            if len(system_verilog) > 1:
-                system_verilog.pop()
-        elif system_verilog[-1] or not (
-            token["local"] or token["scope"] or token["scope_end"]
-        ):
+            if len(modes) > 1:
+                modes.pop()
+        elif modes[-1] or not (token["local"] or token["scope"] or token["scope_end"]):
             yield token
 
 
@@ -76,37 +74,46 @@ _UNIT_NEUTRAL_SWITCHES = {
         "strict-expr-width",
         "xtypes",
     )
+} | {
+    "-v",
+    "-gspecify",
+    "-ginterconnect",
+    "-gsupported-assertions",
+    "-Tmin",
+    "-Ttyp",
+    "-Tmax",
+    "-pfileline=0",
+    "-pfileline=1",
+}
+
+_SYSTEM_VERILOG_MODE = {
+    "-g1995": False,
+    "-g2001": False,
+    "-g2001-noconfig": False,
+    "-g2005": False,
+    "-g2005-sv": True,
+    "-g2009": True,
+    "-g2012": True,
 }
 
 
-def _check_build_args(args: list[str]) -> None:
-    """Accept options that preserve the unit scan, refuse inputs with unmodeled
-    compilation-unit semantics, such as -u or an additional command file."""
+def _build_system_verilog(args: list[str]) -> bool:
+    """Return the final language mode, refusing unmodeled compilation options."""
+    system_verilog = True  # both runners supply -g2012 before user options
     operands = iter(args)
-    for arg in operands:
-        if arg in ("-D", "-I"):
-            if next(operands, None) is not None:
-                continue
-        elif arg == "-T":
-            if next(operands, None) in ("min", "typ", "max"):
-                continue
-        elif arg in _UNIT_NEUTRAL_SWITCHES or arg.startswith(("-D", "-I", "-W")):
+    for option in operands:
+        arg = option
+        if arg in ("-D", "-I", "-T", "-W", "-g", "-p"):
+            arg += next(operands, "")
+        if arg in _SYSTEM_VERILOG_MODE:
+            system_verilog = _SYSTEM_VERILOG_MODE[arg]
+        elif arg.startswith(("-D", "-I", "-W")) and len(arg) > 2:
             continue
-        elif arg in (
-            "-v",
-            "-g2012",
-            "-g2005-sv",
-            "-gspecify",
-            "-ginterconnect",
-            "-gsupported-assertions",
-            "-Tmin",
-            "-Ttyp",
-            "-Tmax",
-        ):
-            continue
-        raise FunctionalVerificationError(
-            f"cannot verify time units with options.build_args entry {arg!r}"
-        )
+        elif arg not in _UNIT_NEUTRAL_SWITCHES:
+            raise FunctionalVerificationError(
+                f"cannot verify time units with options.build_args entry {option!r}"
+            )
+    return system_verilog
 
 
 def _active_sources(
@@ -116,7 +123,6 @@ def _active_sources(
     build_args: list[str],
     cocotb_build_dir: str | None,
 ) -> list[str]:
-    _check_build_args(build_args)
     code = []
     for source in sources:
         text = read_text(source)
@@ -179,9 +185,11 @@ def _declared_unit(text: str, start: int) -> str | None:
     return "".join(value["unit"].split()) if value else None
 
 
-def _compilation_default(text: str, compiler_default: str | None) -> str | None:
+def _compilation_default(
+    text: str, compiler_default: str | None, system_verilog: bool
+) -> str | None:
     """A compilation-unit timeunit precedes design elements and spans source files."""
-    for token in _hdl_tokens(text):
+    for token in _hdl_tokens(text, system_verilog):
         if token["module"] or token["scope"]:
             return compiler_default
         if token["local"]:
@@ -197,23 +205,55 @@ class _Module:
     children: dict[str, _Module] = field(default_factory=dict)
     # Direct module items only. Nested declarations have their own bodies.
     body: list[tuple[int, int]] = field(default_factory=list)
+    instances: dict[tuple[str, ...], str | None] | None = None
 
 
-def _instance_type(
-    text: str, body: Iterable[tuple[int, int]], instance: str
-) -> str | None:
-    """Find an explicit instantiation, declining an ambiguous name."""
-    name = re.escape(instance.removeprefix("\\"))
-    pattern = re.compile(
-        rf"(?<![\w$.\\])({_NAME})\s*(?:#\s*\([^;]*?\)\s*)?"
-        rf"(?<![\w$])(?:\\{name}\s+|{name}\s*)\("
-    )
-    types = {
-        m[1].removeprefix("\\")
-        for start, end in body
-        for m in pattern.finditer(text, start, end)
-    }
-    return types.pop() if len(types) == 1 else None
+def _collapse_parentheses(text: str) -> str:
+    """Hide port connections, parameters and conditions, keeping each outer ()."""
+    parts = []
+    depth = start = 0
+    for token in re.finditer(r"\\\S+|[()]", text):
+        if token[0] == "(":
+            if depth == 0:
+                parts.append(text[start : token.start()] + "()")
+            depth += 1
+        elif token[0] == ")" and depth:
+            depth -= 1
+            start = token.end()
+    if not depth:
+        parts.append(text[start:])
+    return "".join(parts)
+
+
+_INSTANCE = rf"{_NAME}\s*\(\)"
+_MODULE_ITEM = re.compile(
+    rf"(?<![\w$.\\])(?:"
+    rf"(?P<begin>begin)(?![\w$])(?:\s*:\s*(?P<label>{_NAME}))?"
+    rf"|(?P<end>end)(?![\w$])(?:\s*:\s*{_NAME})?"
+    rf"|(?P<type>{_NAME})(?:\s*#\s*\(\)\s*|\s+)"
+    rf"(?P<instances>{_INSTANCE}(?:\s*,\s*{_INSTANCE})*)\s*;)"
+    r"|\\\S+"
+)
+_INSTANCE_NAME = re.compile(rf"({_NAME})\s*\(\)")
+
+
+def _instance_types(text: str, module: _Module) -> dict[tuple[str, ...], str | None]:
+    """Index explicit instances by the named blocks that contain them."""
+    scopes: list[str] = []
+    types: dict[tuple[str, ...], str | None] = {}
+    for start, end in module.body:
+        for item in _MODULE_ITEM.finditer(_collapse_parentheses(text[start:end])):
+            if item["begin"]:
+                scopes.append((item["label"] or "").removeprefix("\\"))
+            elif item["end"] and scopes:
+                scopes.pop()
+            elif item["type"]:
+                cell = item["type"].removeprefix("\\")
+                for name in _INSTANCE_NAME.findall(item["instances"]):
+                    path = (*scopes, name.removeprefix("\\"))
+                    if types.setdefault(path, cell) != cell:
+                        types[path] = None  # Alternative branches disagree.
+    return types
 
 
 @dataclass
@@ -238,30 +278,36 @@ class _ModuleTimeUnits:
         return module
 
     def follow(self, module: _Module | None, path: Iterable[str]) -> _Module | None:
+        scope: tuple[str, ...] = ()
         for instance in path:
             if module is None:
                 return None
             name = instance.removeprefix("\\")
-            if name in module.children:
+            if not scope and name in module.children:
                 # Icarus instantiates a nested declaration under its own name.
                 module = module.children[name]
-            else:
-                cell = _instance_type(self.text, module.body, name)
-                module = self.top.get(cell) if cell else None
-        return module
+                continue
+            if module.instances is None:
+                module.instances = _instance_types(self.text, module)
+            scope = (*scope, name)
+            if scope in module.instances:
+                cell = module.instances[scope]
+                module = self.top.get(cell) if cell is not None else None
+                scope = ()
+        return None if scope else module
 
 
 def _verilog_time_units(
-    source_texts: list[str], default_unit: str | None
+    source_texts: list[str], default_unit: str | None, system_verilog: bool = True
 ) -> _ModuleTimeUnits:
     """Index declarations by lexical scope, retaining each module's own unit."""
     directive = None
     stack: list[_Module] = []
     text = "\n".join(source_texts)
-    default_unit = _compilation_default(text, default_unit)
+    default_unit = _compilation_default(text, default_unit, system_verilog)
     units = _ModuleTimeUnits(text)
     start = 0
-    for token in _hdl_tokens(text):
+    for token in _hdl_tokens(text, system_verilog):
         if token.start() < start:
             continue
         if token["module"] or token["scope"]:

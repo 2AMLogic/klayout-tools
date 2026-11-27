@@ -31,6 +31,8 @@ def test_matching_sdf_inherits_compilation_unit(tmp_path):
     "flags",
     [
         ["-v"],
+        ["-pfileline=1"],
+        ["-p", "fileline=1"],
         *[
             [f"-g{prefix}{feature}"]
             for feature in (
@@ -263,3 +265,74 @@ def test_module_header_package_imports_before_local_unit(tmp_path, sdf_unit):
         assert not (tmp_path / ".klt/functional-verification/build_icarus.log").exists()
     else:
         _assert_matching_ns_edge(tmp_path, request)
+
+
+@needs_icarus
+@pytest.mark.parametrize(
+    "flags,local_unit",
+    [
+        (["-g2001"], False),
+        (["-g2001-noconfig"], False),
+        (["-g2009", "-g2005"], False),
+        (["-g2005", "-g", "2009"], True),
+    ],
+)
+def test_build_language_selects_timeunit_keyword(tmp_path, flags, local_unit):
+    request = Path(_stage_sdf_units(tmp_path))
+    spec = json.loads(request.read_text())
+    spec["options"]["build_args"] = flags
+    request.write_text(json.dumps(spec))
+    leaf = tmp_path / "and_cell.v"
+    if local_unit:
+        code = leaf.read_text().replace("1ns/1ps", "1ps/1ps")
+        declaration = "timeunit 1ns/1ps;"
+    else:
+        code = leaf.read_text()
+        declaration = "wire timeunit;"
+    leaf.write_text(code.replace("  and (", f"  {declaration}\n  and ("))
+    _assert_matching_ns_edge(tmp_path, str(request))
+
+
+@needs_icarus
+@pytest.mark.parametrize("generated", [False, True], ids=["instance-list", "generate"])
+@pytest.mark.parametrize("leaf_unit", ["1ns", "1ps"])
+def test_sdf_follows_the_target_despite_unrelated_nested_module(
+    tmp_path, generated, leaf_unit
+):
+    request = Path(_stage_sdf_units(tmp_path, leaf_timescale=f"{leaf_unit}/1ps"))
+    dut = tmp_path / "and2.v"
+    sdf = tmp_path / "and2.sdf"
+    if generated:
+        # Both branches have a u1. Only g.u1 is the annotation root.
+        dut.write_text(
+            dut.read_text()
+            .replace(
+                "  and_cell u1",
+                "  if (1) begin : other\n    and2_stub u1();\n  end\n"
+                "  if (1) begin : g\n    and_cell u1",
+            )
+            .replace("endmodule", "  end\nendmodule\nmodule and2_stub; endmodule")
+        )
+        spec = json.loads(request.read_text())
+        spec["hdl_toplevel"] = "and_cell"
+        spec["testbench"]["dut_instance"] = "tb_and2.dut.g.u1"
+        request.write_text(json.dumps(spec))
+        sdf.write_text(sdf.read_text().replace("INSTANCE u1", "INSTANCE"))
+    else:
+        dut.write_text(
+            dut.read_text().replace(
+                "and_cell u1", "and_cell spare(.A((a)), .B(b)), and_cell"
+            )
+        )
+        sdf.write_text(sdf.read_text().replace("INSTANCE u1", "INSTANCE and_cell"))
+    with (tmp_path / "and_cell.v").open("a") as source:
+        source.write(
+            "\n`timescale 1ps/1ps\n"
+            "module unrelated; module and_cell; endmodule endmodule\n"
+        )
+    if leaf_unit == "1ps":
+        with pytest.raises(FunctionalVerificationError, match="1000x too small"):
+            run_functional_verification(str(request))
+        assert not (tmp_path / ".klt/functional-verification/build_icarus.log").exists()
+    else:
+        _assert_matching_ns_edge(tmp_path, str(request))

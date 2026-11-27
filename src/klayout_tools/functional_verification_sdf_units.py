@@ -54,6 +54,7 @@ from .functional_verification_base import (
 )
 from .functional_verification_hdl_units import (
     _active_sources,
+    _build_system_verilog,
     _Module,
     _ModuleTimeUnits,
     _verilog_time_units,
@@ -251,6 +252,7 @@ def _check_sdf_time_units(
     if not targets:
         return
     try:
+        system_verilog = _build_system_verilog(user_build_args)
         source_texts = _active_sources(
             sources,
             includes,
@@ -266,7 +268,7 @@ def _check_sdf_time_units(
         ) from exc
     parsed_default = _parse_time_unit(default_unit) if default_unit else None
     units = _verilog_time_units(
-        source_texts, parsed_default[0] if parsed_default else None
+        source_texts, parsed_default[0] if parsed_default else None, system_verilog
     )
     scope = sdf.get("scope")
     components = iter(_split_sdf_scope(f"{dut_path}.{scope}" if scope else dut_path))
