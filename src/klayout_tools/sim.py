@@ -201,7 +201,7 @@ from .ngspice_build import (
 from .ngspice_build import (
     probe_engine_build as _probe_engine_build,
 )
-from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
+from .pdk import PdkNotFoundError, find_pdk
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -297,7 +297,6 @@ from .sim_corners import (
 )
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
-from .sim_derive_rollup import attach_coverage as _attach_derive_coverage
 from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
     _OFFHOST_BACKENDS,
     NODESET_UNSUPPORTED_WORKER_CODE,
@@ -321,6 +320,7 @@ from .sim_environment_report import (
 )
 from .sim_expr_hint import unsupported_function_hint
 from .sim_expr_log import expr_control_lines
+from .sim_model_paths import resolve_lib_ref as _resolve_lib_ref
 from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
@@ -2886,8 +2886,8 @@ def _prepare_sim_request(
             f"unsupported backend '{backend}'{source} "
             f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
         )
-    # The off-host toolchain pins ngspice (see `_enforce_xyce_support_boundary`):
-    # a host default must not turn a valid xyce request into a refusal.
+    # Off-host workers use ngspice. Keep a valid Xyce request local when
+    # the host default selects an off-host backend.
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=engine == "ngspice"
     )
@@ -2993,7 +2993,7 @@ def _prepare_sim_request(
     # existence-checked here, before any corner is dispatched, like
     # `models.lib` -- see `resolve_request_osdi`. Validated for every engine
     # so a typo'd path is always named; `engine: "xyce"` then refuses the
-    # option outright in `_enforce_xyce_support_boundary` below rather than
+    # option outright in `sim_xyce_refusals.enforce_support_boundary` rather than
     # silently dropping it.
     osdi_runner_resolved = sim_staging.runner_resolved_osdi(request, request_dir)
     osdi_preload = resolve_request_osdi(
@@ -3208,7 +3208,7 @@ def _prepare_sim_request(
     monte_carlo_spec = request.get("monte_carlo")
     sim_derive.validate_grid(measurements_spec, corner_points, request)
     sim_post_commands.refuse_xyce(engine, analysis)  # issue #6080
-    _enforce_xyce_support_boundary(
+    sim_xyce_refusals.enforce_support_boundary(
         engine=engine,
         backend=backend,
         corners_spec=corners_spec,
@@ -4213,10 +4213,10 @@ def _run_sim_corners(
             )
 
     grid_stats = sim_probit_sigma.rollup(monte_carlo_stats, corner_points, corners)
-    measurements_rollup.extend(grid_stats)
     coverage = _build_coverage(
-        measurements_spec, corners, capture_only=capture_only, grid_stats=grid_stats
+        measurements_rollup, corners, capture_only=capture_only, grid_stats=grid_stats
     )
+    measurements_rollup.extend(grid_stats)
     graded = _grade_corners(corners, measurements_rollup, coverage)
     passed = graded["passed"]
     failed = graded["failed"]
@@ -4835,27 +4835,6 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
 def _resolve_param_file(points: list[CornerPoint], models: Any, request_dir: str):
     """``models.param_file`` (#4759); see :mod:`klayout_tools.sim_param_file`."""
     return resolve_param_file(points, models, request_dir, _resolve_lib_ref)
-
-
-def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
-    """Apply ``models.lib``'s own resolution rule (see
-    :func:`_resolve_models_lib`) to one library reference, without the
-    existence check -- shared with #2522's per-section corner libraries
-    so a ``corners.process`` ``{"lib": ...}`` entry resolves *identically*:
-    joined against the layout-aware variant directory (``variant_dir_of``;
-    a flat install's variant *is* the root, #522/#6256) when the request
-    names a PDK, else ``$VAR``/``~``-expanded against the request dir.
-    """
-    pdk_variant = models.get("pdk")
-    pdk_root = models.get("pdk_root")
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            resolution = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise SimError(str(exc)) from exc
-        variant_dir = variant_dir_of(resolution) or resolution["root"]
-        return lib if os.path.isabs(lib) else os.path.join(variant_dir, lib)
-    return _resolve_relative(lib, request_dir)
 
 
 def _resolve_corner_section_libs(
@@ -5708,166 +5687,6 @@ def _expand_monte_carlo(
 # --------------------------------------------------------------------------- #
 # Execution backends
 # --------------------------------------------------------------------------- #
-
-
-def _refuse_xyce_params_axis(corners_spec: dict[str, Any]) -> None:
-    """The ``engine: "xyce"`` refusal for ``corners.params``. Split out of
-    :func:`_enforce_xyce_support_boundary` to keep that gate under the
-    complexity limit."""
-    if corners_spec.get("params") or corners_spec.get("temperature_param"):
-        raise SimError(
-            "engine 'xyce' does not support corners.params or "
-            "corners.temperature_param: the parameter "
-            "axis is applied with ngspice's `alterparam` + `reset` control "
-            "commands, which Xyce has no netlist equivalent of -- use engine "
-            "'ngspice'"
-        )
-
-
-def _refuse_xyce_alter_corner_axes(corners_spec: dict[str, Any]) -> None:
-    """The ``engine: "xyce"`` refusals for corner axes that are applied with
-    ngspice's ``alter`` control command (``supply_v``; ``variants``, issue
-    #3252). Split out of :func:`_enforce_xyce_support_boundary` to keep that
-    gate under the complexity limit."""
-    if corners_spec.get("supply_v") or any(
-        isinstance(unit, dict) and unit.get("supply_v")
-        for unit in corners_spec.get("units") or []
-    ):
-        raise SimError(
-            "engine 'xyce' does not support corners.supply_v: Xyce has "
-            "no netlist equivalent of ngspice's `alter` control command, "
-            "so per-corner supply rails cannot be patched into the deck "
-            "-- leave corners.supply_v unset (fixed supply, hardcoded in "
-            "the netlist body) or use engine 'ngspice'"
-        )
-    if corners_spec.get("variants"):
-        raise SimError(
-            "engine 'xyce' does not support corners.variants: variant "
-            "sources are applied with ngspice's `alter` control command, "
-            "which Xyce has no netlist equivalent of -- leave "
-            "corners.variants unset or use engine 'ngspice'"
-        )
-
-
-def _enforce_xyce_support_boundary(
-    *,
-    engine: str,
-    backend: str,
-    corners_spec: dict[str, Any],
-    monte_carlo_declared: bool,
-    fail_fast_probe: bool,
-    measurements_spec: list[dict[str, Any]] | None = None,
-    osdi_preload_declared: bool = False,
-    save_mode_declared: bool = False,
-    save_vectors_declared: bool = False,
-    ngspice_options_declared: bool = False,
-    nodeset_declared: bool = False,
-    initial_conditions_declared: bool = False,
-    analysis_steps_declared: bool = False,
-    linearize_declared: bool = False,
-    op_check_declared: bool = False,
-) -> None:
-    """Refuse the ``engine: "xyce"`` combinations the v1 path does not
-    implement (issue #2016) -- up front, with the same clean
-    :class:`SimError` the engine/backend gates use, rather than as
-    per-corner errors after dispatch. Each refusal names what *is*
-    supported so a caller can re-shape the request instead of guessing;
-    the syntax divergences behind each refusal are recorded in
-    ``_write_xyce_deck``'s docstring and docs/design/xyce-oracle.md. A
-    no-op for every other engine.
-    """
-    if engine != "xyce":
-        return
-    sim_xyce_refusals.refuse_linearize(linearize_declared)
-    sim_op_check.refuse_xyce(op_check_declared)  # issue #5077
-    if analysis_steps_declared:
-        # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
-        # commands inside one ngspice `.control` block. The Xyce deck has no
-        # control block and no `alter`, and no equivalent ordered-analysis
-        # contract is implemented for it -- refused rather than run with the
-        # sequence silently reduced to something else. Checked first: the
-        # flattened step measurements are `expr`s too, and this is the more
-        # specific refusal.
-        raise SimError(
-            "analysis_steps is not supported for engine 'xyce': the ordered "
-            "step sequence is generated as `alter`/analysis/`let` commands in "
-            "an ngspice `.control` block, which the Xyce deck does not have; "
-            "use engine 'ngspice'"
-        )
-    if backend not in ("local", "local-parallel"):
-        raise SimError(
-            f"engine 'xyce' supports only the local backends (local, "
-            f"local-parallel), not '{backend}' -- the remote/batch "
-            "provisioning path pins the ngspice toolchain"
-        )
-    _refuse_xyce_alter_corner_axes(corners_spec)
-    _refuse_xyce_params_axis(corners_spec)
-    sim_xyce_refusals.refuse_options_axis(corners_spec)
-    if monte_carlo_declared:
-        raise SimError(
-            "engine 'xyce' does not implement monte_carlo sampling -- "
-            "ngspice's `.options seed=`/rndseed mechanism has no Xyce "
-            "equivalent wired up yet; use engine 'ngspice'"
-        )
-    if fail_fast_probe:
-        raise SimError(
-            "options.fail_fast_probe is not implemented for engine "
-            "'xyce': the calibration probe reads ngspice's own rawfile "
-            "stream; use engine 'ngspice' or drop the option"
-        )
-    if osdi_preload_declared:
-        # Issue #2513: `pre_osdi` is an ngspice control command and Xyce has
-        # no `.control` block to carry it; Xyce compiles Verilog-A into a
-        # plugin through its own `buildxyceplugin` flow and loads it with
-        # `-plugin`, which a `.osdi` file is not. Refused by name rather
-        # than silently dropped -- a deck that ran without its preload would
-        # report every OSDI device as an undefined model.
-        raise SimError(
-            "options.osdi_preload is not supported for engine 'xyce': "
-            "`pre_osdi` is an ngspice control command, and Xyce loads "
-            "Verilog-A models as its own compiled plugins (`-plugin`), not "
-            "OSDI shared libraries; use engine 'ngspice' or drop the option"
-        )
-    sim_xyce_refusals.refuse_control_block_measurements(measurements_spec or [])
-    for declared, message in (
-        # Issue #2732: `save_mode` selects whether klt's generated ngspice
-        # `.control` block carries `save all`; the Xyce deck has no control
-        # block and no generated save card to suppress. Refused by name,
-        # even for "all", rather than silently accepted with no effect.
-        (
-            save_mode_declared,
-            "options.save_mode is not supported for engine 'xyce': it "
-            "controls the `save all` card in klt's generated ngspice "
-            "`.control` block, which the Xyce deck does not have; use "
-            "engine 'ngspice' or omit options.save_mode",
-        ),
-        # Issue #3211: `save_vectors` rewrites the ngspice `save` card.
-        (
-            save_vectors_declared,
-            "options.save_vectors is not supported for engine 'xyce': it "
-            "replaces the `save all` card in klt's generated ngspice "
-            "`.control` block, which the Xyce deck does not have; use "
-            "engine 'ngspice' or omit options.save_vectors",
-        ),
-        # Issue #3111: the names are ngspice `.options` solver controls; the
-        # Xyce deck has its own `.options` namespaces, so they are refused
-        # by name rather than silently mapped or dropped.
-        (
-            ngspice_options_declared,
-            "options.ngspice_options is not supported for engine 'xyce': "
-            "its names are ngspice solver `.options`; use engine 'ngspice' "
-            "or omit options.ngspice_options",
-        ),
-    ):
-        if declared:
-            raise SimError(message)
-    sim_xyce_refusals.refuse_nodeset(nodeset_declared)
-    if initial_conditions_declared:
-        raise SimError(
-            "options.initial_conditions is not supported for engine 'xyce': "
-            "start states are applied as ngspice `.ic` cards with `uic`; use "
-            "engine 'ngspice' or omit options.initial_conditions"
-        )
 
 
 def _run_local(
@@ -8538,7 +8357,7 @@ def _write_xyce_deck(
     - ``measurements[].expr`` (issue #2533) has no Xyce form at all, for the
       same reason as the first bullet: it is emitted as ngspice
       ``let``/``print`` commands inside a ``.control`` block this deck does
-      not have. ``_enforce_xyce_support_boundary`` refuses such a request
+      not have. ``sim_xyce_refusals.enforce_support_boundary`` refuses such a request
       up front by name; the loop below skips ``expr`` entries only so this
       writer stays total rather than raising ``KeyError`` if a future caller
       reaches it directly.
@@ -9754,13 +9573,13 @@ def _summarise_limits(
 
 
 def _build_coverage(
-    measurements_spec: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
     corners: list[dict[str, Any]],
     *,
     capture_only: bool = False,
     grid_stats: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Common checked-work v1 plus the existing simulation coverage counters.
+    """Build checked-work coverage from rolled-up measurements and their corners.
 
     ``capture_only`` (issue #3158) is the request's declared intent to capture waveforms
     with no measurements: each corner that ran clean then counts its capture as the
@@ -9768,7 +9587,7 @@ def _build_coverage(
     not pass stays a skip, so a run failure is never waived.
     """
     limits_declared, measurements_with_limits, unrecognized = _summarise_limits(
-        measurements_spec
+        measurements
     )
 
     grid_stats = grid_stats or []
@@ -9777,20 +9596,20 @@ def _build_coverage(
     sim_probit_sigma.coverage(grid_stats, checked, skipped)
     inapplicable = []
     for corner_index, corner in enumerate(corners):
-        if not measurements_spec:
+        if not measurements:
             corner_checked, corner_skipped = _corner_without_measurements(
                 corner, corner_index, capture_only
             )
             checked.extend(corner_checked)
             skipped.extend(corner_skipped)
-        for spec in sim_derive.per_corner_measurements(measurements_spec):
+        for entry in sim_derive.per_corner_measurements(measurements):
             actual, missing, irrelevant = _measurement_coverage(
-                spec, corner, corner_index
+                entry, corner, corner_index
             )
             checked.extend(actual)
             skipped.extend(missing)
             inapplicable.extend(irrelevant)
-    _attach_derive_coverage(measurements_spec, corners, checked, skipped, inapplicable)
+    sim_derive_rollup.attach_coverage(measurements, checked, skipped, inapplicable)
     reasons = []
     if not corners:
         reasons.append(REASON_EMPTY_CORNER_MATRIX)
@@ -9802,7 +9621,7 @@ def _build_coverage(
 
     block = {
         "corners_simulated": len(corners),
-        "measurements_declared": len(measurements_spec) + len(grid_stats),
+        "measurements_declared": len(measurements) + len(grid_stats),
         "measurements_with_limits": measurements_with_limits + len(grid_stats),
         "unrecognized_limit_keys": unrecognized,
         **build_check_coverage(

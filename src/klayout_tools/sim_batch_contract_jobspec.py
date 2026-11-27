@@ -50,6 +50,7 @@ def _build_batch_job_spec(
     corner_count: int,
     timeout_s: float,
     job_timeout_s: float | None = None,
+    max_launch_attempts: int | None = None,
     request_dir: str | None = None,
     client_version: str | None = None,
     version_check: str = "enforce",
@@ -150,6 +151,7 @@ def _build_batch_job_spec(
         pdk_variant=models.get("pdk"),
         pdk_root=models.get("pdk_root"),
         cores_per_job=ASSUMED_THREADS_PER_CORNER,
+        max_launch_attempts=max_launch_attempts,
         timeout_seconds=int(
             math.ceil(
                 job_timeout_s

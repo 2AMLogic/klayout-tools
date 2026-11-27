@@ -29,6 +29,8 @@
 #
 # A missing/malformed file at ANY tier soft-fails to `{}` for that tier (it
 # contributes nothing to the merge) — this never aborts the calling script.
+# So does a file holding anything but exactly one JSON object, such as two
+# concatenated objects (#15452).
 # See docs/design/config-resolution-tiers.md for the full design and the
 # `.loom-project/project.json` schema.
 #
@@ -47,6 +49,15 @@ LOOM_CONFIG_PROJECT_REL=".loom-project/project.json"
 LOOM_CONFIG_LOCAL_REL=".loom-local/local.json"
 _LOOM_CONFIG_DEFAULTS_DEFAULT_REL=".local/share/loom/config/defaults.json"
 
+# jq filter that accepts one tier, always run as `jq -c -s`: the slurped input
+# is the tier's top-level values, so a tier contributes its content only when
+# it is exactly one JSON object. Empty input, a non-object top level, and
+# several top-level values (#15452) all give {}. Without the slurp, jq runs a
+# filter once per value, and a file holding two objects yielded two objects
+# for one tier -- both of which the merge then took. Malformed JSON still
+# exits non-zero; the readers map that to {} as well.
+_LOOM_CONFIG_TIER_FILTER='if length == 1 and (.[0] | type) == "object" then .[0] else {} end'
+
 # _loom_config_private_defaults_path -> echoes the resolved private-defaults
 # path honoring $LOOM_CONFIG_DEFAULTS_FILE. Echoes nothing when the env var
 # is explicitly set to empty (tier disabled) or when $HOME is unset. The
@@ -62,9 +73,10 @@ _loom_config_private_defaults_path() {
     fi
 }
 
-# _loom_config_soft_read <path> -> echoes the file's JSON when it parses as
-# a JSON object; echoes '{}' for a missing path, an unreadable file,
-# malformed JSON, or a non-object top level. Never fails the caller.
+# _loom_config_soft_read <path> -> echoes the file's JSON when it holds
+# exactly one JSON object; echoes '{}' for a missing path, an unreadable
+# file, malformed JSON, a non-object top level, or several top-level values.
+# Never fails the caller.
 _loom_config_soft_read() {
     local path="$1"
     if [[ -z "$path" ]] || [[ ! -f "$path" ]] || ! command -v jq >/dev/null 2>&1; then
@@ -72,7 +84,7 @@ _loom_config_soft_read() {
         return 0
     fi
     local parsed
-    if ! parsed=$(jq -c 'if type == "object" then . else {} end' "$path" 2>/dev/null); then
+    if ! parsed=$(jq -c -s "$_LOOM_CONFIG_TIER_FILTER" "$path" 2>/dev/null); then
         echo '{}'
         return 0
     fi
@@ -101,7 +113,7 @@ _loom_config_tracked_read() {
         && git -C "$root" diff --quiet HEAD -- "$rel" 2>/dev/null \
         && { [[ ! -e "$root/$rel" ]] || git -C "$root" cat-file -e "HEAD:$rel" 2>/dev/null; }; then
         text=$(git -C "$root" show "origin/HEAD:$rel" 2>/dev/null || true)
-        if [[ -n "$text" ]] && parsed=$(printf '%s' "$text" | jq -c 'if type == "object" then . else {} end' 2>/dev/null); then
+        if [[ -n "$text" ]] && parsed=$(printf '%s' "$text" | jq -c -s "$_LOOM_CONFIG_TIER_FILTER" 2>/dev/null); then
             echo "$parsed"
         else
             echo '{}'
@@ -126,18 +138,19 @@ loom_resolve_config() {
     local defaults_path
     defaults_path=$(_loom_config_private_defaults_path)
 
-    local tier_defaults tier_legacy tier_project tier_local
+    local tier_defaults tier_legacy tier_project tier_fleet tier_local
     tier_defaults=$(_loom_config_soft_read "$defaults_path")
     tier_legacy=$(_loom_config_tracked_read "$repo_root" "$LOOM_CONFIG_LEGACY_REL")
     tier_project=$(_loom_config_tracked_read "$repo_root" "$LOOM_CONFIG_PROJECT_REL")
+    tier_fleet=$(_loom_config_soft_read "$repo_root/.loom-local/fleet-repo.json")
     tier_local=$(_loom_config_soft_read "$repo_root/$LOOM_CONFIG_LOCAL_REL")
 
-    jq -c -n \
-        --argjson a "$tier_defaults" \
-        --argjson b "$tier_legacy" \
-        --argjson c "$tier_project" \
-        --argjson d "$(_loom_config_soft_read "$repo_root/.loom-local/fleet-repo.json")" --argjson e "$tier_local" \
-        '$a * $b * $c * $d * $e'
+    # Stream the tiers (low -> high precedence) to jq on stdin, never as
+    # `--argjson` argv: Linux caps each argv string at MAX_ARG_STRLEN
+    # (128 KiB) on execve, so a tier past that size failed with "Argument
+    # list too long" (#15313). `printf` is a builtin, so no exec limit applies.
+    printf '%s\n' "$tier_defaults" "$tier_legacy" "$tier_project" "$tier_fleet" "$tier_local" \
+        | jq -c -s 'reduce .[] as $t ({}; . * $t)'
 }
 
 # loom_config_get <repo_root> <dotted.path> [default]

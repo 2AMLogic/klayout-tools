@@ -2592,8 +2592,8 @@ markers inside the two `SRAMCORE` rectangles of the `tt_um_essen` layout,
 against zero from the foundry deck. `SramCore` (108/5) is now a deck layer: a
 stream that draws it lists it under `coverage.deck_layers`/`layers_checked`
 rather than `layers_in_stream_without_rules`. `CO.3`
-(`poly2.enclosing.contact.1`) and the untranscribed `CO.6b` also exclude
-`SramCore` upstream and are not changed by #7954.
+(`poly2.enclosing.contact.1`) takes the same subtraction (issue #7960); the
+untranscribed `CO.6b` also excludes `SramCore` upstream and is unchanged.
 
 The DRM 9.2 bond-pad *guideline* table (`PAD.1`, `PAD.2`, `PAD.5`–`PAD.20`) is
 not evaluated either (issue #4001): only 9.1's `PAD.4` is a coded rule. They

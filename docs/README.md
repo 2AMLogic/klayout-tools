@@ -197,4 +197,6 @@ docs/
     remote-evidence-runs.md
     rtl-mutation-testing.md
     waveform-first-debugging.md
+  reports/               # measured run records: outcomes, provenance, cost
+    tt-gf180mcu-corpus-run.md
 ```
