@@ -315,7 +315,7 @@ from .lvs_replay import (
     _combine_devices_max_attempts_replay_options,
     _constant_nets_replay_hints,
     _omit_mismatches_replay,
-    _reference_conversion_echo,  # noqa: F401 (re-export: lvs_report/lvs_runset)
+    _reference_conversion_echo,  # noqa: F401 (re-export: lvs_report)
     _reference_conversion_replay,
     _supply_nets_replay_options,
     _validate_omit_mismatches,
@@ -323,6 +323,7 @@ from .lvs_replay import (
 )
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
+from .lvs_runset_passthrough import passthrough_rerun_excludes
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
 from .lvs_short_nets import _short_nets_drop_devices as _short_nets_drop_devices
 from .lvs_short_nets import _short_nets_merge_nets as _short_nets_merge_nets
@@ -2297,8 +2298,7 @@ def rerun_lvs_report(
     fresh = rerun_with_conversion_paths(
         request, committed, report_path, _run_reconstructed_lvs
     )
-    # Pair-dependent exclusions supplement the shared LVS policy (#5541).
-    exclude: set[tuple[str, ...]] = set()
+    exclude = passthrough_rerun_excludes(committed)
     if isinstance(committed.get("reference"), str) and not isinstance(
         fresh.get("reference"), str
     ):

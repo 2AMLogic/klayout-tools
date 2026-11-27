@@ -598,6 +598,7 @@
         "klayout_tools.lvs_replay",
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
+        "klayout_tools.lvs_runset_passthrough",
         "klayout_tools.lvs_runset_reference",
         "klayout_tools.lvs_runset_sg13g2_cards",
         "klayout_tools.lvs_runset_top",

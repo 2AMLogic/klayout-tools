@@ -57,6 +57,8 @@ def test_subckt_call_converts_mim_for_the_runset(tmp_path, fake_klayout):
         "form": "subckt-call",
         "deck": "sky130",
         "device_map": None,
+        "passthrough_callees": [],
+        "passthrough_cards": 0,
     }
     # The caller's file is untouched and still the echoed reference.
     assert "XC1" in (tmp_path / "ref.sp").read_text()
@@ -415,6 +417,8 @@ def test_sg13g2_report_replays_with_its_conversion_inputs(tmp_path, fake_klayout
         "form": "subckt-call",
         "deck": None,
         "device_map": {"unused_dev": "nfet"},
+        "passthrough_callees": [],
+        "passthrough_cards": 0,
     }
     assert report["status"] == "mismatch"
     assert [m["instance"]["reference"].upper() for m in _unresolved(report)] == ["LOST"]

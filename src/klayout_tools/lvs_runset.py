@@ -53,6 +53,7 @@ from .lvs_base import (
 from .lvs_mismatch import _mismatch
 from .lvs_runset_census import _attach_reference_source, _build_coverage, _class_census
 from .lvs_runset_findings import _circuit_findings, _device_label, _paired_ok
+from .lvs_runset_passthrough import passthrough_finding, reference_conversion_echo
 from .lvs_runset_ports import augment_verdict, strict_top_port_mode
 from .runset_deck_vars import (
     RESERVED_RUNSET_VARS as RESERVED_RUNSET_VARS,
@@ -478,7 +479,6 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     from .lvs import (
         _DECK_FILE_GIVEN_KEY,
         SCHEMA_VERSION,
-        _reference_conversion_echo,
         _unresolved_reference_subckt_calls,
     )
 
@@ -498,7 +498,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
-        ref_sp, scan_top, source_top = prepare_reference(
+        ref_sp, scan_top, source_top, passthrough = prepare_reference(
             reference, request, work_dir, deck_file
         )
         lvsdb_path, completed = runset_launch.run_runset(
@@ -534,7 +534,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             verdict["coverage"]["declared_device_classes"],
             deck_file,
             _unresolved_reference_subckt_calls,
-        )
+        ) + passthrough_finding(passthrough, verdict)
     finally:
         import shutil
 
@@ -575,9 +575,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": RUNSET_ENGINE,
-        **_reference_conversion_echo(
-            request["reference"].get("form", "plain-element"), request["reference"]
-        ),
+        **reference_conversion_echo(request["reference"], passthrough),
         "layout": repo_relative_path(layout, repo_root=repo_root_for(layout)),
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],

@@ -426,6 +426,24 @@ stub-deck unit tests in `tests/test_lvs_runset_reference.py`: the IHP deck,
 the only one exercised here, declares no `DEVICE_LIST` (its RF devices go
 through the SG13G2 conversion described above).
 
+For a `subckt-call` reference, `reference_conversion.passthrough_callees`
+lists the sorted, unique callee names as written, and `passthrough_cards`
+counts the calls left for the runset's reader by the `DEVICE_LIST` rule
+(issue #5796). Both fields are present even when empty (`[]` and `0`).
+The `form`, `deck`, and `device_map` fields echo the request. These additions
+preserve schema version 3 and older reports still replay under `--check --rerun`.
+
+When calls pass through and `coverage.recognized_device_classes.reference`
+is empty, the runset compared no reference devices. The report returns
+`status: "mismatch"` and one `reference.unresolved_subckt_call` error whose
+`details` name the callees and card count. Supply a suitable `reference.deck`
+or `reference.device_map`, or write the devices as plain-element cards.
+Runset readers can rename device classes, so the report cannot reliably
+attribute a recognized device to an individual callee. If any reference
+device was recognized, the report records the passthrough without this
+aggregate finding. SG13G2 calls preserved for hierarchy or individual
+unresolved-call diagnostics do not contribute to the `DEVICE_LIST` count.
+
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
 may exit `0` on a non-matching pair, and another (sky130's `sky130.lvs`) exits
