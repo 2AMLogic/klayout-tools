@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -151,6 +152,39 @@ def test_user_test_selection_preserves_the_probe(
     assert rt._release(measured["py_get_version"]) == rt._klt_release()
     assert report["status"] == "pass"
     assert [test["name"] for test in report["tests"]] == [testcase]
+
+
+@SKIP_NO_COCOTB
+@needs_icarus
+@pytest.mark.parametrize("setting", ["COCOTB_USER_COVERAGE", "COVERAGE"])
+@pytest.mark.parametrize("source", ["request", "ambient"])
+def test_user_coverage_report_after_probe(
+    tmp_path, monkeypatch, measurements, setting, source
+):
+    coverage = pytest.importorskip("coverage")
+    for name in ("gcd.v", "test_gcd.py"):
+        shutil.copyfile(EXAMPLE_DIR / name, tmp_path / name)
+    request = json.loads((EXAMPLE_DIR / "request.json").read_text())
+    data_file = tmp_path / ".coverage"
+    monkeypatch.setenv("COVERAGE_FILE", str(data_file))
+    if source == "ambient":
+        monkeypatch.setenv(setting, "1")
+    else:
+        request["env"] = {setting: "1"}
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+
+    report = run_functional_verification(str(request_path))
+
+    [measured] = measurements
+    assert measured["status"] == "measured", measured
+    assert (report["passed_count"], report["failed_count"]) == (2, 1)
+    user_coverage = coverage.Coverage(data_file=data_file, config_file=False)
+    user_coverage.load()
+    output = StringIO()
+    user_coverage.report(file=output)
+    assert "test_gcd.py" in output.getvalue()
+    assert rt.PROBE_MODULE not in output.getvalue()
 
 
 @needs_icarus

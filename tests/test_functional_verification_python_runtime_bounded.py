@@ -38,24 +38,32 @@ def test_run_bounded_reports_a_child_that_dies_silent():
     assert "exited without a result (exit code 3)" in outcome["reason"]
 
 
-def test_run_bounded_kills_a_hung_child_and_its_simulator(tmp_path, monkeypatch):
-    """A probe that wedges -- here a child sleeping behind a ``sleep``
-    grandchild standing in for ``vvp`` -- costs the bound, not the session,
-    and leaves neither process behind."""
+@pytest.mark.parametrize("driver_exits", [False, True], ids=["timeout", "driver-exit"])
+def test_run_bounded_stops_the_driver_and_its_simulator(
+    tmp_path, monkeypatch, driver_exits
+):
+    """The simulator is cleaned up even if the driver exits before it."""
     monkeypatch.setattr(rt, "PYTHON_RUNTIME_PROBE_TIMEOUT_S", 1.0)
     pids = tmp_path / "pids"
 
-    def _wedge():
-        sleeper = subprocess.Popen(["sleep", "60"])
+    def _launch_simulator():
+        sleeper = subprocess.Popen(["sleep", "15"])
         pids.write_text(f"{os.getpid()} {sleeper.pid}")
+        if driver_exits:
+            os._exit(3)
         time.sleep(60)
 
     started = time.monotonic()
-    outcome = rt._run_bounded(_wedge)
+    outcome = rt._run_bounded(_launch_simulator)
     elapsed = time.monotonic() - started
 
     assert outcome["status"] == "inconclusive"
-    assert "no result within 1s" in outcome["reason"]
+    reason = (
+        "exited without a result (exit code 3)"
+        if driver_exits
+        else "no result within 1s"
+    )
+    assert reason in outcome["reason"]
     assert elapsed < 30
     child, grandchild = map(int, pids.read_text().split())
     for pid in (child, grandchild):
@@ -92,10 +100,10 @@ def test_a_child_that_cannot_isolate_its_group_measures_nothing(tmp_path, monkey
     ran = tmp_path / "ran"
     signalled = []
 
-    def _refused():
+    def _refused(pid, pgid):
         raise OSError(errno.EPERM, "Operation not permitted")
 
-    monkeypatch.setattr(os, "setpgrp", _refused)  # inherited by the forked child
+    monkeypatch.setattr(os, "setpgid", _refused)
     monkeypatch.setattr(os, "killpg", lambda *args: signalled.append(args))
 
     def _start_the_simulator():
@@ -110,48 +118,23 @@ def test_a_child_that_cannot_isolate_its_group_measures_nothing(tmp_path, monkey
     assert signalled == []
 
 
-def _record_signals(monkeypatch, group_of):
-    """Replace the three ways ``_kill_probe_child`` can signal, so nothing is
-    ever sent, and return what it tried to."""
+@pytest.mark.parametrize("group_created", [True, False])
+def test_kill_probe_child_targets_only_the_isolated_group_or_driver(
+    monkeypatch, group_created
+):
     sent = []
-    monkeypatch.setattr(os, "getpgid", group_of)
     monkeypatch.setattr(os, "killpg", lambda g, sig: sent.append(("group", g, sig)))
     monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append(("pid", pid, sig)))
-    return sent
+
+    rt._kill_probe_child(4242, group_created)
+
+    assert sent == [("group" if group_created else "pid", 4242, signal.SIGKILL)]
 
 
-def test_kill_probe_child_signals_the_group_the_child_leads(monkeypatch):
-    sent = _record_signals(monkeypatch, lambda pid: pid)
+def test_kill_probe_child_handles_an_already_exited_group(monkeypatch):
+    def _gone(pgid, sig):
+        raise ProcessLookupError(pgid)
 
-    rt._kill_probe_child(4242)
-
-    assert sent == [("group", 4242, signal.SIGKILL)]
-
-
-def test_kill_probe_child_never_signals_a_group_it_does_not_lead(monkeypatch):
-    """A child that stayed in klt's group is signalled alone, never the group
-    ``getpgid`` reports for it -- klt's, and its caller's."""
-    klt_group = os.getpgrp()
-    sent = _record_signals(monkeypatch, lambda pid: klt_group)
-
-    rt._kill_probe_child(4242)
-
-    assert sent == [("pid", 4242, signal.SIGKILL)]
-
-
-def test_kill_probe_child_survives_a_child_that_is_already_gone(monkeypatch):
-    def _gone(pid):
-        raise ProcessLookupError(pid)
-
-    sent = _record_signals(monkeypatch, _gone)
-    rt._kill_probe_child(None)
-    assert sent == []
-
-    rt._kill_probe_child(4242)
-    assert sent == [("pid", 4242, signal.SIGKILL)]
-
-    def _already_exited(pid, sig):
-        raise ProcessLookupError(pid)
-
-    monkeypatch.setattr(os, "kill", _already_exited)
-    rt._kill_probe_child(4242)  # no exception
+    monkeypatch.setattr(os, "killpg", _gone)
+    monkeypatch.setattr(os, "kill", lambda *args: pytest.fail("group is gone"))
+    rt._kill_probe_child(4242, group_created=True)

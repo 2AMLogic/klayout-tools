@@ -143,22 +143,15 @@ def _inconclusive(reason: str) -> dict[str, Any]:
 
 
 def _probe_child(
-    conn: multiprocessing.connection.Connection, target: Any, kwargs: dict[str, Any]
+    conn: multiprocessing.connection.Connection,
+    parent_conn: multiprocessing.connection.Connection,
+    target: Any,
+    kwargs: dict[str, Any],
 ) -> None:
-    """Target of the forked child :func:`_run_bounded` starts. ``os.setpgrp()``
-    moves it into its own process group *before* it can spawn the simulator,
-    so a timeout kill reaches that grandchild too (the shape of
-    ``_mutation_subprocess_entry``). A child that cannot get its own group
-    measures nothing: it would otherwise still be in klt's group, and
-    cleaning it up must never be able to signal that. The outcome is relayed
-    over the pipe, never raised across the process boundary."""
+    """Run the target only after the parent has established our process group."""
+    parent_conn.close()  # A lost parent must let recv_bytes() see EOF.
     try:
-        try:
-            os.setpgrp()
-        except OSError as exc:
-            raise RuntimeError(
-                f"could not give the probe its own process group ({exc})"
-            ) from exc
+        conn.recv_bytes()
         conn.send(("measured", target(**kwargs)))
     except BaseException as exc:
         try:
@@ -169,22 +162,16 @@ def _probe_child(
         conn.close()
 
 
-def _kill_probe_child(pid: int | None) -> None:
-    """SIGKILL the probe child, and its whole process group only when the
-    child leads a group of its own (``_probe_child`` makes it so before it
-    starts anything). A child that does not -- isolation failed, or the lookup
-    did -- is signalled alone: the group it would report is klt's own, and
-    ``_kill_process_tree`` signals whichever group it is handed. Never
-    raises."""
-    if pid is None:
-        return
-    try:
-        leads_group = os.getpgid(pid) == pid
-    except OSError:
-        leads_group = False
-    if leads_group:
-        _kill_process_tree(pid)
-        return
+def _kill_probe_child(pid: int, group_created: bool) -> None:
+    """Signal the group established by the parent, or just the waiting child."""
+    if group_created:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return  # The group has already exited.
+        except OSError:
+            pass
     try:
         os.kill(pid, signal.SIGKILL)
     except OSError:
@@ -209,12 +196,14 @@ def _run_bounded(target: Any, **kwargs: Any) -> dict[str, Any]:
     except ValueError as exc:
         return _inconclusive(f"no fork start method on this platform ({exc})")
     try:
-        parent_conn, child_conn = context.Pipe(duplex=False)
+        parent_conn, child_conn = context.Pipe(duplex=True)
     except OSError as exc:  # out of file descriptors, say
         return _inconclusive(f"could not open the probe's result pipe ({exc})")
     try:
         process = context.Process(
-            target=_probe_child, args=(child_conn, target, kwargs), daemon=True
+            target=_probe_child,
+            args=(child_conn, parent_conn, target, kwargs),
+            daemon=True,
         )
         process.start()
     except Exception as exc:
@@ -223,27 +212,32 @@ def _run_bounded(target: Any, **kwargs: Any) -> dict[str, Any]:
         child_conn.close()
         return _inconclusive(f"could not start the probe process ({exc})")
     child_conn.close()
+    pid = process.pid
+    assert pid is not None  # process.start() succeeded.
+    group_created = False
     try:
-        timed_out = not parent_conn.poll(PYTHON_RUNTIME_PROBE_TIMEOUT_S)
-        outcome: dict[str, Any] | None = None
-        if not timed_out:
-            try:
-                status, payload = parent_conn.recv()
-                outcome = {**payload, "status": status}
-            except (EOFError, OSError):
-                outcome = None  # the child closed its end without a result
+        try:
+            os.setpgid(pid, pid)
+        except OSError as exc:
+            return _inconclusive(
+                f"could not give the probe its own process group ({exc})"
+            )
+        group_created = True
+        parent_conn.send_bytes(b"")  # The child can now launch the simulator.
+        if not parent_conn.poll(PYTHON_RUNTIME_PROBE_TIMEOUT_S):
+            return _inconclusive(
+                f"no result within {PYTHON_RUNTIME_PROBE_TIMEOUT_S:g}s"
+            )
+        status, payload = parent_conn.recv()
+        return {**payload, "status": status}
+    except (EOFError, OSError):
+        pass  # The driver exited without a result. Report its exit code after join.
     finally:
-        # A child still alive -- past its deadline, or after closing its end
-        # without exiting -- is killed (its own group and all), then reaped,
-        # so neither it nor its simulator outlives this call.
         parent_conn.close()
-        if process.is_alive():
-            _kill_probe_child(process.pid)
+        # Keep the driver's PID reserved until after signalling its group.
+        # is_alive() and join() can both reap an exited driver.
+        _kill_probe_child(pid, group_created)
         process.join(_PROBE_KILL_GRACE_S)
-    if outcome is not None:
-        return outcome
-    if timed_out:
-        return _inconclusive(f"no result within {PYTHON_RUNTIME_PROBE_TIMEOUT_S:g}s")
     return _inconclusive(
         f"the probe process exited without a result (exit code {process.exitcode})"
     )
@@ -279,12 +273,17 @@ def _probe_in_process(
     """
     build_dir = os.path.join(workdir, "sim_build")
     result_path = os.path.join(workdir, "result.json")
-    # Runner.test merges os.environ over extra_env. Remove user test selectors
-    # from both sources in this forked child so the parent keeps its selection.
+    # Runner.test merges os.environ over extra_env. Keep the user's selection
+    # and coverage (including its legacy alias) out of this scratch test.
     probe_env = env.copy()
-    for selector in ("COCOTB_TEST_FILTER", "COCOTB_TESTCASE"):
-        os.environ.pop(selector, None)
-        probe_env.pop(selector, None)
+    for key in (
+        "COCOTB_TEST_FILTER",
+        "COCOTB_TESTCASE",
+        "COCOTB_USER_COVERAGE",
+        "COVERAGE",
+    ):
+        os.environ.pop(key, None)
+        probe_env.pop(key, None)
     engine_runner = _fv._run_build(
         runner_module,
         engine="icarus",
@@ -468,6 +467,3 @@ def _interpreter_mismatch_hint(engine: str, diagnostic: str) -> str:
 # Imported last so that whichever module is imported first, the others find
 # every name they need already defined (no load-time cycle).
 from . import functional_verification as _fv  # noqa: E402
-from .functional_verification_mutation_variant import (  # noqa: E402
-    _kill_process_tree,
-)
