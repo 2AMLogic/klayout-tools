@@ -18,6 +18,7 @@ from .sim_batch import (
     _assess_job_ceiling,
     _resolve_batch_config,
     dry_run_runner_check,
+    refuse_hosts_over_units,
 )
 
 
@@ -35,22 +36,36 @@ def plan_batch_job(
     unit_count: int,
     timeout_s: float,
     quiet: bool = False,
+    hosts: int = 1,
 ) -> tuple[dict[str, Any], int]:
     """Assess one job against the fleet's whole-job ceiling and plan its split
     (issues #2833, #3446): the single implementation the submit paths use and
     ``--batch-set`` preflights with (issue #4972). Raises
-    :class:`~klayout_tools.sim.SimError` (``batch_job_ceiling_exceeded`` /
-    ``batch_max_units_per_job_invalid``); no S3 write. ``quiet`` suppresses the
+    :class:`~klayout_tools.sim.SimError` for excess hosts or a ceiling or
+    split-policy refusal before any S3 write. ``quiet`` suppresses the
     stderr notices (a preflight must not announce twice); it is only used
-    single-threaded, before any worker starts."""
+    single-threaded, before any worker starts.
+
+    ``hosts`` is the request's resolved ``remote.hosts`` (issue #8011). A
+    sharded request runs one job per shard, so the assessment sizes its bound
+    by the largest shard, ``ceil(unit_count / hosts)`` units, and warns or
+    refuses on *that* -- never on the whole request as one job, which the
+    submit path does not run. The returned job count is then at least
+    ``hosts``, and the assessment says so through its ``split`` /
+    ``effective_hosts`` annotation."""
+    hosts = max(1, hosts)
+    refuse_hosts_over_units(hosts, unit_count)
     with (
         contextlib.redirect_stderr(io.StringIO()) if quiet else contextlib.nullcontext()
     ):
         job_ceiling = _assess_job_ceiling(
-            unit_count=unit_count, per_unit_timeout_s=timeout_s, config=config
+            unit_count=unit_count,
+            per_unit_timeout_s=timeout_s,
+            config=config,
+            hosts=hosts,
         )
         job_ceiling["image_profile"] = config.image_profile or "sim"
-        return _apply_job_split(job_ceiling, config)
+        return _apply_job_split(job_ceiling, config, hosts)
 
 
 def dry_run_job_ceiling(
@@ -59,17 +74,20 @@ def dry_run_job_ceiling(
     corner_count: int,
     timeout_s: float,
     runner_out: dict[str, Any] | None = None,
+    hosts: int = 1,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """The batch half of ``klt sim --dry-run`` (issue #5674): the runner
     check (:func:`sim_batch.dry_run_runner_check`) followed by the same
     :func:`plan_batch_job` the submit path runs, so the dry run refuses what
     the submit refuses and the report can carry the assessment. Returns
-    ``(feature_diagnostic, job_ceiling)``; the ceiling is ``None`` on a host
-    with no resolvable batch configuration, which keeps such hosts
-    dry-running clean. The plan is *not* quiet: the warn / serial-bound /
+    ``(feature_diagnostic, job_ceiling)``; the ceiling is ``None`` when the
+    host has no resolvable batch configuration or the resume checkpoint
+    already covers every unit. The plan is *not* quiet: the warn / serial-bound /
     split stderr notices are part of the submit behaviour the dry run
     mirrors (issue #4982), and this path is single-threaded, before any
-    worker starts.
+    worker starts. ``hosts`` is the resolved ``remote.hosts`` (issue #8011),
+    so a sharded request is assessed by its largest shard, as the
+    ``--batch-set`` preflight and ``--submit-only`` assess it.
     """
     config_out: dict[str, BatchConfig] = {}
     diagnostic = dry_run_runner_check(
@@ -80,10 +98,13 @@ def dry_run_job_ceiling(
         config_out=config_out,
     )
     config = config_out.get("config")
+    if not corner_count:  # A fully resumed request has no job to assess.
+        return diagnostic, None
     if config is None:
+        refuse_hosts_over_units(hosts, corner_count)
         return diagnostic, None
     job_ceiling, _hosts = plan_batch_job(
-        config, unit_count=corner_count, timeout_s=timeout_s
+        config, unit_count=corner_count, timeout_s=timeout_s, hosts=hosts
     )
     return diagnostic, job_ceiling
 
@@ -112,7 +133,9 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
     included), then run the same :func:`plan_batch_job` the submit path runs,
     before any S3 write. Raises :class:`SimError` with the submit path's own
     code; returns the job-ceiling assessment otherwise. ``overrides`` are the
-    :func:`~klayout_tools.sim.run_sim` keyword options."""
+    :func:`~klayout_tools.sim.run_sim` keyword options. The member's resolved
+    ``remote.hosts`` (its own, or ``--hosts``) sizes the assessed job: its
+    largest shard, not the whole request as one job (issue #8011)."""
     from . import sim_commands
     from .sim import (
         _prepare_sim_request,
@@ -158,7 +181,11 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
         check_runner=False,
     )
     job_ceiling, _hosts = plan_batch_job(
-        config, unit_count=len(points), timeout_s=resolved.timeout_s, quiet=True
+        config,
+        unit_count=len(points),
+        timeout_s=resolved.timeout_s,
+        quiet=True,
+        hosts=resolved.hosts,
     )
     return job_ceiling
 

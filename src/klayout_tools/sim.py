@@ -3709,6 +3709,7 @@ def _run_sim_corners(
         if resume
         else corner_points
     )
+    fleet_hosts = sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points)
     sim_subckt_override.refuse_on_host_default(
         netlist_overrides_report,
         backend_is_offhost=backend in _OFFHOST_BACKENDS,
@@ -3918,16 +3919,16 @@ def _run_sim_corners(
     )
     if dry_run:
         published_runner: dict[str, Any] = {}
-        feature_diagnostic, job_ceiling = (
-            dry_run_job_ceiling(
+        feature_diagnostic: dict[str, Any] | None = None
+        job_ceiling: dict[str, Any] | None = None
+        if backend == "batch":
+            feature_diagnostic, job_ceiling = dry_run_job_ceiling(
                 request,
                 corner_count=len(dispatch_points),
                 timeout_s=timeout_s,
                 runner_out=published_runner,
+                hosts=fleet_hosts,
             )
-            if backend == "batch"
-            else (None, None)
-        )
         return _build_dry_run_report(
             request,
             feature_diagnostic=feature_diagnostic,
@@ -3972,8 +3973,7 @@ def _run_sim_corners(
         attach_job_id,
     )
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
-        # Issue #5775: an all-covered resume dispatches nothing -- never the
-        # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
+        # An all-covered resume dispatches nothing (#5775).
         corners_new, backend_engine_version, remote_environment = [], None, None
     elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         corners_new, backend_engine_version, remote_environment = _BACKENDS[backend](
@@ -4034,7 +4034,7 @@ def _run_sim_corners(
             want_waveforms=want_waveforms,
             artifacts_dir=artifacts_dir,
             request=request,
-            hosts=sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points),
+            hosts=fleet_hosts,
             measurements_spec=per_corner_specs,
             request_dir=request_dir,
             **shard_kwargs,

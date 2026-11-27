@@ -383,6 +383,75 @@ def test_cli_max_units_override_wins_over_request_cap(tmp_path, capsys):
     assert "serial upper bound" in capsys.readouterr().err
 
 
+# --- remote.hosts sizes the assessed job (issue #8011) -------------------- #
+# Three corners at 1800 s: as one job the request is bound at 5520 s, but each
+# shard of ceil(3 / hosts) units -- what that job's own job.json
+# timeout_seconds carries -- is 1920 s (one unit) or 3720 s (two).
+
+
+def _sharded(tmp_path: Path, hosts: int, ceiling: int = 3600, **batch) -> str:
+    return _write_request(
+        tmp_path,
+        timeout_s=1800,
+        batch={"max_job_seconds": ceiling, **batch},
+        remote={"hosts": hosts},
+    )
+
+
+@pytest.mark.parametrize(
+    ("declared", "override", "ceiling", "job_units", "bound", "exceeds"),
+    [
+        (3, None, 3600, 1, 1920.0, False),
+        (2, None, 3600, 2, 3720.0, True),
+        (1, None, 3600, 3, 5520.0, True),
+        (2, None, 3720, 2, 3720.0, False),  # a bound equal to the ceiling passes
+        (1, 3, 3600, 1, 1920.0, False),  # `--hosts` lifts a one-host request
+        (3, 2, 3600, 2, 3720.0, True),  # ... and overflows a three-host one
+    ],
+)
+def test_bound_describes_the_largest_shard_of_the_resolved_run(
+    tmp_path, capsys, declared, override, ceiling, job_units, bound, exceeds
+):
+    """``declared`` is the request's ``remote.hosts`` and ``override`` a
+    ``--hosts`` value: the assessed job is the largest shard of the run they
+    resolve to, never the whole request as one job."""
+    path = _sharded(tmp_path, declared, ceiling)
+    report = sim.run_sim(path, backend="batch", dry_run=True, hosts=override)
+    job_ceiling = report["job_ceiling"]
+    assert job_ceiling["job_bound_s"] == bound
+    assert job_ceiling["job_unit_count"] == job_units
+    assert job_ceiling["exceeds_ceiling"] is exceeds
+    # The request is still all three units; `hosts` and the plan count its jobs.
+    assert job_ceiling["unit_count"] == report["unit_count"] == 3
+    assert job_ceiling.get("effective_hosts", 1) == (override or declared)
+    assert report["hosts"] == (override or declared)
+    assert ("klt sim: warning: batch job bound" in capsys.readouterr().err) is exceeds
+    if exceeds:
+        assert job_ceiling["warning"].startswith(
+            f"batch job bound {bound:g}s (options.timeout_s 1800s x {job_units} units"
+        )
+        assert job_ceiling["recommended_hosts"] == 3
+        assert "Set request.remote.hosts to at least 3" in job_ceiling["warning"]
+    # The --batch-set preflight assesses the same resolved run.
+    assert job_ceiling == preflight_batch_request(path, hosts=override)
+
+
+def test_enforce_passes_a_fitting_shard_and_refuses_an_overflowing_one(tmp_path):
+    fitting = _sharded(tmp_path, 3, job_ceiling_check="enforce")
+    report = sim.run_sim(fitting, backend="batch", dry_run=True)
+    assert report["status"] == "valid"
+    assert report["job_ceiling"]["exceeds_ceiling"] is False
+
+    overflowing = _sharded(tmp_path, 2, job_ceiling_check="enforce")
+    with pytest.raises(sim.SimError) as dry:
+        sim.run_sim(overflowing, backend="batch", dry_run=True)
+    with pytest.raises(sim.SimError) as oracle:
+        preflight_batch_request(overflowing)
+    assert dry.value.code == sb.BATCH_JOB_CEILING_CODE
+    assert str(dry.value) == str(oracle.value)
+    assert "batch job bound 3720s" in str(dry.value)
+
+
 # --- text and json surfaces ------------------------------------------------- #
 
 
@@ -395,6 +464,17 @@ def test_text_format_prints_the_shard_plan(tmp_path, capsys):
     assert plan == [
         "  batch plan: 3 unit(s) in 3 job(s) of at most 1 unit(s) "
         "each (bound 300s of the 3600s ceiling)"
+    ]
+
+
+def test_text_plan_counts_every_unit_of_a_remote_hosts_run(tmp_path, capsys):
+    path = _sharded(tmp_path, 3)
+    argv = ["sim", path, "--backend", "batch", "--dry-run", "--format", "text"]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert [line for line in out.splitlines() if "batch plan:" in line] == [
+        "  batch plan: 3 unit(s) in 3 job(s) of at most 1 unit(s) "
+        "each (bound 1920s of the 3600s ceiling)"
     ]
 
 
