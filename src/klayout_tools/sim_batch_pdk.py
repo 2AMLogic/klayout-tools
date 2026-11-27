@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 
-from .pdk_store import INSTALL_FIELDS, STORE_LAYOUTS, client_pdk_stamp
+from .pdk_store import STORE_LAYOUTS, client_pdk_stamp, install_facts
 from .sim_batch_contract_worker import _bounded_str
 from .sim_errors import SimError, request_options
 
@@ -84,20 +84,13 @@ def bounded_store_evidence(capture: dict[str, Any]) -> dict[str, Any]:
     ``None`` -- unknown -- when the capture carries no usable value: an older
     worker's capture has neither field, and an object with no valid fact is
     no evidence."""
-    facts: dict[str, str | None] | None = None
     install = capture.get("install")
-    if isinstance(install, dict):
-        digest = install.get("sha256")
-        facts = {field: _bounded_str(install.get(field)) for field in INSTALL_FIELDS}
-        # Exactly 64 hex digits, never a clipped prefix of something longer.
-        facts["sha256"] = (
-            digest
-            if isinstance(digest, str) and _SHA256_HEX.fullmatch(digest)
-            else None
-        )
+    facts = install_facts(install) if isinstance(install, dict) else None
     layout = capture.get("store_layout")
     return {
-        "install": facts if facts and any(facts.values()) else None,
+        "install": {key: _bounded_str(value) for key, value in facts.items()}
+        if facts
+        else None,
         "store_layout": layout
         if isinstance(layout, str) and layout in STORE_LAYOUTS
         else None,

@@ -62,12 +62,12 @@ def _store_tree(parent, digest=_INSTALL["sha256"], relative=_FAMILY):
     return root
 
 
-def _captured(parent, root, staged="0"):
+def _captured(parent, root, staged="0", variant="gf180mcuD"):
     """The real capture program's document for ``PDK_ROOT=root``."""
     return _run_capture_program(
         parent,
         ngspice_script=None,
-        args=("", "gf180mcuD", staged),
+        args=("", variant, staged),
         env={"PDK_ROOT": str(root)},
     )
 
@@ -103,6 +103,78 @@ def test_worker_capture_agrees_with_the_library_on_each_layout(
     assert _observed(_captured(tmp_path, root)["pdk"]) == (_INSTALL, layout)
 
 
+def test_worker_requires_the_requested_variant_for_store_evidence(tmp_path):
+    root = _store_tree(tmp_path, relative="gf180mcuD")
+    # Only gf180mcuD is installed, even if a namesake directory exists.
+    for directory in (root, root / "gf180mcuD"):
+        block = _captured(tmp_path, directory, staged="1", variant="sky130A")["pdk"]
+        assert _observed(block) == (None, None)
+    (root / "sky130A").mkdir()
+    block = _captured(tmp_path, root, staged="1", variant="sky130A")["pdk"]
+    assert _observed(block) == (None, None)
+
+
+@pytest.mark.parametrize("layout", ["open_pdks", "descriptor", "asap7"])
+def test_worker_reads_the_parent_marker_of_a_matching_flat_root(tmp_path, layout):
+    root = _store_tree(tmp_path, relative="gf180mcuD") / "gf180mcuD"
+    if layout != "open_pdks":
+        (root / "libs.tech").rmdir()
+    if layout == "descriptor":
+        root = root.rename(root.with_name("checkout"))
+        (root / "klt-pdk.json").write_text(
+            json.dumps({"schema_version": 1, "variant": "gf180mcuD"})
+        )
+    if layout == "asap7":
+        for marker in ("base/setup/klayout", "base/apr", "libs"):
+            (root / marker).mkdir(parents=True)
+
+    client = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+    worker = _captured(tmp_path, root)["pdk"]
+
+    assert _observed(client) == _observed(worker) == (_INSTALL, "flat")
+    assert worker["stamp_scheme"] is None  # revision probing still uses root/<variant>
+
+
+def test_install_alias_resolves_the_same_tree_on_the_worker(tmp_path):
+    root = _store_tree(tmp_path, relative="gf180mcuD")
+    installed = (root / "gf180mcuD").rename(root / "ihp-sg13g2")
+    for directory in (root, installed):
+        client = pdk.find_pdk(variant="sg13g2", root=str(directory))
+        worker = _captured(tmp_path, directory, variant="sg13g2")["pdk"]
+        assert _observed(client) == _observed(worker) == (_INSTALL, "flat")
+
+
+def test_custom_version_tree_searched_at_its_revision_reports_unknown_layout(tmp_path):
+    root = _store_tree(tmp_path)
+    for directory, expected in (
+        (root, "manager_family"),
+        ((root / _FAMILY).parent, None),
+    ):
+        client = pdk.find_pdk(variant="gf180mcuD", root=str(directory))
+        worker = _captured(tmp_path, directory)["pdk"]
+        assert _observed(client) == _observed(worker) == (_INSTALL, expected)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires a FIFO")
+@pytest.mark.parametrize("location", ["variant", "parent"])
+def test_worker_skips_nonregular_markers_before_reading(tmp_path, location):
+    root = _store_tree(tmp_path)
+    variant = root / _FAMILY
+    (variant / "SOURCES").unlink()  # also exercise the independent stamp fallback
+    if location == "parent":
+        marker = variant.parent / ".pdk-store.json"
+        marker.unlink()
+    else:
+        marker = variant / ".pdk-store.json"  # shadows the valid parent for install
+    os.mkfifo(marker)
+
+    worker = _captured(tmp_path, root)["pdk"]
+    assert _observed(worker) == (None, "manager_family")
+    assert worker["stamp_scheme"] == (
+        "store-version-sha256" if location == "variant" else None
+    )
+
+
 @pytest.mark.parametrize(
     "beside, inside, expected",
     [
@@ -111,9 +183,18 @@ def test_worker_capture_agrees_with_the_library_on_each_layout(
         (_INSTALL, "{not json", None),  # the nearer marker is *the* marker
         ({"version": "v1"}, None, _NO_FACTS | {"version": "v1"}),
         ({"sha256": "short"}, None, None),  # no valid fact is no evidence
+        ({"sha256": " " + _INSTALL["sha256"]}, None, None),
         (None, None, None),
     ],
-    ids=["beside", "inside", "shadowed", "partial", "invalid-digest", "unmarked"],
+    ids=[
+        "beside",
+        "inside",
+        "shadowed",
+        "partial",
+        "invalid-digest",
+        "padded-digest",
+        "unmarked",
+    ],
 )
 def test_worker_capture_reads_the_marker_as_the_library_does(
     tmp_path, beside, inside, expected
@@ -242,9 +323,19 @@ def test_capture_without_store_evidence_keeps_the_install_identity_unknown(
         ),
         ("artifact-broker", "elsewhere", (None, None)),
         ({"via": "x" * 400}, None, (_NO_FACTS | {"via": "x" * 300}, None)),
+        ({"via": "  ", "version": ""}, "flat", (None, "flat")),
+        ({"via": " store ", "synced": " "}, None, (_NO_FACTS | {"via": "store"}, None)),
         ({}, "flat", (None, "flat")),
     ],
-    ids=["short-digest", "long-digest", "not-an-object", "bounded", "no-fact"],
+    ids=[
+        "short-digest",
+        "long-digest",
+        "not-an-object",
+        "bounded",
+        "blanks",
+        "partial-blanks",
+        "no-fact",
+    ],
 )
 def test_collected_store_evidence_is_revalidated(
     tmp_path, monkeypatch, install, layout, expected

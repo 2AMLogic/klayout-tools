@@ -208,13 +208,6 @@ def sim():
         diag.append("simulator binary not found on worker")
     return s
 doc["simulator"] = guard("simulator", sim, {"selected_path": None, "version_banner": None})
-def store_version(vdir):
-    try:
-        d = json.loads(read(os.path.join(os.path.dirname(os.path.realpath(vdir)), ".pdk-store.json"), 65536))
-    except (OSError, ValueError):
-        return None
-    v = d.get("version") if isinstance(d, dict) else None
-    return v.strip() if isinstance(v, str) and v.strip() else None
 @STORE_EVIDENCE@
 def pdk():
     root = os.environ.get("PDK_ROOT")
@@ -225,11 +218,11 @@ def pdk():
         if staged != "1":
             diag.append("pdk root or variant unknown on worker")
         return p
-    vdir = os.path.join(root, variant)
-    # Issue #8007: what placed the tree and where it sits, whatever SOURCES says below.
-    p["install"] = guard("pdk install", lambda: store_install(vdir))
-    p["store_layout"] = guard("pdk store layout", lambda: store_layout(vdir, root))
-    # root/<variant> only, deliberately: this standalone payload cannot import klayout_tools, so a flat install (#522) degrades to the "pdk stamp unreadable" diagnostic below, never a wrong stamp (#6445).
+    vdir = guard("pdk variant", lambda: evidence_variant_dir(root, variant))
+    if vdir is not None:
+        p["install"] = guard("pdk install", lambda: store_install(vdir))
+        p["store_layout"] = guard("pdk store layout", lambda: store_layout(vdir, root))
+    # Preserve the root/<variant> stamp used for revision comparison (#6445).
     stamp = os.path.join(root, variant, "SOURCES")
     try:
         text = read(stamp, 16384)

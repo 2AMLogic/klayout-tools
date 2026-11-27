@@ -139,8 +139,11 @@ def read_store_install(variant_dir: str) -> dict[str, str | None] | None:
     reports its placing tool as unknown.
     """
     data = _nearest_store_object(variant_dir)
-    if data is None:
-        return None
+    return install_facts(data) if data is not None else None
+
+
+def install_facts(data: dict[str, Any]) -> dict[str, str | None] | None:
+    """Validate the install fields in a store marker or a collected worker report."""
     digest = data.get("sha256")
     facts: dict[str, str | None] = {
         "sha256": digest
@@ -190,27 +193,19 @@ def store_layout_of(root: str, variant_dir: str) -> str | None:
 
     A store is asked before ``root`` because that is where a manager's layout
     is defined: ``$PDK_ROOT`` often holds only the enabled links, or sits
-    inside the store. ``None`` only when the tree sits in a
-    ``versions/<commit>`` directory under neither -- a version tree whose
-    store root is not observable here has no establishable layout, and is
-    not reported as a plain install. Observational only: the layout says
-    where a tree sits, never which tool placed it there
-    (:func:`read_store_install` reads the marker for that).
+    inside the store. If a tree sits in ``versions/<commit>`` and neither
+    base establishes a manager layout, return ``None``. The layout describes
+    where a tree sits. :func:`read_store_install` reports what placed it there.
     """
     from .pdk import STORE_DIRS  # lazy: pdk imports this module
 
     real = os.path.realpath(variant_dir)
-    below = [
-        _parts_under(os.path.realpath(os.path.expanduser(base)), real)
-        for base in (*STORE_DIRS, root)
-    ]
-    for parts in below:
+    for base in (*STORE_DIRS, root):
+        parts = _parts_under(os.path.realpath(os.path.expanduser(base)), real)
         if parts and len(parts) == 5 and parts[2] == "versions":
             return "manager_family"
         if parts and len(parts) == 4 and parts[1] == "versions":
             return "legacy_manager"
-    if below[-1] is not None:
-        return "flat"
     versions_dir = os.path.dirname(os.path.dirname(real))
     return None if os.path.basename(versions_dir) == "versions" else "flat"
 
@@ -351,6 +346,58 @@ def client_pdk_stamp(variant: Any, root: Any = None) -> dict[str, Any] | None:
 #: :func:`worker_store_evidence_source`. Every reading rule here has a
 #: counterpart above; change them together.
 _WORKER_STORE_EVIDENCE_SOURCE = r"""
+def store_version(vdir):
+    try:
+        parent = os.path.dirname(os.path.realpath(vdir))
+        marker = os.path.join(parent, ".pdk-store.json")
+        if not os.path.isfile(marker):
+            return None
+        d = json.loads(read(marker, 65536))
+    except (OSError, ValueError):
+        return None
+    v = d.get("version") if isinstance(d, dict) else None
+    return v.strip() if isinstance(v, str) and v.strip() else None
+def read_bounded_object(path):
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as h:
+            raw = h.read(65537)
+        data = json.loads(raw.decode("utf-8")) if len(raw) <= 65536 else None
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+def tree_name(directory, flat=False):
+    name = os.path.basename(os.path.abspath(directory))
+    descriptor = os.path.join(directory, @DESCRIPTOR@)
+    if os.path.isfile(descriptor):
+        data = read_bounded_object(descriptor)
+        if data is None or data.get("schema_version") != 1:
+            return None
+        declared = data.get("variant")
+        if declared is not None and not (isinstance(declared, str) and declared):
+            return None
+        return declared if flat and declared else name
+    if os.path.isdir(os.path.join(directory, "libs.tech")) or all(
+        os.path.isdir(os.path.join(directory, *parts)) for parts in @ASAP7_MARKERS@
+    ):
+        return name
+    return None
+def evidence_variant_dir(root, variant):
+    aliases = @ALIASES@
+    names = [variant] + [name for name, family in aliases.items() if family == variant]
+    for name in names:
+        if os.path.basename(name) != name or name in (".", ".."):
+            continue
+        nested = os.path.join(root, name)
+        if tree_name(nested) == name:
+            return nested
+    if tree_name(root, flat=True) in names:
+        # find_pdk considers a flat root only when it has no nested variant.
+        with os.scandir(root) as entries:
+            if not any(tree_name(entry.path) for entry in entries if entry.is_dir()):
+                return root
+    return None
 def store_install(vdir):
     real, d = os.path.realpath(vdir), None
     markers = (os.path.join(vdir, ".pdk-store.json"),
@@ -362,22 +409,20 @@ def store_install(vdir):
             continue
         except OSError:
             break
-        try:
-            with open(cand, "rb") as h:
-                raw = h.read(65537)
-            usable = os.path.isfile(cand) and len(raw) <= 65536
-            d = json.loads(raw.decode("utf-8")) if usable else None
-        except (OSError, ValueError):
-            d = None
+        d = read_bounded_object(cand)
         break
+    if d is None:
+        return None
     def text(field):
-        value = d.get(field) if isinstance(d, dict) else None
+        value = d.get(field)
         if not isinstance(value, str) or not value.strip():
             return None
         return clip(value.strip(), STR)
-    sha = text("sha256")
+    sha = d.get("sha256")
     digest = None
-    if sha and len(sha) == 64 and all(c in "0123456789abcdefABCDEF" for c in sha):
+    if isinstance(sha, str) and len(sha) == 64 and all(
+        c in "0123456789abcdefABCDEF" for c in sha
+    ):
         digest = sha
     facts = {"sha256": digest, "version": text("version"), "via": text("via"),
              "synced": text("synced")}
@@ -392,14 +437,14 @@ def under(base, real):
     return [] if rel == "." else rel.split(os.sep)
 def store_layout(vdir, root):
     real = os.path.realpath(vdir)
-    below = [under(base, real) for base in @STORES@ + [root]]
-    for parts in below:
+    for base in @STORES@ + [root]:
+        parts = under(base, real)
         family = parts and len(parts) == 5 and parts[2] == "versions"
         legacy = parts and len(parts) == 4 and parts[1] == "versions"
         if family or legacy:
             return "manager_family" if family else "legacy_manager"
     versioned = os.path.basename(os.path.dirname(os.path.dirname(real))) == "versions"
-    return None if below[-1] is None and versioned else "flat"
+    return None if versioned else "flat"
 """
 
 
@@ -407,6 +452,13 @@ def worker_store_evidence_source() -> str:
     """:data:`_WORKER_STORE_EVIDENCE_SOURCE` ready to splice into the batch
     worker capture program, with :data:`klayout_tools.pdk.STORE_DIRS` embedded
     so the worker measures a tree from the same conventional stores."""
-    from .pdk import STORE_DIRS  # lazy: pdk imports this module
+    from .pdk import _ASAP7_MARKERS, STORE_DIRS  # lazy: pdk imports this module
+    from .pdk_descriptor import DESCRIPTOR_FILENAME
+    from .pdk_families import PDK_VARIANT_FAMILY_ALIASES
 
-    return _WORKER_STORE_EVIDENCE_SOURCE.replace("@STORES@", repr(list(STORE_DIRS)))
+    return (
+        _WORKER_STORE_EVIDENCE_SOURCE.replace("@STORES@", repr(list(STORE_DIRS)))
+        .replace("@ASAP7_MARKERS@", repr(_ASAP7_MARKERS))
+        .replace("@DESCRIPTOR@", repr(DESCRIPTOR_FILENAME))
+        .replace("@ALIASES@", repr(PDK_VARIANT_FAMILY_ALIASES))
+    )

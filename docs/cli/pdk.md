@@ -820,9 +820,9 @@ found on `PATH` says nothing about what placed a tree.
 
   A store is asked before the searched root because that is where a manager's
   layout is defined: `$PDK_ROOT` often holds only the enabled links, or sits
-  inside the store. `null` when the tree sits in a `versions/<commit>/`
-  directory under neither — a version tree whose store root is not observable
-  has no establishable layout, and is not reported as a plain install.
+  inside the store. If the tree sits in a `versions/<commit>/` directory and
+  neither root identifies the manager layout, the value is `null`. This can
+  happen when the search starts at a custom store's revision directory.
 
 `resolved_via` (JSON) / `source` (`provenance.pdk`) stays the search step and
 `layout` the asset layout; neither changes. Text output prints a
