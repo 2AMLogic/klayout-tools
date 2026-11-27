@@ -822,7 +822,13 @@ the fields and their null semantics.
 Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
 the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
 `pdk_stamp_comparison` gains `basis: "staged_model_inputs"` (plus optional
-`client_stamp`, `differing`) comparing the staged file digests. A caller that
+`client_stamp`, `differing`) comparing the staged file digests. `image` also
+arises without that option (issue #7981): on a deck-list batch job whose
+`decks[]` holds a unit whose `.include`/`.lib` closure stages one of that
+unit's declared `inputs[]`, the engine ran client-supplied bytes, so the image
+stamp is not evidence about them. That condition alone leaves `models_staged`
+at its worker-observed `false` and does not move `pdk_stamp_comparison` to the
+digest basis -- only the option does, on corner-mode runs. A caller that
 can name the revision behind those staged models sets `options.pdk_revision`
 and gets it back as `environment.pdk_revision_asserted` (`{value, scope:
 "caller-asserted"}`, issue #5325) -- a *claim*, kept out of the

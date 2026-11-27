@@ -76,6 +76,48 @@ def observed_stamp(value: Any, request: dict[str, Any] | None) -> Any:
     return value
 
 
+def decks_execute_declared_inputs(request: dict[str, Any] | None) -> bool:
+    """Whether a deck-list request holds a unit whose ``.include``/``.lib``
+    closure stages one of that unit's own declared ``inputs[]`` (issue
+    #7981): the engine then executes client-supplied bytes, so the worker
+    image's PDK stamp does not describe every model file the job ran. The
+    unit-relative destinations are compared within a unit; a declared input
+    no directive reads does not count. Never raises."""
+    decks = (request or {}).get("decks")
+    if not isinstance(decks, list):
+        return False
+    for unit in decks:
+        if not isinstance(unit, dict):
+            continue
+        declared = _destinations(unit.get("inputs"))
+        staged = _destinations(unit.get("includes"))
+        if not declared.isdisjoint(staged):
+            return True
+    return False
+
+
+def _destinations(refs: Any) -> set[str]:
+    """The unit-relative ``name`` of every well-formed ``{staged, name}``
+    reference in a worker-form unit list."""
+    if not isinstance(refs, list):
+        return set()
+    return {
+        ref["name"]
+        for ref in refs
+        if isinstance(ref, dict) and isinstance(ref.get("name"), str)
+    }
+
+
+def stamp_scope(captured: dict[str, Any], request: dict[str, Any] | None) -> str:
+    """What the worker's ``pdk.stamp_*`` covers: ``image`` when the model
+    bytes that ran were not the image tree's own -- ``models_staged`` (issue
+    #4020) or a deck executing a declared input (issue #7981) -- and
+    ``executed`` otherwise."""
+    if captured.get("models_staged") is True or decks_execute_declared_inputs(request):
+        return "image"
+    return "executed"
+
+
 def _compare_pdk_stamps(
     worker_pdk: dict[str, Any],
     client: dict[str, Any] | None,
