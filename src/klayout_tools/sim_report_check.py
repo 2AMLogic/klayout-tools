@@ -71,13 +71,10 @@ def _closure_file_digest(path: str) -> str | None:
         return None
 
 
-def _recomputed_identity(paths: list[str]) -> str | None:
+def _recomputed_identity(paths: list[str]) -> str:
     digest = hashlib.sha256()
     for path in paths:
-        try:
-            text, _ = _read_text(path)
-        except IncludeStagingError:
-            return None
+        text, _ = _read_text(path)
         digest.update(_normalized_netlist_text(text).encode("utf-8"))
         digest.update(b"\0")
     return f"sha256:{digest.hexdigest()}"
@@ -91,6 +88,26 @@ def _diagnose(raw_ok: bool, identity_ok: bool, complete: bool) -> str:
     if identity_ok:
         return "cosmetic"
     return "electrical" if not raw_ok else "normalization_changed"
+
+
+def _identity_check(
+    env: dict[str, Any], resolved: list[str], complete: bool
+) -> tuple[dict[str, Any], bool]:
+    """Check the normalized identity and report whether the comparison is complete."""
+    recorded = env.get("netlist_identity")
+    identity_error = env.get("netlist_identity_error")
+    try:
+        actual_identity = _recomputed_identity(resolved) if complete else None
+    except IncludeStagingError as exc:
+        actual_identity = None
+        complete = False
+        identity_error = f"{identity_error}. {exc}" if identity_error else str(exc)
+    identity_check = hash_check(
+        "environment.netlist_identity", recorded, actual_identity
+    )
+    if identity_error:
+        identity_check["error"] = identity_error
+    return identity_check, complete and recorded is not None
 
 
 def check_sim_report(report_path: str, *, root: str | None = None) -> dict[str, Any]:
@@ -161,21 +178,13 @@ def check_sim_report(report_path: str, *, root: str | None = None) -> dict[str, 
         checks.append(check)
         resolved.append(path)
 
-    recorded = env.get("netlist_identity")
-    actual_identity = _recomputed_identity(resolved) if complete else None
-    identity_check = hash_check(
-        "environment.netlist_identity", recorded, actual_identity
-    )
-    if env.get("netlist_identity_error"):
-        identity_check["error"] = env["netlist_identity_error"]
+    identity_check, identity_complete = _identity_check(env, resolved, complete)
     checks.append(identity_check)
 
     result = build_check_result(report_path=report_path, checks=checks, skipped=skipped)
     if skipped:
         result["status"] = "drifted"
-    diagnosis = _diagnose(
-        raw_ok, identity_check["match"], complete and recorded is not None
-    )
+    diagnosis = _diagnose(raw_ok, identity_check["match"], identity_complete)
     if diagnosis == "normalization_changed":
         result["note"] = (
             "every recorded file hash matches but the recomputed identity differs: "

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
-from klayout_tools import sim, sim_op_check
+from klayout_tools import sim, sim_op_check, sim_xyce_refusals
 from klayout_tools.sim_errors import SimError
 
 OFFHOST = ("remote", "batch")
@@ -220,7 +220,7 @@ def test_real_ngspice_unknown_node_fails_the_corner(tmp_path):
 
 def test_xyce_refuses_op_check():
     with pytest.raises(SimError, match="op_check"):
-        sim._enforce_xyce_support_boundary(
+        sim_xyce_refusals.enforce_support_boundary(
             engine="xyce",
             backend="local",
             corners_spec={},

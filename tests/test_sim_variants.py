@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import sim, sim_xyce_refusals
 
 
 def _variants():
@@ -165,7 +165,7 @@ def test_monte_carlo_samples_keep_variant_ids_distinct():
 
 def test_xyce_refuses_variants():
     with pytest.raises(sim.SimError, match="alter"):
-        sim._enforce_xyce_support_boundary(
+        sim_xyce_refusals.enforce_support_boundary(
             engine="xyce",
             backend="local",
             corners_spec={"variants": _variants()},

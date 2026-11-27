@@ -156,6 +156,20 @@ def _resolve_max_job_seconds(
     return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
 
 
+def _resolve_max_launch_attempts(batch_spec: dict[str, Any]) -> int | None:
+    """The fleet accepts one to nine decimal digits for a paid-launch limit."""
+    if "max_launch_attempts" not in batch_spec:
+        return None
+    value = batch_spec["max_launch_attempts"]
+    if not is_int(value) or not 1 <= value <= 999_999_999:
+        raise SimError(
+            "request.batch.max_launch_attempts must be an integer from 1 through "
+            f"999,999,999 (got {value!r})",
+            code="batch_launch_attempts_invalid",
+        )
+    return value
+
+
 def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
     """``request.batch.max_concurrent_jobs`` (issue #3914): a positive integer
     bound on the shard jobs in flight at once, else
@@ -266,6 +280,7 @@ def _validate_batch_request_knobs(batch_spec: dict[str, Any]) -> None:
     ``_resolve_batch_config`` is neither mirrored here nor allowlisted there
     (issue #6646).
     """
+    _resolve_max_launch_attempts(batch_spec)
     resolve_capacity_wait_s(batch_spec)
     _resolve_runner_version_check(batch_spec)
     _resolve_image_profile(batch_spec)

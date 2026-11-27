@@ -8,6 +8,27 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-26
 
+- **PR #7933**: Read simulation supply declarations once per validation
+- **PR #7932**: Distinguish missing simulation includes and name stale inputs in signoff
+- **PR #7927**: Report unreadable recorded netlist files in klt sim --check
+- **PR #7925**: fix: prepare commented xschem and implicit .TOP runset references
+- **PR #7924**: feat: verify pinned Git blobs in item 1 signoff attestations
+- **PR #7923**: Parse measurement windows without importing the simulation runner
+- **PR #7921**: Validate tightened reruns without importing the simulation runner
+- **PR #7917**: Use deterministic GDS output in ASAP7 M4 grid tests
+- **PR #7909**: fix(sim): grade an opted-in window miss not_reached beside stepping narration
+- **PR #7869**: feat: re-hash a cited klt sim report's .include closure in signoff
+- **Issue #7946** (closed): CI flake: Ruby CodeQL loses its hosted runner during Initialize CodeQL after 45 minutes
+- **Issue #7930** (closed): Read the netlist once when validating simulation supply overrides
+- **Issue #7926** (closed): Report an unreadable recorded include as indeterminate in klt sim --check
+- **Issue #7922** (closed): Parse measurement windows without loading the simulation runner
+- **Issue #7920** (closed): Remove the simulation runner import from tightened-rerun validation
+- **Issue #7919** (closed): signoff: verify an item 1 source by Git repository, commit and digest
+- **Issue #7918** (closed): klt lvs: commented xschem top header (**.subckt) breaks klayout-runset align and leaves .TOP with zero pins
+- **Issue #7916** (closed): ASAP7 M4 byte-comparison tests can fail when GDS writes cross a second boundary
+- **Issue #7906** (closed): klt sim: on_unreached "null" is refused on a window-miss corner that also carries stepping narration
+- **Issue #7885** (closed): signoff sim_closure: committed-deleted include reads 'untracked'; text output blames the top deck for a stale include
+- **Issue #7860** (closed): klt sim provenance hash covers only the top deck, not files it .include-s
 - **PR #7907**: fix: pex delta error names an ngspice window miss, not stepping narration
 - **Issue #7904** (closed): klt pex: delta[].error reports a warning-severity singular_matrix diagnostic instead of the measurement failure
 

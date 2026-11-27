@@ -1,6 +1,6 @@
 """Direct tests of the ``engine: "xyce"`` measurement-form refusals in
 ``sim_xyce_refusals.refuse_control_block_measurements``, reached through the
-private gate ``sim._enforce_xyce_support_boundary`` (issue #6879: the gate
+private gate ``sim_xyce_refusals.enforce_support_boundary`` (issue #6879: the gate
 takes the measurement list and selects the first applicable diagnostic from
 its own fixed form order). The end-to-end ``run_sim`` refusals live next to
 the other engine gates in ``tests/test_sim.py`` and in each form's own test
@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import sim_xyce_refusals
+from klayout_tools.sim_errors import SimError
 
 _EXPR = {"name": "vout", "expr": "v(out)"}
 _CROSSINGS = {
@@ -20,7 +21,7 @@ _CROSSINGS = {
 
 
 def _enforce(measurements_spec: list[dict]) -> None:
-    sim._enforce_xyce_support_boundary(
+    sim_xyce_refusals.enforce_support_boundary(
         engine="xyce",
         backend="local",
         corners_spec={},
@@ -35,7 +36,7 @@ def test_refusal_picks_the_first_unsupported_form_not_declaration_order():
     refusal, so a request declaring several unsupported forms is refused
     identically whatever order it declared them in."""
     for specs in ([_EXPR, _CROSSINGS], [_CROSSINGS, _EXPR]):
-        with pytest.raises(sim.SimError, match=r"measurements\[\]\.expr"):
+        with pytest.raises(SimError, match=r"measurements\[\]\.expr"):
             _enforce(specs)
 
 
@@ -43,7 +44,7 @@ def test_noise_measurements_are_refused_as_expr_forms():
     """A ``noise`` measurement is an ``expr`` form (see
     ``sim_validate._expr_measurements``: non-null ``expr`` or ``noise``), so
     the boundary refuses it with the ``expr`` diagnostic."""
-    with pytest.raises(sim.SimError, match=r"measurements\[\]\.expr"):
+    with pytest.raises(SimError, match=r"measurements\[\]\.expr"):
         _enforce([{"name": "n0", "noise": {"quantity": "inoise", "at_hz": 1e3}}])
 
 
@@ -56,10 +57,21 @@ def test_plain_spice_measurements_pass_the_boundary():
 def test_the_gate_is_a_no_op_without_measurements():
     """The measurement parameter is optional at the gate: callers with no
     measurement list (option-refusal probes, say) pass ``nothing``."""
-    sim._enforce_xyce_support_boundary(
+    sim_xyce_refusals.enforce_support_boundary(
         engine="xyce",
         backend="local",
         corners_spec={},
         monte_carlo_declared=False,
         fail_fast_probe=False,
     )
+
+
+def test_xyce_boundary_refuses_supply_in_units():
+    with pytest.raises(SimError, match="corners.supply_v"):
+        sim_xyce_refusals.enforce_support_boundary(
+            engine="xyce",
+            backend="local",
+            corners_spec={"units": [{"supply_v": {"vdd": 1.8}}]},
+            monte_carlo_declared=False,
+            fail_fast_probe=False,
+        )

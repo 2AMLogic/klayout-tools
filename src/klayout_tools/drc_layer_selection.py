@@ -1,5 +1,5 @@
-"""Layer-selection narrowing for ``klt drc``, and the coverage grading that
-depends on it (issues #2688, #2943/#3139, #5435).
+"""Narrowing of a ``DrcRule``'s input regions for ``klt drc``, and the
+coverage grading that depends on it (issues #2688, #2943/#3139, #5435, #7954).
 
 Split out of :mod:`klayout_tools.drc` to satisfy the per-file size ratchet,
 the same way :mod:`klayout_tools.drc_check_kinds` was.
@@ -11,6 +11,10 @@ away *everything*, the same module decides applicability from it:
 :func:`selection_empties_every_top_cell` grades a rule whose selected region is
 empty in every top cell as inapplicable rather than checked, so a ``clean``
 verdict never names a rule that measured zero polygons (#5435).
+
+``other_layer_subtract`` (#7954) is the geometric counterpart on the
+``other_layer`` side: :func:`cell_other_region` carves the rule's marker
+layers out of that region before anything measures it.
 """
 
 from __future__ import annotations
@@ -90,6 +94,38 @@ def select_other_region(rule: DrcRule, other_region: Any) -> Any:
     if rule.other_layer_selection == "squares":
         return other_region.merged().squares()
     return other_region
+
+
+def cell_other_region(rule: DrcRule, cell: Any, layout: Any, other_index: int) -> Any:
+    """``rule``'s ``other_layer`` region in one top ``cell``, with every
+    :attr:`DrcRule.other_layer_subtract` layer (issue #7954) carved out.
+
+    A foundry rule sometimes measures a cut layer *minus* exclusion
+    markers. gf180mcu's CO.4 is ``contact.not(sramcore).enclosed(comp,
+    0.07.um, euclidian)`` plus the escape term
+    ``contact.not(sramcore).not_outside(comp).not(comp)``
+    (``rule_decks/contact.rb``), so a contact inside ``SramCore`` (108/5)
+    is outside the rule. The subtraction is applied here, to the whole
+    region, so every term ``drc._run_check`` derives from it -- the
+    ``Region.*_check`` edge pairs and the #318 zero-overlap escape alike --
+    sees the operand the foundry deck does. It is a geometric subtraction,
+    not a whole-shape selection: a cut straddling a marker keeps its
+    unmasked part, and that part is still measured.
+
+    Each marker is read through the same recursive path as the cut
+    (``Cell.begin_shapes_rec``), so one drawn in a child cell counts. An
+    absent marker layer is an empty region: nothing is subtracted. The
+    region is returned unselected -- :func:`select_other_region` narrows it
+    afterwards, when the rule asks for that.
+    """
+    import klayout.db as kdb
+
+    region = kdb.Region(cell.begin_shapes_rec(other_index))
+    for marker in rule.other_layer_subtract:
+        subtract_index = layout.find_layer(*marker)
+        if subtract_index is not None:
+            region -= kdb.Region(cell.begin_shapes_rec(subtract_index))
+    return region
 
 
 def select_primary_region(rule: DrcRule, region: Any) -> Any:
