@@ -1,7 +1,7 @@
 """Filesystem-safe corner/signal slug helpers for ``klt sim`` artifacts.
 
 Split out of ``sim.py`` (issue #4746) to keep that module under its per-file
-size ceiling. Pure move: every name is re-exported from ``sim`` unchanged.
+size ceiling; the names still referenced through ``sim`` are re-exported there.
 """
 
 from __future__ import annotations

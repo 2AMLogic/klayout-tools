@@ -4,8 +4,8 @@ Pure declarations: one ``TypedDict`` per :func:`klayout_tools.signoff._classify`
 kind, the union they narrow to, and the two runtime lookup tables
 (:data:`_SCALAR_CHECKS`, :data:`_UNION_ORIGINS`)
 :func:`klayout_tools.signoff._validate_envelope` walks them with. No runtime
-logic lives here -- ``signoff.py`` imports every name below by name, so
-``signoff.<name>`` resolves exactly as it did before this split (issue #2313).
+logic lives here -- ``signoff.py`` imports the shapes and tables it still
+references by name (issue #2313).
 """
 
 from __future__ import annotations

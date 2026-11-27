@@ -1437,7 +1437,7 @@ def _run_corner_session(
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         # Additive fields (issue #2740): identity of the worst setup-side /
-        # hold-side path end this session found -- see `_worst_path_record`.
+        # hold-side path end found (`post_route_sta_path_groups._worst_path_record`).
         "worst_setup_path": worst_setup_path,
         "worst_hold_path": worst_hold_path,
         # Additive field (issue #5424): every per-path-group row behind

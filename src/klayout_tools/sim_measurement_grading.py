@@ -6,9 +6,9 @@ started with ``_vector_measurement_result``): the primitives that grade one
 extracted measurement value against its spec's plausibility bound and
 ``limits``, the shared vector-measurement response builder they feed, and
 the per-kind builders over it. Behaviour-preserving move; the JSON contract
-is untouched, and every moved name is re-exported on
-:mod:`klayout_tools.sim` so existing ``sim.<name>`` references (tests
-included) keep working unchanged.
+is untouched, and the names still referenced through
+:mod:`klayout_tools.sim` are re-exported there so existing ``sim.<name>``
+references (tests included) keep working unchanged.
 
 Stdlib-only by design -- a leaf -- so the measurement sidecar modules
 (``sim_measurement_results``, ``sim_snm_meas``, ``sim_slope_band_meas``,

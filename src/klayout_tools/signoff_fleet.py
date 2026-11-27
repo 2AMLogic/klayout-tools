@@ -10,8 +10,8 @@ T1-T4 item skeleton into one roll-up (:func:`build_fleet_report`).
 
 The rest of the subsystem moved out with it and is re-imported here *by
 name* so this module stays the subsystem's single import point (and
-``signoff.py`` re-exports every name from one place, exactly as it did
-before the split): ``signoff_fleet_reduction.py`` owns the per-block
+``signoff.py`` re-exports the public entry points and still-referenced
+helpers from one place): ``signoff_fleet_reduction.py`` owns the per-block
 blocker/coverage reduction ``build_fleet_report`` folds into the roll-up,
 and ``signoff_fleet_check.py`` owns the ``--check`` drift comparison of a
 committed report against a fresh one (issue #2249).

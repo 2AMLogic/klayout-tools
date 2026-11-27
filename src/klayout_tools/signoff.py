@@ -6337,6 +6337,6 @@ def _parse_multi_members(
 # Fleet roll-up (issue #827, Phase 1c of epic #706). Moved to
 # `signoff_fleet.py` (issue #5636) -- with the per-block blocker reduction
 # in `signoff_fleet_reduction.py` and the `--check` drift comparison in
-# `signoff_fleet_check.py` -- and every name re-imported at the top of this
-# module, so `signoff.<name>` keeps resolving exactly as before the split.
+# `signoff_fleet_check.py` -- with public entry points and still-referenced
+# helpers re-imported at the top of this module so `signoff.<name>` resolves.
 # --------------------------------------------------------------------------- #

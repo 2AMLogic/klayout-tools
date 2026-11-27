@@ -2,9 +2,9 @@
 
 Validates the ``measurements[]`` / ``options.fail_on_diagnostic`` request fields
 and raises :class:`~klayout_tools.sim_errors.SimError`; nothing depends on
-``run_sim`` or the corner runner. ``sim.py`` re-exports every name (self-aliased)
-and ``sim_steps`` imports from here directly (issue #3689; precedent
-``sim_remote.py``, #1764)."""
+``run_sim`` or the corner runner. ``sim.py`` re-exports the still-referenced
+names (self-aliased) and ``sim_steps`` imports from here directly (issue #3689;
+precedent ``sim_remote.py``, #1764)."""
 
 from __future__ import annotations
 

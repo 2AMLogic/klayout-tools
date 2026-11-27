@@ -46,12 +46,12 @@ import time. ``klt equiv``'s :func:`~klayout_tools.equiv.run_equiv` /
 ``monkeypatch.setattr(synthesize, "run_equiv", …)`` keeps reaching the adder
 equivalence gate exactly as it did before the split.
 
-``synthesize.py`` in turn imports this module's names back at module scope,
-preserving ``klayout_tools.synthesize.<name>`` as a working import path for
-every name the test suite (``tests/test_synthesize_arithmetic.py``,
-``tests/test_synthesize.py``) and any other caller used before this split.
-``ADDER_ARCHITECTURES`` (``arith_gen.ARCHITECTURES`` under this module's
-own alias) moves here with its only users and is re-exported the same way.
+``synthesize.py`` in turn imports the still-referenced names back at module
+scope, preserving ``klayout_tools.synthesize.<name>`` as a working import
+path for the test suite (``tests/test_synthesize_arithmetic.py``,
+``tests/test_synthesize.py``) and other callers reaching them through
+``synthesize``. ``ADDER_ARCHITECTURES`` (``arith_gen.ARCHITECTURES`` under
+this module's own alias) moves here and is re-exported the same way.
 
 This is a **private implementation module, not part of the public API** --
 the public entry point remains
