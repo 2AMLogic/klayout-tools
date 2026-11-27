@@ -32,6 +32,10 @@ exit 1
     "diagnostic",
     [
         "gzip: stdout: No space left on device",
+        "sh: 1: gzip: not found",
+        "sh: 1: gzip: Permission denied",
+        "sh: line 1: gzip: command not found",
+        "/bin/sh: line 1: /usr/bin/gzip: Permission denied",
         "gzip: /tmp/xschem_undo_dfgdcfbdag/undo0: unexpected end of file",
         "gzip: /tmp/xschem_undo_dfgdcfbdag/undo0.gz: No such file or directory",
         "init_undo(): problems creating tmp undo dir, Undo will be disabled",
@@ -59,7 +63,12 @@ def test_undo_failure_prevents_publication(
 
 
 @pytest.mark.parametrize(
-    "diagnostic", ["", "gzip: /tmp/trace.gz: unexpected end of file"]
+    "diagnostic",
+    [
+        "",
+        "gzip: /tmp/trace.gz: unexpected end of file",
+        "sh: 1: gzip-helper: not found",
+    ],
 )
 def test_external_subcircuit_is_accepted(
     export_args, tmp_path, monkeypatch, diagnostic

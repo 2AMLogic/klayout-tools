@@ -19,11 +19,13 @@ from .output_lock import OutputLockError, hold_output_dir
 #: *before* it. One second is the coarsest granularity we need to tolerate.
 FRESHNESS_TOLERANCE_S = 1.0
 
-# xschem pipes disk undo through gzip. On a full disk gzip names only stdout
-# on write, but names the snapshot when it fails to read it back.
+# xschem pipes disk undo through gzip. The shell reports launch failures.
+# gzip names stdout on a failed write and the snapshot on a failed read.
 _UNDO_FAILURE_RE = re.compile(
     r"^(?:gzip: stdout: No space left on device"
     r"|gzip: .*/xschem_undo_[^/\n]+/undo\d+(?:\.gz)?: .+"
+    r"|(?:/bin/)?sh: (?:(?:line )?\d+: )?(?:[^:\n]+/)?gzip: "
+    r"(?:(?:command )?not found|Permission denied)"
     r"|init_undo\(\): problems creating tmp undo dir.*"
     r"|push_undo\(\): failed to open write pipe.*"
     r"|pop_undo\(\): failed to open read pipe.*)$",
