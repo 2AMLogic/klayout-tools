@@ -8,6 +8,13 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-26
 
+- **PR #7949**: fix: preserve independent root clocks through place and route
+- **PR #7948**: fix: share batch approval validation and reject rooted generator paths
+- **PR #7944**: Check substrate ties derived from sparse drawn wells
+- **PR #7941**: Run gate-level power-up regressions with SDF annotation
+- **PR #7940**: fix: classify ASAP7 SEQ cells as sequential by UDP declaration shape
+- **PR #7937**: fix: mark sim identity check indeterminate when a closure input turns unreadable
+- **PR #7935**: Skip discarded windows in settled measurements
 - **PR #7933**: Read simulation supply declarations once per validation
 - **PR #7932**: Distinguish missing simulation includes and name stale inputs in signoff
 - **PR #7927**: Report unreadable recorded netlist files in klt sim --check
@@ -18,6 +25,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **PR #7917**: Use deterministic GDS output in ASAP7 M4 grid tests
 - **PR #7909**: fix(sim): grade an opted-in window miss not_reached beside stepping narration
 - **PR #7869**: feat: re-hash a cited klt sim report's .include closure in signoff
+- **PR #7900**: chore(loom): resync installed Loom to v0.20.33
+- **Issue #7947** (closed): Share trusted approvals parsing between signoff_generator_batch and sim_commands
+- **Issue #7945** (closed): P&R can reach clock-tree synthesis while dropping a second declared clock
+- **Issue #7942** (closed): ERC skips a geometry-derived substrate tie when real n-wells occupy at most 1% of the top extent
+- **Issue #7939** (closed): functional-verification options.initial_state: sequential-cell recognition matches only udp_dff/udp_dlatch, so the ASAP7 SEQ family (altos_dff*) reports 'no sequential cell'
+- **Issue #7938** (closed): functional-verification: options.initial_state cannot combine with options.sdf, so an SDF-annotated post-route run of a block that needs a power-up model is unreachable
+- **Issue #7936** (closed): Report an indeterminate simulation identity when an input becomes unreadable after hashing
+- **Issue #7934** (closed): Skip discarded windows when computing settled measurements
 - **Issue #7946** (closed): CI flake: Ruby CodeQL loses its hosted runner during Initialize CodeQL after 45 minutes
 - **Issue #7930** (closed): Read the netlist once when validating simulation supply overrides
 - **Issue #7926** (closed): Report an unreadable recorded include as indeterminate in klt sim --check
