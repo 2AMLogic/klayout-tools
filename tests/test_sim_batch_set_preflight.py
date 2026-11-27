@@ -223,6 +223,28 @@ def _set(tmp_path, *members, **run_kwargs):
     )
 
 
+def test_excess_hosts_in_later_member_block_the_whole_set(tmp_path, monkeypatch):
+    from klayout_tools import sim_set
+    from klayout_tools.sim import SimError
+
+    _write_body(tmp_path)
+    ok = _member(tmp_path, "ok")
+    bad = _member(tmp_path, "bad", timeout_s=1800, hosts=4)
+    calls = []
+    _patch_set_run(monkeypatch, lambda path, **kw: calls.append(path) or _fake_report())
+
+    with pytest.raises(SimError) as exc:
+        _set(tmp_path, ok, bad, max_in_flight=1)
+
+    assert exc.value.code == sim_set.SET_PREFLIGHT_CODE
+    assert "bad.json" in str(exc.value) and "ok.json" not in str(exc.value)
+    assert "remote.hosts (4) exceeds the number of units to dispatch (3)" in str(
+        exc.value
+    )
+    assert calls == []
+    assert not (tmp_path / "out" / sim_set.MANIFEST_FILENAME).exists()
+
+
 @pytest.mark.parametrize(
     ("hosts", "job_units", "bound", "exceeds"),
     [(3, 1, 1920.0, False), (2, 2, 3720.0, True), (1, 3, 5520.0, True)],

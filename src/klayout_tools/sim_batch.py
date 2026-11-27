@@ -936,13 +936,25 @@ def _enforce_published_runner_features(
     )
 
 
-def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
+def refuse_hosts_over_units(hosts: int, unit_count: int) -> None:
+    """Refuse more hosts than units (#5281): an idle member is still billed."""
+    if hosts > unit_count:
+        raise SimError(
+            f"remote.hosts ({hosts}) exceeds the number of units to dispatch "
+            f"({unit_count}) -- an idle fleet member would still be billed; "
+            "use hosts <= corner/sample count"
+        )
+
+
+def _plan_job_split(
+    assessment: dict[str, Any], config: BatchConfig, hosts: int = 1
+) -> int:
     """The effective ``remote.hosts`` for an opted-in split (issue #3446).
 
     The shard cap is ``config.max_units_per_job`` when given, else the
     largest shard the ceiling allows (``assessment["max_units_per_job"]``),
-    and the answer is the fewest balanced shards that respect it; ``1``
-    when nothing needs splitting. Raises before any S3 write with
+    and the answer is the fewest balanced shards respecting it and the
+    requested host count. Raises before any S3 write with
     :data:`BATCH_JOB_CEILING_CODE` when even one unit exceeds the ceiling
     (no split can help; lower ``options.timeout_s``). An explicit cap whose
     shards exceed the (serial upper-bound) ceiling is honored with a stderr
@@ -952,14 +964,14 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
     per_job = assessment["max_units_per_job"]
     requested = config.max_units_per_job
     if requested is None and not assessment["exceeds_ceiling"]:
-        return 1
+        return hosts
     if per_job == 0:
         raise SimError(
             f"backend 'batch' refused before submission: {assessment['warning']}",
             code=BATCH_JOB_CEILING_CODE,
         )
     cap = requested if requested is not None else per_job
-    hosts = math.ceil(units / cap)
+    hosts = max(hosts, math.ceil(units / cap))
     largest = math.ceil(units / hosts)
     if largest > per_job:
         # An explicit cap is the caller's call; the bound is serial (#4982).
@@ -3101,32 +3113,24 @@ def _poll_and_collect(
 
 
 def _apply_job_split(
-    job_ceiling: dict[str, Any], config: BatchConfig
+    job_ceiling: dict[str, Any], config: BatchConfig, hosts: int = 1
 ) -> tuple[dict[str, Any], int]:
-    """Decide whether the request is split into several batch jobs (issues
-    #3446, #4620): returns the assessment annotated with ``split`` /
-    ``effective_hosts`` and the shard count (``1`` = one job, in which case an
-    ``enforce`` ceiling is applied here). Shared by the blocking backend and
-    ``--submit-only``, so both split identically."""
-    effective_hosts = 1
+    """Apply the split and ceiling policy and return the assessed job count."""
     if config.job_ceiling_check == "split" or config.max_units_per_job is not None:
-        effective_hosts = _plan_job_split(job_ceiling, config)
-        job_ceiling = {
-            **job_ceiling,
-            "split": effective_hosts > 1,
-            "effective_hosts": effective_hosts,
-        }
-        if effective_hosts > 1:
+        hosts = _plan_job_split(job_ceiling, config, hosts)
+        if hosts > 1:
             print(
                 f"klt sim: notice: splitting {job_ceiling['unit_count']} units "
-                f"into {effective_hosts} batch jobs of at most "
-                f"{math.ceil(job_ceiling['unit_count'] / effective_hosts)} units "
+                f"into {hosts} batch jobs of at most "
+                f"{math.ceil(job_ceiling['unit_count'] / hosts)} units "
                 "each (request.batch.job_ceiling_check / max_units_per_job)",
                 file=sys.stderr,
             )
     else:
         _enforce_job_ceiling(job_ceiling)
-    return job_ceiling, effective_hosts
+        if hosts == 1:
+            return job_ceiling, hosts
+    return {**job_ceiling, "split": hosts > 1, "effective_hosts": hosts}, hosts
 
 
 def _run_batch(
@@ -3757,12 +3761,7 @@ def _run_batch_fleet(
     instead of waiting: terminal shards merge, the rest are lost units listed
     in ``environment.remote.unfinished_shards``.
     """
-    if hosts > len(corner_points):
-        raise SimError(
-            f"remote.hosts ({hosts}) exceeds the number of units to "
-            f"dispatch ({len(corner_points)}) -- an idle fleet member would "
-            "still be billed; use hosts <= corner/sample count"
-        )
+    refuse_hosts_over_units(hosts, len(corner_points))
 
     if config is None:
         config = _resolve_batch_config(
