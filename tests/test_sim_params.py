@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
-from klayout_tools import sim, sim_remote
+from klayout_tools import sim, sim_remote, sim_xyce_refusals
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -383,15 +383,15 @@ def test_save_mode_netlist_still_orders_reset_before_alter():
 
 def test_deck_without_params_is_unchanged():
     point = sim.CornerPoint(None, {"v1": 2.0}, 27)
-    lines = _control(point)
-    assert not any(line.startswith("alterparam") or line == "reset" for line in lines)
-    assert lines == [
+    assert _control(point) == [
         ".control",
         "save all",
         "alter v1=2.0",
         "op ",
+        "echo klt_expr_begin i",
         "let i = i(v1)",
         "print i",
+        "echo klt_expr_end",
         "quit",
         ".endc",
     ]
@@ -425,17 +425,12 @@ def test_temperature_and_mc_seed_cards_stay_at_file_scope(tmp_path):
 
 def test_xyce_refuses_a_parameter_axis():
     with pytest.raises(sim.SimError, match="corners.params"):
-        sim._enforce_xyce_support_boundary(
+        sim_xyce_refusals.enforce_support_boundary(
             engine="xyce",
             backend="local",
             corners_spec={"params": {"r": [1]}},
             monte_carlo_declared=False,
             fail_fast_probe=False,
-            osdi_preload_declared=False,
-            expr_measurements_declared=False,
-            save_mode_declared=False,
-            analysis_steps_declared=False,
-            crossings_declared=False,
         )
 
 
@@ -887,4 +882,4 @@ def test_temperature_param_is_a_target_the_netlist_must_declare(tmp_path):
 
 def test_xyce_refuses_temperature_param():
     with pytest.raises(sim.SimError, match="temperature_param"):
-        sim._refuse_xyce_params_axis({"temperature_param": "temp_c"})
+        sim_xyce_refusals._refuse_params_axis({"temperature_param": "temp_c"})

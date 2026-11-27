@@ -127,6 +127,7 @@ native/*/target/
 .loom/api-keys-*/
 .loom/account-health.json
 .loom/account-health.lock
+.loom/account-ranking.codex
 .loom/CANARY
 .loom/*.log
 .loom/*.sock
@@ -142,7 +143,16 @@ native/*/target/
 .loom/gh-config-by-owner.*/
 .loom/gh-config-by-owner-*/
 /.loom-local/
+/node_modules/
+/pnpm-lock.yaml
 # <<< loom-managed <<<
+
+# Provider-namespaced token ranking caches written next to account-health.json
+# by `loom-daemon tokens check --ranking` (issue #6834) — the managed block's
+# .loom/tokens/ rule covers Claude's default; these cover the workspace-root
+# paths, so the primary checkout stays clean.
+.loom/account-ranking.*
+.loom/.ranking
 
 # repo-remote per-repo config (issue #2277): instance sizing + pinned instance id.
 # Contains no credentials; kept out of git because it is machine-local state.

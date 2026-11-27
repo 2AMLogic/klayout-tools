@@ -56,12 +56,11 @@ breakdown rides a new sibling ``energy`` object on that
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_window
+from . import sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Keys an ``energy`` object may carry. Anything else is refused by name.
@@ -77,7 +76,7 @@ _SOURCE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$#]*$")
 
 def is_energy(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``energy``."""
-    return spec.get("energy") is not None
+    return sim_measurement_kind.declares(spec, "energy")
 
 
 def energy_measurements(
@@ -145,13 +144,13 @@ def validate_energy_context(
     declared = energy_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'energy', which "
-            "integrates power over a time window and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="energy",
+        required="tran",
+        explanation="integrates power over a time window",
+    )
     sim_window.validate_window_inside_tran(declared, analysis, form="energy")
 
 
@@ -160,9 +159,13 @@ def validate_energy_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each energy measurement writes per corner.
+_RAWFILE_PREFIX = "energy"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where energy measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"energy_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -292,47 +295,39 @@ def extract_corner_energy(
     one finished corner, read from the rawfiles :func:`control_lines` asked
     ngspice to write. Never raises: an unreadable or missing rawfile becomes
     that measurement's own ``error``."""
-    outcomes: dict[int, EnergyOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_energy(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_energy,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> EnergyOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["energy"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return EnergyOutcome(
-            error=(
-                f"measurement '{name}' produced no energy: source "
-                f"{body['source']!r} or voltage {body['voltage']!r} did not "
-                "resolve against this transient's saved vectors (no rawfile "
-                "was written) -- check that the deck has an independent "
-                "source of that name and that the voltage node exists"
-            )
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return EnergyOutcome(
-            error=f"measurement '{name}': could not read its energy rawfile: {exc}"
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 3 or not points:
-        return EnergyOutcome(
-            error=f"measurement '{name}' produced no energy: the source "
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=3,
+        missing_error=(
+            f"measurement '{name}' produced no energy: source "
+            f"{body['source']!r} or voltage {body['voltage']!r} did not "
+            "resolve against this transient's saved vectors (no rawfile "
+            "was written) -- check that the deck has an independent "
+            "source of that name and that the voltage node exists"
+        ),
+        empty_error=(
+            f"measurement '{name}' produced no energy: the source "
             "current / voltage vectors yielded no samples"
-        )
+        ),
+        rawfile_label="energy rawfile",
+    )
+    if columns is None:
+        return EnergyOutcome(error=error)
     outcome = integrate_energy(
-        [point[0] for point in points],
-        [point[1] for point in points],
-        [point[2] for point in points],
+        *columns,
         start=sim_window.window_bound(name, body, "from", form="energy"),
         stop=sim_window.window_bound(name, body, "to", form="energy"),
     )

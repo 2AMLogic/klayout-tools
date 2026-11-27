@@ -85,7 +85,15 @@ _REFUSAL_PRIORITY = (
 _PER_REPORT_ENVIRONMENT = ("netlist_sha256", "remote")
 
 #: Per-measurement fields a shard must agree on for the union to be one grid.
-_SPEC_FIELDS = ("unit", "limits", "plausible_range", "step", "derived_from")
+_SPEC_FIELDS = (
+    "unit",
+    "limits",
+    "plausible_range",
+    "step",
+    "derived_from",
+    "spec_row",
+    "case",
+)
 
 
 class MergeError(Exception):
@@ -207,6 +215,20 @@ def _report_corner_ids(report: dict[str, Any], path: str) -> list[str]:
             f"{path}: a Monte Carlo report cannot be merged -- sample seeds and "
             "per-sample statistics depend on the whole sample sequence"
         )
+    derived = [
+        m["name"]
+        for m in report.get("measurements") or []
+        if isinstance(m, dict) and isinstance(m.get("derive"), dict)
+    ]
+    if derived:
+        # Issue #7184: the merge re-rolls per-corner measurements only; a
+        # cross-corner `derive` entry would roll up over no corner and read
+        # as a pass. Re-deriving it across shards is #7225's work.
+        raise MergeError(
+            f"{path}: a report with a cross-corner derive measurement {derived} "
+            "cannot be merged -- a reduced group needs every corner of its grid "
+            "in one request"
+        )
     return [c["corner_id"] for c in corners]
 
 
@@ -317,7 +339,7 @@ def _check_consistent(
             )
         if _measurement_specs(report) != first_specs:
             problems.append(
-                f"shard {shard['id']!r}: measurement names, units or limits "
+                f"shard {shard['id']!r}: measurement names or declarations "
                 f"differ from shard {first_id!r}"
             )
         if report.get("netlist") != reports[0].get("netlist"):
@@ -366,7 +388,7 @@ def _merge(manifest: dict[str, Any], reports: list[dict[str, Any]]) -> dict[str,
     specs = _measurement_specs(reports[0])
 
     measurements = sim._rollup_measurements(specs, corners, None)
-    coverage = sim._build_coverage(specs, corners)
+    coverage = sim._build_coverage(measurements, corners)
     graded = sim._grade_corners(corners, measurements, coverage)
 
     merged: dict[str, Any] = copy.deepcopy(reports[0])
@@ -395,11 +417,12 @@ def _merge(manifest: dict[str, Any], reports: list[dict[str, Any]]) -> dict[str,
             "corners": corners,
         }
     )
-    provenances = [
-        r["provenance"] for r in reports if isinstance(r.get("provenance"), dict)
-    ]
-    if len(provenances) == len(reports):
-        merged["provenance"] = _union_blocks(provenances)
+    provenances = [r.get("provenance") for r in reports]
+    if any(isinstance(block, dict) for block in provenances):
+        # Keep a slot for every member, including legacy reports without a digest.
+        merged["provenance"] = _union_blocks(
+            [block if isinstance(block, dict) else {} for block in provenances]
+        )
     if any("plots" in r for r in reports):
         merged["plots"] = [p for r in reports for p in r.get("plots") or []]
     merged["merge"] = {

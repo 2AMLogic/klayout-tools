@@ -235,6 +235,30 @@ def test_cli_text_output(tmp_path, capsys):
     assert "gap" in capsys.readouterr().out
 
 
+def test_cli_text_output_pass_with_layer_and_band(tmp_path, capsys):
+    path = tmp_path / "row.gds"
+    _build(path)
+    code = main(
+        [
+            "seam-check",
+            str(path),
+            "--tiling",
+            "TILE",
+            "--layer",
+            f"{_RAIL[0]}/{_RAIL[1]}",
+            "--band",
+            _BAND,
+            "--format",
+            "text",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert f"layer: {_RAIL[0]}/{_RAIL[1]}" in out
+    assert "band_um: (0.0,0.0)-(30.0,2.0)" in out
+    assert "violations: 0" in out
+
+
 @pytest.mark.parametrize(
     "extra",
     [[], ["--layer", "bad", "--band", _BAND], ["--layer", "68/20", "--band", "1,2,3"]],

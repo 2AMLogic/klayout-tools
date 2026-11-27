@@ -58,25 +58,6 @@ source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-YELLOW='\033[0;33m'  # retired() below
-
-# An assertion that CANNOT survive #8968's removal of the extract-and-eval
-# wiring, retired under the three-part test in
-# defaults/docs/verification-recipes.md §6. Printed, not deleted: a reader must
-# be able to see what was removed, why, and what proves the property now.
-# Counted as run so the totals stay honest.
-retired() { # <what> <property> <why-structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
-
-refute_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then fail "$msg (unexpectedly matched: $pattern)"; else pass "$msg"; fi
-}
 
 [[ -x "$CLEANUP_SCRIPT" ]] || { echo "ERROR: $CLEANUP_SCRIPT not executable" >&2; exit 1; }
 
@@ -91,9 +72,9 @@ assert_grep '_delete_landed_branch "\$branch" "\$pr_head_sha"' "$CLEANUP_SCRIPT"
     "the pr-* loop routes every candidate through that one delegating helper"
 assert_grep '^[[:space:]]*# requires-daemon: merge-pr >= [0-9]' "$CLEANUP_SCRIPT" \
     "declares the daemon version floor the delegation needs (#8285)"
-refute_grep '_extract_shell_fn|_MAYBE_DELETE' "$CLEANUP_SCRIPT" \
+assert_no_grep '_extract_shell_fn|_MAYBE_DELETE' "$CLEANUP_SCRIPT" \
     "no longer awk-extracts any function body out of merge-pr.sh (#8968)"
-refute_grep '(^|[^[:alnum:]_])eval ' "$CLEANUP_SCRIPT" \
+assert_no_grep '(^|[^[:alnum:]_])eval ' "$CLEANUP_SCRIPT" \
     "no longer evals shell text extracted from another script (#8968)"
 
 # --- Retired source-text assertions (#8968) ---

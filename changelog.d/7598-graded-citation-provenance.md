@@ -1,0 +1,1 @@
+- **Signoff includes the input hash and verification state for each graded citation and power-delivery group** (#7598, 2026-11-23).

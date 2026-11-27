@@ -17,6 +17,7 @@ use std::io::BufReader;
 use fst_reader::{FstFilter, FstHierarchyEntry, FstReader, FstSignalValue, FstVarType};
 use rustc_hash::FxHashSet;
 
+use crate::fst_convert::RealFrameFill;
 use crate::store_writer::StoreWriter;
 
 pub struct FstSourceSignal {
@@ -127,22 +128,6 @@ pub fn open(path: &std::path::Path) -> Result<FstSource, String> {
     })
 }
 
-/// Filtered declared signals, preserving hierarchy declaration order.
-pub fn filter_signals<'a>(
-    all: &'a [FstSourceSignal],
-    allow_list: Option<&[String]>,
-) -> Vec<&'a FstSourceSignal> {
-    match allow_list {
-        None => all.iter().collect(),
-        Some(names) => {
-            let wanted: FxHashSet<&str> = names.iter().map(|s| s.as_str()).collect();
-            all.iter()
-                .filter(|s| wanted.contains(s.full_name.as_str()))
-                .collect()
-        }
-    }
-}
-
 /// Stream every recorded value change for the (already handle-filtered)
 /// declared signals into `store`.
 pub fn stream_body(
@@ -158,6 +143,7 @@ pub fn stream_body(
         .collect();
     let filter = FstFilter::filter_signals(include);
 
+    let real_frame_fill = RealFrameFill::from_header(&source.reader.get_header());
     let mut real_buf = String::new();
     source
         .reader
@@ -177,6 +163,7 @@ pub fn stream_body(
                     let lower: Vec<u8> = bits.iter().map(|b| b.to_ascii_lowercase()).collect();
                     store.record_change(&id, &lower);
                 }
+                FstSignalValue::Real(v) if real_frame_fill.matches(tick, v) => {}
                 FstSignalValue::Real(v) => {
                     real_buf.clear();
                     real_buf.push_str(&v.to_string());

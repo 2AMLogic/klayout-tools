@@ -61,11 +61,11 @@ from __future__ import annotations
 
 import bisect
 import math
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_crossings, sim_cycle_mean, sim_window
+from . import sim_crossings, sim_cycle_mean, sim_measurement_kind, sim_window
+from ._jsonnum import is_finite_number, is_int
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 
@@ -91,7 +91,7 @@ _VECTOR_PREFIX = "__klt_settled_"
 
 def is_settled(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``settled``."""
-    return spec.get("settled") is not None
+    return sim_measurement_kind.declares(spec, "settled")
 
 
 def settled_measurements(
@@ -135,12 +135,7 @@ def _validate_tracked(name: Any, key: str, body: Any) -> None:
         )
     sim_crossings._validate_signal(name, body.get("signal"))
     tol = body.get("tol_pct")
-    if (
-        isinstance(tol, bool)
-        or not isinstance(tol, (int, float))
-        or not math.isfinite(tol)
-        or tol < 0
-    ):
+    if not is_finite_number(tol) or tol < 0:
         raise SimError(
             f"measurement '{name}': settled.{key}.tol_pct is required and "
             f"must be a finite number >= 0, in percent (got {tol!r})"
@@ -172,11 +167,7 @@ def validate_settled_spec(name: Any, body: Any) -> None:
             f"{list(sim_cycle_mean.CYCLE_EDGES)} (got {edge!r})"
         )
     cycles = body.get("cycles")
-    if (
-        not isinstance(cycles, int)
-        or isinstance(cycles, bool)
-        or not 1 <= cycles <= sim_cycle_mean.MAX_CYCLES
-    ):
+    if not is_int(cycles) or not 1 <= cycles <= sim_cycle_mean.MAX_CYCLES:
         raise SimError(
             f"measurement '{name}': settled.cycles is required and must be "
             f"an integer in [1, {sim_cycle_mean.MAX_CYCLES}] (got {cycles!r})"
@@ -211,13 +202,13 @@ def validate_settled_context(
     declared = settled_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'settled', which "
-            "compares transient windows and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="settled",
+        required="tran",
+        explanation="compares transient windows",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -225,9 +216,13 @@ def validate_settled_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each settled measurement writes per corner.
+_RAWFILE_PREFIX = "settled"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where settled measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"settled_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -358,7 +353,7 @@ def compute_settled(
             ),
         )
     windows: list[dict[str, float]] = []
-    for k in range(total):
+    for k in range(max(0, total - MAX_REPORTED_WINDOWS), total):
         t_start, t_end = edges[k * cycles], edges[(k + 1) * cycles]
         windows.append(
             {
@@ -378,7 +373,7 @@ def compute_settled(
         mean_delta_pct=mean_delta,
         peak_delta_pct=peak_delta,
         windows_total=total,
-        windows=windows[-MAX_REPORTED_WINDOWS:],
+        windows=windows,
     )
 
 
@@ -393,50 +388,36 @@ def extract_corner_settleds(
     """``{position in measurements_spec: outcome}`` for every settled entry of
     one finished corner. Never raises: any rawfile problem becomes that
     measurement's own ``error``."""
-    outcomes: dict[int, SettledOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_settled(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_settled,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> SettledOutcome:
-    from .sim import parse_ascii_rawfile
-
     body = spec["settled"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return SettledOutcome(
-            code="settled_vector_missing",
-            error=(
-                f"measurement '{name}': its clock ({body['clock']!r}), mean "
-                f"signal ({body['mean']['signal']!r}) or peak signal "
-                f"({body['peak']['signal']!r}) did not resolve against this "
-                "transient's saved vectors (no rawfile was written) -- check "
-                "the node/branch names"
-            ),
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return SettledOutcome(
-            code="settled_vector_missing",
-            error=f"measurement '{name}': could not read its settled rawfile: {exc}",
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 4 or not points:
-        return SettledOutcome(
-            code="settled_vector_missing",
-            error=f"measurement '{name}': its vectors yielded no samples",
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=4,
+        missing_error=(
+            f"measurement '{name}': its clock ({body['clock']!r}), mean "
+            f"signal ({body['mean']['signal']!r}) or peak signal "
+            f"({body['peak']['signal']!r}) did not resolve against this "
+            "transient's saved vectors (no rawfile was written) -- check "
+            "the node/branch names"
+        ),
+        empty_error=(f"measurement '{name}': its vectors yielded no samples"),
+        rawfile_label="settled rawfile",
+    )
+    if columns is None:
+        return SettledOutcome(code="settled_vector_missing", error=error)
     outcome = compute_settled(
-        [point[0] for point in points],
-        [point[1] for point in points],
-        [point[2] for point in points],
-        [point[3] for point in points],
+        *columns,
         level=float(body["level"]),
         edge=body.get("edge", "rise"),
         start=sim_window.window_bound(name, body, "from", form="settled"),

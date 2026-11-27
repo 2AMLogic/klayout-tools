@@ -31,12 +31,11 @@ Response shape (additive, no ``schema_version`` bump)
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_window
+from . import sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Keys a ``stress`` object may carry. Anything else is refused by name.
@@ -53,7 +52,7 @@ _NODE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.$#:/\[\]<>!+-]*$")
 
 def is_stress(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``stress``."""
-    return spec.get("stress") is not None
+    return sim_measurement_kind.declares(spec, "stress")
 
 
 def stress_measurements(
@@ -113,13 +112,13 @@ def validate_stress_context(
     declared = stress_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'stress', which "
-            "reduces a node-pair voltage over a time window and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="stress",
+        required="tran",
+        explanation="reduces a node-pair voltage over a time window",
+    )
     sim_window.validate_window_inside_tran(declared, analysis, form="stress")
 
 
@@ -128,9 +127,13 @@ def validate_stress_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each stress measurement writes per corner.
+_RAWFILE_PREFIX = "stress"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where stress measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"stress_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -230,45 +233,38 @@ def extract_corner_stress(
     one finished corner, read from the rawfiles :func:`control_lines` asked
     ngspice to write. Never raises: an unreadable or missing rawfile becomes
     that measurement's own ``error``."""
-    outcomes: dict[int, StressOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_stress(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_stress,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> StressOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["stress"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return StressOutcome(
-            error=(
-                f"measurement '{name}' produced no stress: node "
-                f"{body['a']!r} or {body.get('b')!r} did not resolve against "
-                "this transient's saved vectors (no rawfile was written) -- "
-                "check that the nodes exist in the deck"
-            )
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return StressOutcome(
-            error=f"measurement '{name}': could not read its stress rawfile: {exc}"
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 2 or not points:
-        return StressOutcome(
-            error=f"measurement '{name}' produced no stress: the voltage "
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=2,
+        missing_error=(
+            f"measurement '{name}' produced no stress: node "
+            f"{body['a']!r} or {body.get('b')!r} did not resolve against "
+            "this transient's saved vectors (no rawfile was written) -- "
+            "check that the nodes exist in the deck"
+        ),
+        empty_error=(
+            f"measurement '{name}' produced no stress: the voltage "
             "vector yielded no samples"
-        )
+        ),
+        rawfile_label="stress rawfile",
+    )
+    if columns is None:
+        return StressOutcome(error=error)
     outcome = reduce_stress(
-        [point[0] for point in points],
-        [point[1] for point in points],
+        *columns,
         start=sim_window.window_bound(name, body, "from", form="stress"),
         stop=sim_window.window_bound(name, body, "to", form="stress"),
     )

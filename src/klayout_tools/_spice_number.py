@@ -46,3 +46,15 @@ def parse(token: str) -> float | None:
     if match is None:
         return None
     return float(match.group(1)) * suffix_scale(match.group(2))
+
+
+def parse_plain(raw: str) -> float | None:
+    """Parse a bare, dimensionless SPICE numeric literal (e.g. an ``nf=``
+    or ``m=`` instance-multiplier value). Returns ``None`` for anything
+    that is not a plain number -- an expression like ``{n*2}`` this
+    diagnostic cannot evaluate.
+    """
+    match = NUMBER_RE.match(raw.strip().strip("'\""))
+    if match is None:
+        return None
+    return float(match.group(1))

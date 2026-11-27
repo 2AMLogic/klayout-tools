@@ -50,11 +50,10 @@ from __future__ import annotations
 
 import bisect
 import math
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_crossings, sim_window
+from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 
@@ -71,7 +70,7 @@ _VECTOR_PREFIX = "__klt_stepres_"
 
 def is_step_resolution(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``step_resolution``."""
-    return spec.get("step_resolution") is not None
+    return sim_measurement_kind.declares(spec, "step_resolution")
 
 
 def step_resolution_measurements(
@@ -159,13 +158,13 @@ def validate_step_resolution_context(
     declared = step_resolution_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'step_resolution', "
-            "which reports transient time-step sizes and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="step_resolution",
+        required="tran",
+        explanation="reports transient time-step sizes",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -173,9 +172,13 @@ def validate_step_resolution_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each step_resolution measurement writes per corner.
+_RAWFILE_PREFIX = "step_resolution"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where step_resolution measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"step_resolution_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -295,46 +298,35 @@ def extract_corner_step_resolutions(
     """``{position in measurements_spec: outcome}`` for every entry of one
     finished corner. Never raises: any rawfile problem becomes that
     measurement's own ``error``."""
-    outcomes: dict[int, StepResolutionOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_step_resolution(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_step_resolution,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> StepResolutionOutcome:
-    from .sim import parse_ascii_rawfile
-
     body = spec["step_resolution"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return StepResolutionOutcome(
-            code="step_resolution_vector_missing",
-            error=(
-                f"measurement '{name}': its signal ({body['signal']!r}) did "
-                "not resolve against this transient's saved vectors (no "
-                "rawfile was written) -- check the node/branch name"
-            ),
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return StepResolutionOutcome(
-            code="step_resolution_vector_missing",
-            error=f"measurement '{name}': could not read its rawfile: {exc}",
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 2 or not points:
-        return StepResolutionOutcome(
-            code="step_resolution_vector_missing",
-            error=f"measurement '{name}': its signal yielded no samples",
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=2,
+        missing_error=(
+            f"measurement '{name}': its signal ({body['signal']!r}) did "
+            "not resolve against this transient's saved vectors (no "
+            "rawfile was written) -- check the node/branch name"
+        ),
+        empty_error=(f"measurement '{name}': its signal yielded no samples"),
+    )
+    if columns is None:
+        return StepResolutionOutcome(code="step_resolution_vector_missing", error=error)
+    scale, values = columns
     outcome = compute_step_resolution(
-        [point[0] for point in points],
-        [point[1] for point in points],
+        scale,
+        values,
         float(body["level"]),
         float(_seconds(name, body, "window") or 0.0),
         edge=body.get("edge", "either"),

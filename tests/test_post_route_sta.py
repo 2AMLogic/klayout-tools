@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import pdk as pdk_module
 from klayout_tools import post_route_sta
 from klayout_tools._openroad_engine import container_runtime_hint
@@ -481,7 +481,7 @@ def test_resolve_liberty_ihp_single_underscore_fallback(tmp_path, monkeypatch):
     resolve via the single-underscore fallback rather than raising "liberty
     not found" (issue #1790, missed in `post_route_sta.py`'s own copy of
     `_resolve_liberty` until issue #1652 folded it into the shared
-    `klayout_tools.pdk.resolve_liberty_for_cell_library` implementation
+    `klayout_tools.pdk_cells.resolve_liberty_for_cell_library` implementation
     `synthesize.py`/`place_and_route.py` already carried this fallback in)."""
     _isolate_pdk(monkeypatch, tmp_path)
     install_root = tmp_path / "install"
@@ -923,13 +923,12 @@ def test_spef_reader_warnings_counts_delimited_stdout_region():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
     # Only the two inside the region count -- the reader is the only thing
     # running there, but a liberty/clock warning outside it is not evidence
     # of a failed annotation.
-    assert count == 2
-    assert sample == [line.strip() for line in _READER_WARNINGS]
+    assert warnings == [line.strip() for line in _READER_WARNINGS]
 
 
 def test_spef_reader_warnings_counts_unknown_codes_inside_region():
@@ -938,10 +937,9 @@ def test_spef_reader_warnings_counts_unknown_codes_inside_region():
     the region check is deliberately broader than the STA-1648/1650 pair."""
     stdout = _spef_read_block("[WARNING STA-9999] some future reader warning.")
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 1
-    assert sample == ["[WARNING STA-9999] some future reader warning."]
+    assert warnings == ["[WARNING STA-9999] some future reader warning."]
 
 
 def test_spef_reader_warnings_matches_stderr_narrowly():
@@ -956,35 +954,24 @@ def test_spef_reader_warnings_matches_stderr_narrowly():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, stderr)
+    warnings = post_route_sta._spef_reader_warnings(stdout, stderr)
 
-    assert count == 2
-    assert all("STA-16" in line for line in sample)
+    assert len(warnings) == 2
+    assert all("STA-16" in line for line in warnings)
 
 
 def test_spef_reader_warnings_without_markers_falls_back_to_known_codes():
     stdout = "\n".join([*_READER_WARNINGS, "[WARNING STA-1234] unrelated"])
 
-    count, _sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 2
-
-
-def test_spef_reader_warnings_sample_is_capped():
-    warnings = [f"[WARNING STA-1650] net n{i} not found." for i in range(50)]
-    stdout = _spef_read_block(*warnings)
-
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
-
-    assert count == 50
-    assert len(sample) == post_route_sta._SPEF_READER_WARNING_SAMPLE_LIMIT
+    assert len(warnings) == 2
 
 
 def test_spef_reader_warnings_clean_run_reports_zero():
-    count, sample = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
+    warnings = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
 
-    assert count == 0
-    assert sample == []
+    assert warnings == []
 
 
 def _delay_blocks(pre: str, post: str) -> str:
@@ -1473,7 +1460,7 @@ def _stub_openroad_success(
             returncode=0, stdout="\n".join(stdout_lines), stderr=spef_stderr
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_run_sta_response_envelope(tmp_path, monkeypatch):
@@ -1616,7 +1603,7 @@ def _stub_openroad_multi_corner(
                 handle.write("# mutated mid-run\n")
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_run_sta_corners_produces_per_corner_array(tmp_path, monkeypatch):
@@ -1974,7 +1961,7 @@ def _stub_openroad_check_family_engine(
             )
         return fake_completed(returncode=0, stdout=stdout)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -2124,16 +2111,11 @@ def test_run_sta_def_mode_wire_load_fields_are_null(tmp_path, monkeypatch):
 
 
 def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
-    """When the ``-metrics`` JSON carries no ``timing__hold__ws``/
-    ``timing__hold__tns`` keys at all (e.g. an older OpenROAD build, or a
-    design OpenSTA finds no hold path to measure in), the two new fields
-    degrade to ``null`` -- the same null-handling the existing setup-side
-    fields already have, never a ``KeyError``."""
+    """Older engines or unmeasurable paths can omit hold and frequency metrics."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     metrics_without_hold = {
         "timing__setup__ws": -0.15,
         "timing__setup__tns": -1.2,
-        "timing__fmax": 500_000_000.0,
         "power__total": 0.0084,
         "clock__skew__setup": 0.021,
     }
@@ -2142,6 +2124,7 @@ def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
     report = run_sta(request_path)
 
     assert report["worst_slack_ns"] == -0.15
+    assert report["fmax_mhz"] is None
     assert report["worst_hold_slack_ns"] is None
     assert report["total_negative_hold_slack_ns"] is None
 
@@ -2320,7 +2303,7 @@ def test_run_sta_missing_evidence_blocks_degrade_to_null_not_false(
             ),
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     annotation = run_sta(request_path)["spef_annotation"]
 
@@ -2598,7 +2581,7 @@ def test_run_sta_engine_failure_raises(tmp_path, monkeypatch):
             stderr="[ERROR STA-1234] something went wrong",
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError, match=r"\[ERROR STA-1234\]"):
         run_sta(request_path)
@@ -2610,7 +2593,7 @@ def test_run_sta_missing_openroad_binary_raises(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise OSError("no such file or directory: 'openroad'")
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError, match="could not launch openroad"):
         run_sta(request_path)
@@ -2721,8 +2704,8 @@ def test_container_runtime_hint_none_for_empty_output():
 
 def test_engine_error_message_appends_container_runtime_hint():
     """The hint is appended to -- never a replacement for -- the engine's own
-    captured output, following `place_and_route.py`'s `_mount_namespace_hint`
-    pattern (issue #1868)."""
+    captured output, following the shared `mount_namespace_hint` pattern
+    (issue #1868)."""
     completed = fake_completed(returncode=1, stderr=_DOCKER_29_UNREACHABLE)
 
     message = post_route_sta._engine_error_message(completed)
@@ -2799,7 +2782,7 @@ def test_run_sta_unreachable_container_runtime_surfaces_hint(tmp_path, monkeypat
             return fake_completed(stdout="26Q3-771-gdeadbeef\n")
         return fake_completed(returncode=1, stderr=_DOCKER_29_UNREACHABLE)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -2857,6 +2840,8 @@ def test_cli_text_format_multi_corner(tmp_path, monkeypatch, capsys):
     assert "corner: ss_100C_1v60" in out
     assert "worst_slack_ns: -0.15" in out
     assert "worst_slack_ns: -0.42" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "fmax_mhz: 300.0 (clock estimate excludes opposite-edge paths" in out
     assert "def_path:" in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
@@ -2872,6 +2857,8 @@ def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "status: ok" in out
     assert "worst_slack_ns: -0.15" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "can overstate achievable frequency" in out
     assert "worst_hold_slack_ns: 0.03812" in out
     assert "total_negative_hold_slack_ns: 0.0" in out
     with pytest.raises(json.JSONDecodeError):
@@ -3252,7 +3239,7 @@ def test_ord_2013_failure_names_request_macros(tmp_path, monkeypatch):
             ),
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -3327,7 +3314,7 @@ def _stub_openroad_capture(monkeypatch, scenario_by_corner: dict) -> list[str]:
             return fake_completed(returncode=0, stdout=captured["stdout"])
         return fake_completed(returncode=3, stdout=captured["stdout"])
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -4322,7 +4309,12 @@ def _stub_openroad_clock_capture(
     monkeypatch, scenario_by_corner: dict[str | None, str]
 ) -> list[str]:
     """Replay a captured #2739 scenario per corner (`None` key for every
-    run in the request); returns the generated scripts."""
+    run in the request); returns the generated scripts.
+
+    The captured stdout predates the #7417 sink-count query, so a scenario
+    listed in the fixture's `clock_sink_counts` gets the synthesized count
+    block spliced in after the latency markers -- the counts themselves
+    were verified live on the same pinned build."""
     scripts: list[str] = []
 
     def fake_run(cmd, **kwargs):
@@ -4336,12 +4328,27 @@ def _stub_openroad_clock_capture(
             (c for c in scenario_by_corner if c and f"__{c}.lib" in script_text),
             None,
         )
-        captured = _clock_capture_scenario(scenario_by_corner[corner])
+        tag = scenario_by_corner[corner]
+        captured = _clock_capture_scenario(tag)
+        stdout = captured["stdout"]
+        count = _CLOCK_CAPTURES.get("clock_sink_counts", {}).get(tag)
+        if count is not None:
+            block = (
+                f"{post_route_sta._CLOCK_SINK_COUNT_BEGIN}\n"
+                f"KLT_STA_CLOCK_SINK_COUNT {count}\n"
+                f"{post_route_sta._CLOCK_SINK_COUNT_END}\n"
+            )
+            latency_end = f"{post_route_sta._CLOCK_LATENCY_END}\n"
+            stdout = (
+                stdout.replace(latency_end, latency_end + block, 1)
+                if latency_end in stdout
+                else block + stdout
+            )
         with open(metrics_path, "w", encoding="utf-8") as handle:
             json.dump(captured["metrics"], handle)
-        return fake_completed(returncode=0, stdout=captured["stdout"])
+        return fake_completed(returncode=0, stdout=stdout)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -4359,10 +4366,7 @@ def _propagated_constraints(**overrides) -> dict:
 
 
 def test_clock_capture_fixture_matches_module_tcl():
-    """Fixture drift guard: the captures must come from the Tcl this module
-    emits today -- the stored fragments byte-for-byte, and the stored full
-    propagated+SPEF script equal to a fresh `_sta_script_lines` build with
-    the same placeholder paths re-substituted."""
+    """Compare the captured clock fragments and propagated script to current Tcl."""
     assert _CLOCK_CAPTURES["tcl_fragments"][
         "propagated_clock_lines"
     ] == post_route_sta._propagated_clock_lines("clk")
@@ -4370,6 +4374,11 @@ def test_clock_capture_fixture_matches_module_tcl():
         _CLOCK_CAPTURES["tcl_fragments"]["clock_latency_lines"]
         == post_route_sta._clock_latency_lines()
     )
+    # Authored (not captured) on the same pinned build the captures came
+    # from: the capture sessions predate the #7417 sink-count query.
+    assert _CLOCK_CAPTURES["tcl_fragments"][
+        "clock_sink_count_lines"
+    ] == post_route_sta._clock_sink_count_lines("clk")
     placeholders = {
         "<TLEF>": "/t/tech.lef",
         "<CLEF>": "/t/cells.lef",
@@ -4391,21 +4400,30 @@ def test_clock_capture_fixture_matches_module_tcl():
         input_delay_ns=0.0,
         propagated_clock=True,
     )
-    # Issue #2780 appends the read-only constraint-completeness query as the
-    # script's last block -- after every metric/report this capture replays
-    # -- so the pre-#2780 capture still matches everything before it.
+    # The original capture predates the appended constraint and electrical queries.
     completeness = post_route_sta._constraint_completeness_lines()
     assert fresh[-len(completeness) :] == completeness
-    # Issue #3005 likewise inserts the electrical-limit block just before it.
     electrical = post_route_sta._electrical_check_lines()
     head = fresh[: -len(completeness)]
     assert head[-len(electrical) :] == electrical
-    # Issue #4089 pins ns/pF command units just before ``create_clock``; the
-    # pre-#4089 capture predates that line.
+    # The captured clock also predates the ns/pF unit pin (#4089).
     pinned = head[: -len(electrical)]
     pin_idx = pinned.index(post_route_sta._UNIT_PIN_LINE)
     assert pinned[pin_idx + 1].startswith("create_clock")
-    assert stored == pinned[:pin_idx] + pinned[pin_idx + 1 :]
+    current = pinned[:pin_idx] + pinned[pin_idx + 1 :]
+    # ...and the #7417 sink-count query, spliced in right after the
+    # latency block the captured sessions end their evidence with.
+    sink_block = post_route_sta._clock_sink_count_lines("clk")
+    sink_at = current.index(sink_block[0])
+    assert current[sink_at : sink_at + len(sink_block)] == sink_block
+    current = current[:sink_at] + current[sink_at + len(sink_block) :]
+    # The historical capture includes every linked net. Its buffered design
+    # has no driver-only nets, so the #6970 predicate leaves its counts intact.
+    at = stored.index("    incr klt_design_total")
+    assert (
+        current
+        == stored[:at] + list(post_route_sta.SPEF_SKIP_DRIVER_ONLY) + stored[at:]
+    )
 
 
 def test_unit_pin_precedes_clock_and_metrics_issue_4089():
@@ -4515,6 +4533,12 @@ def test_sta_script_lines_propagated_marks_clock_right_after_create_clock():
     assert any(ln.startswith("catch {report_clock_latency -digits 6}") for ln in lines)
     latency_end = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_END}"')
     assert prop_idx < latency_begin < latency_end < first_report_idx
+    # The #7417 sink-count query follows the latency dump, still before the
+    # metrics: `clock_sinks` is this enumeration, never the report's pins.
+    sink_begin = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"')
+    sink_end = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"')
+    assert latency_end < sink_begin < sink_end < first_report_idx
+    assert any(ln.strip().startswith("llength [all_registers -clock") for ln in lines)
 
 
 def test_sta_script_lines_propagated_with_spef_reports_after_read_spef():
@@ -4538,9 +4562,15 @@ def test_sta_script_lines_propagated_with_spef_reports_after_read_spef():
     parasitic_end = lines.index(f'puts "{post_route_sta._PARASITIC_ANNOTATION_END}"')
     latency_begin = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
     latency_end = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_END}"')
+    sink_end = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"')
     first_report_idx = lines.index("report_worst_slack_metric -setup")
     assert (
-        read_spef_idx < parasitic_end < latency_begin < latency_end < first_report_idx
+        read_spef_idx
+        < parasitic_end
+        < latency_begin
+        < latency_end
+        < sink_end
+        < first_report_idx
     )
 
 
@@ -4559,7 +4589,9 @@ def test_sta_script_lines_ideal_has_no_propagation_tcl():
     script = "\n".join(lines)
     assert "set_propagated_clock" not in script
     assert "report_clock_latency" not in script
+    assert "all_registers" not in script
     assert post_route_sta._CLOCK_LATENCY_BEGIN not in script
+    assert post_route_sta._CLOCK_SINK_COUNT_BEGIN not in script
 
 
 def test_sta_netlist_script_lines_never_propagates():
@@ -4581,123 +4613,18 @@ def test_sta_netlist_script_lines_never_propagates():
 # -- evidence parsing --------------------------------------------------------#
 
 
-def test_parse_clock_latency_sinks_max_and_sample():
-    stdout = "\n".join(
-        [
-            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
-            "Clock clk",
-            "rise -> rise",
-            "    min     max",
-            "0.000000 0.000000 source latency",
-            "0.302855         network latency ff/CLK",
-            "        0.302855 network latency ff/CLK",
-            "---------------",
-            "0.302855 0.302855 latency",
-            "        0.000000 skew",
-            "",
-            "fall -> fall",
-            "    min     max",
-            "0.000000 0.000000 source latency",
-            "0.335104         network latency ff/CLK",
-            "        0.335104 network latency ff/CLK",
-            "---------------",
-            "0.335104 0.335104 latency",
-            "        0.000000 skew",
-            "",
-            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
-        ]
-    )
-
-    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
-
-    assert evidence == {
-        "clock_sinks": 1,
-        "max_network_latency_ns": 0.335104,
-        "clock_sinks_sample": ["ff/CLK"],
-    }
-
-
-def test_parse_clock_latency_dedupes_sinks_and_caps_sample():
-    lines = [f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"', "Clock clk"]
-    for i in range(post_route_sta._CLOCK_SINK_SAMPLE_LIMIT + 5):
-        lines.append(f"0.0{i}         network latency ff{i}/CLK")
-    lines += [
-        "        0.990000 network latency ff1/CLK",  # max col of an early sink
-        f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
-    ]
-
-    evidence = post_route_sta._parse_clock_latency("\n".join(lines), "clk")
-
-    assert evidence["clock_sinks"] == post_route_sta._CLOCK_SINK_SAMPLE_LIMIT + 5
-    assert len(evidence["clock_sinks_sample"]) == (
-        post_route_sta._CLOCK_SINK_SAMPLE_LIMIT
-    )
-    assert evidence["clock_sinks_sample"][0] == "ff0/CLK"
-    assert evidence["max_network_latency_ns"] == 0.99
-
-
-def test_parse_clock_latency_ignores_other_clock_sections():
-    stdout = "\n".join(
-        [
-            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
-            "Clock other",
-            "1.000000         network latency x/CLK",
-            "Clock clk",
-            "0.200000         network latency ff/CLK",
-            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
-        ]
-    )
-
-    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
-
-    assert evidence == {
-        "clock_sinks": 1,
-        "max_network_latency_ns": 0.2,
-        "clock_sinks_sample": ["ff/CLK"],
-    }
-
-
 def test_parse_clock_latency_empty_section_is_zero_sinks():
     """The tree-less contract: the clock's section printed with no rows --
     the explicit machine-readable "propagation could not be established"
     signal. This is the real captured output of the fixture's `notree`
-    scenario."""
+    scenario, which predates the #7417 count marker -- so it also pins
+    the marker-less fallback: an empty section stays `0`, not unknown."""
     evidence = post_route_sta._parse_clock_latency(
         _clock_capture_scenario("propagated_notree")["stdout"], "clk"
     )
 
     assert evidence == {
         "clock_sinks": 0,
-        "max_network_latency_ns": None,
-        "clock_sinks_sample": [],
-    }
-
-
-def test_parse_clock_latency_missing_block_is_unknown():
-    evidence = post_route_sta._parse_clock_latency("no markers here", "clk")
-
-    assert evidence == {
-        "clock_sinks": None,
-        "max_network_latency_ns": None,
-        "clock_sinks_sample": [],
-    }
-
-
-def test_parse_clock_latency_error_text_is_unknown():
-    """A `catch`-swallowed command failure (e.g. an OpenSTA build without
-    `report_clock_latency`) leaves the command's error text inside the
-    markers and no `Clock <name>` section -- unknown, never a fabricated
-    sink count."""
-    stdout = "\n".join(
-        [
-            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
-            "invalid command name report_clock_latency",
-            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
-        ]
-    )
-
-    assert post_route_sta._parse_clock_latency(stdout, "clk") == {
-        "clock_sinks": None,
         "max_network_latency_ns": None,
         "clock_sinks_sample": [],
     }
@@ -4834,6 +4761,8 @@ def test_run_sta_propagated_script_emits_set_propagated_clock_per_corner(
     latency_idx = scripts[0].index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
     metrics_idx = scripts[0].index("report_worst_slack_metric -setup")
     assert create_idx < prop_idx < latency_idx < metrics_idx
+    sink_idx = scripts[0].index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"')
+    assert latency_idx < sink_idx < metrics_idx
 
 
 def test_run_sta_verilog_mode_response_is_always_ideal(tmp_path, monkeypatch):
@@ -4873,11 +4802,24 @@ def _live_sky130_env() -> str | None:
     return "sky130A"
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+def _LIVE_ONLY(func):
+    """Issue #7541: skip gate + lane registration in one decorator.
+
+    The skipif keeps the test quiet wherever `_live_sky130_env()` is
+    unsatisfied; the `live_openroad` mark registers it in the
+    post-route-sta-live CI lane, which selects `-m live_openroad`, so a new
+    live test joins the lane by construction.
+    tests/test_live_sta_lane_registration.py guards the link.
+    """
+    marked = pytest.mark.live_openroad(func)
+    return pytest.mark.skipif(
+        _live_sky130_env() is None,
+        reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+        "KLT_SKIP_OPENROAD_TESTS unset",
+    )(marked)
+
+
+@_LIVE_ONLY
 def test_live_engine_boundary_paths(tmp_path):
     """Engine integration: the same boundary request against a real
     OpenROAD session must reproduce the captured identities."""
@@ -4980,7 +4922,7 @@ def test_run_sta_report_ports_validation_runs_before_engine(tmp_path, monkeypatc
     def fail_run(*args, **kwargs):
         raise AssertionError("engine must not run for an invalid request")
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    patch_openroad_run(monkeypatch, fail_run)
     with pytest.raises(PostRouteStaError, match="must not repeat a port"):
         run_sta(request_path)
 
@@ -5169,7 +5111,7 @@ def _append_port_block(monkeypatch, block: str) -> None:
             completed.stdout += block
         return completed
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", run)
+    patch_openroad_run(monkeypatch, run)
 
 
 def test_run_sta_report_ports_single_corner(tmp_path, monkeypatch):
@@ -5252,7 +5194,7 @@ def test_run_sta_report_ports_rejected_by_engine_check(tmp_path, monkeypatch):
             return fake_completed(stdout="unknown \n")
         return fake_completed(returncode=3, stdout=block)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -5292,11 +5234,7 @@ def test_print_text_renders_port_paths(capsys):
     assert "port_paths[a_in].hold: hold a_in -> ff_a/D slack_ns=0.33143 (ok)" in out
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_report_ports(tmp_path):
     """Engine integration (issue #3042): the boundary request with
     ``report_ports`` against a real session must give the boundary ports'
@@ -5375,7 +5313,7 @@ def test_run_sta_false_path_from_validation_runs_before_engine(tmp_path, monkeyp
     def fail_run(*args, **kwargs):
         raise AssertionError("engine must not run for an invalid request")
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    patch_openroad_run(monkeypatch, fail_run)
     with pytest.raises(PostRouteStaError, match="must not repeat a port"):
         run_sta(request_path)
 
@@ -5493,7 +5431,7 @@ def test_run_sta_false_path_from_rejected_by_engine_check(tmp_path, monkeypatch)
             return fake_completed(stdout="unknown \n")
         return fake_completed(returncode=3, stdout=block)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -5503,13 +5441,6 @@ def test_run_sta_false_path_from_rejected_by_engine_check(tmp_path, monkeypatch)
         "constraints.false_path_from['q_a']: port direction is 'output', not an input"
         in message
     )
-
-
-_LIVE_ONLY = pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
 
 
 def _live_verilog_request(tmp_path, **constraint_overrides) -> str:
@@ -5638,11 +5569,7 @@ def _write_clock_fixtures(tmp_path) -> dict[str, str]:
     return {name: _write(tmp_path / name, text) for name, text in paths.items()}
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_propagated_boundary_timing(tmp_path):
     """Engine integration (issue #2739 test plan): the same small post-CTS
     tree DEF timed ideal vs propagated vs propagated+SPEF on the real
@@ -5791,7 +5718,7 @@ def _stub_openroad_completeness_capture(
             json.dump(captured["metrics"], handle)
         return fake_completed(returncode=0, stdout=captured["stdout"])
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -6184,11 +6111,7 @@ def test_cli_text_prints_unavailable_not_zero(tmp_path, monkeypatch, capsys):
 # -- live engine -------------------------------------------------------------#
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_completeness_matches_check_setup(tmp_path):
     """Engine integration (issue #2780 test plan): `run_sta` on the mixed
     design reproduces the captured identities, and they equal what the
@@ -6401,7 +6324,7 @@ def test_engine_error_message_drops_checkout_prefix(tmp_path, monkeypatch):
             stderr=f"[ERROR ODB-0125] DEF parser error in {def_abs} line 7",
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -6580,7 +6503,7 @@ def _wrap_openroad_with_sdf_writer(monkeypatch, *, write: bool = True) -> list[s
                 )
         return result
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -6793,11 +6716,7 @@ def test_cli_text_prints_sdf_line(tmp_path, monkeypatch, capsys):
     assert f"sdf: <outside repo> ({_sha256_of(sdf_file)})" in out
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_sdf_per_corner(tmp_path):
     """Engine integration (issue #2886): the captured post-CTS DEF + SPEF at
     two corners writes two real SDFs whose delays differ by corner, each
@@ -7015,7 +6934,7 @@ def _stub_openroad_matrix(
         ]
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -7148,17 +7067,13 @@ def test_run_sta_spef_map_detects_concurrent_def_mutation(tmp_path, monkeypatch)
                 handle.write("# mutated mid-run\n")
         return result
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", mutating_run)
+    patch_openroad_run(monkeypatch, mutating_run)
 
     with pytest.raises(PostRouteStaError, match="geometry backing this multi-corner"):
         run_sta(request_path)
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
     """Engine integration (issue #3228 test plan): two SPEFs of different
     wire RC on the same DEF and liberty corner give different slack, with
@@ -7196,58 +7111,39 @@ def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
     assert report["provenance"]["input"]["content_hash"] is not None
 
 
-def _write_placed_buffered_def(tmp_path) -> str:
-    """The captured buffered DEF with every component and pin given a
-    location, so OpenROAD's `estimate_parasitics -placement` has geometry to
-    extract (the captured DEF is deliberately unplaced)."""
-    import re
+def _openroad_write_spef(tmp_path: Path) -> tuple[str, str]:
+    """Return a routed DEF and its name-mapped SPEF from OpenROAD.
 
-    text = _CLOCK_CAPTURES["defs"]["buffered"]
-    counter = iter(range(1, 1000))
-
-    def place_component(match):
-        x = 10_000 * next(counter)
-        return f"{match.group(1)} + PLACED ( {x} 20000 ) N ;"
-
-    text = re.sub(
-        r"^(    - \S+ sky130_fd_sc_hd__\S+) ;$", place_component, text, flags=re.M
-    )
-
-    def place_pin(match):
-        x = 5_000 * next(counter)
-        return (
-            f"{match.group(1)} + LAYER met2 ( -70 0 ) ( 70 140 ) + PLACED ( {x} 0 ) N ;"
-        )
-
-    text = re.sub(
-        r"^(    - \S+ \+ NET .* \+ USE SIGNAL) ;$", place_pin, text, flags=re.M
-    )
-    text = text.replace(
-        "COMPONENTS 6 ;", "DIEAREA ( 0 0 ) ( 100000 100000 ) ;\nCOMPONENTS 6 ;"
-    )
-    return _write(tmp_path / "placed.def", text)
-
-
-def _openroad_write_spef(tmp_path, def_path: str) -> str:
-    """Have OpenROAD itself estimate placement parasitics on `def_path` and
-    `write_spef` them -- the real writer's `*NAME_MAP` form, which the
-    hand-written unit fixture only imitates."""
+    OpenRCX's `write_spef` needs extracted routing. The separate placement
+    estimator's SPEF writer omits `*NAME_MAP`.
+    """
     liberty_path, _corner, pdk_info = post_route_sta._resolve_liberty(
         "sky130_fd_sc_hd", "tt_025C_1v80", variant="sky130A"
     )
     tech_lef, cell_lef = post_route_sta._resolve_lef("sky130_fd_sc_hd", pdk_info)
+    def_path = _write(tmp_path / "buffered.def", _CLOCK_CAPTURES["defs"]["buffered"])
+    routed_def = tmp_path / "routed.def"
     spef_path = tmp_path / "openroad.spef"
     script = _write(
         tmp_path / "write_spef.tcl",
         "\n".join(
             [
+                "set_thread_count 1",
+                f"read_liberty {liberty_path}",
                 f"read_lef {tech_lef}",
                 f"read_lef {cell_lef}",
                 f"read_def {def_path}",
-                f"read_liberty {liberty_path}",
-                "create_clock -name clk -period 2.0 [get_ports clk]",
-                "set_wire_rc -layer met2",
-                "estimate_parasitics -placement",
+                "initialize_floorplan -die_area {0 0 100 100} "
+                "-core_area {5 5 95 95} -site unithd",
+                "make_tracks",
+                "place_pins -hor_layers met3 -ver_layers met2",
+                "global_placement -density 0.3",
+                "detailed_placement",
+                "set_routing_layers -signal met1-met5",
+                "global_route",
+                "detailed_route",
+                f"write_def {routed_def}",
+                "extract_parasitics -version 2.0 -lef_rc",
                 f"write_spef {spef_path}",
             ]
         )
@@ -7257,8 +7153,9 @@ def _openroad_write_spef(tmp_path, def_path: str) -> str:
         script, str(tmp_path / "write_spef.json"), error_cls=PostRouteStaError
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert routed_def.is_file(), completed.stdout + completed.stderr
     assert spef_path.is_file(), completed.stdout + completed.stderr
-    return str(spef_path)
+    return str(routed_def), str(spef_path)
 
 
 def test_electrical_check_tcl_ends_redirect_on_error_path():
@@ -7278,18 +7175,13 @@ def test_electrical_check_tcl_ends_redirect_on_error_path():
 _ELECTRICAL_FIXTURE = Path(__file__).parent / "fixtures" / "sta_electrical_checks"
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_spef_name_map_annotation(tmp_path):
     """Engine integration (issue #3776, closing the live-verification gap of
     #3755): a SPEF written by OpenROAD's own `write_spef` (so with its real
     `*NAME_MAP`) must annotate every net of the design it was extracted
     from."""
-    def_path = _write_placed_buffered_def(tmp_path)
-    spef_path = _openroad_write_spef(tmp_path, def_path)
+    def_path, spef_path = _openroad_write_spef(tmp_path)
     assert "*NAME_MAP" in Path(spef_path).read_text(encoding="utf-8")
 
     report = run_sta(
@@ -7312,11 +7204,7 @@ def test_live_engine_spef_name_map_annotation(tmp_path):
     assert annotation["design_nets_missing_sample"] == []
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_driving_cell_and_output_load(tmp_path):
     """Engine integration (issue #3776): OpenSTA accepts the generated
     `set_driving_cell -lib_cell/-pin/-from_pin` and `set_load` commands, and
@@ -7355,11 +7243,7 @@ def test_live_engine_driving_cell_and_output_load(tmp_path):
     assert driven["worst_slack_ns"] is not None
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_electrical_checks_match_hand_run(tmp_path):
     """Engine integration (issue #3005 AC4 / #3621): the fast-corner routed
     DEF/SPEF fixture reports the violation counts recorded from a hand-run

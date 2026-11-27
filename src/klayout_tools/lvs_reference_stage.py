@@ -11,6 +11,11 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from . import lvs as _lvs
+from .lvs_coverage import _implausible_dimensions
+from .lvs_flatten import root_selected_circuit
+from .lvs_gate_level_preparation import _GateLevelPreparation, _prepare_reference_stage
+from .lvs_known_limits import count_unsupported_asap7_instances
+from .netlist_normalize import _sim_model_classes
 
 
 class _ReferenceStage(NamedTuple):
@@ -27,8 +32,20 @@ class _ReferenceStage(NamedTuple):
     reference_gate_level_case_folds: list[dict[str, str]]
     supply_universe: _lvs._SupplyPinUniverse | None
     unresolved_subckt_call_findings: list[dict[str, Any]]
+    dimensions: list[dict[str, Any]]
     reference_pin_order_files: list[str]
     reference_netlist: Any
+    reference_known_limit_counts: dict[str, int]
+
+
+def _flatten_reference(
+    netlist: Any, top: str | None, flatten: bool | list[str]
+) -> dict[str, Any] | None:
+    """Make a selected interior circuit the root before inlining its descendants."""
+    root_selected_circuit(netlist, top)
+    return _lvs._flatten_netlist_safely(
+        netlist, "reference", keep=flatten if isinstance(flatten, list) else None
+    )
 
 
 def _read_reference_stage(
@@ -42,12 +59,19 @@ def _read_reference_stage(
     gate_level_port_alias_warnings: list[dict[str, Any]],
     power_only_pruning_warnings: list[dict[str, Any]],
     combine_per_circuit_warnings: list[dict[str, Any]],
+    preparation: _GateLevelPreparation | None = None,
 ) -> _ReferenceStage:
     """Read the reference netlist and apply its pre-compare conversions
 
     (issue #5158, stage 2 of the `run_lvs` split): path/form validation,
     pin-order resolution, the read, gate-level alias/prune, per-circuit
     combine and optional flatten. The warning lists are appended to in place.
+
+    ``preparation`` (issue #7822) is what :func:`_prepare_reference_stage`
+    returned before extraction started -- the gate-level reference already
+    converted, with its pin-order resolution, port aliases and case folds.
+    Given, this stage reuses all of it (never re-resolving or re-converting)
+    so the two calls together do exactly the work one unprepared call did.
     """
     reference_netlist_path = _lvs._require_path(
         reference_spec, "netlist", "reference", request_dir
@@ -94,57 +118,21 @@ def _read_reference_stage(
             "device-class/model name to the reference net its implicit bulk "
             "terminal carries"
         )
-    # Issue #1622: resolved here rather than inside `_read_reference_netlist`
-    # so the *same* mapping serves both consumers with one read of each
-    # pin-order source -- the conversion's own `pin_order_lookup` and, below,
-    # the power-pin universe `_prune_power_only_circuits` needs.
-    reference_pin_orders: dict[str, list[str]] | None = None
-    # Issue #1901: the PDK `_resolve_gate_level_pin_orders` resolves
-    # internally to read the library's pin-order source -- reused here (not
-    # re-resolved) purely so `provenance.pdk` can record it below, matching
-    # `klt extract`/`klt sta`/`klt place-and-route`. Stays `None` for every
-    # other `reference.form`, which resolves no PDK at all.
-    reference_pdk_info: dict[str, Any] | None = None
-    # Issue #2693: one record per pin-order file actually read -- a
-    # macro-backed design resolves pin orders from several libraries (the
-    # standard cells plus each macro's own one-file-per-macro library), so
-    # `provenance.pdk` alone no longer says where a cell's pin order came
-    # from. Empty for every other `reference.form`, which reads none.
-    reference_pin_order_sources: list[dict[str, Any]] = []
-    # Issue #2693: `reference.library`/`reference.pin_order_files` are
-    # validated inside the resolver (both are specific to this one form, and
-    # "neither was given" is its own error there), so this branch stays a
-    # single call.
-    # Issue #4353: the resolved files are also echoed (`reference_conversion`)
-    # so `--rerun` is independent of the original request directory.
+    binding = preparation or _prepare_reference_stage(reference_spec, request_dir, opts)
+    reference_pin_orders = reference_pdk_info = converted_text = None
     reference_pin_order_files: list[str] = []
-    if reference_form == "gate-level-verilog":
-        reference_pin_order_files = _lvs._resolve_reference_pin_order_files(
-            reference_spec, request_dir
-        )
-        resolved_pin_orders = _lvs._resolve_gate_level_pin_orders(
-            reference_spec.get("library"),
-            reference_spec.get("pdk"),
-            reference_spec.get("pdk_root"),
-            pin_order_files=reference_pin_order_files,
-        )
-        reference_pin_orders = resolved_pin_orders.pin_orders
-        reference_pdk_info = resolved_pin_orders.pdk_info
-        reference_pin_order_sources = resolved_pin_orders.sources
-    # Issue #1907: populated by the `form: "subckt-call"` conversion with every
-    # resistor/capacitor device class it wrote the literal `0` placeholder
-    # value onto -- consumed by `_apply_reference_placeholder_values` below,
-    # empty for every other reference form.
+    reference_pin_order_sources: list[dict[str, Any]] = []
     reference_placeholder_classes: dict[str, str] = {}
-    # Issue #2021: populated by `_read_reference_netlist` only for
-    # `form="gate-level-verilog"` -- `{<module name>: {<port>: <canonical
-    # net>}}` for every declared port whose only Verilog-level connection is
-    # a plain `assign` alias. Consumed by `_apply_gate_level_port_aliases`
-    # right below, before anything else reads `reference_netlist`.
     reference_gate_level_port_aliases: dict[str, dict[str, str]] = {}
-    # Issue #4815: fold records from the gate-level conversion's
-    # case-insensitive pin binding, disclosed as warnings below.
     reference_gate_level_case_folds: list[dict[str, str]] = []
+    if binding is not None:
+        reference_pin_orders = binding.pin_orders
+        reference_pdk_info = binding.pdk_info
+        converted_text = binding.converted_text
+        reference_pin_order_files = binding.pin_order_files
+        reference_pin_order_sources = binding.sources
+        reference_gate_level_port_aliases = binding.port_aliases
+        reference_gate_level_case_folds = binding.case_folds
     # Issue #2136: the library-derived power-pin universe plus the layout
     # nets those pins land on, used below to mark a `net_correspondence[]`
     # entry that pairs a layout supply net with a reference net that is not
@@ -171,9 +159,28 @@ def _read_reference_stage(
         ),
         gate_level_port_aliases=reference_gate_level_port_aliases,
         gate_level_port_case_folds=reference_gate_level_case_folds,
+        gate_level_converted=converted_text,
         finfet=opts.finfet_layout,
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=opts.compare_mos_flavour,
+    )
+    dimensions = _implausible_dimensions(
+        reference_netlist,
+        _lvs._reachable_circuits(
+            reference_netlist, reference_spec.get("top"), "reference"
+        ),
+        "reference",
+    )
+    # Issue #5676: the mirror image of the X-card form guard inside
+    # `_read_reference_netlist` -- a plain-element reference whose `M` cards
+    # name the PDK's own simulation models cannot pair with a curated-deck
+    # extraction's class names, so refuse it here rather than let the compare
+    # spend a full unmatched-device/net cascade on it.
+    _reject_unpairable_sim_model_classes(
+        reference_netlist,
+        layout_netlist,
+        deck=reference_spec.get("deck"),
+        form=reference_form,
     )
     # Issue #2952: scanned now, before any flatten/prune below erases the
     # hierarchy that names each offending instance. Appended to
@@ -313,13 +320,18 @@ def _read_reference_stage(
             if reference_parameter_correction is not None:
                 combine_per_circuit_warnings.append(reference_parameter_correction)
 
+    # Issue #6931: census of pinned unsupported ASAP7 masters beneath the
+    # selected reference top, taken while the netlist still carries its
+    # hierarchy (one SubCircuit per X card; `sliced_reference_file` has
+    # already restricted a FinFET reference read to the compared top's own
+    # subtree) -- the optional flatten right below is what discards it.
+    # Consumed by `note_known_limit` only on a mismatching FinFET compare.
+    reference_known_limit_counts = count_unsupported_asap7_instances(
+        reference_netlist, reference_spec.get("top")
+    )
     if opts.flatten_reference:
-        reference_flatten_warning = _lvs._flatten_netlist_safely(
-            reference_netlist,
-            "reference",
-            keep=opts.flatten_reference
-            if isinstance(opts.flatten_reference, list)
-            else None,
+        reference_flatten_warning = _flatten_reference(
+            reference_netlist, reference_spec.get("top"), opts.flatten_reference
         )
         if reference_flatten_warning is not None:
             flatten_warnings.append(reference_flatten_warning)
@@ -335,6 +347,69 @@ def _read_reference_stage(
         reference_gate_level_case_folds=reference_gate_level_case_folds,
         supply_universe=supply_universe,
         unresolved_subckt_call_findings=unresolved_subckt_call_findings,
+        dimensions=dimensions,
         reference_pin_order_files=reference_pin_order_files,
         reference_netlist=reference_netlist,
+        reference_known_limit_counts=reference_known_limit_counts,
+    )
+
+
+def _reject_unpairable_sim_model_classes(
+    reference_netlist: Any,
+    layout_netlist: Any,
+    deck: str | None,
+    form: str,
+) -> None:
+    """Issue #5676: refuse a ``plain-element`` reference whose device classes
+    are the PDK's own MOS **simulation model** names (each plain ``M`` card's
+    model token, upper-cased by ``NetlistSpiceReader``) while the
+    ``layout_netlist`` -- a curated-deck extraction -- names its MOS classes
+    by the deck's generic names (``nfet``/``pfet``). The two class-name sets
+    are disjoint, so the compare provably pairs nothing and would report a
+    device/net-unmatched cascade that reads like a layout bug. Best-effort,
+    like ``_reject_bare_deck_x_cards``: without a ``deck`` or for one
+    with no curated model table, return early and leave validation to the
+    reference read itself. Four clauses, all required:
+
+    1. ``form`` is ``plain-element`` (the two conversion forms already
+       rewrite the model tokens);
+    2. ``deck``'s lower-cased model-name -> device-class table
+       (:func:`klayout_tools.netlist_normalize._sim_model_classes`, issue
+       #3882) is non-empty;
+    3. some reference class name, case-folded, is a model in that table
+       *and* the class it maps to is registered on the layout side -- the
+       layout really does use the deck's generic class naming;
+    4. the reference does *not* itself register a class of that mapped
+       name -- a mixed reference (both ``sg13_lv_nmos`` and ``nfet``) keeps
+       its generic-named devices pairable, so it is not refused.
+    """
+    if form != "plain-element" or not deck:
+        return
+    sim_model_classes = _sim_model_classes(deck)
+    if not sim_model_classes:
+        return
+    reference_names = _lvs._device_class_names(reference_netlist)
+    reference_lowered = {name.lower() for name in reference_names}
+    layout_lowered = {name.lower() for name in _lvs._device_class_names(layout_netlist)}
+    offending = sorted(
+        (name, target)
+        for name in reference_names
+        if (target := sim_model_classes.get(name.lower())) is not None
+        and target.lower() in layout_lowered
+        and target.lower() not in reference_lowered
+    )
+    if not offending:
+        return
+    raise _lvs.LvsError(
+        "reference netlist is in plain-element form but names PDK "
+        "simulation model(s) "
+        + ", ".join(name for name, _ in offending)
+        + " as device classes, which cannot pair with the layout side's "
+        "deck class name(s) "
+        + ", ".join(target for _, target in offending)
+        + " -- every device and net would come back unmatched. Set "
+        'request.reference.form to "subckt-call", which rewrites an M '
+        "card's model token to the deck's device class even when the "
+        'reference contains no X cards -- see docs/cli/lvs.md, "Netlist '
+        'form".'
     )

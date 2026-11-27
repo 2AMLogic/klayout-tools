@@ -8,6 +8,8 @@ per-draw Monte Carlo CSV — one row per draw
 klt yield-csv <csv> --group-by <col> --value <col>
               [--status-col <col> --pass-value <v>] [--draw-col <col>]
               [--unit <u>] [--min <x>] [--max <x>] [--target-yield <y>]
+              [--negative-control CSV] [--description TEXT]
+              [--seed INT] [--rng NAME] [--draws-per-population N]
               [--format text|json]
 ```
 
@@ -24,6 +26,30 @@ hash), emitted through the shared envelope in
 no yield and needs no native extension. The full contract — column mapping,
 failed-draw rules and what `klt signoff` hashes — is in
 [`docs/cli/yield.md` → "Deriving a sample set from a per-draw CSV"](yield.md#deriving-a-sample-set-from-a-per-draw-csv-klt-yield-csv).
+
+## Paired controls and run provenance
+
+```sh
+klt yield-csv nominal.csv --group-by metric --value result --min 0.9 \
+    --negative-control fault.csv --description "injected open" \
+    --seed 42 --rng PCG64 --draws-per-population 500 --format json > samples.json
+klt yield samples.json --format json
+```
+
+Both files use the same column mapping, status filter and duplicate-draw check.
+Each nominal group requires an exact-name control group with at least one usable
+draw. Additional control groups supply no nominal measurement. Invalid values
+and unsuccessful draws count as errored in either file. The control records its
+own CSV path, byte digest and input row count under `derivation.negative_control`.
+The estimator grades control values against the nominal measurement's limits.
+
+`--description` requires a control CSV. Seed, generator and positive draws per
+population are optional and independent of the control. They record the caller's
+run settings in `provenance`, echoed by `klt yield` under `source.provenance`.
+
+For per-draw waveform reductions, the campaign can retain its simulator version,
+netlist digest, seed sequence and spec row alongside the CSV-derived values.
+[Caller-driven transient-noise example](yield.md#ingesting-a-caller-driven-transient-noise-campaign)
 
 ## Exit codes
 

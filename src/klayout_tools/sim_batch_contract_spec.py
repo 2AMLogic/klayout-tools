@@ -8,29 +8,29 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from . import (
     remote_transport,
     sim_eye,
+    sim_mismatch_scale,
     sim_op_check,
+    sim_post_commands,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_stress,
+    sim_supply_relative,
     sim_transfer_meas,
     sim_twoport,
 )
 from .sim_batch_contract import (
     REQUEST_FEATURE_MIN_RUNNER_VERSION,
 )
-
-if TYPE_CHECKING:
-    pass
-
 
 # --------------------------------------------------------------------------- #
 # job.json (2am's shell-command contract)
@@ -114,6 +114,8 @@ class BatchJobSpec:
     cores_per_job: int | None = None
     timeout_seconds: int | None = None
     inputs: tuple[BatchJobInput, ...] = ()
+    image_profile: str | None = None
+    max_launch_attempts: int | None = None
 
     def to_job_json(self) -> dict[str, Any]:
         """The ``job.json`` document, in ``batch-fleet.md``'s own field
@@ -124,31 +126,27 @@ class BatchJobSpec:
         if self.tool is not None:
             document["tool"] = self.tool
         document["cmd"] = self.cmd
-        for key in ("pdk_variant", "pdk_root", "cores_per_job", "timeout_seconds"):
+        for key in (
+            "pdk_variant",
+            "pdk_root",
+            "cores_per_job",
+            "timeout_seconds",
+            "max_launch_attempts",
+        ):
             value = getattr(self, key)
             if value is not None:
                 document[key] = value
+        if self.image_profile not in (None, "sim"):
+            document["image_profile"] = self.image_profile
         return document
 
 
 def _release_segment(version: str) -> str | None:
-    """The PEP 440 release segment of a ``klt --version`` build string, or
-    ``None`` when it has none (issue #3184).
+    """Read the numeric release prefix of a klt version, stripping dev and local parts.
 
-    Steps: drop the PEP 440 local part (``+...``), keep the leading
-    ``[0-9.]`` run, drop one trailing ``.``, and accept the result only if it
-    is ``N(.N)*``. This equals ``packaging.version.Version(v).release`` for
-    the strings klt produces, without importing ``packaging`` (not a runtime
-    dependency). The strings klt produces (``_version_scheme.render``) are
-    ``X.Y.Z`` for a clean build on a release tag, ``X.Y.(Z+1).devN+g<sha>``
-    for any commit after the released base's tag (so ``0.7.1.dev212+g<sha>``
-    on a checkout past ``v0.7.0``), ``X.Y.Z.devN+g<sha>`` before the base is
-    tagged, either with ``.dirty`` appended to the local part, and
-    ``X.Y.Z.dev0+unknown`` with no git facts. Their release segments are
-    ``X.Y.Z``, ``X.Y.(Z+1)``, ``X.Y.Z`` and ``X.Y.Z``.
-
-    The gate does not compare this whole segment: it compares
-    :func:`_runner_gate_release`, its first two components.
+    Mirrors the worker shell parser. An empty or malformed prefix has no
+    release segment. The general compatibility check uses its first two
+    components; request features may also use the patch and dev distance.
     """
     head = version.strip().split("+", 1)[0]
     prefix = re.match(r"[0-9.]*", head).group(0)  # always matches
@@ -158,22 +156,11 @@ def _release_segment(version: str) -> str | None:
 
 
 def _runner_gate_release(version: str) -> str | None:
-    """The ``major.minor`` the runner version gate compares, or ``None``
-    (issue #3184).
+    """Major.minor used by the general worker gate; a lone major is unknown.
 
-    The gate compares major.minor only: patch releases, ``.devN`` builds and
-    ``+g<sha>`` local builds count as the same version as their major.minor.
-    So a post-tag git client ``0.7.1.dev212+g<sha>`` matches a ``0.7.0``
-    runner, ``0.7.3`` matches ``0.7.0`` in either direction, and
-    ``0.8.0.devN`` or ``0.8.0`` against any ``0.7.x`` is a mismatch. A
-    version whose release segment (:func:`_release_segment`) has fewer than
-    two components (``7``) has no gate release and counts as unknown.
-
-    This rests on a release discipline: a change that breaks the runner
-    contract ships in a minor release, never a patch, and every minor
-    release is published to PyPI and gets a rebaked runner image.
-    :func:`_runner_preflight_script` repeats the same steps in POSIX shell on
-    the runner, so both sides of the gate use one rule.
+    Patch and development builds of one minor match. Breaking the worker
+    contract requires a minor release and a rebaked runner. The worker
+    preflight repeats this release comparison in shell.
     """
     release = _release_segment(version)
     if release is None:
@@ -182,39 +169,79 @@ def _runner_gate_release(version: str) -> str | None:
     return ".".join(parts[:2]) if len(parts) >= 2 else None
 
 
-#: Request features a client can send that a runner built before the feature
-#: landed cannot parse (issue #3249): ``name -> (first runner release that
-#: supports it, detector)``. The major.minor gate (:func:`_runner_gate_release`)
-#: deliberately lets a post-tag client talk to a patch-level older runner, so
-#: it cannot see these; this registry compares the *full* release segment
-#: instead. ``analysis_steps[]`` (#2482) landed after ``v0.7.0``, so the first
-#: release segment that can carry it is ``0.7.1`` (post-tag builds render as
-#: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
-#: indistinguishable from one built after, so it counts as supporting it.
-#: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
-#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment, as is
-#: ``stimulus`` (the declarative timed stimulus block, #2977), and
-#: ``dual_injection`` (``analysis.passes`` / ``measurements[].tian``,
-#: #3159/#3160/#3161), ``complex_vectors`` (``options.complex_vectors``,
-#: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
-#: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
-#: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
-#: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
-#: its first release segment is ``0.8.1``, as is ``stress`` (#4592/#4858).
+#: The registry maps each feature to its first supporting release segment and
+#: detector (#3249). The major.minor gate allows patch-level differences, so
+#: feature checks compare the full release segment. Step-scoped on_unreached
+#: needs a worker observation for development builds within the same segment.
+#: Following v0.7.0, the first 0.7.1 features were analysis_steps (#2482),
+#: measurements[].transfer (#2923/#2924), stimulus (#2977), dual_injection
+#: (analysis.passes / measurements[].tian, #3159/#3160/#3161), complex_vectors
+#: (#3337), twoport (#3338), twoport_noise (#3339), snm (#3895) and search
+#: (#4121). Eye (#4292) and stress (#4592/#4858) first ship in 0.8.1.
 #: ``search_param`` (``measurements[].search.param``, #5391) landed after
 #: ``v0.9.1``, so its first release segment is ``0.9.2``; an older runner would
-#: reject the key or silently search nothing, hence mandatory.
+#: reject the key or silently search nothing, hence mandatory. ``slope_band``
+#: (``measurements[].slope_band``, #5518) missed the ``v0.9.2`` tag (it was not
+#: in that release), so ``0.9.3`` is its first release segment; an older runner
+#: would reject the unknown form or drop the measurement, hence mandatory.
+#: ``crossings_value_from`` (``measurements[].crossings.value_from``, #6913)
+#: likewise first ships in ``0.9.3``; an older runner would reject the unknown
+#: key (at best) or grade the raw crossing count, hence mandatory.
+#: Scanned mismatch_params (#5486) and exclusive_bounds (#7645) require 0.9.3.
+def _step_measurements(request: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    for step in request.get("analysis_steps") or []:
+        if isinstance(step, dict):
+            yield from (
+                m for m in step.get("measurements") or [] if isinstance(m, dict)
+            )
+
+
+def _uses_extended_eye(request: dict[str, Any]) -> bool:
+    if any(sim_eye.is_eye(m) for m in _step_measurements(request)):
+        return True
+    return any(
+        isinstance(spec, dict)
+        and isinstance(spec.get("eye"), dict)
+        and spec["eye"].get("phase") is not None
+        for spec in request.get("measurements") or []
+    )
+
+
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
 
 
+def _uses_pdk_relative_osdi(request: dict[str, Any]) -> bool:
+    options = request.get("options") or {}
+    entries = options.get("osdi_preload")
+    return (
+        isinstance(entries, list)
+        and options.get("stage_model_inputs") is not True
+        and any(
+            isinstance(entry, dict) and "pdk_relative" in entry for entry in entries
+        )
+    )
+
+
 _step_res_declared = _declared(sim_step_resolution.step_resolution_measurements)
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": ((0, 7, 1), lambda r: r.get("analysis_steps") is not None),
+    "step_on_unreached": (
+        (0, 9, 3),
+        lambda r: any(m.get("on_unreached") == "null" for m in _step_measurements(r)),
+    ),
+    "_regrade": ((0, 9, 3), lambda r: r.get("_regrade") is not None),  # also CLI-probed
     "transfer": ((0, 7, 1), _declared(sim_transfer_meas.transfer_measurements)),
     "snm": ((0, 7, 1), _declared(sim_snm_meas.snm_measurements)),
+    "slope_band": (
+        (0, 9, 3),
+        _declared(sim_slope_band_meas.slope_band_measurements),
+    ),
     "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
+    "eye_step_or_phase": ((0, 9, 3), _uses_extended_eye),
+    "osdi_pdk_relative": ((0, 9, 3), _uses_pdk_relative_osdi),
+    "exclusive_bounds": ((0, 9, 3), sim_supply_relative.request_uses_exclusive_bounds),
     "step_resolution": ((0, 8, 1), _step_res_declared),
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
     "stress": ((0, 8, 1), _declared(sim_stress.stress_measurements)),
@@ -227,6 +254,19 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
             and spec["search"].get("param") is not None
             for spec in request.get("measurements") or []
         ),
+    ),
+    "crossings_value_from": (
+        (0, 9, 3),
+        lambda request: any(
+            isinstance(spec, dict)
+            and isinstance(spec.get("crossings"), dict)
+            and spec["crossings"].get("value_from") is not None
+            for spec in request.get("measurements") or []
+        ),
+    ),
+    "post_commands": (
+        (0, 9, 3),
+        lambda request: sim_post_commands.is_declared(request.get("analysis")),
     ),
     "stimulus": (
         (0, 7, 1),
@@ -250,6 +290,14 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: sim_twoport.has_noise_request(request.get("analysis")),
     ),
+    "mismatch_params": ((0, 9, 3), sim_mismatch_scale.wire_uses_scanned_cards),
+    # No entry for `options.measurement_cases` (issue #5731): the expansion is
+    # resolved client-side -- `sim_measurement_template.expand_request` runs
+    # in `load_request` (which `run_sim` calls, passing the loaded request
+    # through to `_prepare_sim_request`) before any
+    # dispatch -- so the forwarded request
+    # document carries only the expanded plain `measurements[]` (the option
+    # key itself is dropped). An older runner sees an ordinary request.
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
@@ -266,21 +314,38 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``twoport_noise`` is mandatory because an older runner would reject
 #: ``analysis.noise`` or omit ``nf_db`` (#3339). ``corners.params`` is
 #: mandatory because an older runner ignores the axis, running one corner per
-#: process x temperature with ``status: pass`` (#4235). The #5645 five
-#: (``corners.options``, ``options.nodeset``,
+#: process x temperature with ``status: pass`` (#4235). ``post_commands`` is
+#: mandatory because an older runner ignores the field, composing the deck
+#: without ``linearize``/``fft`` and evaluating ``expr`` measurements against
+#: the transient plot with ``status: pass`` (#6080).
+#: Older runners drop mismatch_params and run at nominal sigma even when the
+#: report echoes the requested scale, invalidating the negative control (#5486).
+#: The #5645 five (``corners.options``, ``options.nodeset``,
 #: ``options.initial_conditions``, ``analysis_overrides``,
 #: ``analysis.op_check``) are mandatory because each one's post-run
 #: ``*_unsupported_worker`` echo check already hard-fails the whole request
 #: -- mandatory membership mirrors that severity, moving the identical
 #: refusal from after the grid ran to before anything is launched.
+#: ``lossless supply_v corner_id spelling`` (#5870) hard-fails on a post-run
+#: ``supply_precision_unsupported_worker`` echo. Its unreleased registry version
+#: is ``None``, so only that echo applies until a release pins the pre-launch gate.
+#: ``exclusive_bounds`` stops older workers from passing equality at a strict bound.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
+        "mismatch_params",
+        "_regrade",
         "transfer",
         "snm",
+        "slope_band",
+        "crossings_value_from",
+        "exclusive_bounds",
+        "osdi_pdk_relative",
         "search",
         "search_param",
         "eye",
+        "eye_step_or_phase",
         "step_resolution",
+        "step_on_unreached",
         "settled",
         "stress",
         "stimulus",
@@ -294,6 +359,8 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "options.initial_conditions",
         "analysis_overrides",
         "analysis.op_check",
+        "lossless supply_v corner_id spelling",
+        "post_commands",
     }
 )
 
@@ -404,15 +471,25 @@ def _feature_release_key(name: str) -> int:
 
 
 def _missing_runner_features(
-    features: list[str], runner_version: str | None
+    features: list[str], runner_version: str | None, step_probe: object = None
 ) -> list[str] | None:
-    """The ``features`` a runner of ``runner_version`` predates, or ``None``
-    when its version is unknown (unknown is never "missing")."""
+    """Known missing features, or None when only unverified features remain."""
     release = _release_segment(runner_version) if runner_version else None
     key = _release_key(release) if release else None
     if key is None:
         return None
-    return [name for name in features if key < _feature_release_key(name)]
+    missing = [name for name in features if key < _feature_release_key(name)]
+    # SCM development distance counts commits on a branch, not feature ancestry.
+    if (
+        "step_on_unreached" in features
+        and key == _feature_release_key("step_on_unreached")
+        and release != (runner_version or "").strip().partition("+")[0]
+    ):
+        if step_probe == "unsupported":
+            missing.append("step_on_unreached")
+        elif step_probe != "supported" and not missing:
+            return None
+    return missing
 
 
 #: Filename the worker capture writes under ``$EDA_OUTPUT_DIR`` (issue #2834):

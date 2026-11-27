@@ -4,26 +4,24 @@
 **Background.** Issue #1558 stopped ``klt extract -o netlist.spice`` from
 writing an unbound capacitor's device-class name as a trailing (4th) token
 on its ``C`` card (``C$1 a b 1.19e-13 <class>``), because ngspice's native
-``C``-element parser reads that trailing token as a required capacitor
-``.model`` reference -- and no deck's internal capacitor-class label is a
-real ``.model``/``.subckt`` name, so the old card could never actually be
-simulated. The card is now bare and value-only (``C$1 a b 1.19e-13``), which
-is correct for simulatability, but leaves nothing in the card's own text for
-``kdb.NetlistSpiceReader`` to recover the capacitor's real class from on
-read-back -- it registers the device under KLayout's own generic/anonymous
-capacitor class (name ``"CAP"``) instead. That breaks ``klt lvs``'s
-name-based device-class correspondence whenever the *other* side of the
-compare (a hand-authored/schematic-derived reference, or a layout netlist
-extracted by a pre-#1558 ``klt``) names the capacitor's class explicitly.
+``C``-element parser reads that token as a required capacitor ``.model``
+reference -- and no deck's internal capacitor-class label is a real
+``.model``/``.subckt`` name. The card is now bare and value-only
+(``C$1 a b 1.19e-13``), simulatable, but with nothing in the card's text
+for ``kdb.NetlistSpiceReader`` to recover the class from on read-back --
+it registers the device under KLayout's generic/anonymous capacitor class
+(name ``"CAP"``) instead, breaking ``klt lvs``'s name-based device-class
+correspondence whenever the *other* side of the compare (a hand-authored/
+schematic-derived reference, or a pre-#1558 ``klt``-extracted layout
+netlist) names the class explicitly.
 
 **The fix.** ``kdb.NetlistSpiceWriter`` itself (not ``klt`` code) already
 emits one ``* device instance <name> <transform...> <x,y> [<class>]``
 comment line immediately before *every* device card it writes, trailing
 class name included -- see
 :func:`klayout_tools.pdk_models.create_model_binding_delegate`'s own
-docstring and ``tests/test_extract.py``'s
-``test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card``,
-which locks the exact comment text. This module scans a SPICE netlist's own
+docstring; ``tests/test_extract.py`` locks the exact comment text. This
+module scans a SPICE netlist's own
 text for that comment (:func:`parse_capacitor_class_comments`) and builds a
 ``kdb.NetlistSpiceReaderDelegate``-backed reader
 (:func:`make_capacitor_class_recovery_reader`) that reattaches the recovered
@@ -31,14 +29,13 @@ class to an otherwise-bare ``C`` card's device -- instead of falling back to
 KLayout's generic ``CAP`` class -- while deferring every other device/card to
 KLayout's own default reading behaviour, byte-for-byte unchanged.
 
-A missing or malformed comment (e.g. a hand-edited SPICE file, or a bare
-``C`` card KLayout's own default writer -- not ``klt`` -- produced without a
-preceding device-instance comment at all) degrades gracefully: the device
-simply reads as the generic ``CAP`` class, exactly as it did before this
-module existed. This mechanism never changes what is written to disk -- only
-how ``klt`` itself re-reads a netlist for ``klt lvs``'s pre-extracted
-``layout.netlist`` shape and reference-netlist reads; the bare, value-only
-``C`` card format issue #1558 fixed is completely unaffected.
+A missing or malformed comment (a hand-edited file, or a bare ``C`` card
+KLayout's own writer -- not ``klt`` -- produced with no preceding
+device-instance comment) degrades gracefully: the device reads as the
+generic ``CAP`` class, as it did before this module existed. This never
+changes what is written to disk -- only how ``klt`` re-reads a netlist for
+``klt lvs``'s pre-extracted ``layout.netlist`` and reference reads; the
+#1558 card format is unaffected.
 
 **Custom device classes round-tripped as ``X`` subcircuit calls (issue
 #1942).** A device class ``klt extract`` recognises through a custom
@@ -47,17 +44,15 @@ how ``klt`` itself re-reads a netlist for ``klt lvs``'s pre-extracted
 ``cap_cmomf`` MoM capacitors, issue #1466) -- has no native SPICE element
 letter (it is not MOS/resistor/capacitor/bipolar/diode-shaped), so
 ``kdb.NetlistSpiceWriter`` writes it as an ``X`` subcircuit-call card (e.g.
-``XD_$1 A B cap_cmomi W=1U L=2U`` -- unit-suffixed and ``PARAMS:``-free as of
-issue #2355; the ``PARAMS:`` separator is still accepted on read, since
-KLayout's own reader treats it as an optional no-op token). Read back through
-a plain ``kdb.NetlistSpiceReader()`` (no delegate, or this module's own
-capacitor-only delegate before this extension), an ``X`` card naming an
-undefined subcircuit synthesises an *abstract circuit* whose parameters are
-baked into its own mangled name (``CAP_CMOMI(L=2U,W=1U)``) -- the device is
-then compared by that circuit-name string, never as a device: it is
-invisible in the device census, ``options.parameter_tolerance`` never
-reaches it, and any mismatch degrades to a generic ``circuit could not be
-matched to a counterpart`` triple with no device/parameter/net name.
+``XD_$1 A B cap_cmomi W=1U L=2U`` -- unit-suffixed and ``PARAMS:``-free as
+of issue #2355; the ``PARAMS:`` separator is still accepted on read, since
+KLayout's own reader treats it as an optional no-op token). Read back
+through a plain ``kdb.NetlistSpiceReader()``, an ``X`` card naming an
+undefined subcircuit synthesises an *abstract circuit* whose parameters
+are baked into its mangled name (``CAP_CMOMI(L=2U,W=1U)``) -- compared by
+that name string, never as a device: invisible to the census and
+``options.parameter_tolerance``, and any mismatch degrades to a generic
+``circuit could not be matched`` triple.
 
 :func:`custom_device_classes_for_deck` reads the same
 ``ExtractionDeck.mom_capacitors`` table :func:`klayout_tools.extract
@@ -71,12 +66,12 @@ creates a real :class:`~klayout.db.Device` of a
 ``layout.netlist`` with ``layout.deck`` given, and a ``reference.netlist``
 with ``reference.deck`` given) recognise the identical device class for the
 identical name, and the device participates in ``klt lvs``'s ordinary
-device-level compare (device census, ``parameter_tolerance``, named
-``device.unmatched``/``device.property`` mismatches) exactly like an M/R/C/D
-card already does. Without a resolved deck on that side (``layout.deck``/
-``reference.deck`` omitted), this recognition cannot run -- the ``X`` card
-still degrades to the pre-#1942 abstract-circuit fallback described above;
-see ``docs/cli/lvs.md``'s "Custom device classes" section.
+device-level compare (census, ``parameter_tolerance``, named
+``device.unmatched``/``device.property`` mismatches) like an M/R/C/D card
+already does. Without a resolved deck on that side, this recognition cannot
+run -- the ``X`` card still degrades to the pre-#1942 abstract-circuit
+fallback described above; see ``docs/cli/lvs.md``'s "Custom device
+classes" section.
 
 **Drawn-resistor classes round-tripped as ``X`` subcircuit calls (issue
 #1157).** The same reader-side recovery pattern, one deck table over: a
@@ -86,10 +81,9 @@ see ``docs/cli/lvs.md``'s "Custom device classes" section.
 subcircuit call (``X$1 A B W <class> r=<ohms> L=<um>U W=<um>U``, see
 :func:`klayout_tools.pdk_models.create_model_binding_delegate`'s
 docstring), because ngspice's native ``R`` element accepts exactly two
-nodes and the pre-#1157 3-net ``R`` card was not a simulatable deck at
-all. Read back through a plain ``kdb.NetlistSpiceReader()``, that card
-degrades to exactly the mangled abstract-circuit fallback the #1942
-paragraph describes -- so :func:`resistor_classes_for_deck` reads the
+nodes. Read back through a plain ``kdb.NetlistSpiceReader()``, that card
+degrades to the #1942 mangled abstract-circuit fallback -- so
+:func:`resistor_classes_for_deck` reads the
 deck's own ``ExtractionDeck.resistors`` table and
 :func:`make_capacitor_class_recovery_reader`'s ``resistor_classes``
 parameter recovers the device as a real 3-terminal
@@ -98,15 +92,21 @@ parameter recovers the device as a real 3-terminal
 class name, byte-compatible with what the pre-#1157 ``R`` card's own
 read-back produced. The card's declared ``r=`` parameter keeps the
 extracted (offset-corrected, issues #521/#588) resistance on the
-round-tripped device -- the value rides the card exactly so this recovery
-need not guess it from geometry.
+round-tripped device. Both recovery claims yield to a ``.subckt`` name
+the text itself defines (issue #5665) -- a real circuit, never a device
+model, so the factory's ``defined_subckt_names`` parameter exempts them.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING
+
+from .extract_base import MOM_FEED_TOKENS
+from .extract_passive_regions import mom_capacitor_device_class
+from .netlist_class_registry import shared_device_class as _shared_device_class
+from .netlist_inductor_recovery import recover_inductor_x_card
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -319,61 +319,6 @@ def bulk_resistor_device_class(name: str) -> kdb.DeviceClass:
     return device_class
 
 
-def _shared_device_class(
-    netlist: kdb.Netlist,
-    class_name: str,
-    make_class: Callable[[], kdb.DeviceClass],
-    registry: dict[str, kdb.DeviceClass],
-) -> kdb.DeviceClass:
-    """The one ``kdb.DeviceClass`` object every recovery of ``class_name``
-    in one read must share -- looked up in ``registry`` first, then in
-    ``netlist``'s registered classes by exact name, and only then built via
-    ``make_class`` and registered (issue #1157, PR #2336 CI regression).
-
-    Why not ``Netlist.device_class_by_name``: that lookup misses a class
-    this recovery registered earlier in the same read twice over (both
-    verified against ``klayout==0.30.10``). First, it does not see a class
-    ``netlist.add()``-ed from inside a ``NetlistSpiceReaderDelegate
-    .element()`` callback for the rest of that read, even though
-    ``each_device_class()`` lists it immediately. Second, even after the
-    read completes it normalizes its argument through the netlist's own
-    case convention (SPICE netlists read case-insensitively, so it
-    *uppercases*) but compares against each registered class's stored name
-    verbatim -- a deck's canonical lowercase ``res_high_po`` never matches.
-    Either miss alone sends a naive create-and-``add`` fallback down the
-    per-card path: one fresh class object *per recovered card*.
-    ``Netlist.combine_devices()`` groups devices by ``DeviceClass`` object
-    identity (``tl::id_of`` of the device's class against the class being
-    combined for), so a per-card class object means no two devices ever
-    group and the series fold silently never happens (PR #2336: three
-    sky130 ``res_high_po`` segments survived as three devices on Linux CI).
-    One class object per name -- what this helper guarantees -- is also
-    what makes the fold robust against the klayout-side detail that
-    ``DeviceClass``'s copy constructor copies an indeterminate
-    ``tl::UniqueId`` (verified against ``klayout==0.30.10``: a
-    ``Netlist.dup()`` clone's ``id()`` is 0 on macOS but distinct garbage
-    on Linux), so the fold no longer depends on which platform's heap
-    happens to make the clone ids coincide.
-
-    ``registry`` is the per-reader cache the caller owns (one
-    ``make_capacitor_class_recovery_reader`` build serves exactly one
-    ``Netlist.read`` call -- every caller in this repo does); the exact-name
-    scan covers a class the *default* reader handler already registered
-    under the same verbatim name earlier in the same read.
-    """
-    device_class = registry.get(class_name)
-    if device_class is not None:
-        return device_class
-    for registered in netlist.each_device_class():
-        if registered.name == class_name:
-            registry[class_name] = registered
-            return registered
-    device_class = make_class()
-    netlist.add(device_class)
-    registry[class_name] = device_class
-    return device_class
-
-
 def _recover_bulk_resistor_x_card(
     circuit: kdb.Circuit,
     name: str,
@@ -466,8 +411,6 @@ def _recover_mom_x_card(
     against a freshly extracted side that measured them.
     """
 
-    from .extract import mom_capacitor_device_class
-
     class_name = custom_lookup.get(model.upper())
     if class_name is None:
         return False
@@ -503,7 +446,6 @@ def _recover_mom_x_card(
 def _mom_feed_code(value: object) -> int:
     """The ``MOM_FEED_*`` code for a card's ``FEED=`` value (issue #2445), or
     ``0`` ("unstated") for an absent/unrecognised one."""
-    from .extract import MOM_FEED_TOKENS
 
     token = str(value).strip().lower() if value is not None else ""
     for code, name in MOM_FEED_TOKENS.items():
@@ -545,56 +487,67 @@ def make_capacitor_class_recovery_reader(
     *,
     custom_device_classes: Mapping[str, str] | None = None,
     resistor_classes: Mapping[str, str] | None = None,
+    inductor_classes: Mapping[str, str] | None = None,
+    defined_subckt_names: Collection[str] | None = None,
 ) -> kdb.NetlistSpiceReader:
     """Build a ``kdb.NetlistSpiceReader`` whose delegate reattaches a
     recovered capacitor device-class name (see
     :func:`parse_capacitor_class_comments`) to a bare ``C`` card's device
     instead of KLayout's own generic/anonymous ``CAP`` class -- for exactly
     the ``(circuit_name, device_name)`` pairs ``recovered`` names. Every
-    other device/card (including a bare ``C`` card with no entry in
-    ``recovered`` -- a missing or malformed comment) defers to KLayout's
-    default reading behaviour, unchanged.
+    other device/card (including one with no ``recovered`` entry -- a
+    missing or malformed comment) defers to KLayout's default, unchanged.
 
     The recovered device class is looked up in the reader's own
     one-class-object-per-name registry (:func:`_shared_device_class`) --
     which also catches a class the default reader handler already
     registered under the same verbatim name earlier in the same read -- and
     only created when absent, so multiple devices/circuits sharing the
-    same recovered class name -- and, moreover, a class name genuinely bound
-    elsewhere in the same file via a real ``X``-card model binding --
-    correctly share one class object, exactly the way KLayout's own default
-    reading already shares one class object per class name. Sharing the
-    object (not merely the name) is load-bearing: ``Netlist.combine_devices``
-    groups devices by class *object identity*, so KLayout's
-    ``device_class_by_name`` -- whose case-insensitive lookup silently
-    misses a lowercase stored name -- cannot be used as the shared registry
-    (PR #2336, see :func:`_shared_device_class`).
+    same recovered class name -- and, moreover, one genuinely bound
+    elsewhere in the file via a real ``X``-card model binding -- correctly
+    share one class object, as KLayout's own default reading already does.
+    Sharing the object (not merely the name) is load-bearing:
+    ``Netlist.combine_devices`` groups devices by class *object identity*,
+    so KLayout's ``device_class_by_name`` -- whose case-insensitive lookup
+    silently misses a lowercase stored name -- cannot be the shared
+    registry (PR #2336, see :func:`_shared_device_class`).
 
-    ``custom_device_classes`` (issue #1942, see :func:`custom_device_classes_for_deck`
-    and this module's own docstring) additionally recognises an ``X``
-    subcircuit-call card naming one of its values as a *device* of that
-    class -- built by :func:`klayout_tools.extract.mom_capacitor_device_class`
-    the first time a given class name is seen, then reused by name exactly
-    like the capacitor-recovery path above -- instead of letting
-    ``kdb.NetlistSpiceReader``'s own default handling synthesise a mangled-
-    name abstract circuit for it. ``None``/``{}`` (the default) leaves every
-    ``X`` card to that default handling, byte-for-byte unchanged from before
-    this parameter existed.
+    ``custom_device_classes`` (issue #1942, see
+    :func:`custom_device_classes_for_deck` and the module docstring)
+    additionally recognises an ``X`` card naming one of its values as a
+    *device* of that class -- built by
+    :func:`klayout_tools.extract.mom_capacitor_device_class` on first
+    sight, then reused by name exactly like the capacitor-recovery path
+    above -- instead of the default handling's mangled-name abstract
+    circuit. ``None``/``{}`` (the default) leaves every ``X`` card to that
+    default handling, unchanged from before this parameter existed.
 
     ``resistor_classes`` (issue #1157, see :func:`resistor_classes_for_deck`
-    and this module's own docstring) recognises the same way an ``X`` card
-    naming a *drawn-resistor* class as a real 3-terminal
-    ``DeviceClassResistor`` device (:func:`bulk_resistor_device_class`),
-    carrying the card's declared ``r=``/``L=``/``W=`` parameters onto the
-    device (``L``/``W`` arrive SI-scaled by the reader's own parameter
-    parsing -- ``10U`` is ``1e-5`` -- and are converted to the micrometre
-    domain ``DeviceClassResistor`` reports). ``None``/``{}`` (the default)
-    leaves every such card to the default handling, unchanged.
+    and the module docstring) recognises the same way an ``X`` card naming
+    a *drawn-resistor* class as a real 3-terminal ``DeviceClassResistor``
+    device (:func:`bulk_resistor_device_class`), carrying the card's
+    declared ``r=``/``L=``/``W=`` parameters onto the device (``L``/``W``
+    arrive SI-scaled by the reader's parameter parsing -- ``10U`` is
+    ``1e-5`` -- and are converted to the micrometre domain it reports).
+    ``None``/``{}`` leaves every such card to the default handling, unchanged.
+
+    ``inductor_classes`` (issue #6726, see
+    :func:`~klayout_tools.netlist_inductor_recovery.inductor_classes_for_deck`)
+    recognises an ``X`` card naming a deck spiral-inductor class as a real
+    3-terminal device (``A``/``B``/``SUB``); ``None``/``{}`` leaves it to the
+    default handling, unchanged.
+
+    ``defined_subckt_names`` (issue #5665) is the set of (upper-cased)
+    ``.subckt`` names the text itself defines -- a defined name is a real
+    circuit, never a device model, so neither lookup may claim it (see the
+    module docstring); ``None``/empty claims every name as before, unchanged.
     """
     import klayout.db as kdb
 
     custom_lookup: dict[str, str] = dict(custom_device_classes or {})
     resistor_lookup: dict[str, str] = dict(resistor_classes or {})
+    inductor_lookup: dict[str, str] = dict(inductor_classes or {})
+    defined_subckts = {name.upper() for name in defined_subckt_names or ()}
     # One reader instance serves exactly one `Netlist.read` call (every
     # caller in this repo builds it per call), so a plain per-class-name
     # cache is a complete registry of the classes this delegate created or
@@ -603,7 +556,10 @@ def make_capacitor_class_recovery_reader(
 
     class _CapacitorClassRecoveringDelegate(kdb.NetlistSpiceReaderDelegate):
         def wants_subcircuit(self, name: str) -> bool:
-            if name.upper() in custom_lookup or name.upper() in resistor_lookup:
+            if defined_subckts and name.upper() in defined_subckts:
+                return super().wants_subcircuit(name)
+            claimed = (custom_lookup, resistor_lookup, inductor_lookup)
+            if any(name.upper() in table for table in claimed):
                 return True
             return super().wants_subcircuit(name)
 
@@ -659,6 +615,10 @@ def make_capacitor_class_recovery_reader(
                     return True
                 if _recover_resistor_x_card(
                     circuit, name, model, nets, params, resistor_lookup, class_registry
+                ):
+                    return True
+                if recover_inductor_x_card(
+                    circuit, name, model, nets, inductor_lookup, class_registry
                 ):
                     return True
             return super().element(

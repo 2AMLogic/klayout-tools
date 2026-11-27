@@ -78,3 +78,54 @@ def test_no_value_error_names_the_replacement(expr, named):
 def test_no_value_error_has_no_hint_for_supported_functions():
     message = sim._no_value_message({"name": "m", "expr": "vecmax(v(out))"})
     assert "no such function" not in message
+
+
+@pytest.mark.parametrize(
+    ("expr", "hints"),
+    [
+        ("max(max(a,b),c)-min(min(a,b),c)", set()),
+        ("max(min(x),y)", {"min"}),
+        ("min(a,max(b,c))", set()),
+        ("vmax(x) + ns.max(y)", set()),
+        ("max(s[1,2])", {"max"}),
+        ("min(v(in,out))", {"min"}),
+        ("max()", set()),
+    ],
+)
+def test_extrema_diagnostic_follows_call_arity(expr, hints):
+    message = sim._no_value_message({"name": "m", "expr": expr})
+    actual = {name for name in ("max", "min") if f"{name}() ->" in message}
+    assert actual == hints
+
+
+@real_ngspice
+@pytest.mark.parametrize(
+    ("source", "derived", "expected"),
+    [("expr", "expr", 4.0), ("spice", "spice", 4.0), ("spice", "expr", None)],
+)
+def test_three_scalar_spread(tmp_path, source, derived, expected):
+    path = _request(tmp_path)
+    (tmp_path / "body.spice").write_text("Va va 0 2\nVb vb 0 5\nVc vc 0 1\n")
+    request = json.loads(path.read_text())
+    formula = "max(max(a,b),c)-min(min(a,b),c)"
+    sources = [
+        {
+            "name": name,
+            source: f"v(v{name})[0]"
+            if source == "expr"
+            else f".meas tran {name} FIND v(v{name}) AT=1u",
+        }
+        for name in ("a", "b", "c")
+    ]
+    spread = formula if derived == "expr" else f".meas tran spread param='{formula}'"
+    request["measurements"] = [*sources, {"name": "spread", derived: spread}]
+    request["options"] = {"ngspice_init": ["set numdgt=10"]}
+    path.write_text(json.dumps(request))
+    report = sim.run_sim(str(path), backend="local")
+    rows = report["corners"][0]["measurements"]
+    assert [row["value"] for row in rows] == [2.0, 5.0, 1.0, expected]
+    if expected is None:
+        assert report["status"] == "error"
+        diagnostics = report["corners"][0]["diagnostics"]
+        assert any("produced no value" in item["message"] for item in diagnostics)
+        assert all("max() ->" not in item["message"] for item in diagnostics)

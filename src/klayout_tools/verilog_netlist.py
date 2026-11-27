@@ -99,10 +99,12 @@ simple `assign <net> = <net>;` alias, and a plain concatenation `assign
 a vector alias or tie-off padding), expanded MSB-first into one per-bit
 alias using the module's own `wire`/`input`/`output`/`inout` declared
 widths; the two sides' total widths must agree exactly. A concatenation
-operand must be a plain net, single-index bit-select, nested concatenation
-or replication with a literal positive count (`{N{x}}`, issue #4117);
-literals (`1'b0`) and part-selects (`a[7:4]`) inside a concatenation stay
-rejected. A Verilog escaped identifier
+operand must be a plain net, single-index bit-select, fixed part-select of
+a declared bus in its declared direction (`a[7:4]`, issue #7822), nested
+concatenation or replication with a literal positive count (`{N{x}}`,
+issue #4117); literals (`1'b0`) inside a concatenation stay rejected. A
+part-select operand on the left-hand side of a concatenation `assign`
+stays rejected too. A Verilog escaped identifier
 (`\\name`) is accepted wherever a name is, as the single atomic token
 Verilog's own whitespace-terminated escape rule defines -- so a
 place-and-route-flattened hierarchy path like `\\my_array[0].u_inst/_01_` is
@@ -155,13 +157,10 @@ import re
 from dataclasses import dataclass, field
 from typing import cast
 
+from ._verilog_text import split_top_level as _split_top_level
+from ._verilog_text import strip_verilog_comments as _strip_comments
 from .verilog_module_names import apply_module_names
 from .verilog_pin_bind import _bind_connections
-
-#: Verilog block (`/* ... */`) and line (`// ...`) comments, stripped before
-#: any other parsing. `re.S` so a block comment can span newlines.
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
-_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 
 #: Splits the (comment-stripped) source on `endmodule` -- the one keyword in
 #: this grammar with no trailing `;`, so it cannot be handled by the
@@ -169,14 +168,8 @@ _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 #: (trailing, must be blank) is one `module ... ... endmodule` body.
 _ENDMODULE_RE = re.compile(r"\bendmodule\b")
 
-#: An identifier: a plain Verilog identifier, or an escaped identifier
-#: (`\name`, terminated by whitespace -- Verilog's own escape convention for
-#: identifiers containing characters that would otherwise be delimiters).
-#: The post-backslash character class here is deliberately the *plain*
-#: identifier one: this pattern validates module/port/direction-statement
-#: names, where the escape only ever guards against a keyword collision.
-#: Connection expressions do **not** use it for an escaped name -- see
-#: :data:`_ESCAPED_IDENT_RE`.
+#: Plain identifier spelling, optionally escaped to guard a keyword.
+#: Port declarations also accept full escaped names via _ESCAPED_IDENT_RE.
 _IDENT_RE = re.compile(r"\\?[A-Za-z_$][A-Za-z0-9_$]*")
 
 #: A Verilog escaped identifier in its full generality: a leading backslash
@@ -304,33 +297,6 @@ class _Module:
     aliases: dict[str, str]
 
 
-def _strip_comments(text: str) -> str:
-    text = _BLOCK_COMMENT_RE.sub(" ", text)
-    return _LINE_COMMENT_RE.sub("", text)
-
-
-def _split_top_level(text: str, seps: str = ",") -> list[str]:
-    """Split ``text`` on any character in ``seps`` that is not nested inside
-    ``()``/``[]``/`{}` -- used for both a module's port list and one
-    instance's `.PORT(NET), .PORT(NET)` connection list, neither of which
-    can contain a top-level comma any other way in this grammar."""
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-    for char in text:
-        if char in "([{":
-            depth += 1
-        elif char in ")]}":
-            depth = max(0, depth - 1)
-        if char in seps and depth == 0:
-            parts.append("".join(current))
-            current = []
-            continue
-        current.append(char)
-    parts.append("".join(current))
-    return [p.strip() for p in parts if p.strip()]
-
-
 def _parse_header(statement: str) -> tuple[str, list[str]]:
     """Parse a `module <name> ( <port>, ... )` statement (the `;` already
     stripped by the caller) into `(name, port_list)`."""
@@ -363,15 +329,25 @@ def _parse_header(statement: str) -> tuple[str, list[str]]:
             f"{trailer!r} -- only a plain, non-ANSI port list "
             "('module name(a, b, c);') is supported"
         )
-    for port in port_names:
-        if not _IDENT_RE.fullmatch(port):
-            raise VerilogNetlistError(
-                f"'module {name}' port list entry {port!r} is not a plain "
-                "port name -- ANSI-style inline port declarations "
-                "('module name(input a, output b);') are not supported, "
-                "only 'module name(a, b); input a; output b;'"
-            )
-    return _unescape(name), [_unescape(p) for p in port_names]
+    context = f"'module {name}' port list entry"
+    return _unescape(name), [_port_name(port, context) for port in port_names]
+
+
+def _port_name(raw: str, context: str, *, escape_terminated: bool = True) -> str:
+    if _IDENT_RE.fullmatch(raw) or (
+        escape_terminated and _ESCAPED_IDENT_RE.fullmatch(raw)
+    ):
+        return _unescape(raw)
+    if _DIRECTION_STMT_RE.match(raw):
+        raise VerilogNetlistError(
+            f"{context} {raw!r} uses an ANSI-style inline declaration. "
+            "Declare the direction after the module header."
+        )
+    raise VerilogNetlistError(
+        f"{context} {raw!r} is not a port identifier. Declare a bus with "
+        "a range before its name, or escape a literal port name with a "
+        "leading backslash and terminate it with whitespace."
+    )
 
 
 def _unescape(identifier: str) -> str:
@@ -396,21 +372,13 @@ def _parse_direction_statement(
         raise VerilogNetlistError(
             f"could not parse port direction declaration: {statement.strip()[:80]!r}"
         )
-    names_text = match.group("names")
-    names = [_unescape(n) for n in _split_top_level(names_text)]
+    names = _split_top_level(match.group("names"))
     if not names:
         raise VerilogNetlistError(
             f"port direction declaration names no signal: {statement.strip()[:80]!r}"
         )
-    for name in names:
-        if not _IDENT_RE.fullmatch(name):
-            # Re-validate the already-unescaped name so a stray range/
-            # expression in the name list fails loudly instead of silently
-            # becoming a malformed net name.
-            raise VerilogNetlistError(
-                f"port direction declaration has a non-identifier entry "
-                f"{name!r}: {statement.strip()[:80]!r}"
-            )
+    for raw in names:
+        name = _port_name(raw, "port direction declaration entry")
         if match.group("msb") is not None:
             msb = int(match.group("msb"))
             lsb = int(match.group("lsb"))
@@ -471,7 +439,7 @@ def _parse_escaped_connection_expr(expr: str) -> str:
     )
 
 
-def _parse_connection_expr(expr: str, aliases: dict[str, str] | None = None) -> str:
+def _parse_connection_expr(expr: str) -> str:
     """Resolve one single-net expression to a net name, or raise
     :class:`VerilogNetlistError` for anything this narrow grammar does not
     model (a range slice, concatenation, a non-constant expression).
@@ -544,19 +512,16 @@ def _parse_instance_statement(statement: str) -> _Instance:
                     f"instance '{inst_name}' ('{cell}') connection {item!r} "
                     "is not a well-formed '.PORT(NET)' entry"
                 )
-            port_name = item[1:port_open].strip()
-            if not _IDENT_RE.fullmatch(port_name):
-                raise VerilogNetlistError(
-                    f"instance '{inst_name}' ('{cell}') connection {item!r} "
-                    "names an invalid port"
-                )
+            port_name = _port_name(
+                item[1:port_open].strip(),
+                f"instance '{inst_name}' ('{cell}') pin",
+                escape_terminated=item[port_open - 1].isspace(),
+            )
             expr = item[port_open + 1 : port_close].strip()
             if not expr:
-                # `.PORT()` -- an explicit no-connect. Leave it unrecorded;
-                # `_convert_module` synthesizes a fresh disconnected net for
-                # any declared pin with no recorded connection.
+                # _convert_module supplies a fresh disconnected net for `.PORT()`.
                 continue
-            expressions[_unescape(port_name)] = expr
+            expressions[port_name] = expr
     return _Instance(cell=cell, name=inst_name, expressions=expressions)
 
 
@@ -886,8 +851,7 @@ def _unsupported_assign(statement: str, reason: str = "") -> VerilogNetlistError
 def _concat_operand_bits(
     statement: str, operand: str, net_widths: dict[str, list[str]]
 ) -> list[str]:
-    """Resolve one side of a concatenation assign (the LHS, or one RHS
-    operand) to its MSB-first list of single-bit net names."""
+    """Resolve a plain assign operand into declared MSB-first bits."""
     operand = operand.strip()
     if "{" in operand or "}" in operand:
         raise _unsupported_assign(
@@ -927,31 +891,19 @@ def _concat_operand_bits(
 _REPLICATION_RE = re.compile(r"^(?P<count>\d+)\s*(?P<body>\{.*\})$", re.S)
 
 
-def _closes_at_end(expr: str) -> bool:
-    """True when the ``{`` opening ``expr`` is matched by its final ``}``."""
-    depth = 0
-    for index, char in enumerate(expr):
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return index == len(expr) - 1
-    return False
-
-
 def _flatten_concat(
     statement: str, expr: str, net_widths: dict[str, list[str]]
 ) -> list[str]:
     """Flatten a brace-delimited concatenation ``{ ... }`` to its MSB-first
     single-bit list (issue #4117). An element is a nested concatenation
     (``{a, b}``), a replication with a literal positive integer count
-    (``2{a}`` / ``2{a, b}``), or a plain operand resolved by
+    (``2{a}`` / ``2{a, b}``), a fixed part-select of a declared bus
+    (``a[7:0]``, issue #7822), or a plain operand resolved by
     :func:`_concat_operand_bits`, whose brace rejection backstops malformed
     input."""
-    if not (expr.startswith("{") and _closes_at_end(expr)):
+    elements = _split_concatenation(expr)
+    if elements is None:
         raise _unsupported_assign(statement, f"unbalanced braces in {expr!r}")
-    elements = _split_top_level(expr[1:-1])
     if not elements:
         raise _unsupported_assign(statement, "the concatenation is empty")
     bits: list[str] = []
@@ -965,7 +917,7 @@ def _flatten_concat(
                     f"replication count in {element!r} must be a positive integer",
                 )
             body = replication.group("body")
-            if not _closes_at_end(body):
+            if _split_concatenation(body) is None:
                 raise _unsupported_assign(
                     statement, f"unbalanced braces in {element!r}"
                 )
@@ -973,7 +925,15 @@ def _flatten_concat(
         elif element.startswith("{"):
             bits.extend(_flatten_concat(statement, element, net_widths))
         else:
-            bits.extend(_concat_operand_bits(statement, element, net_widths))
+            stripped = element.strip()
+            try:
+                sliced = _range_slice_bits(stripped, net_widths)
+            except VerilogNetlistError as exc:
+                raise _unsupported_assign(statement, str(exc)) from exc
+            if sliced is not None:
+                bits.extend(sliced)
+            else:
+                bits.extend(_concat_operand_bits(statement, stripped, net_widths))
     return bits
 
 
@@ -991,9 +951,11 @@ def _expand_concat_assign(
     Verilog concatenation is MSB-first: the first operand supplies the
     most-significant bits. Both sides are expanded to MSB-first bit lists
     from the module's own declarations and zipped. Operands may be plain
-    nets, single-index bit-selects, nested concatenations and replications
+    nets, single-index bit-selects, fixed part-selects of a declared bus
+    (``a[7:4]``, in its declared direction -- issue #7822), nested
+    concatenations and replications
     with a literal positive count (``{N{x}}``, issue #4117); literals
-    (``1'b0``) and part-selects (``a[7:4]``) are rejected with the
+    (``1'b0``) are rejected with the
     same "only a plain ... is supported" error as any other unsupported
     ``assign``, as is a width mismatch between the two sides (Verilog would
     silently zero-extend or truncate; a sign-off converter must not).
@@ -1230,7 +1192,7 @@ def parse_subckt_pin_orders(text: str) -> dict[str, list[str]]:
     join-continuations convention :mod:`klayout_tools.netlist_normalize`
     already uses.
     """
-    from ._paths import fold_spice_continuations
+    from ._spice_text import fold_spice_continuations
 
     pin_orders: dict[str, list[str]] = {}
     for line in fold_spice_continuations(text.splitlines()):

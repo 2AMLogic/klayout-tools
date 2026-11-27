@@ -143,7 +143,7 @@ from . import _spice_number as spice_number
 from ._capacitor_mf import capacitor_mf_is_m_alias
 from ._diode_card import convert_diode_card
 from ._jsonnum import is_number
-from ._paths import fold_spice_continuations
+from ._spice_text import fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
     DeviceLookup,
@@ -1235,29 +1235,12 @@ def _convert_capacitor_card(
         exclude += ("mf",)
     _reject_multiplicity(instance, subckt_name, params, exclude=exclude)
 
-    has_length_param = lookup.length_param in params
-    has_width_param = lookup.width_param in params
+    resolved = _resolve_call_geometry(
+        instance, subckt_name, lookup, params, geometry_style=geometry_style
+    )
     extra = ""
-    if has_length_param or has_width_param:
-        l_um = _resolve_geometry_dimension(
-            instance,
-            subckt_name,
-            lookup.length_param,
-            params,
-            has_length_param,
-            lookup.fixed_length_um,
-            geometry_style=geometry_style,
-        )
-        w_um = _resolve_geometry_dimension(
-            instance,
-            subckt_name,
-            lookup.width_param,
-            params,
-            has_width_param,
-            lookup.fixed_width_um,
-            geometry_style=geometry_style,
-        )
-        _require_both(instance, subckt_name, lookup, l_um is not None, w_um is not None)
+    if resolved is not None:
+        l_um, w_um = resolved
         area_um2 = l_um * w_um
         perimeter_um = 2.0 * (l_um + w_um)
         extra = f" A={_format_um2(area_um2)} P={_format_um(perimeter_um)}"
@@ -1359,15 +1342,13 @@ def _resolve_call_geometry(
 ) -> tuple[float, float] | None:
     """The call's resolved ``(L, W)`` in micrometres, or ``None`` when the
     call supplies neither dimension (the subcircuit's own default geometry
-    then applies). Used by the deck-derived resistor value (issue
-    #2905)."""
+    then applies)."""
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
     if not (has_length_param or has_width_param):
         return None
     l_um = _resolve_geometry_dimension(
         instance,
-        subckt_name,
         lookup.length_param,
         params,
         has_length_param,
@@ -1376,7 +1357,6 @@ def _resolve_call_geometry(
     )
     w_um = _resolve_geometry_dimension(
         instance,
-        subckt_name,
         lookup.width_param,
         params,
         has_width_param,
@@ -1390,7 +1370,6 @@ def _resolve_call_geometry(
 
 def _resolve_geometry_dimension(
     instance: str,
-    subckt_name: str,
     param: str | None,
     params: dict[str, str],
     has_param: bool,
@@ -2239,7 +2218,6 @@ def normalize_reference_netlist(
 
 
 from .netlist_normalize_scan import (  # noqa: E402,F401  (re-exported)
-    _INCLUDE_LINE_RE,
     defined_subckt_names,
     detect_subckt_call_devices,
     quote_spice_includes,

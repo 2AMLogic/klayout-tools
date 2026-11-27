@@ -43,9 +43,11 @@ from .sim_batch import (
 )
 from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
+from .sim_batch_receipt import COLLECTED_NETLIST_MISMATCH
+from .sim_batch_worker_engine_build import portable_batch_report
 from .sim_set_runtime import (
-    MANIFEST_SCHEMA_VERSION,  # noqa: F401  (re-exported)
     NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
+    REPORT_FILENAME,
     SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
     _Manifest,
     _MemberScheduler,
@@ -57,9 +59,6 @@ SET_SCHEMA_VERSION = 1
 
 #: Default bound on requests in flight at once (``--max-in-flight``).
 DEFAULT_MAX_IN_FLIGHT = 4
-
-#: Name of the per-request report written into each request's own directory.
-REPORT_FILENAME = "report.json"
 
 #: Name of the incrementally-updated request -> directory/job map (issue #3520).
 MANIFEST_FILENAME = "set-manifest.json"
@@ -104,11 +103,30 @@ def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
             else os.path.join(os.path.dirname(os.path.abspath(path)), ".klt", "sim")
         )
         candidate = os.path.join(base, stem)
-        if os.path.abspath(candidate) in seen:
-            candidate = os.path.join(base, f"{stem}-{index}")
-        seen.add(os.path.abspath(candidate))
+        suffix = index
+        while os.path.realpath(candidate) in seen:
+            candidate = os.path.join(base, f"{stem}-{suffix}")
+            suffix += 1
+        seen.add(os.path.realpath(candidate))
         dirs.append(candidate)
     return dirs
+
+
+def _check_aggregate_destination(aggregate_path: str | None, dirs: list[str]) -> None:
+    if not aggregate_path:
+        return
+    aggregate = os.path.realpath(aggregate_path)
+    for directory in dirs:
+        member = os.path.join(directory, REPORT_FILENAME)
+        if aggregate == os.path.realpath(member) or (
+            os.path.exists(aggregate)
+            and os.path.exists(member)
+            and os.path.samefile(aggregate, member)
+        ):
+            raise SimError(
+                f"--report-out '{aggregate_path}' would overwrite "
+                f"member report '{member}'"
+            )
 
 
 def _job_ids(report: dict[str, Any]) -> list[str]:
@@ -152,6 +170,7 @@ def _run_one(
     sleep: Callable[[float], None] = time.sleep,
     collect_partial: bool = False,
     tracker: _ShardTracker | None = None,
+    portable_base: str | None = None,
 ) -> dict[str, Any]:
     tracker = tracker if tracker is not None else _ShardTracker()
     shard_map = os.path.join(directory, BATCH_SHARDS_FILENAME)
@@ -198,6 +217,7 @@ def _run_one(
             if code in CAPACITY_CODES and attempt <= capacity_retries:
                 sleep(CAPACITY_RETRY_BACKOFF_S * 2 ** (attempt - 1))
                 continue
+            entry["exit_code"] = 4 if code == COLLECTED_NETLIST_MISMATCH else 1
             entry["error"] = {"message": str(exc), "code": code}
         except Exception as exc:  # one request must never sink its siblings
             entry["error"] = {"message": f"{type(exc).__name__}: {exc}", "code": None}
@@ -209,7 +229,10 @@ def _run_one(
     os.makedirs(directory, exist_ok=True)
     report_path = os.path.join(directory, REPORT_FILENAME)
     with open(report_path, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2)
+        payload = portable_batch_report(
+            report, enabled=portable_base is not None, backend="batch"
+        )
+        json.dump(payload, handle, indent=2)
         handle.write("\n")
     job_ids = _job_ids(report)
     entry.update(
@@ -217,7 +240,9 @@ def _run_one(
         exit_code=_entry_exit_code(report["status"]),
         job_id=job_ids[0] if len(job_ids) == 1 else None,
         job_ids=job_ids,
-        report=report_path,
+        report=os.path.relpath(report_path, portable_base)
+        if portable_base is not None
+        else report_path,
         shards=tracker.summary(report),
     )
     if _client_interrupted(report):
@@ -282,7 +307,6 @@ def _launch_budget(capacity_wait_s: Any) -> float | None:
 
 def _execute_members(
     paths: list[str],
-    dirs: list[str],
     manifest: _Manifest,
     workers: int,
     launch_budget: float | None,
@@ -296,7 +320,16 @@ def _execute_members(
     cannot hold the process open) while a replacement worker keeps the
     concurrency; an interrupt (``KeyboardInterrupt``/``SystemExit``) turns every
     unfinished member into a ``set_interrupted`` entry instead of exiting
-    silently."""
+    silently.
+
+    Issue #5849: the replacement is admitted only while no abandoned member
+    still holds a ``pending`` job -- the set then holds no more fleet capacity
+    than it has member threads. A job that never launches cannot starve the
+    set: past one more ``launch_budget`` the unstarted members become
+    ``not_launched`` entries instead of being submitted -- but, once no live
+    member remains to run them (#6278); while another member is still running,
+    its worker keeps draining the unstarted members at the reduced
+    concurrency."""
     return _MemberScheduler(
         paths, manifest, launch_budget, SET_POLL_INTERVAL_S, run_member
     ).run(workers)
@@ -313,6 +346,8 @@ def run_sim_set(
     preflight: Callable[..., Any] | None = None,
     dry_run: bool = False,
     collect_partial: bool = False,
+    portable_paths: bool = False,
+    aggregate_path: str | None = None,
     **run_kwargs: Any,
 ) -> dict[str, Any]:
     """Run ``request_paths`` with at most ``max_in_flight`` in flight; return
@@ -350,6 +385,10 @@ def run_sim_set(
     if isinstance(capacity_retries, bool) or capacity_retries < 0:
         raise SimError(f"--capacity-retries must be >= 0 (got {capacity_retries!r})")
 
+    dirs = _request_dirs(request_paths, outdir)
+    protected_aggregate = aggregate_path if portable_paths else None
+    _check_aggregate_destination(protected_aggregate, dirs)
+
     if preflight is None and run is run_sim:
         preflight = preflight_batch_request
     if preflight is not None:
@@ -380,8 +419,12 @@ def run_sim_set(
             ],
         }
 
-    dirs = _request_dirs(request_paths, outdir)
     manifest_dir = outdir if outdir is not None else os.path.dirname(dirs[0])
+    reference_dir = (
+        os.path.dirname(os.path.abspath(aggregate_path))
+        if aggregate_path
+        else manifest_dir
+    )
     manifest = _Manifest(
         os.path.join(manifest_dir, MANIFEST_FILENAME), request_paths, dirs
     )
@@ -389,7 +432,6 @@ def run_sim_set(
     launch_budget = _launch_budget(run_kwargs.get("capacity_wait_s"))
     requests = _execute_members(
         request_paths,
-        dirs,
         manifest,
         workers,
         launch_budget,
@@ -404,9 +446,12 @@ def run_sim_set(
             sleep,
             collect_partial,
             tracker,
+            reference_dir if portable_paths else None,
         ),
     )
 
+    # A previously absent file can now resolve through a filesystem case alias.
+    _check_aggregate_destination(protected_aggregate, dirs)
     errored = sum(1 for r in requests if r["status"] == "error")
     failed = sum(1 for r in requests if r["status"] == "fail")
     worst = max((r["exit_code"] for r in requests), default=0)

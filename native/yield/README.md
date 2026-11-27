@@ -4,11 +4,10 @@ The Rust statistics core behind `klt yield` / `klt yield-campaign` / `klt
 yield-sensitivity` (issue #816, Phase 1a of the statistical/yield epic
 #710).
 
-This repo's third Rust component (after `native/mom/`, issue #718, and
-`native/congestion/`, issue #785), following the same standalone
+Like `native/mom/`, this crate follows the standalone
 `maturin`-built `pyo3` extension convention — its own `Cargo.toml` +
 `pyproject.toml`, reached from the top-level `pyproject.toml` via a PEP 735
-dependency group. The split with Python mirrors `mom.py`/`congestion.py`:
+dependency group. The split with Python mirrors `mom.py`:
 reading a `klt sim` Monte Carlo report (or a plain sample-set document) and
 turning it into this crate's request shape is the Python layer's job
 (`src/klayout_tools/yield_analysis.py`); everything statistical lives here.

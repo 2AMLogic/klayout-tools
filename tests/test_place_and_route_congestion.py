@@ -8,10 +8,11 @@ overflowing table was not captured. No live overflowing run is claimed.
 """
 
 import json
+import os
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import place_and_route
 from klayout_tools import place_and_route_reports as reports
 from test_place_and_route import (
@@ -174,30 +175,50 @@ def test_build_congestion_names_every_null_field():
     assert nulls == set(block["null_reasons"])
 
 
-def _wrap_route_stdout(monkeypatch, extra_stdout: str, extra_metrics: dict) -> None:
+def _wrap_route_stdout(
+    monkeypatch,
+    extra_stdout: str,
+    extra_metrics: dict,
+    congestion_report: str | None = None,
+) -> None:
     base_run = place_and_route.subprocess.run
 
     def run(cmd, **kwargs):
         completed = base_run(cmd, **kwargs)
-        if len(cmd) > 5 and cmd[5].endswith("_route.tcl"):
-            with open(cmd[4], encoding="utf-8") as handle:
+        if len(cmd) > 5 and cmd[-1].endswith("_route.tcl"):
+            with open(cmd[-2], encoding="utf-8") as handle:
                 metrics = json.load(handle)
             metrics.update(extra_metrics)
-            with open(cmd[4], "w", encoding="utf-8") as handle:
+            with open(cmd[-2], "w", encoding="utf-8") as handle:
                 json.dump(metrics, handle)
+            if congestion_report is not None:
+                # Where the route stage's own script makes `global_route
+                # -congestion_report_file` land (same naming convention as
+                # `congestion_report_path`, hdl_toplevel `gcd`).
+                report = os.path.join(
+                    os.path.dirname(cmd[-1]), "gcd_route_congestion.rpt"
+                )
+                with open(report, "w", encoding="utf-8") as handle:
+                    handle.write(congestion_report)
             return fake_completed(
                 returncode=0, stdout=completed.stdout + "\n" + extra_stdout
             )
-        if len(cmd) > 5 and cmd[5].endswith("_place.tcl"):
+        if len(cmd) > 5 and cmd[-1].endswith("_place.tcl"):
             return fake_completed(
                 returncode=0, stdout=completed.stdout + "\n" + _GPL_PLACE
             )
         return completed
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", run)
+    patch_openroad_run(monkeypatch, run)
 
 
-def _route_with(tmp_path, monkeypatch, table: str, unrouted: int) -> dict:
+def _route_with(
+    tmp_path,
+    monkeypatch,
+    table: str,
+    unrouted: int,
+    congestion_report: str | None = None,
+) -> dict:
     request = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)
     _stub_merge_def_to_gds(monkeypatch)
@@ -208,7 +229,9 @@ def _route_with(tmp_path, monkeypatch, table: str, unrouted: int) -> dict:
             reports.ROUTING_COMPLETENESS_END,
         ]
     )
-    _wrap_route_stdout(monkeypatch, table + completeness, _ITER_METRICS)
+    _wrap_route_stdout(
+        monkeypatch, table + completeness, _ITER_METRICS, congestion_report
+    )
     return place_and_route.run_place_and_route(request)
 
 
@@ -233,6 +256,99 @@ def test_dense_run_reports_higher_overflow_than_sparse(tmp_path, monkeypatch):
     dense_gr = dense["congestion"]["global_route"]
     assert dense_gr["total_overflow"] > sparse_gr["total_overflow"]
     assert dense["congestion"]["completeness"]["unrouted_net_count"] == 2
+
+
+# Two records of a `global_route -congestion_report_file` report in the
+# verbatim format of the checked-in capture: a zero-capacity tile and a
+# capacity-4 one, no macros in this run so both attribute to `elsewhere`.
+_ROUTE_CONGESTION_REPORT = (
+    "violation type: Horizontal congestion\n"
+    "    srcs: net:_a_ net:_b_\n"
+    "    comment: capacity:0 usage:3 congestion:3\n"
+    "    bbox = (10.0000, 10.0000) - (20.0000, 20.0000) on Layer -\n"
+    "violation type: Vertical congestion\n"
+    "    srcs: net:_a_ net:_c_\n"
+    "    comment: capacity:4 usage:9 congestion:5\n"
+    "    bbox = (195.0000, 195.0000) - (205.0000, 205.0000) on Layer -\n"
+)
+
+
+def test_route_response_carries_overflow_by_region_alongside_regions(
+    tmp_path, monkeypatch
+):
+    """Issue #6949: the route-stage congestion block and its top-level copy
+    both carry the per-region aggregates, computed over the full report the
+    worst-20 list samples."""
+    result = _route_with(
+        tmp_path,
+        monkeypatch,
+        _GRT_DENSE,
+        unrouted=0,
+        congestion_report=_ROUTE_CONGESTION_REPORT,
+    )
+    congestion = result["congestion"]
+    assert congestion == result["stages"][-1]["congestion"]
+    gr = congestion["global_route"]
+    assert [r["overflow"] for r in gr["overflow_regions"]] == [5, 3]
+    assert gr["overflow_by_region"] == {
+        "horizontal": {
+            "inside_footprint": {
+                "overflow_sum": 0,
+                "violation_tile_count": 0,
+                "zero_capacity_tile_count": 0,
+                "zero_capacity_overflow_sum": 0,
+            },
+            "keepout_band": {
+                "overflow_sum": 0,
+                "violation_tile_count": 0,
+                "zero_capacity_tile_count": 0,
+                "zero_capacity_overflow_sum": 0,
+            },
+            "elsewhere": {
+                "overflow_sum": 3,
+                "violation_tile_count": 1,
+                "zero_capacity_tile_count": 1,
+                "zero_capacity_overflow_sum": 3,
+            },
+        },
+        "vertical": {
+            "inside_footprint": {
+                "overflow_sum": 0,
+                "violation_tile_count": 0,
+                "zero_capacity_tile_count": 0,
+                "zero_capacity_overflow_sum": 0,
+            },
+            "keepout_band": {
+                "overflow_sum": 0,
+                "violation_tile_count": 0,
+                "zero_capacity_tile_count": 0,
+                "zero_capacity_overflow_sum": 0,
+            },
+            "elsewhere": {
+                "overflow_sum": 5,
+                "violation_tile_count": 1,
+                "zero_capacity_tile_count": 0,
+                "zero_capacity_overflow_sum": 0,
+            },
+        },
+    }
+    assert "global_route.overflow_regions" not in congestion["null_reasons"]
+    assert "global_route.overflow_by_region" not in congestion["null_reasons"]
+
+
+@pytest.mark.parametrize("report", [None, ""], ids=["missing", "empty"])
+def test_route_without_congestion_report_nulls_both_overflow_fields(
+    tmp_path, monkeypatch, report
+):
+    result = _route_with(
+        tmp_path, monkeypatch, _GRT_SPARSE, unrouted=0, congestion_report=report
+    )
+    congestion = result["congestion"]
+    gr = congestion["global_route"]
+    assert gr["overflow_regions"] is None
+    assert gr["overflow_by_region"] is None
+    assert "global_route.overflow_regions" in congestion["null_reasons"]
+    assert "global_route.overflow_by_region" in congestion["null_reasons"]
 
 
 def test_route_script_runs_verbose_global_route_and_completeness_check(

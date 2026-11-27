@@ -1,110 +1,95 @@
-"""``--attest 1 --check`` names a pre-v0.9.0 envelope ``schema_mismatch`` (#5730).
-
-The legacy envelope is minted by rewriting a current one's
-``provenance.input`` to the singular shape, so no old ``klt`` is needed."""
+"""Compatibility controls for the pre-0.9 item-1 input binding (#5730)."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import pytest
+
+from klayout_tools.cli import main
 from klayout_tools.signoff_attest import build_attestation
-from klayout_tools.signoff_attest_input import legacy_binding_detail
 from test_signoff import _attest_cli, _attest_repo, _write_inventory
+from test_signoff_attest_multi_stream import _two
+
+_BINDING_FIELDS = {
+    "provenance.input.path",
+    "provenance.input.paths",
+    "provenance.input.content_hash",
+}
 
 
-def _legacy(tmp_path, klt_version="0.8.0"):
-    repo = _attest_repo(tmp_path)
+def _legacy_item1(repo, version="0.8.0"):
     inventory = _write_inventory(repo, 1)
     envelope = build_attestation(1, inventory)
-    binding = envelope["provenance"]["input"]
-    inv_rel = "attest/item1.json"
-    envelope["provenance"]["input"] = {
-        "path": {"path": inv_rel, "scope": "repo"},
-        "content_hash": "sha256:" + "0" * 64,
-    }
-    assert "paths" in binding
-    if klt_version is None:
-        envelope["provenance"].pop("klt_version", None)
-    else:
-        envelope["provenance"]["klt_version"] = klt_version
-    committed = repo / "evidence" / "legacy.json"
-    committed.write_text(json.dumps(envelope, indent=2) + "\n")
-    return repo, inventory, committed
-
-
-def _check(inventory, committed, capsys, *extra):
-    code = _attest_cli(
-        1, inventory, "--check", str(committed), "--format", "json", *extra
+    provenance = envelope["provenance"]
+    # 0.8.x bound just the inventory, whose path and raw digest are both
+    # present in the current input set.
+    inventory_path = Path(inventory).relative_to(repo).as_posix()
+    provenance["input"] = next(
+        member
+        for member in provenance["input"]["paths"]
+        if member["path"]["path"] == inventory_path
     )
-    return code, json.loads(capsys.readouterr().out)
+    if version is None:
+        provenance.pop("klt_version")
+    else:
+        provenance["klt_version"] = version
+    committed = repo / "evidence" / "item1.json"
+    committed.write_text(json.dumps(envelope))
+    return inventory, committed
 
 
-def test_legacy_shape_is_schema_mismatch_and_still_fails(tmp_path, capsys):
-    _repo, inventory, committed = _legacy(tmp_path)
-    code, out = _check(inventory, committed, capsys)
-    assert code == 3
-    assert out["status"] == "schema_mismatch"
-    assert out["legacy_binding"] is True
-    detail = out["legacy_binding_detail"]
-    assert detail["attested_klt_version"] == "0.8.0"
-    assert detail["checking_klt_version"]
-    assert "v0.9.0" in detail["boundary"] and "#4764" in detail["boundary"]
-    assert "regenerate" in detail["remedy"] and "pin" in detail["remedy"]
-    assert out["fresh_status"] == "pass"
+@pytest.mark.parametrize("version", ["0.8.0", None])
+def test_legacy_item1_binding_retains_drift_and_exit_code(tmp_path, capsys, version):
+    inventory, committed = _legacy_item1(_attest_repo(tmp_path), version)
+    assert _attest_cli(1, inventory, "--check", str(committed), "--format", "json") == 3
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "drifted"
+    assert result["fresh_status"] == "pass"
+    assert {entry["field"] for entry in result["drift"]} == _BINDING_FIELDS
 
 
-def test_text_prints_remedy_before_drift_block(tmp_path, capsys):
-    _repo, inventory, committed = _legacy(tmp_path)
-    assert _attest_cli(1, inventory, "--check", str(committed)) == 3
-    text = capsys.readouterr().out
-    assert "status: schema_mismatch" in text
-    assert text.index("legacy_binding:") < text.index("drift:")
+def test_legacy_item1_also_reports_changed_source_bytes(tmp_path, capsys):
+    repo = _attest_repo(tmp_path)
+    inventory, committed = _legacy_item1(repo)
+    (repo / "design/ota.sch").write_text("edited after attestation\n")
+
+    assert _attest_cli(1, inventory, "--check", str(committed), "--format", "json") == 3
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "drifted"
+    assert _BINDING_FIELDS <= {entry["field"] for entry in result["drift"]}
+    assert any(
+        entry.get("check", {}).get("path") == "design/ota.sch"
+        and entry["field"].endswith(".content_hash")
+        and entry["committed"] != entry["fresh"]
+        for entry in result["drift"]
+    )
 
 
-def test_missing_attesting_version_still_renders(tmp_path, capsys):
-    _repo, inventory, committed = _legacy(tmp_path, klt_version=None)
-    code, out = _check(inventory, committed, capsys)
-    assert code == 3
-    assert out["legacy_binding_detail"]["attested_klt_version"] is None
-    assert "unknown" in out["legacy_binding_detail"]["remedy"]
+def test_second_item2_stream_is_input_drift(tmp_path, capsys):
+    repo, first, second = _two(tmp_path)
+    committed = str(repo / "evidence" / "item2.json")
+    command = ["signoff", "--attest", "2", "--input", first, "--format", "json"]
+    assert main([*command, "-o", committed]) == 0
+    capsys.readouterr()
+
+    assert main([*command, "--input", second, "--check", committed]) == 3
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "drifted"
+    assert "shape_mismatch" not in result
+    assert _BINDING_FIELDS <= {entry["field"] for entry in result["drift"]}
 
 
-def test_cooccurring_real_drift_stays_drifted(tmp_path, capsys):
-    repo, inventory, committed = _legacy(tmp_path)
-    envelope = json.loads(committed.read_text())
-    envelope["attestation"]["checks"][0]["passed"] = not envelope["attestation"][
-        "checks"
-    ][0]["passed"]
-    committed.write_text(json.dumps(envelope, indent=2) + "\n")
-    code, out = _check(inventory, committed, capsys)
-    assert code == 3
-    assert out["status"] == "drifted"
-    assert "legacy_binding" not in out
-
-
-def test_current_shape_unchanged_matches(tmp_path, capsys):
+def test_current_item1_binding_matches(tmp_path, capsys):
     repo = _attest_repo(tmp_path)
     inventory = _write_inventory(repo, 1)
-    output = repo / "evidence" / "item1.json"
-    assert _attest_cli(1, inventory, "-o", str(output)) == 0
+    committed = str(repo / "evidence" / "item1.json")
+    assert _attest_cli(1, inventory, "-o", committed) == 0
     capsys.readouterr()
-    code, out = _check(inventory, output, capsys)
-    assert code == 0
-    assert out["status"] == "match" and out["fresh_status"] == "pass"
-    assert "legacy_binding" not in out
 
-
-def test_item2_path_to_paths_is_never_legacy():
-    drift = [{"field": "provenance.input.path"}, {"field": "provenance.input.paths"}]
-    committed = {
-        "t1_item": 2,
-        "provenance": {"input": {"path": {}, "content_hash": "x"}},
-    }
-    assert legacy_binding_detail(committed, {}, drift) is None
-
-
-def test_no_path_nor_paths_or_new_shape_does_not_fire():
-    drift = [{"field": "provenance.input.content_hash"}]
-    for binding in ({"content_hash": "x"}, {"paths": [], "content_hash": "x"}):
-        committed = {"t1_item": 1, "provenance": {"input": binding}}
-        assert legacy_binding_detail(committed, {}, drift) is None
+    assert _attest_cli(1, inventory, "--check", committed, "--format", "json") == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert "shape_mismatch" not in result

@@ -1,0 +1,430 @@
+"""``klt sim --check`` netlist-evidence re-check (issue #5821)."""
+
+from __future__ import annotations
+
+import errno
+import hashlib
+import json
+import os
+
+import pytest
+
+from klayout_tools.cli import main
+from klayout_tools.sim_errors import SimError
+from klayout_tools.sim_report_check import check_sim_report
+from klayout_tools.sim_staging import (
+    _normalized_netlist_text,
+    netlist_closure,
+    netlist_identity,
+)
+
+
+def _raw(path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _identity(paths) -> str:
+    digest = hashlib.sha256()
+    for p in paths:
+        digest.update(_normalized_netlist_text(p.read_text()).encode())
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+@pytest.fixture
+def tree(tmp_path):
+    (tmp_path / ".git").mkdir()
+    top = tmp_path / "top.cir"
+    inc = tmp_path / "models_a.spice"
+    inc.write_text(".model d d\n")
+    top.write_text(".include models_a.spice\nr1 n1 0 1k\n")
+    return tmp_path, top, inc
+
+
+def _write(tmp_path, top, inc, **env_over):
+    paths = [top, inc]
+    env = {
+        "netlist_closure": [
+            {"path": p.name, "scope": "repo", "sha256": _raw(p)} for p in paths
+        ],
+        "netlist_identity": _identity(paths),
+    }
+    env.update(env_over)
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"environment": env}))
+    return str(report)
+
+
+def _edit_report(report, mutate):
+    data = json.loads(open(report).read())
+    mutate(data["environment"])
+    open(report, "w").write(json.dumps(data))
+
+
+def test_clean_tree_matches(tree):
+    tmp, top, inc = tree
+    result = check_sim_report(_write(tmp, top, inc))
+    assert result["status"] == "match"
+    assert result["diagnosis"] == "intact"
+
+
+def test_comment_edit_is_cosmetic(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    inc.write_text("* note\n.model d d\n")
+    result = check_sim_report(report)
+    assert result["status"] == "drifted"
+    assert result["diagnosis"] == "cosmetic"
+    ident = [c for c in result["checks"] if c["field"].endswith("netlist_identity")]
+    assert ident[0]["match"]
+
+
+def test_value_edit_is_electrical(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    top.write_text(".include models_a.spice\nr1 n1 0 2k\n")
+    assert check_sim_report(report)["diagnosis"] == "electrical"
+
+
+def test_edit_inside_include_is_electrical(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    inc.write_text(".model d d is=1\n")
+    result = check_sim_report(report)
+    assert result["status"] == "drifted"
+    assert result["diagnosis"] == "electrical"
+
+
+def test_repointed_include_caught_by_raw_hash(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    top.write_text(".include models_b.spice\nr1 n1 0 1k\n")
+    result = check_sim_report(report)
+    assert result["status"] == "drifted"
+    assert not result["checks"][0]["match"]
+
+
+def test_normalization_change_named(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc, netlist_identity="sha256:" + "0" * 64)
+    result = check_sim_report(report)
+    assert result["status"] == "drifted"
+    assert result["diagnosis"] == "normalization_changed"
+    assert "normalization" in result["note"]
+
+
+@pytest.mark.parametrize("sibling_changed", [False, True])
+def test_identity_input_disappears_after_raw_hash(tree, monkeypatch, sibling_changed):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    if sibling_changed:
+        top.write_text(".include models_a.spice\nr1 n1 0 2k\n")
+
+    read_text = sim_report_check._read_text
+
+    def read_after_removal(path):
+        if path == str(inc):
+            inc.unlink()
+        return read_text(path)
+
+    monkeypatch.setattr(sim_report_check, "_read_text", read_after_removal)
+    result = check_sim_report(report, root=str(tmp))
+    assert (result["status"], result["diagnosis"]) == ("drifted", "indeterminate")
+    sibling, removed, identity = result["checks"]
+    assert sibling["match"] is (not sibling_changed)
+    assert sibling["actual"] == _raw(top)
+    assert removed["match"] and removed["actual"] == removed["expected"]
+    assert identity["actual"] is None
+    assert str(inc) in identity["error"]
+    assert "cannot read netlist file" in identity["error"]
+    assert "note" not in result
+
+
+def test_identity_read_error_keeps_recorded_identity_error(tree, monkeypatch):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc, netlist_identity=None, netlist_identity_error="boom")
+
+    read_text = sim_report_check._read_text
+
+    def read_after_removal(path):
+        if path == str(inc):
+            inc.unlink()
+        return read_text(path)
+
+    monkeypatch.setattr(sim_report_check, "_read_text", read_after_removal)
+    result = check_sim_report(report, root=str(tmp))
+    identity = result["checks"][-1]
+    assert identity["actual"] is None
+    assert identity["error"].startswith("boom")
+    assert "cannot read netlist file" in identity["error"]
+    assert result["diagnosis"] == "indeterminate"
+
+
+def test_cli_check_identity_read_failure_text_and_recovery(tree, capsys, monkeypatch):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    read_text = sim_report_check._read_text
+    armed = True
+
+    def read_after_removal(path):
+        if armed and path == str(inc):
+            inc.unlink()
+        return read_text(path)
+
+    monkeypatch.setattr(sim_report_check, "_read_text", read_after_removal)
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert "diagnosis: indeterminate" in out
+    assert "cannot read netlist file" in out
+    assert str(inc) in out
+    assert "normalization" not in out
+
+    armed = False
+    inc.write_text(".model d d\n")
+    assert main(["sim", "--check", report, "--format", "json"]) == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert (envelope["status"], envelope["diagnosis"]) == ("match", "intact")
+
+
+def test_identity_error_never_matches(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc, netlist_identity=None, netlist_identity_error="boom")
+    result = check_sim_report(report)
+    assert result["status"] == "drifted"
+    assert result["checks"][-1]["error"] == "boom"
+
+
+def test_closure_error_drifts(tmp_path):
+    rep = tmp_path / "r.json"
+    rep.write_text(json.dumps({"environment": {"netlist_closure_error": "bad"}}))
+    result = check_sim_report(str(rep))
+    assert result["status"] == "drifted"
+    assert result["checks"][0]["error"] == "bad"
+
+
+def test_no_closure_at_all_never_matches(tmp_path):
+    rep = tmp_path / "r.json"
+    rep.write_text(json.dumps({}))
+    assert check_sim_report(str(rep))["status"] == "drifted"
+
+
+def test_host_resolved_entry_skipped(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    _edit_report(
+        report,
+        lambda env: env["netlist_closure"].append(
+            {"target": "$PDK/x.lib", "sha256": None, "unhashed_reason": "env_var"}
+        ),
+    )
+    result = check_sim_report(report)
+    assert result["status"] == "drifted"
+    assert "env_var" in result["skipped"][0]["reason"]
+
+
+def test_external_scope_skipped(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+
+    def mutate(env):
+        env["netlist_closure"][1] = {
+            "path": None,
+            "scope": "external",
+            "sha256": "ab" * 32,
+        }
+
+    _edit_report(report, mutate)
+    result = check_sim_report(report)
+    assert result["status"] == "drifted"
+    assert result["skipped"]
+
+
+def test_missing_file_drifts(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    os.remove(inc)
+    result = check_sim_report(report)
+    assert result["status"] == "drifted"
+    assert "not found" in result["checks"][1]["error"]
+
+
+def test_unusable_recorded_path_keeps_missing_file_diagnostic(tree):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    _edit_report(report, lambda env: env["netlist_closure"][1].update(path="bad\0name"))
+    result = check_sim_report(report, root=str(tmp))
+    assert result["diagnosis"] == "indeterminate"
+    assert "not found" in result["checks"][1]["error"]
+
+
+def test_unreadable_include_reports_drift_and_checks_other_files(
+    tree, monkeypatch, capsys
+):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    original = sim_report_check.sha256_file
+
+    def read_digest(path):
+        if os.path.samefile(path, inc):
+            raise PermissionError("permission denied")
+        return original(path)
+
+    monkeypatch.setattr(sim_report_check, "sha256_file", read_digest)
+    assert main(["sim", "--check", report, "--format", "json"]) == 3
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "drifted"
+    assert result["diagnosis"] == "indeterminate"
+    first, failed, identity = result["checks"]
+    assert first["match"] is True
+    assert failed["match"] is False and failed["actual"] is None
+    assert inc.name in failed["error"] and "permission denied" in failed["error"]
+    assert identity["match"] is False and identity["actual"] is None
+
+
+def test_lookup_permission_error_is_not_reported_as_a_missing_include(
+    tree, monkeypatch
+):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    real_stat = os.stat
+
+    def deny_lookup(path, *args, **kwargs):
+        if path == str(inc):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", deny_lookup)
+    top.write_text(".include models_a.spice\nr1 n1 0 2k\n")
+    result = check_sim_report(report, root=str(tmp))
+    assert (result["status"], result["diagnosis"]) == ("drifted", "indeterminate")
+    changed, inaccessible, identity = result["checks"]
+    assert not changed["match"] and changed["actual"] is not None
+    assert inaccessible["actual"] is None and identity["actual"] is None
+    assert str(inc) in inaccessible["error"]
+    assert os.strerror(errno.EACCES) in inaccessible["error"]
+
+
+def test_include_removed_during_hash_keeps_missing_file_diagnostic(tree, monkeypatch):
+    from klayout_tools import sim_report_check
+
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    original = sim_report_check.sha256_file
+
+    def disappear(path):
+        if path == str(inc):
+            raise FileNotFoundError(path)
+        return original(path)
+
+    monkeypatch.setattr(sim_report_check, "sha256_file", disappear)
+    result = check_sim_report(report, root=str(tmp))
+    assert result["diagnosis"] == "indeterminate"
+    assert result["checks"][1]["error"] == f"closure file not found: {inc}"
+
+
+def test_root_reanchors(tree, tmp_path_factory):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    moved = tmp_path_factory.mktemp("elsewhere") / "report.json"
+    moved.write_text(open(report).read())
+    assert check_sim_report(str(moved), root=str(tmp))["status"] == "match"
+
+
+def test_unreadable_report_raises(tmp_path):
+    with pytest.raises(SimError):
+        check_sim_report(str(tmp_path / "nope.json"))
+
+
+def test_writer_identity_and_closure_round_trip(tree):
+    """The fixture evidence is recorded by ``sim_staging`` itself, not the
+    ``_raw``/``_identity`` helpers: if the writer's digest loop ever changes
+    (separator, ordering, which files it walks), this fails instead of the
+    checker silently reporting false drift on every intact report."""
+    tmp, top, _ = tree
+    identity, error = netlist_identity({}, str(top))
+    assert error is None
+    report = tmp / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "environment": {
+                    "netlist_closure": netlist_closure({}, str(top)),
+                    "netlist_identity": identity,
+                }
+            }
+        )
+    )
+    result = check_sim_report(str(report))
+    assert result["status"] == "match"
+    assert result["diagnosis"] == "intact"
+
+
+def test_cli_check_exit_codes_and_text_rendering(tree, capsys):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    assert main(["sim", "--check", report, "--format", "json"]) == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "match"
+    assert envelope["diagnosis"] == "intact"
+
+    top.write_text(".include models_a.spice\nr1 n1 0 2k\n")
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    assert "diagnosis: electrical" in capsys.readouterr().out
+
+
+def test_cli_check_text_renders_check_error(tree, capsys):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    os.remove(inc)
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert "error: closure file not found" in out
+    assert "diagnosis: indeterminate" in out
+
+
+def test_cli_check_text_renders_skipped(tree, capsys):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    _edit_report(
+        report,
+        lambda env: env["netlist_closure"].append(
+            {"target": "$PDK/x.lib", "sha256": None, "unhashed_reason": "env_var"}
+        ),
+    )
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert "[SKIPPED]" in out
+    assert "env_var" in out
+
+
+def test_cli_check_text_renders_note(tree, capsys):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc, netlist_identity="sha256:" + "0" * 64)
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert "diagnosis: normalization_changed" in out
+    assert "note:" in out
+
+
+def test_cli_unreadable_report_exits_1(tree):
+    tmp, _, _ = tree
+    assert main(["sim", "--check", str(tmp / "nope.json")]) == 1
+
+
+def test_cli_root_without_check_is_usage_error(tree):
+    tmp, _, _ = tree
+    assert main(["sim", "--root", str(tmp)]) == 2
+
+
+def test_cli_check_with_request_is_usage_error(tree):
+    tmp, _, _ = tree
+    report = _write(tmp, tmp / "top.cir", tmp / "models_a.spice")
+    assert main(["sim", "--check", report, "req.request.json"]) == 2

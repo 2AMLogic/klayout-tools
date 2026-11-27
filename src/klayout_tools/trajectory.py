@@ -51,7 +51,7 @@ import json
 import os
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 
 __all__ = [
     "TrajectoryError",
@@ -161,7 +161,7 @@ def _validate_record(record: dict[str, Any], source: str, lineno: int) -> None:
         raise TrajectoryError(f"{source}:{lineno}: {msg}")
 
     turn = record.get("turn")
-    if not isinstance(turn, int) or isinstance(turn, bool):
+    if not is_int(turn):
         fail("'turn' is required and must be an integer")
 
     if not isinstance(record.get("candidate_ref"), str) or not record["candidate_ref"]:

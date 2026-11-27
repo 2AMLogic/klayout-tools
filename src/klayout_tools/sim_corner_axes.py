@@ -8,17 +8,84 @@ the ``exclude`` selector validation and matchers.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from . import sim_supply_waveform
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number, is_number
 from .sim_corner_point import (
     CornerPoint,
-    _format_params_label,
     _validate_param_scalar,
 )
-from .sim_echo_messages import zipped_length_message
 from .sim_errors import SimError
+
+#: ``options.ngspice_options`` (issue #3111): the solver/convergence
+#: ``.options`` names a request may set (``chgtol``/``trtol``, issue #7007,
+#: complete the transient tolerance set). Moved out of ``sim.py`` (issue
+#: #7007) for its size ratchet; re-exported there. ngspice silently ignores
+#: an unknown ``.options`` name, so a free-form map would hide a typo as "no
+#: effect"; the allowlist turns it into a named error instead.
+NGSPICE_SOLVER_OPTIONS = (
+    "abstol",
+    "chgtol",
+    "gmin",
+    "gminsteps",
+    "itl1",
+    "itl2",
+    "itl4",
+    "method",
+    "noopiter",
+    "pivtol",
+    "reltol",
+    "srcsteps",
+    "trtol",
+    "vntol",
+)
+
+
+#: A string option value lands verbatim in a deck card, so it is limited to
+#: a bare token (``method=gear``) -- no whitespace, quotes or newlines.
+_NGSPICE_OPTION_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+def _validate_ngspice_options(value: Any) -> dict[str, Any]:
+    """Validate ``options.ngspice_options`` (issue #3111).
+
+    Returns the declared map unchanged (``{}`` when omitted or ``null``).
+    Keys must come from :data:`NGSPICE_SOLVER_OPTIONS`; values must be a
+    finite number, a bool or a bare-token string.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SimError(
+            "options.ngspice_options must be an object mapping ngspice "
+            f".options names to scalar values (got {json.dumps(value, default=repr)})"
+        )
+    for name, item in value.items():
+        if name not in NGSPICE_SOLVER_OPTIONS:
+            raise SimError(
+                f"options.ngspice_options key {json.dumps(name)} is not a "
+                "supported solver option; supported: "
+                + ", ".join(NGSPICE_SOLVER_OPTIONS)
+            )
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, (int, float)):
+            if not is_finite_number(item):
+                raise SimError(
+                    f"options.ngspice_options.{name} must be finite (got {item!r})"
+                )
+            continue
+        if isinstance(item, str) and _NGSPICE_OPTION_TOKEN.fullmatch(item):
+            continue
+        raise SimError(
+            f"options.ngspice_options.{name} must be a number, a boolean or "
+            f"a bare-token string (got {json.dumps(item, default=repr)})"
+        )
+    return dict(value)
+
 
 #: ``corners.options`` (issue #3125): the numeric solver ``.options`` a
 #: corner axis may sweep. A subset of :data:`NGSPICE_SOLVER_OPTIONS` -- the
@@ -48,67 +115,6 @@ def _validate_corner_option_name(name: Any, where: str) -> str:
             f"option; supported: {', '.join(CORNER_OPTION_NAMES)}"
         )
     return lowered
-
-
-def _expand_options_axis(
-    corners_spec: dict[str, Any],
-) -> list[dict[str, int | float]]:
-    """The zipped ``corners.options`` rows (issue #3125), or ``[{}]`` for a
-    request with no options axis. Same shape and rules as
-    :func:`_expand_param_axis`: names zip by index, every array nonempty and
-    the same length, duplicate rows rejected."""
-    spec = corners_spec.get("options")
-    if spec is None or spec == {}:
-        return [{}]
-    if not isinstance(spec, dict):
-        raise SimError(
-            "corners.options must be an object mapping solver option names "
-            "to equal-length arrays of numbers"
-        )
-    columns: dict[str, list[int | float]] = {}
-    for name, values in spec.items():
-        lowered = _validate_corner_option_name(name, "corners.options")
-        if lowered in columns:
-            raise SimError(
-                f"corners.options declares {lowered!r} more than once "
-                "(names are case-insensitive)"
-            )
-        if not isinstance(values, list) or not values:
-            raise SimError(
-                f"corners.options.{name} must be a nonempty array of numbers"
-            )
-        columns[lowered] = [
-            _validate_param_scalar(value, f"corners.options.{name}[{i}]")
-            for i, value in enumerate(values)
-        ]
-    if len({len(values) for values in columns.values()}) != 1:
-        raise SimError(zipped_length_message("corners.options", columns))
-    count = len(next(iter(columns.values())))
-    rows = [
-        dict(sorted((name, values[i]) for name, values in columns.items()))
-        for i in range(count)
-    ]
-    seen: set[str] = set()
-    for row in rows:
-        label = _format_params_label(row)
-        if label in seen:
-            raise SimError(f"corners.options declares the row {label!r} twice")
-        seen.add(label)
-    return rows
-
-
-def _normalize_option_row(raw: Any, where: str) -> dict[str, int | float]:
-    """One scalar ``{option: number}`` row (a report/wire ``options`` map),
-    validated and normalized."""
-    if not isinstance(raw, dict):
-        raise SimError(f"{where} must be an object mapping names to numbers")
-    row: dict[str, int | float] = {}
-    for name, value in raw.items():
-        lowered = _validate_corner_option_name(name, where)
-        if lowered in row:
-            raise SimError(f"{where} declares {lowered!r} more than once")
-        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
-    return dict(sorted(row.items()))
 
 
 def _parse_process_entry(
@@ -203,57 +209,29 @@ def _parse_process_section(section: Any) -> tuple[str, str | None]:
     return name, lib
 
 
-def _validate_exclude_params(
-    exclude_spec: list[dict[str, Any]], declared: set[str]
+def _validate_exclude_numeric_axis(
+    exclude_spec: list[dict[str, Any]], declared: set[str], *, key: str, noun: str
 ) -> None:
-    """Reject an ``exclude[].params`` selector naming a parameter the request
-    does not sweep (issue #3035) -- it could never match, so it would
-    silently exclude nothing."""
+    """Reject selectors naming coordinates this request does not sweep."""
     for entry in exclude_spec:
-        if not isinstance(entry, dict) or "params" not in entry:
+        if not isinstance(entry, dict) or key not in entry:
             continue
-        selector = entry["params"]
+        selector = entry[key]
         if not isinstance(selector, dict):
-            raise SimError("exclude[].params must be an object of name: number")
+            raise SimError(f"exclude[].{key} must be an object of name: number")
         for name, value in selector.items():
             lowered = name.lower() if isinstance(name, str) else name
             if lowered not in declared:
                 raise SimError(
-                    f"exclude[].params names {name!r}, which is not a "
-                    "corners.params parameter of this request"
+                    f"exclude[].{key} names {name!r}, which is not a "
+                    f"corners.{key} {noun} of this request"
                     + (
                         f" (declared: {', '.join(sorted(declared))})"
                         if declared
                         else ""
                     )
                 )
-            _validate_param_scalar(value, f"exclude[].params.{name}")
-
-
-def _validate_exclude_options(
-    exclude_spec: list[dict[str, Any]], declared: set[str]
-) -> None:
-    """Reject an ``exclude[].options`` selector naming an option the request
-    does not sweep (issue #3125) -- it could never match."""
-    for entry in exclude_spec:
-        if not isinstance(entry, dict) or "options" not in entry:
-            continue
-        selector = entry["options"]
-        if not isinstance(selector, dict):
-            raise SimError("exclude[].options must be an object of name: number")
-        for name, value in selector.items():
-            lowered = name.lower() if isinstance(name, str) else name
-            if lowered not in declared:
-                raise SimError(
-                    f"exclude[].options names {name!r}, which is not a "
-                    "corners.options option of this request"
-                    + (
-                        f" (declared: {', '.join(sorted(declared))})"
-                        if declared
-                        else ""
-                    )
-                )
-            _validate_param_scalar(value, f"exclude[].options.{name}")
+            _validate_param_scalar(value, f"exclude[].{key}.{name}")
 
 
 _CORNER_UNIT_KEYS = ("process", "temperature_c", "supply_v")

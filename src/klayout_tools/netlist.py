@@ -63,7 +63,6 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
 
 from __future__ import annotations
 
-import difflib
 import os
 import re
 import shutil
@@ -77,18 +76,34 @@ from typing import Any
 from . import pdk as pdk_module
 from ._provenance import content_hash_bytes
 from .netlist_diagnostics import diagnostics_block
+from .netlist_diff import MAX_DIFF_LINES, unified_diff  # noqa: F401
+from .netlist_export import (
+    FRESHNESS_TOLERANCE_S as FRESHNESS_TOLERANCE_S,
+)
+from .netlist_export import (
+    NetlistError as NetlistError,
+)
+from .netlist_export import (
+    _fresh_files,
+    _resolve_produced_netlist,
+    export_destination,
+    publish_split_netlists,
+    split_warning,
+)
 from .netlist_inputs import (
     generation_inputs,
     inputs_drift,
     inputs_record_line,
     split_inputs_record,
 )
+from .netlist_instances import instances_payload
 from .netlist_paths import _PATH_COMMENT_RE, fold_continuations, postprocess_netlist
 from .netlist_pdk import (
     _pdk_env_note,
     _pdk_root_consistent,
+    _pdk_xschem_env,
     _rcfile_pdk_root,
-    _with_symbol_path_env,
+    unestablished_variant_warning,
 )
 from .netlist_port_order import port_order_drift_reason
 from .netlist_port_order import sibling_symbol as _sibling_symbol
@@ -126,52 +141,12 @@ DEFAULT_TIMEOUT_S = 120.0
 #: delays the error.
 SIGTERM_GRACE_S = 2.0
 
-#: Slack allowed when comparing the produced netlist's mtime against the
-#: moment xschem was launched. Not cosmetic: HFS+ and some network/container
-#: filesystems carry whole-second mtime granularity, so a file genuinely
-#: written 10ms after launch can stat as having been written up to a second
-#: *before* it. One second is the coarsest granularity we need to tolerate.
-FRESHNESS_TOLERANCE_S = 1.0
-
-#: Cap on the number of unified-diff lines carried in a ``--check`` payload.
-#: A drifted netlist can differ by thousands of lines; the payload's job is
-#: to say *that* it drifted and show the head of the difference, not to be a
-#: transport for the whole file (both copies are on disk already).
-MAX_DIFF_LINES = 200
-
 #: ``status`` values. ``"generated"`` is the normal export; ``"match"`` /
 #: ``"drifted"`` are ``--check``'s verdicts, reusing the same vocabulary (and
 #: the same 0/3 exit split) as ``klt drc --check`` and friends.
 STATUS_GENERATED = "generated"
 STATUS_MATCH = "match"
 STATUS_DRIFTED = "drifted"
-
-
-class NetlistError(Exception):
-    """A netlist export could not be completed (bad input, xschem missing,
-    xschem hung, or no fresh output file produced).
-
-    ``code`` is an optional machine-readable classification the CLI emits as
-    the error envelope's ``error.code`` (``docs/json-contract.md``). It is
-    ``None`` for every local failure; the ``batch`` backend sets it so a
-    caller can tell a retryable capacity refusal or a runner-version mismatch
-    from a bad schematic (see :mod:`klayout_tools.netlist_batch`).
-    ``job_id`` names the batch job, when one was allocated. ``details`` holds
-    extra structured fields the CLI merges into the error envelope's
-    ``error`` object (e.g. a failed batch job's ``remote_stderr_tail``).
-    """
-
-    def __init__(
-        self,
-        *args: object,
-        code: str | None = None,
-        job_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(*args)
-        self.code = code
-        self.job_id = job_id
-        self.details = details
 
 
 def _validate_schematic(schematic: str) -> None:
@@ -293,9 +268,8 @@ def _launch_xschem(
             stderr=subprocess.PIPE,
             text=True,
             env=env,
-            # The child gets its own session (and therefore its own process
-            # group) so `_signal_group` has a group handle to kill -- see its
-            # docstring.
+            # The child gets its own session (and therefore its own process group) so
+            # `_signal_group` has a group handle to kill -- see its docstring.
             start_new_session=True,
         )
     except FileNotFoundError as exc:
@@ -357,72 +331,6 @@ def _timeout_message(
     )
 
 
-def _fresh_files(work_dir: str, started_at: float) -> list[str]:
-    """Names of files in ``work_dir`` whose mtime is at or after
-    ``started_at`` (within :data:`FRESHNESS_TOLERANCE_S`), sorted."""
-    fresh = []
-    for name in sorted(os.listdir(work_dir)):
-        path = os.path.join(work_dir, name)
-        if not os.path.isfile(path):
-            continue
-        if os.stat(path).st_mtime >= started_at - FRESHNESS_TOLERANCE_S:
-            fresh.append(name)
-    return fresh
-
-
-def _resolve_produced_netlist(
-    work_dir: str,
-    stem: str,
-    started_at: float,
-    *,
-    exit_status: int,
-    stdout: str,
-    stderr: str,
-) -> str:
-    """Decide whether the run succeeded, **without consulting the exit status**.
-
-    xschem returns non-zero after a successful batch netlist (issue #55's
-    first sharp edge), so the verdict is: a file exists in the private output
-    directory and was written at or after we launched xschem. xschem names a
-    SPICE export after the schematic (``foo.sch`` -> ``foo.spice``); that name
-    is preferred, and a single fresh file under any other name is accepted as
-    well (and reported, via the payload's ``netlist.path``) so a future xschem
-    naming change surfaces as a different filename rather than a spurious
-    "produced nothing".
-
-    The freshness half matters as much as the existence half: without it, a
-    stale netlist left behind by an earlier run would be read as this run's
-    output -- the exact drift failure ``--check`` exists to catch.
-
-    Raises :class:`NetlistError`, quoting xschem's own output and its exit
-    status, when no fresh file appeared.
-    """
-    fresh = _fresh_files(work_dir, started_at)
-    expected = f"{stem}.spice"
-    if expected in fresh:
-        return os.path.join(work_dir, expected)
-    if len(fresh) == 1:
-        return os.path.join(work_dir, fresh[0])
-
-    detail = (stdout or stderr or "").strip()
-    if fresh:
-        produced = (
-            f"It produced {len(fresh)} files, none named {expected!r}: "
-            f"{', '.join(fresh)}."
-        )
-    else:
-        produced = f"Expected {expected!r}; the output directory is empty."
-    raise NetlistError(
-        "xschem produced no fresh netlist file. "
-        + produced
-        + " (xschem's exit status is deliberately not used as the verdict "
-        "here -- it is non-zero even on success -- so this means the export "
-        f"really did not happen. xschem exited {exit_status}."
-        + (f" Its own output:\n{detail}" if detail else "")
-        + ")"
-    )
-
-
 def _netlist_block(path: str | None, data: bytes) -> dict[str, Any]:
     """Identity of the netlist this run produced.
 
@@ -437,26 +345,6 @@ def _netlist_block(path: str | None, data: bytes) -> dict[str, Any]:
         "lines": data.count(b"\n"),
         "content_hash": content_hash_bytes(data),
     }
-
-
-def _unified_diff(
-    committed: bytes, fresh: bytes, output: str
-) -> tuple[list[str], bool]:
-    """Unified diff of the committed netlist against the regenerated one,
-    capped at :data:`MAX_DIFF_LINES` lines (second element says whether it
-    was truncated)."""
-    lines = list(
-        difflib.unified_diff(
-            committed.decode("utf-8", errors="replace").splitlines(),
-            fresh.decode("utf-8", errors="replace").splitlines(),
-            fromfile=f"{output} (committed)",
-            tofile=f"{output} (regenerated)",
-            lineterm="",
-        )
-    )
-    if len(lines) > MAX_DIFF_LINES:
-        return lines[:MAX_DIFF_LINES], True
-    return lines, False
 
 
 def _normalize_path_comments(data: bytes) -> bytes:
@@ -617,6 +505,12 @@ def _check_result(
     ``--block`` top sheet's port order, both quoted in that reason
     (:func:`port_order_drift_reason`, issue #5473).
 
+    ``compared_content_hash`` (issue #5743) is the hash of the normalized body
+    both sides reduced to -- ``None`` unless the verdict is ``"match"``; under
+    ``ignore_comments`` it is the comment-stripped body. Unlike
+    ``run_netlist``'s ``netlist.content_hash`` (the raw generator output) it is
+    the same on every checkout that agrees.
+
     ``inputs`` (issue #4945) are the fresh generation inputs; the committed
     side's record is the ``** klt-netlist-inputs:`` line :func:`run_netlist`
     wrote, which is excluded from the comparison. ``drift.inputs`` compares
@@ -627,6 +521,7 @@ def _check_result(
             "committed_present": False,
             "committed_bytes": None,
             "committed_content_hash": None,
+            "compared_content_hash": None,
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": False,
@@ -648,6 +543,9 @@ def _check_result(
             "committed_present": True,
             "committed_bytes": len(committed_raw),
             "committed_content_hash": content_hash_bytes(committed_raw),
+            "compared_content_hash": content_hash_bytes(
+                _normalize_layout(committed_paths)
+            ),
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
@@ -666,6 +564,9 @@ def _check_result(
             "committed_present": True,
             "committed_bytes": len(committed_raw),
             "committed_content_hash": content_hash_bytes(committed_raw),
+            "compared_content_hash": content_hash_bytes(
+                _normalize_layout(committed, True)
+            ),
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": True,
@@ -676,7 +577,7 @@ def _check_result(
             "inputs": inputs_block,
         }
 
-    diff, truncated = _unified_diff(committed, fresh_data, output)
+    diff, truncated = unified_diff(committed, fresh_data, output)
     port_order = _subckt_port_order_drift(committed, fresh_data, ignore_comments)
     if port_order:
         reason = port_order_drift_reason(port_order, xschem_version, sibling_symbol)
@@ -691,6 +592,7 @@ def _check_result(
         "committed_present": True,
         "committed_bytes": len(committed_raw),
         "committed_content_hash": content_hash_bytes(committed_raw),
+        "compared_content_hash": None,
         "path_comments_differ": False,
         "layout_differs": False,
         "comments_differ": False,
@@ -849,6 +751,11 @@ def _pdk_consistency(
     install root itself, or the resolved variant directory under it, e.g.
     ``$PDK_ROOT`` holding ``sky130A/``), and ``None`` when there is nothing
     to compare.
+
+    ``variant_established`` is ``False`` when the variant was defaulted, not
+    selected -- no ``--pdk``/``$PDK`` and the root holds more than one (issue
+    #5639); ``unestablished_warning`` then carries the ``payload.warnings``
+    entry, and the generation-inputs record says ``pdk_variant: null``.
     """
     explicit = pdk is not None or pdk_root is not None
     if not explicit and not (
@@ -874,6 +781,7 @@ def _pdk_consistency(
                 f"(via {found['resolved_via']}); the schematic and "
                 "simulation sides may be using different PDKs"
             )
+    unestablished = unestablished_variant_warning(found)
     return {
         "variant": found["variant"],
         "version": found.get("version"),
@@ -883,6 +791,8 @@ def _pdk_consistency(
         "consistent": consistent,
         "warning": warning,
         "ambiguity_warning": pdk_module.ambiguity_warning(found),
+        "variant_established": unestablished is None,
+        "unestablished_warning": unestablished,
     }
 
 
@@ -896,10 +806,27 @@ def _resolve_symbol_path(symbol_path: Sequence[str]) -> list[str]:
     return resolved
 
 
+def _validate_run_inputs(
+    schematic: str,
+    check: bool,
+    ignore_comments: bool,
+    timeout_s: float,
+    rcfile: str | None,
+) -> None:
+    _validate_schematic(schematic)
+    if ignore_comments and not check:
+        raise NetlistError("--ignore-comments only applies with --check")
+    if timeout_s <= 0:
+        raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
+    if rcfile is not None and not os.path.isfile(rcfile):
+        raise NetlistError(f"xschemrc file not found: {rcfile}")
+
+
 def run_netlist(
     schematic: str,
-    output: str,
+    output: str | None = None,
     *,
+    output_dir: str | None = None,
     check: bool = False,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     xschem_binary: str = DEFAULT_XSCHEM_BINARY,
@@ -916,6 +843,9 @@ def run_netlist(
     provenance_header: bool = True,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
+
+    With ``output_dir``, local generation publishes the raw top-level and split
+    SPICE files and returns their sorted basenames in ``produced_files``.
 
     ``check=True`` does not write ``output``: it regenerates into a temp
     directory and compares, reporting ``status: "match"`` or ``"drifted"``
@@ -951,13 +881,10 @@ def run_netlist(
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
     escalation), no fresh output file, or an unwritable ``output``.
     """
-    _validate_schematic(schematic)
-    if ignore_comments and not check:
-        raise NetlistError("--ignore-comments only applies with --check")
-    if timeout_s <= 0:
-        raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
-    if rcfile is not None and not os.path.isfile(rcfile):
-        raise NetlistError(f"xschemrc file not found: {rcfile}")
+    output = export_destination(
+        output, output_dir, check, block, relative_paths, canonical_wrap
+    )
+    _validate_run_inputs(schematic, check, ignore_comments, timeout_s, rcfile)
     resolved_symbol_path = _resolve_symbol_path(symbol_path)
     pdk_block = _pdk_consistency(rcfile, pdk, pdk_root)
 
@@ -971,25 +898,14 @@ def run_netlist(
             rcfile=rcfile,
         )
         # Captured *before* the launch, so the freshness test can never be
-        # satisfied by a file that already existed (see
-        # `_resolve_produced_netlist`).
+        # satisfied by a file that already existed (see `_resolve_produced_netlist`).
         started_at = time.time()
-        # Export the resolved PDK so an xschemrc reading $env(PDK_ROOT)/
-        # $env(PDK) agrees with --pdk/--pdk-root (issue #4186).
-        xschem_env: dict[str, str] | None = None
-        if pdk_block is not None:
-            xschem_env = {
-                **os.environ,
-                "PDK_ROOT": pdk_block["root"],
-                "PDK": pdk_block["variant"],
-            }
-        # Only a resolved PDK means klt exported PDK_ROOT/PDK; --symbol-path
-        # alone builds an env that merely inherits them (issue #5441).
-        exported_pdk_env = xschem_env
-        xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
+        # Netlist_pdk (size split); snapshot pre-dates the symbol-path merge.
+        xschem_env, exported_pdk_env = _pdk_xschem_env(pdk_block, resolved_symbol_path)
         exit_status, stdout, stderr, duration_s = _launch_xschem(
             argv, timeout_s, xschem_env
         )
+        fresh = _fresh_files(work_dir, started_at)
         produced = _resolve_produced_netlist(
             work_dir,
             stem,
@@ -997,23 +913,37 @@ def run_netlist(
             exit_status=exit_status,
             stdout=stdout,
             stderr=stderr,
+            fresh=fresh,
         )
         with open(produced, "rb") as handle:
             fresh_data = handle.read()
 
-        fresh_data, block_info = postprocess_netlist(
-            fresh_data,
-            block=block,
-            relative_paths=relative_paths,
-            schematic=schematic,
-            canonical_wrap=canonical_wrap,
-        )
+        top = os.path.basename(produced)
+        siblings = [
+            name for name in fresh if name != top and name.lower().endswith(".spice")
+        ]
+        block_info = None
+        if output_dir is not None:
+            output = os.path.join(output_dir, top)
+        else:
+            fresh_data, block_info = postprocess_netlist(
+                fresh_data,
+                block=block,
+                relative_paths=relative_paths,
+                schematic=schematic,
+                canonical_wrap=canonical_wrap,
+            )
 
         version = _probe_xschem_version(xschem_binary)
-        warnings = _unevaluated_expr_warnings(
-            fresh_data, version, allow_unevaluated_expr
-        )
-        _check_no_unresolved_symbol(fresh_data, rcfile, exported_pdk_env)
+
+        def check_content(data: bytes) -> list[dict[str, Any]]:
+            result = _unevaluated_expr_warnings(data, version, allow_unevaluated_expr)
+            _check_no_unresolved_symbol(data, rcfile, exported_pdk_env)
+            return result
+
+        warnings = check_content(fresh_data)
+        if pdk_block is not None and pdk_block["unestablished_warning"] is not None:
+            warnings.append(pdk_block["unestablished_warning"])
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -1033,34 +963,51 @@ def run_netlist(
                 "symbol_path": resolved_symbol_path,
             },
             "diagnostics": diagnostics_block(stdout, stderr, erc=erc),
+            **instances_payload(fresh_data),
         }
 
         if pdk_block is not None:
             payload["pdk"] = pdk_block
         if block_info is not None:
             payload["block"] = block_info
+        if siblings and output_dir is None and not check:
+            warnings.append(split_warning(siblings))
+
+        if output_dir is not None:
+            names, sibling_warnings = publish_split_netlists(
+                work_dir, output_dir, top, fresh_data, siblings, check_content
+            )
+            warnings.extend(sibling_warnings)
+            payload.update(
+                status=STATUS_GENERATED,
+                produced_files=names,
+                provenance_header=False,
+                canonical_wrap=False,
+                netlist=_netlist_block(output, fresh_data),
+            )
+        else:
+            inputs = generation_inputs(version, rcfile, pdk_block)
+            written_data = inputs_record_line(inputs, provenance_header) + fresh_data
+            if check:
+                status, drift = _check_result(
+                    output,
+                    fresh_data,
+                    ignore_comments,
+                    xschem_version=version,
+                    inputs=inputs,
+                    sibling_symbol=_sibling_symbol(schematic) if block else None,
+                )
+                nb = _netlist_block(None, written_data)
+                payload.update(status=status, netlist=nb, drift=drift)
+            else:
+                _write_output(output, written_data)
+                payload.update(
+                    status=STATUS_GENERATED, provenance_header=provenance_header
+                )
+                payload["canonical_wrap"] = canonical_wrap
+                payload["netlist"] = _netlist_block(output, written_data)
         if warnings:
             payload["warnings"] = warnings
-
-        inputs = generation_inputs(version, rcfile, pdk_block)
-        written_data = inputs_record_line(inputs, provenance_header) + fresh_data
-        if check:
-            status, drift = _check_result(
-                output,
-                fresh_data,
-                ignore_comments,
-                xschem_version=version,
-                inputs=inputs,
-                sibling_symbol=_sibling_symbol(schematic) if block else None,
-            )
-            nb = _netlist_block(None, written_data)
-            payload.update(status=status, netlist=nb, drift=drift)
-            return payload
-
-        _write_output(output, written_data)
-        payload.update(status=STATUS_GENERATED, provenance_header=provenance_header)
-        payload["canonical_wrap"] = canonical_wrap
-        payload["netlist"] = _netlist_block(output, written_data)
         return payload
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

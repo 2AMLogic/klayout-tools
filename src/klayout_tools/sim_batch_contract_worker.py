@@ -10,10 +10,8 @@ import shlex
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .remote_launcher import (
-    RemoteLaunchError,
-    published_runner_identities,
-)
+from ._digest import normalize_sha256
+from ._jsonnum import is_int
 from .sim_batch_contract import (
     _BATCH_PREFLIGHT_REJECT_EXIT,
     _DECKS_BASE_RELEASE,
@@ -26,6 +24,7 @@ from .sim_batch_contract import (
 from .sim_batch_contract_spec import (
     _release_segment,
 )
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
     from .sim_batch import BatchConfig
@@ -41,6 +40,110 @@ WORKER_CAPTURE_PROBE_TIMEOUT_S = 10
 #: Most staged model files the worker capture digests / the client re-reads.
 WORKER_CAPTURE_MODEL_INPUTS_MAX = 64
 
+#: Bounds for init lines retained from the worker's simulation report.
+WORKER_INIT_LINES_MAX = 256
+WORKER_INIT_LINE_MAX = 2000
+WORKER_INIT_CHARS_MAX = 32768
+
+
+def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
+    """A JSON-safe, bounded, control-character-free copy of a captured string
+    (``None`` for anything that is not a string)."""
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in value)
+    return cleaned[:limit]
+
+
+def _capture_engine_digest(request: dict[str, Any]) -> bool:
+    return "decks" not in request and request.get("engine", "ngspice") == "ngspice"
+
+
+def _bounded_simulator(
+    raw: Any, request: dict[str, Any] | None
+) -> dict[str, str | None]:
+    """Sanitize the simulator capture before incorporating it into a report."""
+    sim = raw if isinstance(raw, dict) else {}
+    result = {
+        "requested_binary": _bounded_str(sim.get("requested_binary")),
+        "binary_source": _bounded_str(sim.get("binary_source"), 40),
+        "selected_path": _bounded_str(sim.get("selected_path")),
+        "version_banner": _bounded_str(
+            sim.get("version_banner"), WORKER_CAPTURE_BANNER_MAX
+        ),
+        "version_probe": _bounded_str(sim.get("version_probe"), 40),
+    }
+    if "binary_sha256" in sim and _capture_engine_digest(request or {}):
+        result["binary_sha256"] = normalize_sha256(sim["binary_sha256"])
+    return result
+
+
+def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
+    """The worker-reported ``model_inputs`` list, re-validated and bounded.
+    ``None`` (not ``[]``) when the capture carries no list at all."""
+    models_in = doc.get("model_inputs")
+    if not isinstance(models_in, list):
+        return None
+    return [
+        {
+            "name": _bounded_str(entry.get("name")),
+            "sha256": _bounded_str(entry.get("sha256"), 64),
+        }
+        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
+        if isinstance(entry, dict)
+    ]
+
+
+def _bounded_init_lines(value: Any) -> list[str] | None:
+    """Reject oversized/malformed content rather than truncating a hashed file."""
+    if not isinstance(value, list) or not 0 < len(value) <= WORKER_INIT_LINES_MAX:
+        return None
+    if any(not isinstance(line, str) for line in value):
+        return None
+    if any(len(line) > WORKER_INIT_LINE_MAX for line in value):
+        return None
+    if sum(len(line) + 1 for line in value) > WORKER_INIT_CHARS_MAX:
+        return None
+    if any(ch < " " and ch not in "\n\t" for line in value for ch in line):
+        return None
+    return list(value)
+
+
+def runner_ngspice_init(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Bounded init provenance from the worker's own on-host report (#6045).
+
+    Preflight runs before klt writes its per-corner init files. Use the
+    collected report instead of guessing from the client request or HOME.
+    Source is a closed, path-free vocabulary; home contents and extra keys
+    are never copied. Missing/legacy/Xyce/malformed observations stay null.
+    """
+    env = report.get("environment") if isinstance(report, dict) else None
+    block = env.get("ngspice_init") if isinstance(env, dict) else None
+    if not isinstance(block, dict):
+        return None
+    source = block.get("source")
+    if source == "none":
+        return {"source": "none", "lines": None, "sha256": None}
+    if source not in ("request", "thread_pin", "home"):
+        return None
+    digest = block.get("sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return None
+    lines = _bounded_init_lines(block.get("lines")) if source != "home" else None
+    if source != "home" and lines is None:
+        return None
+    return {"source": source, "lines": lines, "sha256": digest}
+
+
+def runner_threads_per_worker(report: dict[str, Any] | None) -> int | None:
+    """The launch pin recorded by the worker's simulation report, when known."""
+    env = report.get("environment") if isinstance(report, dict) else None
+    pin = env.get("threads_per_worker") if isinstance(env, dict) else None
+    if is_int(pin) and pin > 0:
+        return pin
+    return None
+
+
 #: The worker-side capture program. It is passed to ``python3 -I -c`` as one
 #: shell-quoted argument (never interpolated with untrusted text); request
 #: values arrive as ``sys.argv`` and everything it observes is serialised with
@@ -51,8 +154,10 @@ _WORKER_CAPTURE_PROGRAM = r"""
 import hashlib, json, os, shutil, sys
 import subprocess as sp
 BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
-out, req_bin, variant, staged = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-model_names = sys.argv[5:5 + @MODELS@]
+capture_digest = sys.argv[1] != "--omit-binary-digest"
+args = sys.argv[1:] if capture_digest else sys.argv[2:]
+out, req_bin, variant, staged = args[:4]
+model_names = args[4:4 + @MODELS@]
 diag = []
 def clip(v, n=STR):
     if not isinstance(v, str):
@@ -68,6 +173,12 @@ def guard(label, fn, default=None):
 def read(path, n):
     with open(path, "rb") as h:
         return h.read(n + 1)[:n].decode("utf-8", "replace")
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 doc = {"schema": 1}
 def sim():
     sel = req_bin or os.environ.get("KLT_NGSPICE_BINARY") or "ngspice"
@@ -77,6 +188,8 @@ def sim():
          "selected_path": clip(path) if path else None, "version_banner": None,
          "version_probe": "unavailable"}
     if path:
+        if capture_digest:
+            s["binary_sha256"] = guard("simulator digest", lambda: file_sha256(path))
         try:
             r = sp.run([path, "--version"], stdin=sp.DEVNULL,
                                stdout=sp.PIPE, stderr=sp.STDOUT,
@@ -107,6 +220,7 @@ def pdk():
         if staged != "1":
             diag.append("pdk root or variant unknown on worker")
         return p
+    # root/<variant> only, deliberately: this standalone payload cannot import klayout_tools, so a flat install (#522) degrades to the "pdk stamp unreadable" diagnostic below, never a wrong stamp (#6445).
     stamp = os.path.join(root, variant, "SOURCES")
     try:
         text = read(stamp, 16384)
@@ -153,11 +267,7 @@ def model_inputs():
     base = os.environ.get("EDA_INPUT_DIR") or "."
     found = []
     for name in model_names:
-        h = hashlib.sha256()
-        with open(os.path.join(base, name), "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        found.append({"name": clip(name), "sha256": h.hexdigest()})
+        found.append({"name": clip(name), "sha256": file_sha256(os.path.join(base, name))})
     return found
 doc["model_inputs"] = guard("model inputs", model_inputs)
 doc["diagnostics"] = diag[:20]
@@ -193,11 +303,14 @@ def _worker_capture_command(
         *(shlex.quote(name) for name in model_names[:WORKER_CAPTURE_MODEL_INPUTS_MAX]),
     ]
     target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
+    digest_flag = (
+        "" if _capture_engine_digest(remote_request) else "--omit-binary-digest "
+    )
     return (
         'wt=; command -v timeout >/dev/null 2>&1 && wt="timeout 30"; '
         "{ command -v python3 >/dev/null 2>&1 && "
         f"$wt python3 -I -c {shlex.quote(_WORKER_CAPTURE_PROGRAM)} "
-        f"{target} {' '.join(args)} 2>/dev/null; true; }}"
+        f"{digest_flag}{target} {' '.join(args)} 2>/dev/null; true; }}"
     )
 
 
@@ -310,7 +423,7 @@ def _capability_preflight_lines(
 
 def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     """Refuse a deck-list batch submit before any S3 write or launch when
-    every image the AMI manifest could boot is known to predate ``decks[]``
+    every image the batch image pointer could boot is known to predate ``decks[]``
     (issue #3303). Same candidate selection as
     :func:`_assess_published_runner`; anything less certain (no manifest,
     a legacy entry without ``klt_version``, a mix) proceeds to the
@@ -351,13 +464,8 @@ def _assess_capability_support(
     predates: str,
     remedy: str,
 ) -> None:
-    from .sim import SimError
-
     pdk = (request.get("models") or {}).get("pdk")
-    try:
-        images = published_runner_identities(str(pdk) if pdk else None, config.region)
-    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
-        return
+    images = config.runner_identities(str(pdk) if pdk else None)
     if not images:
         return
     support = [
@@ -373,7 +481,7 @@ def _assess_capability_support(
         for image in images
     )
     raise SimError(
-        f"backend 'batch' refused before submission: the AMI manifest "
+        f"backend 'batch' refused before submission: the batch image pointer "
         f"publishes the fleet runner image as {published}, which predates "
         f"{predates} -- the request was not submitted and no "
         f"instance was launched ({remedy})",

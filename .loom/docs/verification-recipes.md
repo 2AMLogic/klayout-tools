@@ -1,10 +1,10 @@
 # Verification Recipes
 
-How to check that a thing you just did actually happened. Five recipes, each
+How to check that a thing you just did actually happened. Seven recipes, each
 one a *command you run*, not a habit you cultivate.
 
-These come from a root-cause analysis of 17 agent errors made across two
-independent sessions in this repo (#7793). They cluster into five shapes, and
+The first five come from a root-cause analysis of 17 agent errors made across
+two independent sessions in this repo (#7793). They cluster into five shapes, and
 each shape has the same fix every time: **assert the postcondition, with a tool
 that can see what you cannot.**
 
@@ -22,7 +22,8 @@ case.
 - [4. Posting text to the forge: `--body-file`, always](#4-posting-text-to-the-forge---body-file-always)
 - [5. A diagnosis: name the falsifying fact and check it first](#5-a-diagnosis-name-the-falsifying-fact-and-check-it-first)
 - [6. A port: differential-test against the implementation you are replacing](#6-a-port-differential-test-against-the-implementation-you-are-replacing)
-- [The shape all six share](#the-shape-all-six-share)
+- [7. A doc-comment change: diff the warnings you touched, not the crate total](#7-a-doc-comment-change-diff-the-warnings-you-touched-not-the-crate-total)
+- [The shape all seven share](#the-shape-all-seven-share)
 <!-- toc:end -->
 
 ## 1. A mechanical text move: assert an invariant, not the diff
@@ -605,10 +606,72 @@ a fingerprint in the log cost one line and turn "this assertion failed" into
 "this assertion failed against a binary from 02:10" — recoverable weeks later,
 from a log, by someone who no longer has the file.
 
-## The shape all six share
+## 7. A doc-comment change: diff the warnings you touched, not the crate total
+
+**When**: a PR edits doc comments in `loom-daemon` and an acceptance criterion
+needs to prove it introduced no new rustdoc diagnostic — the shape #14971
+phrased as `RUSTDOCFLAGS="-D warnings" cargo doc -p loom-daemon --no-deps`
+succeeding.
+
+**The check**: run `cargo doc` twice — once on the PR branch, once on the base
+— and compare the warning blocks whose `-->` path is a file the PR touched.
+
+`-D warnings` is **not a usable criterion for this crate**: the lib doc
+already emits 1113 warnings (measured 2026-11-22 on `690ff01`, #14990; a day
+later, unbidden, 1115 on `bf32c1618`), so the
+command fails on every branch regardless of what the PR under review does — an
+AC no change can satisfy. Nothing in CI runs rustdoc either (no workflow
+mentions `cargo doc` or `RUSTDOCFLAGS`, verified 2026-11-22), so the absolute
+count drifts unobserved; gating on it would fail a week later with no PR at
+fault. Write the criterion as **"introduces no new rustdoc warning in the
+touched files (diff vs `origin/main`)"** and verify it like this:
+
+```bash
+# Both runs from the workspace root, so the `-->` paths match git's output.
+# -j2 or fewer on the shared fleet hosts; build with the exported
+# CARGO_TARGET_DIR (.loom/roles/cargo-target-isolation.md).
+RD="$(mktemp -d)"     # one private dir per run: concurrent sweeps share /tmp
+doc_warnings() {
+  cargo doc -p loom-daemon --no-deps -j2 2>&1 \
+    | awk '/^warning/ { w = $0; if ((getline loc) > 0 && loc ~ /-->/)
+           print w "  " loc }' > "$RD/$1.log"
+}
+doc_warnings after    # in your worktree
+doc_warnings before   # in a checkout of the base (origin/main), same command
+
+# Per touched file, count each warning text (location stripped) on both sides
+# and flag any text whose count rose:
+for f in $(git diff --name-only origin/main...HEAD -- '*.rs'); do
+  new="$(awk '
+    { side = (FILENAME == ARGV[1]) ? 1 : 2 }
+    { n[side, $0]++; seen[$0] = 1 }
+    END { for (t in seen) if (n[2, t] > n[1, t]) print n[2, t] - n[1, t] "x " t }
+  ' \
+    <(grep -F "$f" "$RD/before.log" | sed 's/-->.*//' | sort) \
+    <(grep -F "$f" "$RD/after.log"  | sed 's/-->.*//' | sort))"
+  [ -z "$new" ] || { echo "NEW rustdoc warnings in $f:"; echo "$new"; }
+done
+```
+
+Compare warning **texts and their counts**, not locations — editing a doc
+comment above line 100 shifts every line number under it, and a pre-existing
+warning that merely moved is not new. Counts matter because the dominant
+classes (`unresolved link`, `private intra-doc link`) repeat one text many
+times in a file: a second identical warning is a new warning, and a
+set-difference would miss it. An empty result — including "no touched `.rs` file at all",
+for a docs-only PR — **counts as passing**: the criterion is about the diff,
+and an empty diff is an empty diff. A warning that *disappears* is a fix, not
+a regression.
+
+Do not burn the 1113 down inside an unrelated PR, and do not add crate-level
+`#![allow(rustdoc::…)]` to make `-D warnings` pass — #14990 keeps both out of
+scope on purpose; zero rustdoc debt, if an operator wants it, is its own
+decomposed issue.
+
+## The shape all seven share
 
 Each failure was a *plausible* story that fit the first two observations,
 reported before checking the third. The cost is asymmetric: a wrong result
-delivered confidently sends the next reader somewhere the work isn't. All six
-recipes are the same move — **spend one command to make the silent failure
-loud.**
+delivered confidently sends the next reader somewhere the work isn't. All
+seven recipes are the same move — **spend one command to make the silent
+failure loud.**

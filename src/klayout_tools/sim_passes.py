@@ -43,14 +43,15 @@ carries each pass's status and sample count (and ``raw`` path when
 
 from __future__ import annotations
 
-import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_steps
+from . import sim_measurement_kind, sim_raw, sim_steps
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
+from .sim_expr_log import expr_control_lines
 
 #: What an ``alter`` entry changes.
 FIELDS = ("ac", "dc")
@@ -158,11 +159,7 @@ def _resolve_alter_entry(item: Any, name: str) -> tuple[str, Any, str]:
             "not supported"
         )
     value = item.get("value")
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
+    if not is_finite_number(value):
         raise SimError(
             f"pass {name!r}: alter value for {target!r} must be a finite "
             f"number (got {value!r})"
@@ -230,6 +227,13 @@ def validate_alter_targets(
     dc_targets = sorted(
         {t for p in analysis["passes"] for t, _v, f in p["alter"] if f == "dc"}
     )
+    ac_targets = [
+        (target, f"pass {passed['name']!r}: alter target {target!r}")
+        for passed in analysis["passes"]
+        for target, _value, field in passed["alter"]
+        if field == "ac"
+    ]
+    sim_steps.check_ac_alter_targets_exist(netlist_path, ac_targets)
     params = _param_only_targets(netlist_path, dc_targets) if dc_targets else {}
     for passed in analysis["passes"]:
         for target, _value, field in passed["alter"]:
@@ -287,8 +291,12 @@ def refuse_xyce(analysis: dict[str, Any], engine: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each AC pass writes per corner.
+_RAWFILE_PREFIX = "ac_pass"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"ac_pass_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def _format_value(value: float) -> str:
@@ -314,8 +322,7 @@ def control_lines(
     if exprs:
         lines.append("op")
         for spec in exprs:
-            lines.append(f"let {spec['name']} = {spec['expr']}")
-            lines.append(f"print {spec['name']}")
+            lines.extend(expr_control_lines(spec))
     for index, passed in enumerate(analysis["passes"]):
         for target, value, field in passed["alter"]:
             suffix = " ac" if field == "ac" else ""

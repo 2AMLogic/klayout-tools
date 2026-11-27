@@ -101,7 +101,7 @@ description alone):
    unconditionally, supply nets included ("always report the array, never
    silently drop... let the caller judge it benign"). Only BJT ``C`` is
    still such a terminal; MOS ``B`` was too until #5546 bound it
-   group-level -- see :func:`~klayout_tools.layout_plan_ports.bind_body_nets`.
+   group-level -- see :func:`~klayout_tools.layout_plan_body_nets.bind_body_nets`.
 6. **No ``klt`` CLI subcommand is added this phase**, mirroring Phase B's
    own decision and for the same reason: :func:`execute_layout_plan`/
    :func:`execute_layout_plan_document` are a complete library surface, and
@@ -177,16 +177,20 @@ import tempfile
 from collections.abc import Callable
 from typing import Any
 
-from . import layout_plan, layout_plan_ports
+from . import layout_plan, layout_plan_body_nets, layout_plan_ports
 from . import layout_plan_routing as nr
 from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
+from .layout_plan_diff_pair import apply_diff_pair_unit_w_um, apply_strap_splits
 from .layout_plan_fields import ingest_netlist
 from .layout_plan_ports import (
+    _netlist_derived_size_params,
+    apply_derived_flavors,
     apply_gate_contact,
     device_owned_port_names,
+    diff_pair_leg_error,
     extract_raw_params_by_id,
     port_pins,
     unrouted_reasons,
@@ -224,7 +228,7 @@ _ALLOWED_ROUTING_KEYS = {
 #: per-device port concept for connectivity derivation; a terminal name
 #: absent from a present generator's own sub-dict (MOS ``B``, BJT ``C``) has
 #: no *per-device* port to map onto -- MOS ``B`` is bound group-level
-#: instead (``layout_plan_ports.bind_body_nets``, #5546); see decision 5.
+#: instead (``layout_plan_body_nets.bind_body_nets``, #5546); see decision 5.
 _TERMINAL_SUFFIXES: dict[str, dict[str, str]] = {
     "mos_array": {"S": "S", "D": "D", "G": "G"},
     "diff_pair": {"S": "S", "D": "D", "G": "G"},
@@ -232,16 +236,6 @@ _TERMINAL_SUFFIXES: dict[str, dict[str, str]] = {
     "bjt_array": {"E": "E", "B": "B"},
     "res_array": {"A": "A", "B": "B"},
     "cap_array": {"A": "BOT", "B": "TOP"},
-}
-
-#: Which resolved digest params (MOS/resistor ``L``/``W``) map onto which
-#: ``klt gen`` params field, per generator -- see the module docstring's
-#: scope decision 1.
-_SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
-    "mos_array": {"L": "l_um", "W": "w_um"},
-    "diff_pair": {"L": "l_um", "W": "w_um"},
-    "esd_device": {"L": "l_um", "W": "finger_width_um"},
-    "res_array": {"L": "length_um", "W": "width_um"},
 }
 
 #: Opposite edge, used when resolving an ``abutment[]`` pair from the side
@@ -268,8 +262,10 @@ class LayoutPlanExecuteError(Exception):
     """Raised when a validated plan cannot be executed: an unresolvable PDK,
     a generation failure (invalid resolved ``params``), a ``device_groups[]``
     entry with no reachable placement (no ``rows[]`` entry and no resolvable
-    ``abutment[]`` chain), or a ``gen_compose.compose()`` failure. Exit code
-    1 -- see the module docstring's "Exit-code trichotomy" note.
+    ``abutment[]`` chain), a ``diff_pair`` group whose declared devices are
+    not electrically distinct legs (#5765), or a ``gen_compose.compose()``
+    failure. Exit code 1 -- see the module docstring's "Exit-code
+    trichotomy" note.
     """
 
 
@@ -352,34 +348,6 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
     return resolved
 
 
-def _netlist_derived_size_params(
-    generator: str, device_params: dict[str, Any]
-) -> dict[str, float]:
-    """Pick the ``L``/``W``-style digest params a given generator's own
-    ``klt gen`` params can absorb, per :data:`_SIZE_PARAM_TARGETS`.
-
-    Only a **positive** digest value counts as "the netlist specified this
-    device's geometry" -- ``NetlistSpiceReader`` reports ``L``/``W`` as
-    ``0.0`` (KLayout's own structural default for an unset device-class
-    param) for a resistor written in the bare, purely-electrical
-    ``R<name> n1 n2 <ohms>`` SPICE form (no ``L=``/``W=`` at all), which is
-    "the netlist did not specify a geometric size for this device," not "the
-    netlist specifies a zero-sized device" -- treating it as the latter
-    would hand a real generator a rejected (``> 0`` required) param instead
-    of falling back to its own documented default.
-    """
-    targets = _SIZE_PARAM_TARGETS.get(generator)
-    if not targets:
-        return {}
-    resolved: dict[str, float] = {}
-    for digest_key, gen_param in targets.items():
-        value = device_params.get(digest_key)
-        value_is_number = is_number(value)
-        if value_is_number and value > 0:
-            resolved[gen_param] = float(value)
-    return resolved
-
-
 def _resolve_group_params(
     group: dict[str, Any],
     digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
@@ -420,6 +388,10 @@ def _resolve_group_params(
     warnings.extend(
         apply_gate_contact(resolved, group, digest, digest_devices_by_key, overrides)
     )
+    # strap_splits (#5557): derived for diff_pair groups resolving splits > 1;
+    # recorded in `derived` so a diverging explicit override still gets the
+    # generic divergence warning from the loop below.
+    warnings.extend(apply_strap_splits(resolved, derived, group, overrides))
     # `device_groups[].topology` is a top-level plan field (Phase B's own
     # matching-pattern concept, already validated against the named
     # generator's own support table) but only `mos_array`/`bjt_array` accept
@@ -453,46 +425,11 @@ def _resolve_group_params(
             )
         resolved[param_name] = value
 
-    # `diff_pair`'s `w_um` PCell param is the *unit sub-instance* width, not
-    # the whole matched device's width -- `gen.py`'s `_diff_pair_layout()`
-    # draws each matched device as `splits` unit instances wide (default
-    # `splits=2`). `_netlist_derived_size_params()` above maps the digest's
-    # `W` straight onto `w_um` with no `splits` awareness, so a netlist
-    # device with `W=20` would otherwise resolve `w_um=20.0` and draw a 40 um
-    # device -- 2x the schematic. Only divide the netlist-derived value: an
-    # explicit `params.w_um` override (checked above, already layered into
-    # `resolved`) is the caller directly setting the per-unit PCell param and
-    # is left alone. `splits` itself resolves the same way any other
-    # override does -- default `2` (matching `gen.py`'s own PCell default)
-    # or the group's own `params.splits` override.
-    is_diff_pair_derived_w_um = (
-        group["generator"] == "diff_pair"
-        and "w_um" in derived
-        and "w_um" not in overrides
-    )
-    if is_diff_pair_derived_w_um:
-        resolved_splits = overrides.get("splits", 2)
-        is_valid_splits = (
-            isinstance(resolved_splits, (int, float))
-            and not isinstance(resolved_splits, bool)
-            and resolved_splits > 0
-        )
-        if is_valid_splits:
-            netlist_w = derived["w_um"]
-            unit_w = netlist_w / resolved_splits
-            resolved["w_um"] = unit_w
-            if resolved_splits != 1:
-                warnings.append(
-                    f"device_groups (id '{group['id']}'): diff_pair draws each "
-                    f"matched device as 'splits' unit instances wide, so the "
-                    f"netlist-derived w_um ({netlist_w}) was auto-divided by "
-                    f"the resolved splits ({resolved_splits}) to w_um="
-                    f"{unit_w} so the drawn device reproduces the netlist W"
-                )
-        # An invalid `splits` override (non-numeric, non-positive) is left
-        # for `gen_describe.py`'s own `_diff_pair_validate` to reject
-        # (`params.splits must be >= 1`) rather than this module dividing by
-        # a value it cannot itself validate.
+    # `diff_pair`'s netlist-derived `w_um` is the *whole matched device's*
+    # width but its PCell param is the *unit sub-instance* width -- divide by
+    # the resolved splits (see `apply_diff_pair_unit_w_um`; moved to
+    # `layout_plan_diff_pair.py`, beside `apply_strap_splits`).
+    warnings.extend(apply_diff_pair_unit_w_um(resolved, derived, group, overrides))
 
     return resolved, warnings
 
@@ -682,7 +619,7 @@ def _build_connectivity(
                 )
 
     layout_plan_ports.bind_ring_nets(device_groups, generated, net_pins, warnings)
-    layout_plan_ports.bind_body_nets(
+    layout_plan_body_nets.bind_body_nets(
         device_groups, digest_devices_by_key, generated, net_pins, warnings
     )
     connectivity: list[dict[str, Any]] = []
@@ -1058,11 +995,19 @@ def execute_layout_plan(
 
         generated: dict[str, dict[str, Any]] = {}
         resolved_params_by_id: dict[str, dict[str, Any]] = {}
+        family = None
         for group in device_groups:
+            raw_params = raw_params_by_id.get(group["id"], {})
+            # Check the declared legs before generating the pair or mirror.
+            leg_error = diff_pair_leg_error(
+                group, digest_devices_by_key, mirror=raw_params.get("mirror") is True
+            )
+            if leg_error:
+                raise LayoutPlanExecuteError(leg_error)
             params, param_warnings = _resolve_group_params(
                 group,
                 digest_devices_by_key,
-                raw_params_by_id.get(group["id"], {}),
+                raw_params,
                 digest,
             )
             warnings.extend(param_warnings)
@@ -1077,6 +1022,7 @@ def execute_layout_plan(
                 },
             }
             try:
+                warnings.extend(apply_derived_flavors(group, params, pdk_spec, family))
                 generated[group["id"]] = generate(gen_request)
             except GenError as exc:
                 raise LayoutPlanExecuteError(
@@ -1085,11 +1031,7 @@ def execute_layout_plan(
             except PdkNotFoundError as exc:
                 raise LayoutPlanExecuteError(str(exc)) from exc
 
-            # Scope decision 8 (issue #1731): the PDK variant `generate()`
-            # actually resolved (never `None`, unlike `pdk_spec["variant"]`,
-            # which Phase B leaves optional) -- resolving `family` from it
-            # here, once per group, avoids a second, possibly-divergent PDK
-            # lookup.
+            # Reuse the actual PDK family when resolving subsequent groups.
             family = _pdk_family(generated[group["id"]]["pdk"]["variant"])
             warnings.extend(_device_class_mismatch_warnings(group, params, family))
 
