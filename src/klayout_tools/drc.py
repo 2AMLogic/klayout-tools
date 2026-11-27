@@ -81,6 +81,7 @@ from .decks import (
 from .decks.sky130_cuts import CUT_SELECTION_LAYERS
 from .drc_attribution import attribute_to_instance as _attribute_to_instance
 from .drc_attribution import attribute_violation
+from .drc_butted_diffusion import butted_fields, select_not_butted, validate_butted
 from .drc_check_kinds import (
     _ANTENNA_CHECKS,
     _AREA_CHECKS,
@@ -135,14 +136,14 @@ _NET_SPACE_CHECKS = {"net_space"}
 
 def _spec_layers(rule: DrcRule) -> set[tuple[int, int]]:
     """Layers referenced by the rule's spec descriptors, if any."""
-    specs = (rule.region_spec, rule.net_spec, rule.text_exempt, rule.band_spec)
+    specs = [rule.region_spec, rule.net_spec, rule.text_exempt, rule.band_spec]
+    specs.append(rule.butted_spec)
     return {layer for spec in specs if spec is not None for layer in spec.layers()}
 
 
-# Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
-# see that class's docstring for each one's derivation. Validated per rule
-# (rather than assumed) so a deck typo fails loudly with the rule id instead
-# of silently falling through to the default derivation.
+# Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for -- see
+# that class's docstring for each one's derivation. Validated per rule (rather than
+# assumed) so a deck typo fails loudly with the rule id, never silently deriving.
 _DERIVED_LAYER_MODES = {
     "sized_intersection",
     "overlapping",
@@ -156,9 +157,9 @@ _DERIVED_LAYER_MODES = {
 _DERIVED_CONTEXTS = {None, "near", "far"}
 
 # Every `DrcRule.other_layer_selection` value `run_drc()` knows how to apply
-# (issue #2688) -- validated per rule for the same "fail loudly, never
+# (issues #2688, #7970) -- validated per rule for the same "fail loudly, never
 # silently check a different population" reason as `_DERIVED_LAYER_MODES`.
-_OTHER_LAYER_SELECTIONS = {"squares"}
+_OTHER_LAYER_SELECTIONS = {"squares", "not_butted"}
 
 # Every `DrcRule.layer_selection` value (the primary-layer counterpart of
 # `_OTHER_LAYER_SELECTIONS`, issues #2943/#3139).
@@ -1060,6 +1061,7 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                 "scope": rule.scope or None,
                 **rule_threshold_fields(rule, nominal_dbu_um),
                 **edge_band_fields(rule, nominal_dbu_um),
+                **butted_fields(rule),
             }
         )
         if rule.layer_selection:
@@ -1603,14 +1605,12 @@ def _cell_check_regions(
 
     base_region = None
     if rule.derived_layer is not None:
-        # Virtual/derived region (#345, marker-scoped modes #1110) --
-        # see `DerivedLayer`'s docstring for each mode's full
-        # derivation and why an unscoped check against either raw
-        # input layer would be wrong, not just conservative.
-        # `sized_by_um` is a real micrometre distance, rescaled
-        # against this layout's own `dbu` directly (unlike
-        # `rule.threshold_dbu`, which is rescaled via `dbu_scale`
-        # against the deck's nominal dbu).
+        # Virtual/derived region (#345, marker-scoped modes #1110) -- see
+        # `DerivedLayer`'s docstring for each mode's full derivation and why an
+        # unscoped check against either raw input layer would be wrong, not just
+        # conservative. `sized_by_um` is a real micrometre distance, rescaled against
+        # this layout's own `dbu` directly (unlike `rule.threshold_dbu`, which is
+        # rescaled via `dbu_scale` against the deck's nominal dbu).
         base_region = _cell_region_or_empty(cell, base_index)
         region = _derived_region(
             rule,
@@ -1627,12 +1627,13 @@ def _cell_check_regions(
         if other_index is not None
         else (kdb.Region() if rule.require_containment else None)
     )
+    if rule.other_layer_selection == "not_butted":
+        other_region = select_not_butted(rule, cell, layout, other_region, base_region)
 
-    # Supplementary edge pairs reported under the same rule id,
-    # alongside whatever `_run_check` returns -- the same additive
-    # pattern `_run_check`'s own `outside_region` escape term already
-    # uses (#318). Only ever set for the derived+`"separation"`
-    # same-drawn-layer case (issue #1033).
+    # Supplementary edge pairs reported under the same rule id, alongside whatever
+    # `_run_check` returns -- the same additive pattern `_run_check`'s own
+    # `outside_region` escape term already uses (#318). Only ever set for the
+    # derived+`"separation"` same-drawn-layer case (issue #1033).
     peer_edge_pairs: Any | None = None
 
     if (
@@ -1717,7 +1718,7 @@ def _edge_pairs_for_rule(
     other_region: Any,
 ) -> tuple[Any, Any]:
     """``(edge_pairs, outside_region)`` for an edge-pair-reporting ``rule``."""
-    if rule.band_spec is not None:
+    if rule.band_spec is not None or rule.butted_spec is not None:
         return run_edge_band_check(cell, setup, rule, region, other_region)
     if rule.check in _NET_SPACE_CHECKS:
         return _run_net_space_check(cell, setup.layout, rule, setup.dbu_scale), None
@@ -3029,12 +3030,10 @@ def _validate_derived_layer(rule: DrcRule) -> None:
 
 def _validate_other_layer_selection(rule: DrcRule) -> None:
     """Reject a :class:`~klayout_tools.decks.DrcRule` whose
-    ``other_layer_selection`` or ``other_layer_subtract`` this engine cannot
-    apply (issues #2688, #7954): an unknown selection value, or either
-    modifier on a rule with no ``other_layer``. Same "fail loudly with the
-    rule id" contract as :func:`_validate_derived_layer`, which owns the
-    ``"union"``-needs-``intersect_with`` check among the ``derived_layer`` checks.
+    butted-diffusion settings, ``other_layer_selection``, or
+    ``other_layer_subtract`` cannot be applied. Each error names the rule.
     """
+    validate_butted(rule)
     selection = rule.other_layer_selection
     if selection is not None and selection not in _OTHER_LAYER_SELECTIONS:
         raise DrcError(

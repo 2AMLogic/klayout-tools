@@ -743,15 +743,11 @@ class DrcRule:
     (2) outside Nwell and DNWELL" -- both resolve to the *same* 0.16um
     value, so ``nplus.enclosing.comp.1`` needs no equivalent gate). Setting
     ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``) on
-    ``pplus.enclosing.comp.1`` matches this exactly: a layout drawing
-    neither has no shape this rule's 0.16um threshold can correctly apply
-    to, so the whole rule is skipped rather than evaluated at the wrong,
-    stricter threshold; one drawing *either* keeps the unchanged (still
-    approximate -- butting edges, ``euclidian`` vs. ``projection``; see the
-    rule's own comment in ``decks/gf180mcu.py``) flat 0.16um behaviour, the
-    gate being unable to narrow *which* ``PCOMP`` shapes are in which DRM
-    sub-case without the same unsupported three-input derivation. Defaults
-    to ``None``: no gate, so a rule skips only on a missing input layer.
+    ``pplus.enclosing.comp.1`` skips the rule when both wells are absent.
+    With either well present, the rule's ``derived_layer`` selects the
+    ``PCOMP`` shapes to check (#3484). The enclosure remains approximate
+    for butting edges and the choice of distance metric (see ``decks/gf180mcu.py``).
+    The default ``None`` disables this gate.
 
     ``voltage_independent`` (issue #2369) opts a rule out of
     ``run_drc()``'s ``coverage.voltage_domain_warnings`` gate (issue #552/
@@ -769,20 +765,21 @@ class DrcRule:
     conservative value every pre-existing rule keeps, so the gate's
     behaviour is unchanged for them.
 
-    ``other_layer_selection`` (issue #2688) narrows the ``other_layer``
-    side of a two-layer rule to a whole-polygon sub-population of that
-    drawn layer, the same way a ``.not(...)``-free official selector does.
-    The only supported value is ``"squares"``: ``other_layer``'s *merged*
-    polygons filtered by ``klayout.db.Region.squares()`` -- the complement
-    of the DRC-DSL ``non_squares`` selector sg13g2's runset uses to split
-    square contacts from contact bars (``contbar = cont_nseal.non_squares;
-    cont_sq = cont_nseal.not(contbar)``, ``ihp-sg13g2.drc``). A contact bar
-    (or any non-square merged contact shape) is therefore neither measured
-    for margin nor reported by the #318 zero-overlap escape term of a rule
-    using this selection -- matching ``Cnt.c``, which never applied to
-    bars (those are ``CntB.*``'s job). ``None`` (the default, every
-    pre-existing rule) reads ``other_layer``'s full drawn shapes exactly as
-    before this field existed. Any other value is a deck-authoring mistake
+    ``other_layer_selection`` (issue #2688) narrows the ``other_layer`` side of a
+    two-layer rule to a whole-polygon sub-population of that drawn layer, the same way a
+    ``.not(...)``-free official selector does. ``"squares"``: ``other_layer``'s *merged*
+    polygons filtered by ``klayout.db.Region.squares()`` -- the complement of the
+    DRC-DSL ``non_squares`` selector sg13g2's runset uses to split square contacts from
+    contact bars (``contbar = cont_nseal.non_squares; cont_sq =
+    cont_nseal.not(contbar)``, ``ihp-sg13g2.drc``). A contact bar (or any non-square
+    merged contact shape) is therefore neither measured for margin nor reported by the
+    #318 zero-overlap escape term of a rule using this selection -- matching ``Cnt.c``,
+    which never applied to bars (those are ``CntB.*``'s job). ``"not_butted"`` (issue
+    #7970) drops, on a ``derived_layer`` rule, every ``other_layer`` polygon touching a
+    butted diffusion pair, gf180mcu's NP.3/PP.3 operand; see
+    :mod:`klayout_tools.drc_butted_diffusion`. ``None`` (the default, every pre-existing
+    rule) reads ``other_layer``'s full drawn shapes exactly as before this field
+    existed. Any other value is a deck-authoring mistake
     :func:`~klayout_tools.drc.run_drc` rejects loudly with the rule id.
 
     ``layer_selection`` (issues #2943, #3139) is the same ``"squares"``
@@ -850,6 +847,7 @@ class DrcRule:
     approximations: list[dict[str, str]] | None = None
     other_layer_subtract: tuple[tuple[int, int], ...] = ()
     band_spec: Any = None  # `drc_edge_band.EdgeBandSpec` -- thresholds by depth (#7955)
+    butted_spec: Any = None  # `drc_butted_diffusion.ButtedEdgeSpec` -- butted edges
 
 
 class UnknownDeckError(Exception):
