@@ -372,12 +372,15 @@
         "klayout_tools.functional_verification_run_inputs",
         "klayout_tools.functional_verification_tools",
         "klayout_tools.functional_verification_run_results",
+        "klayout_tools.functional_verification_hdl_units",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_internal_bus",
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_output_concat",
         "klayout_tools.functional_verification_sdf_rename",
         "klayout_tools.functional_verification_sdf_steps",
+        "klayout_tools.functional_verification_sdf_unit_syntax",
+        "klayout_tools.functional_verification_sdf_units",
         "klayout_tools.functional_verification_search_path",
         "klayout_tools.functional_verification_verilog_top"
       ]

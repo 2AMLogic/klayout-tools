@@ -285,11 +285,7 @@ from .functional_verification_sdf_internal_bus import (
     SDF_INTERNAL_BUS_NET_REASONS,
     _apply_sdf_internal_bus_net_drop,
 )
-from .functional_verification_sdf_output_concat import _sdf_output_concat_report
-from .functional_verification_sdf_rename import (
-    _apply_sdf_escaped_divider_rename,
-    _sdf_renamed_report,
-)
+from .functional_verification_sdf_rename import _apply_sdf_escaped_divider_rename
 from .functional_verification_sdf_steps import (
     SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
     SDF_IOPATH_SYNTAX_REASONS,
@@ -301,6 +297,10 @@ from .functional_verification_sdf_steps import (
     _sdf_refusal_attribution,
     _sdf_refusal_error,
     _write_sdf_drop_step,
+)
+from .functional_verification_sdf_units import (
+    _check_sdf_time_units,
+    _sdf_annotation_report,
 )
 from .functional_verification_tools import (
     _ENGINE_VERSION_COMMANDS,
@@ -2356,7 +2356,6 @@ def run_functional_verification(
         # line counter is cumulative across the calls above), never
         # against the request's own SDF path.
         sdf.update(_sdf_refusal_attribution(sdf_paths, ports))
-
         shim_path = os.path.join(output_dir, f"{SDF_ANNOTATE_MODULE}.v")
         _write_sdf_annotate_shim(
             shim_path,
@@ -2392,6 +2391,18 @@ def run_functional_verification(
         sources, source_defines, output_dir
     )
     includes = [*includes, *scoped_include_dirs]
+    if sdf is not None:
+        _check_sdf_time_units(
+            sdf,
+            sdf_paths,
+            sources,
+            verilog_tb["dut_instance"] if verilog_tb else hdl_toplevel,
+            timescale[0] if verilog_tb is None else None,
+            includes,
+            defines,
+            user_build_args,
+            build_dir if verilog_tb is None else None,
+        )
 
     if verilog_tb is not None:
         return with_run_inputs(
@@ -2568,28 +2579,14 @@ def run_functional_verification(
                 "sdf": (
                     None
                     if sdf is None
-                    else {
-                        # Retyped to the hashed envelope (issue #5784).
-                        "file": _hashed_path_envelope(sdf["file"], repo_root=repo_root),
-                        "corner": sdf["corner"],
-                        # Additive (issue #2364): echoes the request's entry
-                        # population -- "all" (every delay entry) or
-                        # "interconnect" (net delays only, every non-INTERCONNECT
-                        # delay entry dropped and counted in `dropped`). Absent
-                        # on no older reader's contract: the field is new, and a
-                        # consumer that ignores unknown keys (the JSON contract's
-                        # additive rule) is unaffected.
-                        "entries": sdf["entries"],
-                        **({"scope": sdf["scope"]} if "scope" in sdf else {}),
-                        "annotated": True,
-                        "partial": bool(sdf_dropped_counts),
-                        "dropped": _sdf_dropped_report(
-                            sdf_dropped_counts, sdf_pre_dropped_arcs
-                        ),
-                        # Additive (#2897): `{from, to}` per escaped-divider rename.
-                        **_sdf_renamed_report(sdf_renamed),
-                        **_sdf_output_concat_report(sdf_output_concat, repo_root),
-                    }
+                    else _sdf_annotation_report(
+                        sdf,
+                        repo_root,
+                        sdf_dropped_counts,
+                        sdf_pre_dropped_arcs,
+                        sdf_renamed,
+                        sdf_output_concat,
+                    )
                 ),
             },
         }
