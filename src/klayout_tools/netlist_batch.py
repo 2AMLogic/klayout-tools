@@ -223,7 +223,8 @@ def package_tree(
     )
     files = _batch_tree.tracked_files(root, err_cls=NetlistError)
     tracked = set(files)
-    selected = set(_batch_tree.select_files(files, include, exclude))
+    selected_files = _batch_tree.select_files(files, include, exclude)
+    selected = set(selected_files)
     rel_schematic = _batch_tree.relative_tracked(
         schematic, root, tracked, what="schematic", flag="", err_cls=NetlistError
     )
@@ -258,7 +259,7 @@ def package_tree(
 
     symbol_rel = _relative_symbol_dirs(symbol_path, root, selected)
 
-    tree = _batch_tree.measure_tree(root, selected)
+    tree = _batch_tree.measure_tree(root, selected_files)
     if tree.total_bytes > max_bytes:
         raise NetlistError(
             f"--backend batch input tree under {root} is {tree.total_bytes} bytes "

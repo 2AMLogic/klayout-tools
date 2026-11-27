@@ -181,8 +181,8 @@ def measure_tree(root: str, selected: Collection[str]) -> TrackedTree:
     """The selected files that exist on disk, and their total uncompressed
     size. A tracked file deleted in the working tree is skipped (``tar`` would
     fail on it), and so is a directory that is not a symlink (a submodule's
-    gitlink). ``files`` comes back sorted, so the archive order does not
-    depend on how the caller holds ``selected``."""
+    gitlink). Pass the selected index entries with duplicates intact. Each
+    entry counts toward the total and becomes a member in sorted order."""
     present: list[str] = []
     total = 0
     for rel in sorted(selected):

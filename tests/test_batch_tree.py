@@ -13,11 +13,13 @@ import subprocess
 import sys
 import tarfile
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import pytest
 
 from klayout_tools import _batch_tree
+from klayout_tools import extract_batch as eb
 from klayout_tools import netlist_batch as nb
 from klayout_tools import signoff_generator_batch as sgb
 
@@ -222,6 +224,77 @@ def test_measure_tree_skips_deleted_files_and_gitlinks_in_sorted_order(repo):
         "design/a.sch",
     )
     assert _batch_tree.measure_tree(root, []).total_bytes == 0
+
+
+@pytest.fixture
+def unmerged_repo(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
+    (root / "top.sch").write_bytes(b"sch")
+    (root / "top.gds").write_bytes(b"gds")
+    sidecar = root / "sidecar.txt"
+    sidecar.write_text("base\n")
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "base")
+    _git(root, "switch", "-qc", "other")
+    sidecar.write_text("other\n")
+    _git(root, "commit", "-qam", "other")
+    _git(root, "switch", "-q", "main")
+    sidecar.write_text("main\n")
+    _git(root, "commit", "-qam", "main")
+    with pytest.raises(subprocess.CalledProcessError):
+        _git(root, "merge", "other")
+    entries = subprocess.check_output(["git", "-C", root, "ls-files", "sidecar.txt"])
+    assert entries.splitlines() == [b"sidecar.txt"] * 3
+    return root, 3 * sidecar.stat().st_size + len(b"sch") + len(b"gds")
+
+
+def test_netlist_counts_and_archives_each_unmerged_entry(unmerged_repo, tmp_path):
+    root, total = unmerged_repo
+    package = partial(
+        nb.package_tree,
+        str(root / "top.sch"),
+        rcfile=None,
+        pdk="sky130A",
+        batch_root=None,
+    )
+    with pytest.raises(nb.NetlistError) as err:
+        package(max_bytes=total - 1)
+    assert err.value.code == "batch_input_too_large"
+    tree = package(max_bytes=total)
+    assert tree.total_bytes == total
+    path = tmp_path / "netlist.tar.gz"
+    nb.build_tarball(tree, str(path))
+    with tarfile.open(path) as archive:
+        assert archive.getnames() == ["sidecar.txt"] * 3 + ["top.gds", "top.sch"]
+
+
+def test_extract_counts_and_archives_each_unmerged_entry(unmerged_repo, tmp_path):
+    root, total = unmerged_repo
+    package = partial(
+        eb.package,
+        {"file": "top.gds"},
+        str(root),
+        batch_root=None,
+        include=(),
+        exclude=(),
+    )
+    with pytest.raises(eb.ExtractError) as err:
+        package(max_bytes=total - 1)
+    assert err.value.code == "batch_input_too_large"
+    tree, request = package(max_bytes=total)
+    assert tree.total_bytes == total
+    path = tmp_path / "extract.tar.gz"
+    eb.build_tarball(tree, request, str(path))
+    with tarfile.open(path) as archive:
+        assert archive.getnames() == ["sidecar.txt"] * 3 + [
+            "top.gds",
+            "top.sch",
+            "request.json",
+        ]
 
 
 def test_write_tarball_is_scrubbed_ordered_and_carries_extra_members(repo, tmp_path):

@@ -188,9 +188,9 @@ def package(
         layout, batch_root, what="layout", err_cls=ExtractError
     )
     files = _batch_tree.tracked_files(root, err_cls=ExtractError)
-    selected = set(_batch_tree.select_files(files, include, exclude))
+    selected = _batch_tree.select_files(files, include, exclude)
     runner_request = _root_relative_request(
-        request, base_dir, layout, root, set(files), selected
+        request, base_dir, layout, root, set(files), set(selected)
     )
 
     runner_request.pop("output", None)
