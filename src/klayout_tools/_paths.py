@@ -1,7 +1,7 @@
 """Shared path-resolution, request-loading and small text helpers used across
 the ``klt`` verb modules.
 
-Offers: ``_resolve_relative`` (anchor a user-supplied path at the request's
+Offers: ``resolve_relative`` (anchor a user-supplied path at the request's
 directory), ``_load_request_json`` / ``_load_spec_json`` (read a JSON
 request or spec file), ``validate_request_shape`` / ``load_request_arg``
 (request dispatch and shape checks), ``parse_layer_datatype`` and
@@ -26,12 +26,15 @@ from typing import Any
 from ._layer_spec import parse_layer_datatype_strict
 
 
-def _resolve_relative(path: str, base_dir: str) -> str:
+def resolve_relative(path: str, base_dir: str) -> str:
     """Expand env vars/``~`` in ``path``; join relative paths against ``base_dir``."""
     expanded = os.path.expanduser(os.path.expandvars(path))
     if os.path.isabs(expanded):
         return expanded
     return os.path.join(base_dir, expanded)
+
+
+_resolve_relative = resolve_relative  # Compatibility for existing callers.
 
 
 def resolve_tool_binary(

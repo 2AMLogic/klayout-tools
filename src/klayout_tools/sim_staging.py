@@ -685,14 +685,14 @@ def _resolve_declared_lib(
 ) -> str:
     """Resolve one declared library ref exactly as ``sim`` resolves it for a
     local run (memoized per ref), refusing a missing file by field name."""
-    from .sim import _resolve_lib_ref
+    from .sim_model_paths import resolve_lib_ref
 
     if not isinstance(ref, str) or not ref:
         raise ModelStagingError(f"{field_name} must be a non-empty path")
     if ref in resolved_refs:
         return resolved_refs[ref]
     try:
-        path = os.path.abspath(_resolve_lib_ref(ref, models, request_dir))
+        path = os.path.abspath(resolve_lib_ref(ref, models, request_dir))
     except SimError as exc:
         raise ModelStagingError(f"{field_name}: {exc}") from exc
     if not os.path.isfile(path):
