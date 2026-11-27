@@ -30,6 +30,7 @@ from helpers.subprocess_fakes import (
     INPUTS_UPLOAD_ARGV,
     fake_completed,
     inputs_upload_of,
+    read_job_contract,
     uploaded_input_bytes,
     uploaded_request_of,
 )
@@ -53,11 +54,8 @@ class _FakeRunner:
     """Records every argv; returns canned responses keyed by a substring of
     the joined argv, in call order, falling back to a default success.
 
-    Mirrors `tests/test_remote_transport.py`'s `_FakeRunner`, with one
-    addition the S3 transport needs: an ``outputs`` payload the fake
-    materializes into the destination directory when it sees the
-    ``s3 cp ... outputs/ <dir> --recursive`` collect call, standing in for
-    what a real download would have written.
+    S3 reads serve an uncapped job contract by default and materialize
+    ``outputs`` in the destination directory on a recursive collect.
     """
 
     def __init__(self) -> None:
@@ -91,6 +89,8 @@ class _FakeRunner:
                 if isinstance(item, Exception):
                     raise item
                 return item
+        if joined.endswith("/job.json -"):
+            return read_job_contract(argv, {})
         return self.default
 
     def _outputs_for(self, s3_uri: str) -> dict[str, str]:
@@ -796,7 +796,7 @@ def _queue_refusals(runner: _FakeRunner, count: int) -> None:
 
 
 def test_classify_launch_failure_only_matches_the_capacity_refusal():
-    assert sb._classify_launch_failure(_CAPACITY_REFUSAL) == "batch_no_capacity"
+    assert sb._classify_launch_failure(_CAPACITY_REFUSAL, 1) == "batch_no_capacity"
     assert sb.BATCH_NO_CAPACITY_CODE == "batch_no_capacity"
     for other in (
         "error: only 2 instance type(s) configured, floor is 3",
@@ -804,7 +804,7 @@ def test_classify_launch_failure_only_matches_the_capacity_refusal():
         "error: no job spec at s3://bucket/jobs/x/job.json",
         "",
     ):
-        assert sb._classify_launch_failure(other) is None
+        assert sb._classify_launch_failure(other, 1) is None
 
 
 #: Verbatim shape of 2am's concurrency-cap refusal (issue #2917).
@@ -823,20 +823,20 @@ _VCPU_REFUSAL = (
 
 
 def test_classify_launch_failure_matches_the_vcpu_budget_refusal():
-    assert sb._classify_launch_failure(_VCPU_REFUSAL) == "batch_no_capacity"
+    assert sb._classify_launch_failure(_VCPU_REFUSAL, 1) == "batch_no_capacity"
     both = f"{_CAP_REFUSAL}; {_VCPU_REFUSAL}"
-    assert sb._classify_launch_failure(both) == "batch_concurrency_cap"
-    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}") == (
+    assert sb._classify_launch_failure(both, 1) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}", 1) == (
         "batch_no_capacity"
     )
 
 
 def test_classify_launch_failure_matches_the_concurrency_cap_refusal():
-    assert sb._classify_launch_failure(_CAP_REFUSAL) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(_CAP_REFUSAL, 1) == "batch_concurrency_cap"
     assert sb.BATCH_CONCURRENCY_CAP_CODE == "batch_concurrency_cap"
     # Both markers present: the Spot refusal wins (checked first).
     both = f"{_CAPACITY_REFUSAL}; {_CAP_REFUSAL}"
-    assert sb._classify_launch_failure(both) == "batch_no_capacity"
+    assert sb._classify_launch_failure(both, 1) == "batch_no_capacity"
 
 
 def test_concurrency_cap_without_wait_is_one_attempt_with_a_code(tmp_path):
@@ -2574,7 +2574,7 @@ def test_run_checked_classifies_on_the_unredacted_stderr():
             ["aws"],
             1.0,
             "step",
-            classify=lambda detail: "seen" if FAKE_BUCKET in detail else None,
+            classify=lambda detail, _rc: "seen" if FAKE_BUCKET in detail else None,
             redact=FAKE_BUCKET,
         )
 
@@ -3274,16 +3274,11 @@ def test_a_lost_shard_never_aborts_its_siblings(tmp_path, monkeypatch):
     runner.outputs = {"report.json": _sim_report(corner_ids=("tt_1.800_0",))}
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
-    calls = {"n": 0}
-    real_launch = sb.launch_job
-
-    def _flaky_launch(config, job_id, *, runner=None):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise sb.BatchError("create-fleet refused every pool")
-        return real_launch(config, job_id, runner=runner)
-
-    monkeypatch.setattr(sb, "launch_job", _flaky_launch)
+    runner.queue("--apply", fake_completed())
+    runner.queue(
+        "--apply",
+        fake_completed(returncode=1, stderr="create-fleet refused every pool"),
+    )
 
     corners, _, environment = sb._run_batch_fleet(
         corner_points=_corner_points(2),
@@ -7443,20 +7438,12 @@ def test_shard_map_tracks_launch_state_and_is_self_describing(tmp_path, monkeypa
         assert all(entry[k] for k in ("submitted_at", "launched_at", "collected_at"))
 
 
-def test_failed_launch_leaves_the_shard_unlaunched_and_says_so(
+def test_applied_launch_timeout_leaves_the_shard_launching(
     tmp_path, monkeypatch, capsys
 ):
-    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
-    real_launch = sb.launch_job
-    launched: list[str] = []
-
-    def _launch(config, job_id, **kwargs):
-        if launched:
-            raise sb.BatchError("client died")
-        launched.append(job_id)
-        return real_launch(config, job_id, **kwargs)
-
-    monkeypatch.setattr(sb, "launch_job", _launch)
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    runner.queue("--apply", fake_completed())
+    runner.queue("--apply", subprocess.TimeoutExpired("launch", 60))
     fleet()
     states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
     assert states == ["collected", "launching"]
