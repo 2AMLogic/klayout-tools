@@ -97,7 +97,8 @@ def _reduce_group(
         "margin": None,
         "reason": None,
     }
-    missing = [value for value in expected if value not in {p for _, p in points}]
+    observed = {p for _, p in points}
+    missing = [value for value in expected if value not in observed]
     if missing:
         return {
             **record,
@@ -299,22 +300,22 @@ def _group_id(group_by: list[str], group: dict[str, Any]) -> str:
 
 
 def attach_coverage(
-    measurements_spec: list[dict[str, Any]],
-    corners: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
     checked: list[str],
     skipped: list[dict[str, str]],
     inapplicable: list[dict[str, str]],
 ) -> None:
-    """Append every ``derive`` entry's per-group checked-work records to the
-    three coverage lists (the per-corner rows skip these entries)."""
-    for spec in measurements_spec:
-        if spec.get("derive") is None:
+    """Append checked-work records from each derived measurement's graded groups."""
+    for entry in measurements:
+        if not is_derive(entry):
             continue
-        limits = spec.get("limits")
+        limits = entry.get("limits")
         if not isinstance(limits, dict):
             limits = {}
-        for group in rollup_fields(spec, corners)["derive"]["groups"]:
-            _group_coverage(spec["name"], limits, group, checked, skipped, inapplicable)
+        for group in entry["derive"]["groups"]:
+            _group_coverage(
+                entry["name"], limits, group, checked, skipped, inapplicable
+            )
 
 
 def _group_coverage(

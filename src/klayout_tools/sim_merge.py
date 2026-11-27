@@ -388,7 +388,7 @@ def _merge(manifest: dict[str, Any], reports: list[dict[str, Any]]) -> dict[str,
     specs = _measurement_specs(reports[0])
 
     measurements = sim._rollup_measurements(specs, corners, None)
-    coverage = sim._build_coverage(specs, corners)
+    coverage = sim._build_coverage(measurements, corners)
     graded = sim._grade_corners(corners, measurements, coverage)
 
     merged: dict[str, Any] = copy.deepcopy(reports[0])
