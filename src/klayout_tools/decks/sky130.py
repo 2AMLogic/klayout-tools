@@ -1,19 +1,11 @@
 """sky130 DRC deck: a curated subset of the official rule set.
 
-Layer/datatype pairs and rule thresholds below are transcribed from the
-official, community-maintained sky130 KLayout DRC deck and layer map,
-fetched directly from the canonical source repository for this issue:
-
-- ``sky130/klayout/sky130.lydrc`` (the DRC-DSL rule script)
-- ``sky130/klayout/sky130.lyt`` (the layer map / layer-properties technology
-  file, which defines the ``name.purpose : layer/datatype`` pairs used below,
-  e.g. ``poly.drawing : 66/20``)
-
-both from https://github.com/fossi-foundation/open-pdks (the current home of
-the repo historically known as ``open_pdks``/``RTimothyEdwards/open_pdks``;
-distributed under GPLv3). Each rule's docstring cites the exact source line
-(rule id and comment) it was transcribed from, so values can be re-verified
-against a fresh checkout of that file at any time.
+The DRC script ``sky130/klayout/sky130.lydrc`` and layer map
+``sky130/klayout/sky130.lyt`` come from ``fossi-foundation/open-pdks``
+(historically ``RTimothyEdwards/open_pdks``, GPLv3). The layer map defines
+the layer/datatype pairs used below, such as ``poly.drawing : 66/20``.
+Open-pdks also installs the runset ``checks/tech-files/sky130A_mr.drc``
+from ``fossi-foundation/mpw_precheck``.
 
 This is *not* a full transcription of the official deck (hundreds of rules
 across dozens of layers) — see the "Scope guard" section of issue #9: a
@@ -180,14 +172,11 @@ met2/via rule coverage (issue #513, closing the gap #511 opened when it
 extended ``EXTRACTION_DECK`` to a third connectivity level -- see that field's
 own comment below): ``m2.1``/``m2.2``/``m2.4``/``m2.5`` and
 ``via.1a``/``via.2``/``via.4a``/``via.5a`` below are transcribed from a real
-sky130A PDK install (volare), whose ``libs.tech/klayout/drc/sky130A_mr.drc`` is
-the sky130A variant's current name for the same official, community-maintained
-KLayout DRC deck this module's other rules already cite as ``sky130.lydrc``
-(confirmed by cross-checking: every rule id/value this module already cites --
-``poly.1a``, ``li.1``, ``li.3``, ``m1.1``, ``m1.2``, ``m1.4``,
-``licon.5``/``licon.8``, ``ct.2`` -- appears in ``sky130A_mr.drc`` with the
-identical id and threshold value). ``m2.6`` (minimum met2 area, 0.0676 um^2) is
-a real rule in that same source; at the time this note was written no
+sky130A PDK install (volare). Its ``libs.tech/klayout/drc/sky130A_mr.drc``
+comes from mpw_precheck. It shares several rule IDs and thresholds with
+``sky130.lydrc``, including ``poly.1a``, ``li.1``, ``li.3``, ``m1.1``, ``m1.2``,
+``m1.4``, ``licon.5``, ``licon.8`` and ``ct.2``. The MR runset also defines
+``m2.6`` (minimum met2 area, 0.0676 um^2). At the time this note was written no
 ``"area"`` check primitive existed anywhere in this engine's ``DrcRule``
 vocabulary, so it was left untranscribed pending one (tracked as #513's own
 candidate follow-on). That primitive now exists (issue #812, ``drc.py``'s
@@ -390,27 +379,25 @@ from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
 DRC_RULE_SOURCES = ("sky130_cuts", "sky130_offgrid", "sky130_unmodeled")
 
 # The open-pdks revision used to install the SKY130 PDK and verify these rules.
-_OPEN_PDKS_REPO = "fossi-foundation/open-pdks"
 _OPEN_PDKS_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
+_MR_DRC_PATH = "checks/tech-files/sky130A_mr.drc"
+_DRC_SOURCE_PINS = {
+    "sky130/klayout/sky130.lydrc": ("fossi-foundation/open-pdks", _OPEN_PDKS_COMMIT),
+    _MR_DRC_PATH: (
+        "fossi-foundation/mpw_precheck",
+        "86b7362dacd931bf1fd957c84501bfbe7955fa7c",
+    ),
+}
 
 
 def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
-    """Identify a rule in the pinned open-pdks source tree."""
+    """Cite the pinned upstream runset that defines this rule."""
+    source_repo, commit = _DRC_SOURCE_PINS[source_path]
     return RuleProvenance(
-        source_repo=_OPEN_PDKS_REPO,
+        source_repo=source_repo,
         source_path=source_path,
         rule_id=rule_id,
-        commit=_OPEN_PDKS_COMMIT,
-    )
-
-
-def _mpw_precheck_provenance(rule_id: str) -> RuleProvenance:
-    """Identify a rule in the MR runset copied by the open-pdks SKY130 Makefile."""
-    return RuleProvenance(
-        source_repo="fossi-foundation/mpw_precheck",
-        source_path="checks/tech-files/sky130A_mr.drc",
-        rule_id=rule_id,
-        commit="86b7362dacd931bf1fd957c84501bfbe7955fa7c",
+        commit=commit,
     )
 
 
@@ -539,7 +526,7 @@ DECK: list[DrcRule] = [
         # value is applied everywhere, including inside areaid:core where the
         # runset relaxes it to poly.3's 0.16 um (listed in UNMODELED_RULES).
         scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "poly.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "poly.2"),
     ),
     DrcRule(
         id="poly.endcap.diff.1",
@@ -618,7 +605,7 @@ DECK: list[DrcRule] = [
         # in the source union, which a per-layer check cannot reproduce).
         # -> "difftap.3 : min. difftap spacing : 0.27um"
         scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "difftap.3"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "difftap.3"),
     ),
     DrcRule(
         id="tap.space.1",
@@ -629,7 +616,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "difftap.3" -- tap-side half; see diff.space.1.
         # -> "difftap.3 : min. difftap spacing : 0.27um"
         scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "difftap.3"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "difftap.3"),
     ),
     DrcRule(
         id="li1.width.1",
@@ -773,7 +760,7 @@ DECK: list[DrcRule] = [
         # entirely, unlike met2-met5's own area rules, which were at least
         # cited and explicitly deferred).
         scope="m1",  # sky130A_mr.drc "m1.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m1.6"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m1.6"),
     ),
     DrcRule(
         id="met1.holes_area.1",
@@ -796,7 +783,7 @@ DECK: list[DrcRule] = [
         # `Region.holes()` as the checked region; an unslotted plate derives
         # an empty region, which stays clean, not an error.)
         scope="m1",  # sky130A_mr.drc "m1.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m1.7"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m1.7"),
     ),
     DrcRule(
         id="licon1.width.1",
@@ -808,7 +795,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc: licon.not((rpm | urpm) & psdm & poly.interacting(poly_rs)).
         layer_selection=ORDINARY_LICON,
         scope="licon",
-        provenance=_mpw_precheck_provenance("licon.1"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "licon.1"),
     ),
     DrcRule(
         id="diff.enclosing.licon.1",
@@ -928,7 +915,7 @@ DECK: list[DrcRule] = [
         # Non-ring mcon outside areaid:ce includes edge- and corner-touching cuts.
         layer_selection=ORDINARY_MCON,
         scope="ct",
-        provenance=_mpw_precheck_provenance("ct.1_a/ct.1_b"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "ct.1_a/ct.1_b"),
     ),
     DrcRule(
         id="mcon.space.1",
@@ -963,7 +950,7 @@ DECK: list[DrcRule] = [
         # into its "Four more...approximate a max-bound rule" list; that
         # was a miscategorization and has been corrected.
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.1"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m2.1"),
     ),
     DrcRule(
         id="met2.space.1",
@@ -977,7 +964,7 @@ DECK: list[DrcRule] = [
         # the same approximation met1.space.1 above already makes for its
         # own wide-metal exception, "m1.3ab".)
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m2.2"),
     ),
     DrcRule(
         id="via.width.1",
@@ -1006,7 +993,7 @@ DECK: list[DrcRule] = [
         # L-shaped cut that fits inside a 0.15um box, so rectangularity is
         # not enforced. See docs/cli/drc.md's "sky130" approximation notes.
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.1a_a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via.1a_a"),
     ),
     DrcRule(
         id="via.space.1",
@@ -1017,7 +1004,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via.2": via.space(0.17, euclidian)
         # -> "via.2 : min. via spacing : 0.17um"
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via.2"),
     ),
     DrcRule(
         id="met1.enclosing.via.1",
@@ -1034,7 +1021,7 @@ DECK: list[DrcRule] = [
         # modelled by met1.enclosing_adjacent.via.1 below; "m1.5", the
         # mcon sibling, is still not modelled.)
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.4a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via.4a"),
     ),
     DrcRule(
         id="met1.enclosing_adjacent.via.1",
@@ -1049,7 +1036,7 @@ DECK: list[DrcRule] = [
         # (a corner of short edges; two opposite short edges are legal --
         # see drc.py `_run_enclosing_adjacent_check`, #3316).
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.5a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via.5a"),
     ),
     DrcRule(
         id="met2.enclosing.via.1",
@@ -1082,7 +1069,7 @@ DECK: list[DrcRule] = [
         # (a corner of short edges; two opposite short edges are legal --
         # see drc.py `_run_enclosing_adjacent_check`, #3316).
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.5"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m2.5"),
     ),
     DrcRule(
         id="met2.area.1",
@@ -1097,7 +1084,7 @@ DECK: list[DrcRule] = [
         # this rule was previously cited but not transcribed, since no
         # "area" check primitive existed yet).
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.6"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m2.6"),
     ),
     DrcRule(
         id="met2.holes_area.1",
@@ -1116,7 +1103,7 @@ DECK: list[DrcRule] = [
         # holes-area sibling of met2.area.1's "m2.6" above -- see
         # met1.holes_area.1's own note above for the shared derivation).
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.7"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m2.7"),
     ),
     # met3/via2 rule coverage (issue #776), mirroring the met2/via rule
     # shapes above -- see the module docstring's own #776 note for
@@ -1130,7 +1117,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m3.1": m3.width(0.3, euclidian)
         # -> "m3.1 : min. m3 width : 0.3um"
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.1"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m3.1"),
     ),
     DrcRule(
         id="met3.space.1",
@@ -1144,7 +1131,7 @@ DECK: list[DrcRule] = [
         # the same approximation met1.space.1/met2.space.1 above already
         # make for their own wide-metal exceptions.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m3.2"),
     ),
     DrcRule(
         id="via2.width.1",
@@ -1170,7 +1157,7 @@ DECK: list[DrcRule] = [
         # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
         # approximation notes.
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.1a_a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via2.1a_a"),
     ),
     DrcRule(
         id="via2.space.1",
@@ -1181,7 +1168,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via2.2": via2.space(0.2, euclidian)
         # -> "via2.2 : min. via2 spacing : 0.2um"
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via2.2"),
     ),
     DrcRule(
         id="met2.enclosing.via2.1",
@@ -1195,7 +1182,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via2.4": m2.enclosing(via2, 0.04, euclidian)
         # -> "via2.4 : min. m2 enclosure of via2 : 0.04um"
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.4"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via2.4"),
     ),
     DrcRule(
         id="met3.enclosing.via2.1",
@@ -1227,7 +1214,7 @@ DECK: list[DrcRule] = [
         # the violation; two opposite short edges are legal -- see drc.py
         # `_run_enclosing_adjacent_check`, #3316).
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.5"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via2.5"),
     ),
     DrcRule(
         id="met3.area.1",
@@ -1239,7 +1226,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m3.6": m3.with_area(0..0.240)
         # -> "m3.6 : min. m3 area : 0.240um²" (issue #1955)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.6"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m3.6"),
     ),
     DrcRule(
         id="met3.holes_area.1",
@@ -1258,7 +1245,7 @@ DECK: list[DrcRule] = [
         # holes-area sibling of met3.area.1's "m3.6" above -- see
         # met1.holes_area.1's own note above for the shared derivation).
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.7"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m3.7"),
     ),
     # met4/via3 rule coverage (issue #776), mirroring the met3/via2 rule
     # shapes just above.
@@ -1271,7 +1258,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m4.1": m4.width(0.3, euclidian)
         # -> "m4.1 : min. m4 width : 0.3um"
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.1"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m4.1"),
     ),
     DrcRule(
         id="met4.space.1",
@@ -1285,7 +1272,7 @@ DECK: list[DrcRule] = [
         # the same approximation met3.space.1 above already makes for its
         # own wide-metal exception.)
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m4.2"),
     ),
     DrcRule(
         id="via3.width.1",
@@ -1310,7 +1297,7 @@ DECK: list[DrcRule] = [
         # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
         # approximation notes.
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.1_a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via3.1_a"),
     ),
     DrcRule(
         id="via3.space.1",
@@ -1321,7 +1308,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via3.2": via3.space(0.2, euclidian)
         # -> "via3.2 : min. via3 spacing : 0.2um"
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via3.2"),
     ),
     DrcRule(
         id="met3.enclosing.via3.1",
@@ -1335,7 +1322,7 @@ DECK: list[DrcRule] = [
         # (the 2-adjacent-edges-relaxed refinement, "via3.5" (0.09um), is
         # met3.enclosing_adjacent.via3.1.)
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.4"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via3.4"),
     ),
     DrcRule(
         id="met3.enclosing_adjacent.via3.1",
@@ -1350,7 +1337,7 @@ DECK: list[DrcRule] = [
         # (a corner of short edges; two opposite short edges are legal --
         # see drc.py `_run_enclosing_adjacent_check`, #3316).
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.5"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via3.5"),
     ),
     DrcRule(
         id="met4.enclosing.via3.1",
@@ -1375,7 +1362,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m4.4a": m4.with_area(0..0.240)
         # -> "m4.4a : min. m4 area : 0.240um²" (issue #1955)
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.4a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m4.4a"),
     ),
     DrcRule(
         id="met4.holes_area.1",
@@ -1394,7 +1381,7 @@ DECK: list[DrcRule] = [
         # holes-area sibling of met4.area.1's "m4.4a" above -- see
         # met1.holes_area.1's own note above for the shared derivation).
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.7"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m4.7"),
     ),
     # met5/via4 rule coverage (issue #776), mirroring the met4/via3 rule
     # shapes just above.
@@ -1407,7 +1394,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m5.1": m5.width(1.6, euclidian)
         # -> "m5.1 : min. m5 width : 1.6um"
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.1"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m5.1"),
     ),
     DrcRule(
         id="met5.space.1",
@@ -1418,7 +1405,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m5.2": m5.space(1.6, euclidian)
         # -> "m5.2 : min. m5 spacing : 1.6um"
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m5.2"),
     ),
     DrcRule(
         id="via4.width.1",
@@ -1443,7 +1430,7 @@ DECK: list[DrcRule] = [
         # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
         # approximation notes.
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.1_a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via4.1_a"),
     ),
     DrcRule(
         id="via4.space.1",
@@ -1454,7 +1441,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via4.2": via4.space(0.8, euclidian)
         # -> "via4.2 : min. via4 spacing : 0.8um"
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.2"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via4.2"),
     ),
     DrcRule(
         id="met4.enclosing.via4.1",
@@ -1466,7 +1453,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via4.4": m4.enclosing(via4, 0.19, euclidian)
         # -> "via4.4 : min. m4 enclosure of via4 : 0.19um"
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.4"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "via4.4"),
     ),
     DrcRule(
         id="met5.enclosing.via4.1",
@@ -1491,7 +1478,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m5.4": m5.with_area(0..4.0)
         # -> "m5.4 : min. m5 area : 4.0um²" (issue #1955)
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.4"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m5.4"),
     ),
     DrcRule(
         id="met5.holes_area.1",
@@ -1510,7 +1497,7 @@ DECK: list[DrcRule] = [
         # holes-area sibling of met5.area.1's "m5.4" above -- see
         # met1.holes_area.1's own note above for the shared derivation).
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.7"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "m5.7"),
     ),
     # capm (met3 MiM-cap top plate) rule coverage (issue #776). capm.3's
     # commented-out compound variant and capm.2b/capm.2b_a/capm.11 (each
@@ -1525,7 +1512,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "capm.1": capm.width(1.0, euclidian)
         # -> "capm.1 : min. capm width : 1.0um"
         scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "capm.1"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "capm.1"),
     ),
     DrcRule(
         id="capm.space.1",
@@ -1536,7 +1523,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "capm.2a": capm.space(0.84, euclidian)
         # -> "capm.2a : min. capm spacing : 0.84um"
         scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "capm.2a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "capm.2a"),
     ),
     DrcRule(
         id="met3.enclosing.capm.1",
@@ -1589,7 +1576,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "cap2m.1": cap2m.width(1.0, euclidian)
         # -> "cap2m.1 : min. cap2m width : 1.0um"
         scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "cap2m.1"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "cap2m.1"),
     ),
     DrcRule(
         id="capm2.space.1",
@@ -1600,7 +1587,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "cap2m.2a": cap2m.space(0.84, euclidian)
         # -> "cap2m.2a : min. cap2m spacing : 0.84um"
         scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "cap2m.2a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "cap2m.2a"),
     ),
     DrcRule(
         id="met4.enclosing.capm2.1",
@@ -1656,7 +1643,7 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "nwell.1a": nwell.width(0.84, euclidian)
         # -> "nwell.1a : min. nwell width : 0.84um"; native id "nwell.1" (#5253)
         scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "nwell.1"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "nwell.1"),
     ),
     DrcRule(
         id="nwell.space.1",
@@ -1689,7 +1676,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "rpm.1a": rpm.width(1.27, euclidian)
         # -> "rpm.1a : min. rpm width : 1.27um"
         scope="rpm",  # sky130A_mr.drc "rpm.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "rpm.1a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "rpm.1a"),
     ),
     DrcRule(
         id="urpm.width.1",
@@ -1700,7 +1687,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "urpm.1a": urpm.width(1.27, euclidian)
         # -> "urpm.1a : min. rpm width : 1.27um"
         scope="urpm",  # sky130A_mr.drc "urpm.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "urpm.1a"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "urpm.1a"),
     ),
     DrcRule(
         id="nwell.enclosed.hvi.1",
@@ -1725,7 +1712,7 @@ DECK: list[DrcRule] = [
         # deck's PDK-cell inputs produce. The margin half (`threshold_dbu`)
         # is 0 because the runset checks containment only.
         scope="nwell",  # sky130A_mr.drc "nwell.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "nwell.9"),
+        provenance=_sky130_provenance(_MR_DRC_PATH, "nwell.9"),
     ),
 ]
 
