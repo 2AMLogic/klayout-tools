@@ -3044,6 +3044,7 @@ empty), and `environment.remote.worker_environment.pdk` reads:
 ```json
 {"variant": "gf180mcuD", "root": "/opt/pdk", "stamp_scheme": "sources-sha256",
  "stamp_sha256": "<hex>", "stamp_text": "open_pdks <hash>",
+ "install": null, "store_layout": null,
  "models_staged": false, "stamp_scope": "executed"}
 ```
 
