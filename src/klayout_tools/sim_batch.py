@@ -968,31 +968,29 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
 
 
 def _assess_job_ceiling(
-    *, unit_count: int, per_unit_timeout_s: float, config: BatchConfig
+    *, unit_count: int, per_unit_timeout_s: float, config: BatchConfig, hosts: int = 1
 ) -> dict[str, Any]:
     """Deterministic pre-submit runtime-risk assessment of **one** batch job
     against the fleet's whole-job ceiling (issue #2833).
 
     The bound is :func:`_default_batch_job_timeout_s` -- every unit burning
     its full ``options.timeout_s`` one after another, plus
-    :data:`_BATCH_JOB_OVERHEAD_S`. It is derived from the request alone and
-    is a conservative *upper bound*, never a measured or predicted ngspice
-    runtime (``basis`` says so); a job whose units finish well inside their
-    ``timeout_s`` can run far below it. It is compared with
-    ``config.max_job_seconds``: a bound *equal* to the ceiling does not
-    exceed it.
+    :data:`_BATCH_JOB_OVERHEAD_S`: a conservative *upper bound* derived from
+    the request alone, never a runtime estimate (``basis`` says so).
+    ``hosts`` (the resolved ``remote.hosts``, issue #8011) shards the units
+    first, as :func:`sim_remote._shard_corner_points` balances them, so the
+    bound describes the largest shard, ``ceil(unit_count / hosts)`` units
+    (``job_unit_count``); ``unit_count`` stays the request's total, and a
+    bound *equal* to ``config.max_job_seconds`` does not exceed it.
 
     ``max_units_per_job`` is the largest shard whose own bound stays within
-    the ceiling (``0`` when even one unit's bound exceeds it), and
-    ``recommended_hosts`` the smallest ``remote.hosts`` whose largest shard
-    -- :func:`sim_remote._shard_corner_points` balances shards to at most
-    ``ceil(units / hosts)`` -- fits it, or ``None`` when no ``hosts`` value
-    can (lower ``options.timeout_s`` instead). When the bound exceeds the
-    ceiling the result carries a human-readable ``warning``.
+    the ceiling (``0`` when even one unit's exceeds it), ``recommended_hosts``
+    the smallest ``remote.hosts`` whose largest shard fits it, else ``None``
+    (lower ``options.timeout_s``). An exceeded ceiling adds a ``warning``.
 
-    ``config.job_timeout_s`` (issue #5544) replaces the whole assessment:
-    :func:`sim_batch_job_timeout.assess_caller_job_timeout` defines every
-    field from the caller's stated bound instead of this serial formula.
+    ``config.job_timeout_s`` (issue #5544) replaces the whole assessment with
+    :func:`sim_batch_job_timeout.assess_caller_job_timeout`'s caller-stated
+    bound; ``hosts`` changes nothing there.
     """
     if getattr(config, "job_timeout_s", None) is not None:
         return assess_caller_job_timeout(
@@ -1001,8 +999,9 @@ def _assess_job_ceiling(
             config=config,
         )
     units = max(1, unit_count)
+    largest = math.ceil(units / max(1, hosts))
     ceiling = config.max_job_seconds
-    bound = _default_batch_job_timeout_s(units, per_unit_timeout_s)
+    bound = _default_batch_job_timeout_s(largest, per_unit_timeout_s)
     if per_unit_timeout_s > 0:
         per_job = max(0, int((ceiling - _BATCH_JOB_OVERHEAD_S) // per_unit_timeout_s))
         # Settle float rounding against the bound function itself, so the
@@ -1020,6 +1019,7 @@ def _assess_job_ceiling(
     assessment: dict[str, Any] = {
         "basis": JOB_CEILING_BASIS,
         "unit_count": units,
+        "job_unit_count": largest,
         "per_unit_timeout_s": per_unit_timeout_s,
         "overhead_s": _BATCH_JOB_OVERHEAD_S,
         "job_bound_s": bound,
@@ -1033,7 +1033,7 @@ def _assess_job_ceiling(
     if exceeds:
         message = (
             f"batch job bound {bound:g}s (options.timeout_s {per_unit_timeout_s:g}s "
-            f"x {units} units + {_BATCH_JOB_OVERHEAD_S:g}s; a conservative "
+            f"x {largest} units + {_BATCH_JOB_OVERHEAD_S:g}s; a conservative "
             "fully-serial upper bound, not a runtime estimate) exceeds the "
             f"fleet's whole-job ceiling of {ceiling:g}s (max_job_seconds from "
             f"{config.max_job_seconds_source}); a job still running at the "

@@ -3916,16 +3916,16 @@ def _run_sim_corners(
     )
     if dry_run:
         published_runner: dict[str, Any] = {}
-        feature_diagnostic, job_ceiling = (
-            dry_run_job_ceiling(
+        feature_diagnostic: dict[str, Any] | None = None
+        job_ceiling: dict[str, Any] | None = None
+        if backend == "batch":
+            feature_diagnostic, job_ceiling = dry_run_job_ceiling(
                 request,
                 corner_count=len(dispatch_points),
                 timeout_s=timeout_s,
                 runner_out=published_runner,
+                hosts=hosts,
             )
-            if backend == "batch"
-            else (None, None)
-        )
         return _build_dry_run_report(
             request,
             feature_diagnostic=feature_diagnostic,

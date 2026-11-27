@@ -17,13 +17,22 @@ CORNERS = {"process": ["TYP"], "params": {"vdd": [1.6, 1.8, 2.0]}}
 
 
 def _member(
-    tmp_path, name, *, timeout_s=60, max_job_seconds=3600, check="enforce", **batch
+    tmp_path,
+    name,
+    *,
+    timeout_s=60,
+    max_job_seconds=3600,
+    check="enforce",
+    hosts=None,
+    **batch,
 ):
     request = _batch_request(tmp_path)
     request["corners"] = CORNERS
     request["models"] = {"lib": "corner.lib"}
     (tmp_path / "corner.lib").write_text("* lib\n")
     request["options"] = {"timeout_s": timeout_s}
+    if hosts is not None:
+        request["remote"] = {"hosts": hosts}
     request["batch"].update(
         job_ceiling_check=check, max_job_seconds=max_job_seconds, **batch
     )
@@ -196,6 +205,111 @@ def test_mixed_corner_and_deck_set_preflights_both(tmp_path, monkeypatch):
         paths, outdir=str(tmp_path / "out"), preflight=sim_set.preflight_batch_request
     )
     assert report["submitted"] == 2
+
+
+# --- remote.hosts sizes the assessed job (issue #8011) --------------------- #
+# Three corners at 1800 s: the whole request as one job is bound at 5520 s, a
+# shard of ceil(3 / hosts) units at 1920 s (three hosts) or 3720 s (two).
+
+
+def _set(tmp_path, *members, **run_kwargs):
+    from klayout_tools import sim_set
+
+    return sim_set.run_sim_set(
+        [str(member) for member in members],
+        outdir=str(tmp_path / "out"),
+        preflight=sim_set.preflight_batch_request,
+        **run_kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("hosts", "job_units", "bound", "exceeds"),
+    [(3, 1, 1920.0, False), (2, 2, 3720.0, True), (1, 3, 5520.0, True)],
+)
+def test_set_preflight_sizes_the_bound_by_the_members_largest_shard(
+    tmp_path, hosts, job_units, bound, exceeds
+):
+    from klayout_tools import sim_set
+
+    _write_body(tmp_path)
+    path = _member(tmp_path, "m", timeout_s=1800, hosts=hosts, check="warn")
+
+    ceiling = sim_set.preflight_batch_request(path)
+
+    assert ceiling["job_bound_s"] == bound
+    assert ceiling["job_unit_count"] == job_units
+    assert ceiling["unit_count"] == 3
+    assert ceiling["exceeds_ceiling"] is exceeds
+    assert ceiling["recommended_hosts"] == 3
+    assert ("warning" in ceiling) is exceeds
+
+
+@pytest.mark.parametrize(
+    ("hosts", "max_job_seconds", "refused"),
+    [(3, 3600, False), (2, 3720, False), (2, 3719, True), (1, 3600, True)],
+)
+def test_enforce_set_refuses_only_an_overflowing_shard_before_submitting(
+    tmp_path, monkeypatch, hosts, max_job_seconds, refused
+):
+    from klayout_tools import sim_set
+    from klayout_tools.sim import SimError
+
+    _write_body(tmp_path)
+    calls = []
+    _patch_set_run(monkeypatch, lambda path, **kw: calls.append(path) or _fake_report())
+    path = _member(
+        tmp_path, "m", timeout_s=1800, hosts=hosts, max_job_seconds=max_job_seconds
+    )
+
+    if not refused:
+        assert _set(tmp_path, path)["status"] == "pass"
+        assert calls == [str(path)]
+        return
+    with pytest.raises(SimError) as excinfo:
+        _set(tmp_path, path)
+    assert calls == []
+    assert excinfo.value.code == sim_set.SET_PREFLIGHT_CODE
+    assert sb.BATCH_JOB_CEILING_CODE in str(excinfo.value)
+    assert not (tmp_path / "out" / sim_set.MANIFEST_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("hosts", "override", "check", "code", "warns"),
+    [
+        (3, None, "enforce", 0, False),  # the reported false warning
+        (2, None, "warn", 0, True),
+        (2, None, "enforce", 1, False),
+        (1, 3, "enforce", 0, False),  # `--hosts` lifts a one-host member
+        (3, 2, "enforce", 1, False),  # ... and overflows a three-host one
+    ],
+)
+def test_cli_set_dry_run_follows_the_resolved_host_count(
+    tmp_path, capsys, hosts, override, check, code, warns
+):
+    """The three-host case exits 0, submits nothing and prints no ceiling
+    warning; nothing is written and the fleet is never contacted."""
+    from klayout_tools.cli import main
+
+    _write_body(tmp_path)
+    path = _member(tmp_path, "m", timeout_s=1800, hosts=hosts, check=check)
+    argv = ["sim", "--batch-set", str(path), "--dry-run", "--format", "json"]
+    if override is not None:
+        argv += ["--hosts", str(override)]
+
+    assert main(argv) == code
+
+    captured = capsys.readouterr()
+    assert ("klt sim: warning: batch job bound" in captured.err) is warns
+    assert not (tmp_path / "out").exists()
+    if code == 0:
+        report = json.loads(captured.out)
+        assert report["dry_run"] is True
+        assert report["submitted"] == 0
+        assert [r["status"] for r in report["requests"]] == ["dry_run"]
+    else:
+        assert "batch_set_preflight_failed" in captured.err
+        assert sb.BATCH_JOB_CEILING_CODE in captured.err
 
 
 def test_member_with_neither_netlist_nor_decks_is_structured_not_keyerror(tmp_path):

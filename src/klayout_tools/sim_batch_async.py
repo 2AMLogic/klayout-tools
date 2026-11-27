@@ -148,13 +148,16 @@ def submit_only(
     ``manifest_path`` -- the ``batch-shards.json`` shard map under
     ``artifacts_dir`` that ``--attach`` takes -- and has no single
     ``job_id``. It needs ``artifacts_dir`` and ``shard_fingerprint``.
-    An explicit host count above one also selects the sharded path.
+    An explicit host count above one also selects the sharded path, and the
+    ceiling assessment (``job_ceiling``) then describes the largest shard
+    it submits, as ``--dry-run`` and the ``--batch-set`` preflight do
+    (issue #8011).
     """
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     job_ceiling, planned_hosts = plan_batch_job(
-        config, unit_count=len(corner_points), timeout_s=timeout_s
+        config, unit_count=len(corner_points), timeout_s=timeout_s, hosts=hosts or 1
     )
     hosts = max(planned_hosts, hosts or 1)
     if hosts > 1:

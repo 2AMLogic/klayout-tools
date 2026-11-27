@@ -136,7 +136,9 @@ this document (and the code) win.
   report also carries `job_ceiling` -- the submit path's own whole-job
   ceiling assessment, under the `environment.remote.job_ceiling` name and
   shape, including `split` / `effective_hosts` when a split mode is active
-  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674)); the planned job count it
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674)) or when
+  `remote.hosts` / `--hosts` shards the request (the bound is then the largest
+  shard's, [#8011](https://github.com/2AMLogic/klayout-tools/issues/8011)); the planned job count it
   reports never redefines `hosts` (still the request's `remote.hosts`), and
   a `--format text` dry run prints a `batch plan:` line with the unit count
   and planned job count. `exclude` is a top-level request key, not a `corners` key: nested
@@ -1324,7 +1326,7 @@ collects:
 | `launched_at` | UTC time the launch returned |
 | `request_sha256` | Digest of the request document, to tie a later read back to it |
 | `unit_count` | Corners × Monte Carlo samples in the job (the number of `decks` for a deck-list request) |
-| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`); `null` for a deck-list request, which does not assess one |
+| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`), sized by the largest shard when `remote.hosts` / `--hosts` shards the request ([#8011](https://github.com/2AMLogic/klayout-tools/issues/8011)); `null` for a deck-list request, which does not assess one |
 
 Anything it cannot represent fails **before any S3 write** with
 `error.code: "submit_only_unsupported"`: a non-`batch` backend, `--resume`,
@@ -1804,7 +1806,10 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   Before anything is submitted, every member is resolved (with
   `--max-units-per-job` / `--max-concurrent-jobs` applied) and run through the
   same whole-job ceiling / split check a real submit does
-  (`batch_job_ceiling_exceeded`, `batch_max_units_per_job_invalid`). If any
+  (`batch_job_ceiling_exceeded`, `batch_max_units_per_job_invalid`). A member's
+  bound is its largest shard's, sized by its resolved `remote.hosts` (its own,
+  or `--hosts`; [#8011](https://github.com/2AMLogic/klayout-tools/issues/8011)).
+  If any
   member fails, nothing is submitted, no `set-manifest.json` is written, and the
   command exits `1` with error code `batch_set_preflight_failed` naming every
   failing member (path and code). Capacity refusals (`--capacity-retries`) can
@@ -2125,7 +2130,16 @@ job_bound_s = options.timeout_s × units + 120
 This assumes every unit uses its full `options.timeout_s`, one after another.
 It is derived from the request alone and is an upper bound, **not** a measured
 or predicted ngspice runtime. A job whose units finish quickly can run far
-below it. The bound is compared with `max_job_seconds`. A bound equal to the
+below it. A request that `remote.hosts` (or `--hosts`) shards is sized by its
+largest shard ([#8011](https://github.com/2AMLogic/klayout-tools/issues/8011)):
+`units` is `ceil(units / remote.hosts)`, the size of the biggest job the shard
+path submits, so `--dry-run`, the `--batch-set` preflight and `--submit-only`
+warn or refuse on the bound of *that* job, never on the whole request as one
+job. Three corners at `options.timeout_s: 1800` with `remote.hosts: 3` are
+three 1,920 s jobs and draw no warning against the 3600 s ceiling; with
+`remote.hosts: 2` the largest job holds two corners, is bound at 3,720 s, and
+is warned (or refused under `"enforce"`) with a recommendation of three hosts.
+The bound is compared with `max_job_seconds`. A bound equal to the
 ceiling passes. When the bound exceeds the ceiling:
 
 - under `batch.job_ceiling_check: "warn"` (the default), the client prints
@@ -2154,6 +2168,7 @@ field is additive:
 "job_ceiling": {
   "basis": "conservative_serial_bound",
   "unit_count": 63,
+  "job_unit_count": 63,
   "per_unit_timeout_s": 120,
   "overhead_s": 120.0,
   "job_bound_s": 7680.0,
@@ -2172,7 +2187,12 @@ field is additive:
 (the selected profile’s ceiling in `batch-fleet.env`), or `"default"` (`3600`,
 the value 2am's harness falls back to when the instance's `MaxJobSeconds`
 tag is absent). `warning` is present only when `exceeds_ceiling` is `true`.
-`recommended_hosts` is `null` when no `hosts` value fits.
+`recommended_hosts` is `null` when no `hosts` value fits. `unit_count` is
+always the request's total; `job_unit_count` is the number of units behind
+`job_bound_s` and the warning -- `ceil(unit_count / remote.hosts)`, so
+`unit_count` itself for a one-job request. When `remote.hosts` / `--hosts`
+shards the request, the assessment a dry run or `--submit-only` reports also
+carries `split: true` and `effective_hosts`, the number of jobs it runs as.
 
 The fleet sets the `simlong` ceiling to 7,200 seconds and the ordinary sim ceiling
 to 3,600 seconds. With one corner at `options.timeout_s: 4000`, the 4,120-second
@@ -2210,6 +2230,7 @@ every field defined by the stated bound, which is unit-count-independent:
 | `recommended_hosts` | `1` when the bound fits, `null` when it exceeds (no `hosts` value changes a per-job bound) |
 | `warning` | present only when `exceeds_ceiling`; names `batch.job_timeout_s` as the value to lower -- never more hosts, never a lower `options.timeout_s` |
 | `split`, `effective_hosts` | unchanged: added whenever a split mode is active |
+| `job_unit_count` | absent: the stated bound does not depend on how many units a shard holds, so `remote.hosts` changes nothing in this mode |
 
 Behavior under the check modes follows the same rules as the serial bound,
 with two consequences worth spelling out. When the stated bound fits, the
@@ -2248,8 +2269,11 @@ bound is `120 × 21 + 120 = 2640 s`, within the ceiling:
 
 `remote.hosts > 1` submits one independent job per shard and merges them in
 global unit order (see "Fleet sharding" below). An explicit `remote.hosts > 1`
-is honored as given: the check, and the split below, never apply to it, and its
-shards are not assessed. Each extra shard is one more
+is honored as given: the split below never applies to it, and a blocking
+submit launches its shards without a ceiling check. The assessments made
+before a submit -- `--dry-run`, the `--batch-set` preflight and
+`--submit-only` -- do assess it, by its largest shard ([#8011](https://github.com/2AMLogic/klayout-tools/issues/8011),
+under "Pre-submit check" above). Each extra shard is one more
 launch against the fleet's shared concurrency cap. Because the bound is
 conservative, a tighter `options.timeout_s` that still covers each unit (see
 "Timeout-budget preflight" below) often needs far fewer shards than a
