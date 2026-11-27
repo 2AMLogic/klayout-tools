@@ -231,6 +231,7 @@ from .sim_batch_features import (
     worker_ngspice_binary,
 )
 from .sim_batch_hints import attach_runner_hints as _attach_runner_hints
+from .sim_batch_knobs import _resolve_max_launch_attempts
 from .sim_batch_plan import dry_run_job_ceiling
 from .sim_batch_resume import _is_unrun_batch_corner, _record_batch_checkpoint
 from .sim_checkpoint import (  # noqa: F401 -- keep runner checkpoint imports working
@@ -4689,16 +4690,13 @@ def _build_dry_run_report(
     assessment, emitted additively under the ``environment.remote.job_ceiling``
     name and shape; ``None`` leaves the field out.
     """
+    max_launch_attempts = None
     if backend == "batch":
-        # Issue #3917: a real batch submit refuses an unresolvable model
-        # library before any S3 write; the dry-run must say the same.
+        # Validate the model paths (#3917, #5449) and resolve the per-job limit
+        # even on hosts where the provision script or bucket is unavailable.
         _validate_batch_models_lib(request)
-        # Issue #5449: and the same for a `models.pdk_root` that is a
-        # directory on *this* host (issue #4097's refusal). The real submit
-        # makes this check during config resolution. Validate directly here
-        # so a dry run refuses a host-local path just like a submit does
-        # whether or not this host can resolve a bucket or provision script.
         _validate_batch_pdk_root(request)
+        max_launch_attempts = _resolve_max_launch_attempts(request.get("batch") or {})
     units: list[dict[str, Any]] = []
     for point in corner_points:
         unit: dict[str, Any] = {"corner_id": point.corner_id}
@@ -4726,6 +4724,8 @@ def _build_dry_run_report(
         "staged_files": staged_model_environment.get("staged_model_inputs", []),
         "warnings": warnings,
     }
+    if max_launch_attempts is not None:
+        report["batch"] = {"max_launch_attempts": max_launch_attempts}
     if job_ceiling is not None:
         report["job_ceiling"] = job_ceiling
     if published_runner is not None:
