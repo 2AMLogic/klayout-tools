@@ -126,19 +126,26 @@ def test_resetall_restores_compilation_declaration():
 
 @needs_icarus
 @pytest.mark.parametrize(
-    "scale,delay", [("1", "0.5"), ("10", "0.05"), ("100", "0.005")]
+    "written,scale,delay",
+    [
+        ("1.0", "1", "0.5"),
+        ("10.0", "10", "0.05"),
+        ("100.0", "100", "0.005"),
+        ("1e0", "1", "0.5"),
+        ("1e1", "10", "0.05"),
+        ("1e2", "100", "0.005"),
+        ("0.1E+2", "10", "0.05"),
+        ("100e-2", "1", "0.5"),
+    ],
 )
-def test_matching_decimal_sdf_timescale(tmp_path, scale, delay):
+def test_matching_decimal_sdf_timescale(tmp_path, written, scale, delay):
     request = _stage_sdf_units(
         tmp_path,
-        sdf_timescale=f"{scale}.0 ns",
+        sdf_timescale=f"{written} ns",
         leaf_timescale=f"{scale}ns/1ps",
         delay=delay,
     )
-    report = run_functional_verification(request)
-    sdf = report["environment"]["sdf"]
-    assert report["status"] == "pass" and sdf["annotated"]
-    assert sdf["timescale"] == sdf["time_unit"] == f"{scale}ns"
+    _assert_matching_ns_edge(tmp_path, request, expected_unit=f"{scale}ns")
 
 
 @needs_icarus
@@ -166,7 +173,7 @@ def test_disagreeing_module_redeclaration_keeps_unit_unknown():
     assert _verilog_time_units([text], "1ns").top["leaf"].unit is None
 
 
-def _assert_matching_ns_edge(tmp_path, request):
+def _assert_matching_ns_edge(tmp_path, request, expected_unit="1ns"):
     bench = tmp_path / "tb_and2.v"
     bench.write_text(
         bench.read_text().replace(
@@ -178,7 +185,34 @@ def _assert_matching_ns_edge(tmp_path, request):
     report = run_functional_verification(request)
     assert report["status"] == "pass"
     sdf = report["environment"]["sdf"]
-    assert sdf["annotated"] and sdf["timescale"] == sdf["time_unit"] == "1ns"
+    assert sdf["annotated"] and sdf["timescale"] == sdf["time_unit"] == expected_unit
+
+
+@needs_icarus
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        '`line 30 "cell_model.sv" 0\ntimeunit 1ns/1ps;',
+        "`pragma reset protect\ntimeunit 1ns/1ps;",
+        "timeprecision 1ps;\n`pragma reset protect\ntimeunit 1ns;",
+        "`celldefine\n`endcelldefine\ntimeunit 1ns/1ps;",
+        '`begin_keywords "1800-2012"\n`end_keywords\ntimeunit 1ns/1ps;',
+    ],
+    ids=["line", "pragma", "separate-precision", "celldefine", "keyword-mode"],
+)
+@pytest.mark.parametrize("sdf_unit", ["1ns", "1ps"])
+def test_directive_before_module_timeunit(tmp_path, declarations, sdf_unit):
+    request = _stage_sdf_units(
+        tmp_path, leaf_timescale="1ps/1ps", sdf_timescale=sdf_unit
+    )
+    leaf = tmp_path / "and_cell.v"
+    leaf.write_text(leaf.read_text().replace("  and (", f"{declarations}\n  and ("))
+    if sdf_unit == "1ps":
+        with pytest.raises(FunctionalVerificationError, match="'u1'.*1000x too large"):
+            run_functional_verification(request)
+        assert not (tmp_path / ".klt/functional-verification/build_icarus.log").exists()
+    else:
+        _assert_matching_ns_edge(tmp_path, request)
 
 
 @needs_icarus

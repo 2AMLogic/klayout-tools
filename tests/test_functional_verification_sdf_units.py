@@ -217,6 +217,7 @@ def test_timingcheck_only_cell_is_not_a_delay_target(tmp_path, monkeypatch):
         ("1ns", "1ns", True),
         ("100ps", "100ps", True),
         ("1ns", "1000ps", True),
+        ("1ns", "1e3ps", True),
         ("1ns", "1ps", False),
         ("10ps", "1ns", False),
         ("10ps", "100ps", False),
@@ -375,7 +376,19 @@ def test_actual_sdf_header_sets_the_unit(tmp_path, monkeypatch, header):
     assert "1000x too large" in _refused(tmp_path, monkeypatch, request)
 
 
-@pytest.mark.parametrize("invalid", ["0ps", "1.5 ns", "1ns extra"])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "0ps",
+        "1.5 ns",
+        "1e-1 ns",
+        "1.00000000000000001e0 ns",
+        ".1e1 ns",
+        "1e999999999 ns",
+        "1ns/1e-1 ps",
+        "1ns extra",
+    ],
+)
 def test_invalid_multiplier_or_trailing_text_is_a_typed_refusal(
     tmp_path, monkeypatch, invalid
 ):
@@ -416,8 +429,10 @@ def test_matching_preprocessed_attributed_model_runs_on_icarus(tmp_path):
     assert (annotation["timescale"], annotation["time_unit"]) == ("1ps", "1ps")
 
 
-@pytest.mark.parametrize("unit", ["1ps", "1.00 ps"])
-def test_split_sdf_keeps_the_actual_header_unit(tmp_path, unit):
+@pytest.mark.parametrize(
+    "unit,expected", [("1ps", "1ps"), ("1.00 ps", "1ps"), ("1e2 ps", "100ps")]
+)
+def test_split_sdf_keeps_the_actual_header_unit(tmp_path, unit, expected):
     # The vector endpoint sends this entry to the second annotation file.
     path = tmp_path / "split.sdf"
     path.write_text(
@@ -427,7 +442,7 @@ def test_split_sdf_keeps_the_actual_header_unit(tmp_path, unit):
     )
     original, deferred = sdf._split_sdf_bus_port_interconnects(str(path), {"a"})
     assert f"( TiMeScAlE {unit})" in original
-    assert "(TIMESCALE 1ps)" in deferred
+    assert f"(TIMESCALE {expected})" in deferred
 
 
 def test_uncertain_compilation_unit_refuses_before_build(tmp_path, monkeypatch):

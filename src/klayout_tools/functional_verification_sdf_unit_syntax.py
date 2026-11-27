@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Iterator
+from decimal import Decimal, InvalidOperation
 from typing import NamedTuple
 
 from .functional_verification_base import FunctionalVerificationError
@@ -12,9 +14,9 @@ from .functional_verification_base import FunctionalVerificationError
 #: case, optionally followed by a precision: a Verilog `` `timescale ``
 #: argument, or an SDF header written ``(TIMESCALE 1ns/1ps)``.
 _TIME_SUFFIX = r"(?:ms|us|ns|ps|fs|s)"
+_MULTIPLIER = r"[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
 _TIME_UNIT_RE = re.compile(
-    rf"0*([1-9][0-9]*)(?:\.0+)?\s*({_TIME_SUFFIX})"
-    rf"(?:\s*/\s*0*[1-9][0-9]*(?:\.0+)?\s*{_TIME_SUFFIX})?",
+    rf"({_MULTIPLIER})\s*({_TIME_SUFFIX})(?:\s*/\s*({_MULTIPLIER})\s*{_TIME_SUFFIX})?",
     re.IGNORECASE,
 )
 
@@ -54,18 +56,37 @@ class _Target(NamedTuple):
     interconnect: bool
 
 
+def _integral_multiplier(written: str) -> int | None:
+    """Read an exact positive integer, including SDF real-number spellings."""
+    try:
+        value = Decimal(written)
+    except InvalidOperation:
+        return None
+    # Limit expansion of an exponent beyond the simulator's real-number range.
+    if "e" in written.lower() and value.adjusted() > sys.float_info.max_10_exp:
+        return None
+    integral = value.to_integral_value()
+    if value <= 0 or value != integral:
+        return None
+    try:
+        return int(format(integral, "f"))
+    except ValueError:  # Python's limit on integer string conversions.
+        return None
+
+
 def _parse_time_unit(unit: str) -> tuple[str, int] | None:
     """``("<multiplier><unit>", length in femtoseconds)``, or ``None`` when
     ``unit`` is not a positive time unit."""
     match = _TIME_UNIT_RE.fullmatch(unit.strip())
     if match is None:
         return None
-    try:
-        amount = int(match[1])
-    except ValueError:
+    amount = _integral_multiplier(match[1])
+    if amount is None or (
+        match[3] is not None and _integral_multiplier(match[3]) is None
+    ):
         return None
     unit = match[2].lower()
-    return f"{match[1]}{unit}", amount * _UNIT_FS[unit]
+    return f"{amount}{unit}", amount * _UNIT_FS[unit]
 
 
 def _unit_fs(unit: str) -> int:

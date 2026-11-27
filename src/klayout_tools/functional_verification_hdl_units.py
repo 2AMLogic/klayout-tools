@@ -18,9 +18,16 @@ _LANGUAGE = r"(?:1364|1800)-\d{4}(?:-noconfig)?"
 _HDL_LITERAL = re.compile(
     rf'(?P<keep>\\\S+|"{_LANGUAGE}")|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL
 )
+# Icarus -E retains these compiler directives. Their operands are not HDL
+# items, even when a pragma contains text resembling a declaration.
+_PREPROCESSED_LITERAL = re.compile(
+    _HDL_LITERAL.pattern + r"|`(?:line|pragma)\b[^\n]*|`(?:end)?celldefine\b",
+    re.DOTALL,
+)
 _PREPROCESSING = re.compile(r"`(?!(?:timescale|resetall)\b)")
 _UNIT = r"(?:100|10|1)\s*(?:ms|us|ns|ps|fs|s)"
 _NAME = r"(?:[A-Za-z_][\w$]*|\\\S+)"
+_KEYWORD_MODE = rf'`begin_keywords\s+"{_LANGUAGE}"|`end_keywords\b'
 _TOKEN = re.compile(
     rf"\\\S+|`timescale\s+(?P<directive>{_UNIT})\s*/\s*{_UNIT}|`resetall\b"
     rf'|`begin_keywords\s+"(?P<language>{_LANGUAGE})"|`end_keywords\b'
@@ -36,13 +43,17 @@ _LOCAL_DECLARATION = re.compile(rf"\s*(?P<unit>{_UNIT})\s*(?:/\s*{_UNIT}\s*)?;")
 # Header package imports each have their own semicolon before the optional
 # parameter and port lists. Escaped identifiers can contain literal semicolons.
 _HEADER_FIELD = r"(?:[^;\\]|\\\S+(?=\s))*"
+# Keyword-mode directives still take effect in _hdl_tokens, but neither
+# they nor whitespace count as a module item before the local declaration.
+_HEADER_SPACE = rf"(?:\s|{_KEYWORD_MODE})*"
 _MODULE_HEADER = re.compile(
-    rf"(?:\s*import\b{_HEADER_FIELD};)*{_HEADER_FIELD};\s*(?:timeprecision\s+{_UNIT}\s*;\s*)?"
+    rf"(?:{_HEADER_SPACE}import\b{_HEADER_FIELD};)*{_HEADER_FIELD};"
+    rf"{_HEADER_SPACE}(?:timeprecision\s+{_UNIT}\s*;{_HEADER_SPACE})?"
 )
 
 
-def _hdl_code(text: str) -> str:
-    return _HDL_LITERAL.sub(lambda m: m["keep"] or " ", text)
+def _hdl_code(text: str, literals: re.Pattern[str] = _HDL_LITERAL) -> str:
+    return literals.sub(lambda m: m["keep"] or " ", text)
 
 
 def _hdl_tokens(text: str, system_verilog: bool) -> Iterator[re.Match[str]]:
@@ -177,7 +188,7 @@ def _active_sources(
         raise FunctionalVerificationError(
             f"could not preprocess HDL with Icarus: {exc}"
         ) from exc
-    return [_hdl_code(output.stdout)]
+    return [_hdl_code(output.stdout, _PREPROCESSED_LITERAL)]
 
 
 def _declared_unit(text: str, start: int) -> str | None:
