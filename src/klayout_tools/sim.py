@@ -297,7 +297,6 @@ from .sim_corners import (
 )
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
-from .sim_derive_rollup import attach_coverage as _attach_derive_coverage
 from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
     _OFFHOST_BACKENDS,
     NODESET_UNSUPPORTED_WORKER_CODE,
@@ -4214,10 +4213,10 @@ def _run_sim_corners(
             )
 
     grid_stats = sim_probit_sigma.rollup(monte_carlo_stats, corner_points, corners)
-    measurements_rollup.extend(grid_stats)
     coverage = _build_coverage(
-        measurements_spec, corners, capture_only=capture_only, grid_stats=grid_stats
+        measurements_rollup, corners, capture_only=capture_only, grid_stats=grid_stats
     )
+    measurements_rollup.extend(grid_stats)
     graded = _grade_corners(corners, measurements_rollup, coverage)
     passed = graded["passed"]
     failed = graded["failed"]
@@ -9574,13 +9573,13 @@ def _summarise_limits(
 
 
 def _build_coverage(
-    measurements_spec: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
     corners: list[dict[str, Any]],
     *,
     capture_only: bool = False,
     grid_stats: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Common checked-work v1 plus the existing simulation coverage counters.
+    """Build checked-work coverage from rolled-up measurements and their corners.
 
     ``capture_only`` (issue #3158) is the request's declared intent to capture waveforms
     with no measurements: each corner that ran clean then counts its capture as the
@@ -9588,7 +9587,7 @@ def _build_coverage(
     not pass stays a skip, so a run failure is never waived.
     """
     limits_declared, measurements_with_limits, unrecognized = _summarise_limits(
-        measurements_spec
+        measurements
     )
 
     grid_stats = grid_stats or []
@@ -9597,20 +9596,20 @@ def _build_coverage(
     sim_probit_sigma.coverage(grid_stats, checked, skipped)
     inapplicable = []
     for corner_index, corner in enumerate(corners):
-        if not measurements_spec:
+        if not measurements:
             corner_checked, corner_skipped = _corner_without_measurements(
                 corner, corner_index, capture_only
             )
             checked.extend(corner_checked)
             skipped.extend(corner_skipped)
-        for spec in sim_derive.per_corner_measurements(measurements_spec):
+        for entry in sim_derive.per_corner_measurements(measurements):
             actual, missing, irrelevant = _measurement_coverage(
-                spec, corner, corner_index
+                entry, corner, corner_index
             )
             checked.extend(actual)
             skipped.extend(missing)
             inapplicable.extend(irrelevant)
-    _attach_derive_coverage(measurements_spec, corners, checked, skipped, inapplicable)
+    sim_derive_rollup.attach_coverage(measurements, checked, skipped, inapplicable)
     reasons = []
     if not corners:
         reasons.append(REASON_EMPTY_CORNER_MATRIX)
@@ -9622,7 +9621,7 @@ def _build_coverage(
 
     block = {
         "corners_simulated": len(corners),
-        "measurements_declared": len(measurements_spec) + len(grid_stats),
+        "measurements_declared": len(measurements) + len(grid_stats),
         "measurements_with_limits": measurements_with_limits + len(grid_stats),
         "unrecognized_limit_keys": unrecognized,
         **build_check_coverage(

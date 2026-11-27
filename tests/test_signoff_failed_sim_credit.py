@@ -217,14 +217,15 @@ def _spec(name: str, limits: dict | None) -> dict:
 
 def _producer_failure(specs: list[dict], corners: list[dict]) -> dict:
     failed = sum(1 for c in corners if c["status"] != "pass")
+    measurements = sim._rollup_measurements(specs, corners)
     return {
         **SIM_FAIL_ENVELOPE,
         "corner_count": len(corners),
         "passed": len(corners) - failed,
         "failed": failed,
         "corners": corners,
-        "measurements": sim._rollup_measurements(specs, corners),
-        "coverage": sim._build_coverage(specs, corners),
+        "measurements": measurements,
+        "coverage": sim._build_coverage(measurements, corners),
     }
 
 
