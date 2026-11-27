@@ -3045,6 +3045,60 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the submitting client's own `environment.client_engine_build.version_banner` (whitespace-normalised; issue #5566 — on an off-host report `environment.engine_build` is the worker's, so the client's probe is the one kept under `client_engine_build`). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. With a valid `binary_sha256` on both sides (the worker's `simulator.binary_sha256`, the client's `environment.client_engine_build.binary_sha256`; issue #7959) the object also carries `digest`: `match` or `mismatch`, the same binary or not. `status` and `digest` are independent — `{"status": "match", "digest": "mismatch"}` is the same version built differently. The member is omitted when either hash is absent, `null` or malformed (an older worker capture, a hash that failed), leaving the banner-only object. |
 
+**Closure-only deck caveat (issue
+[#7985](https://github.com/2AMLogic/klayout-tools/issues/7985)): `stamp_scope`
+can read `executed` for a deck that ran the caller's models.** On a deck-list
+(`decks[]`) batch job, a relative `.include` / `.inc` / `.lib <file> <section>`
+target that resolves next to the deck (or next to the file
+including it) is staged with the deck's closure on its own. It needs no
+`decks[].inputs[]` declaration (see "Pre-composed decks"), and staging it
+alone leaves `stamp_scope` at `executed`. With `model.lib` beside the deck
+and a unit declared as `{"id": "pinned", "deck": "pinned.spice"}` -- no
+`inputs` -- this deck stages the library:
+
+```spice
+* pinned.spice -- model.lib sits beside it; inputs[] never names it
+.include model.lib
+```
+
+The file-bearing `.lib model.lib tt` form stages it the same way. Either way
+the worker request's unit lists the file under `includes` only (`inputs` is
+empty), and `environment.remote.worker_environment.pdk` reads:
+
+```json
+{"variant": "gf180mcuD", "root": "/opt/pdk", "stamp_scheme": "sources-sha256",
+ "stamp_sha256": "<hex>", "stamp_text": "open_pdks <hash>",
+ "models_staged": false, "stamp_scope": "executed"}
+```
+
+even though the engine ran the caller's bytes for it, never the image's. The
+stamp identifies the worker image's PDK tree; it cannot establish the origin
+of every model the simulator read. The presence or count of a staged include
+does not settle that either, because the same closure stages a stimulus or a
+measurement block. One unit can carry both sources: a local stimulus staged
+through a relative `.include`, and the image's PDK read through a
+`$PDK_ROOT/<variant>/...` reference, which the unit lists under `host_resolved`
+rather than `includes`. A unit that *does* declare the file in
+`decks[].inputs[]` is the separate shape of
+[#7981](https://github.com/2AMLogic/klayout-tools/issues/7981).
+
+To verify the staged bytes, hash your local file and compare it with the
+entry in the unit's completion record `<outdir>/<id>/unit.json`:
+
+```console
+$ sha256sum model.lib
+<sha256 of your model.lib>  model.lib
+$ jq '.key.includes["model.lib"]' <outdir>/pinned/unit.json
+"<sha256 of your model.lib>"
+```
+
+`<outdir>` is the report's `outdir` (the `-o` directory; by default
+`.klt/sim/` next to the request file). A declared `inputs[]` file is digested
+under `key.inputs` the same way. The deck ships byte-for-byte, so its own
+directives say which staged files it names: a matching digest shows which
+bytes were staged beside the deck, not that the simulator opened them -- klt
+does not trace simulator file access.
+
 Four sibling fields sit on `environment.remote` itself (and on each `fleet[]`
 member), for a runner whose image has no readable `SOURCES` stamp. The first
 pair (issue #5321) attests the `models.lib`; the second (issue #5457) attests
