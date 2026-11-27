@@ -3,19 +3,19 @@ drive OpenROAD as a subprocess: ``place_and_route.py``'s own place/route/CTS/
 in-flow-STA stages, and ``post_route_sta.py``'s standalone post-route timing
 verb (issue #1099).
 
-``_run_openroad``, ``_count_violations``, and ``_openroad_version`` were
-previously defined identically (modulo docstring length, and -- for
-``_run_openroad`` -- which ``*Error`` class it raised) in both modules; they
-now live here as the single source of truth, following the same precedent
-as ``_paths.py`` hosting ``load_request``'s shared file-read/JSON-parse
-boilerplate (issue #642).
+``run_openroad``, ``count_violations``, ``openroad_version`` and their
+public peers (issue #8051) were previously defined identically (modulo
+docstring length, and -- for ``run_openroad`` -- which ``*Error`` class it
+raised) in both modules; they now live here as the single source of truth,
+following the same precedent as ``_paths.py`` hosting ``load_request``'s
+shared file-read/JSON-parse boilerplate (issue #642).
 
-``_run_openroad`` is the one genuine behavioral difference between the two
+``run_openroad`` is the one genuine behavioral difference between the two
 former copies: ``place_and_route.py`` needs to raise ``PlaceAndRouteError``
 on a launch failure, ``post_route_sta.py`` needs ``PostRouteStaError``. That
 is preserved here via a caller-supplied ``error_cls`` parameter, the same
-pattern ``_paths.py``'s own ``_load_request_json``/``_load_spec_json`` use
-for the identical problem.
+parameter ``_openroad_io.py``'s script/metrics/error-text helpers take
+(issue #8051); that module exists because this one is at its ceiling.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def _is_unconstrained_slack(value: float | None) -> bool:
     return value is not None and abs(value) >= _UNCONSTRAINED_SLACK_NS
 
 
-def _timing_status(values: Iterable[float | None]) -> str | None:
+def timing_status(values: Iterable[float | None]) -> str | None:
     """Classify a set of reported slack values as ``"constrained"`` /
     ``"unconstrained"`` / ``None`` (issue #1865).
 
@@ -94,7 +94,7 @@ def _timing_status(values: Iterable[float | None]) -> str | None:
 
 
 @dataclass(frozen=True)
-class _OpenRoadResult:
+class OpenRoadResult:
     """Captured process output plus this invocation's retained evidence."""
 
     returncode: int
@@ -143,7 +143,7 @@ _CONTAINER_RUNTIME_HINT_PREFIX = (
 )
 
 
-def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
+def container_runtime_hint(completed: OpenRoadResult) -> str | None:
     """``None``, or an actionable hint that ``openroad`` never really ran
     because its container runtime was unreachable (issue #2632).
 
@@ -306,7 +306,7 @@ def _log_error_context(message: str, record: dict[str, Any]) -> str:
     return f"{message} -- openroad invocation: {json.dumps(record, sort_keys=True)}"
 
 
-def _run_openroad(
+def run_openroad(
     script_path: str,
     metrics_path: str,
     *,
@@ -315,7 +315,7 @@ def _run_openroad(
     container_id_wait_s: float = _CONTAINER_ID_WAIT_S,
     threads: int | None = None,
     repo_root: RepoRoot = ANCHOR_CWD,
-) -> _OpenRoadResult:
+) -> OpenRoadResult:
     """See “Retained OpenROAD logs” in docs/cli/place-and-route.md for log streaming.
     Keep partial logs; anchor on ``repo_root``; raise ``error_cls`` if launch fails."""
     invocation_id = uuid.uuid4().hex
@@ -394,7 +394,7 @@ def _run_openroad(
                 )
             raise
     data, record = retain("exited", proc.returncode, stdout, stderr)
-    return _OpenRoadResult(
+    return OpenRoadResult(
         proc.returncode,
         _captured_text(data["stdout"]),
         _captured_text(data["stderr"]),
@@ -402,7 +402,7 @@ def _run_openroad(
     )
 
 
-def _openroad_version() -> str | None:
+def openroad_version() -> str | None:
     """The resolved OpenROAD build string, or ``None`` if unresolvable --
     never raises.
 
@@ -462,11 +462,11 @@ def write_sdf_line(sdf_path: str) -> str:
     return f"write_sdf -divider . -include_typ {_tcl_literal(sdf_path)}"
 
 
-def _timing_violation_report_lines(
+def timing_violation_report_lines(
     *, setup_begin: str, setup_end: str, hold_begin: str, hold_end: str
 ) -> list[str]:
     """Tcl emitting the marker-delimited setup-side and hold-side violator
-    reports :func:`_count_violations` scrapes (issue #2741).
+    reports :func:`count_violations` scrapes (issue #2741).
 
     The single source of the check-family policy for every verb that counts
     setup/hold violations -- ``post_route_sta.py``'s standalone session (single
@@ -495,7 +495,7 @@ def _timing_violation_report_lines(
     ]
 
 
-def _count_violations(stdout: str, begin: str, end: str) -> int:
+def count_violations(stdout: str, begin: str, end: str) -> int:
     """Count ``"(VIOLATED)"`` lines between ``begin``/``end`` markers in a
     stage's captured stdout -- OpenROAD has no ``*_metric`` proc for
     setup/hold *violation counts* (only the scalar WNS/TNS), so this is the

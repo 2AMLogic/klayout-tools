@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ._openroad_engine import run_openroad
+from ._openroad_io import write_script
 from ._sta_multicycle import (
     MCP_BEGIN,
     MCP_END,
@@ -266,19 +268,16 @@ def _run_without_session(
 ) -> dict[int, dict[str, Any]]:
     """One "without" session: write ``script_lines`` (the with-run's own
     script minus one entry's tagged pair), run the engine, and parse its
-    measurements. Lazy-imports :mod:`klayout_tools.post_route_sta`'s own
-    session helpers -- only a ``klt sta`` corner session ever reaches here,
-    so nothing that imports this module for the validator or the emitter
-    loads the verb module (the #6923 P&R reuse contract)."""
-    from .post_route_sta import (
-        PostRouteStaError,
-        _engine_error_message,
-        _run_openroad,
-        _write_script,
-    )
+    measurements. The script write and the engine run go through the shared
+    ``_openroad_io``/``_openroad_engine`` helpers; only this verb's own error
+    formatter is lazy-imported from :mod:`klayout_tools.post_route_sta` --
+    only a ``klt sta`` corner session ever reaches here, so nothing that
+    imports this module for the validator or the emitter loads the verb
+    module (the #6923 P&R reuse contract)."""
+    from .post_route_sta import PostRouteStaError, _engine_error_message
 
-    _write_script(script_path, script_lines)
-    rerun = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
+    write_script(script_path, script_lines, label="sta", error_cls=PostRouteStaError)
+    rerun = run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
     with rerun.diagnostics(PostRouteStaError):
         errors = multicycle_request_error(rerun.stdout or "")
         if errors is not None:
