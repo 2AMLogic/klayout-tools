@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from ._jsonnum import is_int
+from ._sta_request_diag import validate_name_list
 from ._tcl import tcl_literal as _tcl_literal
 from .post_route_sta_errors import PostRouteStaError
 
@@ -347,32 +348,13 @@ def _validate_false_path_from(
     emitted, so the generated Tcl is byte-identical to a request without
     it). Existence and direction are verified inside the engine session
     (``_port_check_lines``); the clock port is rejected here."""
-    field = "request.constraints.false_path_from"
-    value = constraints.get("false_path_from")
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        raise PostRouteStaError(f"{field} must be a list of input port names")
-    seen: set[str] = set()
-    for port in value:
-        if not isinstance(port, str) or not port or port != port.strip():
-            raise PostRouteStaError(
-                f"{field} entries must be non-empty port-name strings without "
-                f"leading/trailing whitespace (got {port!r})"
-            )
-        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
-            raise PostRouteStaError(
-                f"{field} entry {port!r} contains a control character"
-            )
-        if port == clock_port:
-            raise PostRouteStaError(
-                f"{field} must not name the clock port {port!r} -- "
-                "a false path from the clock would untime every register"
-            )
-        if port in seen:
-            raise PostRouteStaError(f"{field} must not repeat a port ({port!r})")
-        seen.add(port)
-    return list(value) or None
+    return validate_name_list(
+        constraints,
+        "false_path_from",
+        list_kind="input port",
+        clock_port=clock_port,
+        clock_reason="a false path from the clock would untime every register",
+    )
 
 
 def _false_path_lines(false_path_from: list[str] | None) -> list[str]:
