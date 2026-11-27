@@ -163,7 +163,7 @@ def test_remote_banded_tap_preserves_strict_sloped_markers(tmp_path):
     shapes = [(COMP, _sloped_tap()), (NPLUS, _notched_implant())]
     baseline = _marker_vertices(tmp_path / "strict.gds", shapes)
     assert baseline == [
-        [(707, 998), (810, 963), (810, 1120), (810, 1132)],
+        [(707, 998), (810, 963), (810, 1132)],
         [(707, 998), (810, 1120), (820, 960), (846, 1120)],
     ]
 
@@ -209,7 +209,7 @@ def test_strict_part_of_a_sloped_edge_starts_at_its_well_crossing(tmp_path):
     # At x=711 the original tap edge crosses at y=996 on the 1 nm grid.
     # Cutting either already-rounded marker at x=711 instead gives y=997.
     assert _marker_vertices(tmp_path / "crossing.gds", shapes) == [
-        [(711, 996), (810, 963), (810, 1120), (810, 1132)],
+        [(711, 996), (810, 963), (810, 1132)],
         [(711, 996), (810, 1120), (819, 960), (845, 1120)],
     ]
 
