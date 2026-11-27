@@ -12,6 +12,64 @@ Tracking issue: #2501. The curator/judge/doctor pins (#668) were retired by
 #1966: their frozen-timeline protection now lives in the pinned
 `scripts/claim-staleness.sh`. This page does not cover them.
 
+## Resync on a shared worker
+
+A shared dispatch worker is provisioned once for every sweep it hosts, so a
+resync must leave the host alone. The apply step of
+`.loom/scripts/resync-installed.sh` does not, unless the apply says so. Stage
+the resync in two commands, with `/path/to/loom` a plain clone of the Loom
+source repository at the version being moved to:
+
+```bash
+# 1) Preview.
+./.loom/scripts/resync-installed.sh --dry-run --output /tmp/loom-resync-preview --source /path/to/loom
+
+# 2) Apply. The opt-out goes on this command itself.
+LOOM_RESYNC_SKIP_USER_SCOPE=1 ./.loom/scripts/resync-installed.sh --output /tmp/loom-resync-apply --source /path/to/loom
+```
+
+Neither `--output` path may exist yet, and the two must differ: each run
+creates its own staging worktree at the path it is given, and the script
+refuses a path that already exists. A preview removes its worktree before
+exiting; an apply keeps it, prints the commands to commit from, and leaves
+its removal to you. On a shared host, add the issue number to both paths so a
+concurrent sweep's apply cannot occupy them.
+
+**Why the prefix matters even after a clean preview.** After syncing the
+repository's installed files, an apply also provisions Loom at user scope
+from the source checkout (#10238). The step runs when all of these hold:
+
+- the run is not `--dry-run`;
+- `LOOM_RESYNC_SKIP_USER_SCOPE` is not `1`;
+- the source checkout is a plain clone, where `.git` is a directory;
+- that clone carries `scripts/install/provision-dispatcher.sh` and
+  `scripts/install/provision-skills.sh`.
+
+A preview with that same source skips the step at the first condition, so its
+output says nothing about it. `--output` is not in the list: it moves only
+the repository-side writes into a staging worktree. Without the opt-out, the
+apply can still install `~/.local/bin/loom` and, under `~/.claude/`, create
+the `commands/loom` and `commands/star.md` links and one
+`agents/loom-<role>.md` link per role. The opt-out covers that step, and Loom
+documents it in `.loom/docs/machine-dispatcher.md` ("Daemonless machines").
+
+None of that is part of a shared worker's provisioned state, and the
+user-scope copies take precedence over each repository's own
+`.claude/commands/loom/` and agents. While they exist, every new session on
+the host resolves `/loom:*` and `loom-*` through those links instead of the
+repository's copies. The first occurrence, and its cleanup, are recorded in
+#7984.
+
+**Why this note lives here.** This section and the pointers to it in
+`CLAUDE.md` and `AGENTS.md` sit in repository-owned text, which a resync does
+not rewrite: it never regenerates either root file (it only deletes a
+leftover Loom version header from `CLAUDE.md`), and `docs/` is not a
+Loom-installed surface. The installed Builder prompt is resynced, so the same
+guidance added there would not survive. That is the rule in its
+[Never fix an installed Loom file in place (consumer repos)](../.loom/roles/builder.md#never-fix-an-installed-loom-file-in-place-consumer-repos)
+section: upstream the change to Loom, or pin the file. The matching change to
+the Builder prompt belongs upstream, not in the installed copy.
+
 ## Pin audit 2026-11-23 (#7601)
 
 Keep the four groups of pins at the recorded install, `v0.19.1306`

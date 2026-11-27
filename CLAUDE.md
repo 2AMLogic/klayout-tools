@@ -30,6 +30,11 @@ Python API). Public repo, MIT, built in the open by 2AM Logic.
 - Site lives in `site/` and deploys to Cloudflare Pages (project
   `klayout-tools`, personal account, custom domain klayout-tools.org) via
   `scripts/deploy-site.sh`.
+- **Resyncs must not write to the host.** Before running
+  `.loom/scripts/resync-installed.sh` without `--dry-run`, read
+  [Resync on a shared worker](docs/loom-pin-drift.md#resync-on-a-shared-worker):
+  on a shared worker a plain apply can install user-level Loom files unless it
+  opts out.
 
 <!-- BEGIN REPO-SKILLS -->
 This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.26.1 installed —
