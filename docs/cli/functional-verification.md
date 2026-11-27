@@ -245,13 +245,16 @@ the reviewer-side check.
   `engine: "icarus"` and a cocotb testbench, klt first compiles an empty
   module and runs one throwaway cocotb test through the same `vvp` launcher,
   cocotb loading path and working directory as your own run, so a relative
-  `PATH` entry selects the same launcher in both. The probe uses your
-  launcher environment, including `request.env`, and ignores testcase selectors (`COCOTB_TEST_FILTER` and
-  `COCOTB_TESTCASE`) for its own test. It takes about 0.5 s on an idle host
-  and has a 60 s timeout. Inside `vvp` it calls `Py_GetVersion()`. On Linux
-  it checks the supplying file's device and inode against the mapping that
-  contains that symbol. If it cannot verify a path, the error reports the
-  path as unresolved. A release difference, including a patch or prerelease
+  `PATH` entry selects the same launcher in both. The probe puts its scratch
+  directory first and preserves your testbench's import order after it.
+  It uses your launcher environment, including `request.env`. Testcase selectors
+  (`COCOTB_TEST_FILTER` and `COCOTB_TESTCASE`), user coverage, waveform
+  recording and viewing, and debugger settings apply only to your design.
+  For example, `COCOTB_ATTACH` pauses the design's `vvp` process. The probe
+  takes about 0.5 s on an idle host and has a 60 s timeout. Inside `vvp` it
+  calls `Py_GetVersion()`. On Linux it checks the supplying file's device and
+  inode against the mapping that contains that symbol. If it cannot verify a
+  path, the error reports the path as unresolved. A release difference, including a patch or prerelease
   such as `3.13.0rc1` versus `3.13.18`, stops the run before your build.
   For example, the error can read `klt is running on CPython 3.13.18, but the Icarus vvp process
   loads CPython 3.13.0rc1 for cocotb (...), supplied by

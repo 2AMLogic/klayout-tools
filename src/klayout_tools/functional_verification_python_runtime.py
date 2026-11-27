@@ -265,22 +265,24 @@ def _probe_in_process(
     the probe's artifacts -- build, logs, ``results.xml``, its result file --
     stay in the scratch ``workdir``.
 
-    The user's ``module_dirs`` stay on the import path ahead of everything
-    but the scratch directory itself, exactly as in the real run: a helper of
-    theirs that shadows a module decides both runs alike. What is
-    deliberately *not* carried over is anything that could keep the probe's
-    single test from running -- ``testcase``, ``plusargs``, build args.
+    The probe prepends its scratch directory to the design's effective
+    import path so both runs resolve startup hooks in the same order.
     """
     build_dir = os.path.join(workdir, "sim_build")
     result_path = os.path.join(workdir, "result.json")
-    # Runner.test merges os.environ over extra_env. Keep the user's selection
-    # and coverage (including its legacy alias) out of this scratch test.
+    # The runner reads its own environment and merges it over extra_env.
+    # Reserve test selection, coverage, waveforms and debugging for the design.
     probe_env = env.copy()
     for key in (
         "COCOTB_TEST_FILTER",
         "COCOTB_TESTCASE",
         "COCOTB_USER_COVERAGE",
         "COVERAGE",
+        "GUI",
+        "WAVES",
+        "COCOTB_WAVEFORM_VIEWER",
+        "COCOTB_ATTACH",
+        "COCOTB_PDB_ON_EXCEPTION",
     ):
         os.environ.pop(key, None)
         probe_env.pop(key, None)
@@ -302,7 +304,8 @@ def _probe_in_process(
         engine_runner,
         engine="icarus",
         module=PROBE_MODULE,
-        module_dirs=[workdir, *module_dirs],
+        module_dirs=module_dirs,
+        probe_dir=workdir,
         hdl_toplevel=PROBE_MODULE,
         testcase=None,
         random_seed=None,

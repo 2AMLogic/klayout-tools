@@ -20,6 +20,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -95,7 +96,8 @@ class ProbingRunner(FakeCocotbRunner):
 def _inline_bounded(target, **kwargs):
     """Stand-in for the forked, bounded child: run the probe in-process."""
     try:
-        return {"status": "measured", **target(**kwargs)}
+        with patch.dict(os.environ):
+            return {"status": "measured", **target(**kwargs)}
     except Exception as exc:
         return rt._inconclusive(f"{type(exc).__name__}: {exc}")
 

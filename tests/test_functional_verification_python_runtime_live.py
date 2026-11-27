@@ -93,6 +93,93 @@ def measurements(monkeypatch):
     return outcomes
 
 
+def _selected_gcd_request(bench: Path, env: dict[str, str]) -> str:
+    for name in ("gcd.v", "test_gcd.py"):
+        shutil.copyfile(EXAMPLE_DIR / name, bench / name)
+    request = json.loads((EXAMPLE_DIR / "request.json").read_text())
+    request["testbench"]["testcase"] = "test_gcd_known_pairs"
+    request["env"] = env
+    path = bench / "request.json"
+    path.write_text(json.dumps(request))
+    return str(path)
+
+
+@SKIP_NO_COCOTB
+@needs_icarus
+def test_probe_preserves_single_testbench_directory_position(
+    tmp_path, monkeypatch, measurements
+):
+    first, bench = tmp_path / "first", tmp_path / "bench"
+    log = tmp_path / "startup.log"
+    for directory in (bench, first):
+        directory.mkdir()
+        (directory / "record_startup.py").write_text(
+            "import os\n"
+            "def record():\n"
+            "    module = os.environ['COCOTB_TEST_MODULES']\n"
+            "    with open(os.environ['STARTUP_LOG'], 'a') as log:\n"
+            f"        print(module, {directory.name!r}, file=log)\n"
+        )
+        monkeypatch.syspath_prepend(str(directory))
+    request = _selected_gcd_request(
+        bench,
+        {
+            "PYGPI_USERS": "record_startup:record,cocotb.logging:_configure,"
+            "cocotb._init:init_package_from_simulation,cocotb.regression:_run_regression",
+            "STARTUP_LOG": str(log),
+        },
+    )
+
+    report = run_functional_verification(request)
+
+    assert report["status"] == "pass"
+    assert measurements[0]["status"] == "measured", measurements
+    assert log.read_text().splitlines() == [
+        f"{rt.PROBE_MODULE} first",
+        "test_gcd first",
+    ]
+
+
+@SKIP_NO_COCOTB
+@needs_icarus
+@pytest.mark.parametrize("attach_source", ["request", "ambient"])
+def test_only_the_design_opens_the_viewer_and_waits_for_attach(
+    tmp_path, monkeypatch, measurements, attach_source
+):
+    viewer_log, launches = tmp_path / "viewer.log", tmp_path / "launches.log"
+    viewer = tmp_path / "viewer"
+    viewer.write_text(f'#!/bin/sh\necho "$1" >> "{viewer_log}"\n')
+    viewer.chmod(0o755)
+    wrapper = tmp_path / "vvp"
+    wrapper.write_text(
+        '#!/bin/sh\nif [ -n "$COCOTB_TEST_MODULES" ]; then\n'
+        '  settings="${COCOTB_ATTACH-unset}/${COCOTB_PDB_ON_EXCEPTION-unset}"\n'
+        f'  echo "$COCOTB_TEST_MODULES $settings" >> "{launches}"\n'
+        f'fi\nexec "{REAL_VVP}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path), os.environ["PATH"]]))
+    monkeypatch.setenv("GUI", "1")
+    monkeypatch.setenv("COCOTB_WAVEFORM_VIEWER", str(viewer))
+    env = {"COCOTB_PDB_ON_EXCEPTION": "1"}
+    if attach_source == "ambient":
+        monkeypatch.setenv("COCOTB_ATTACH", "1")
+    else:
+        monkeypatch.delenv("COCOTB_ATTACH", raising=False)
+        env["COCOTB_ATTACH"] = "1"
+    request = _selected_gcd_request(tmp_path, env)
+
+    report = run_functional_verification(request)
+
+    assert report["status"] == "pass"
+    assert measurements[0]["status"] == "measured", measurements
+    assert viewer_log.read_text().splitlines() == ["gcd.fst"]
+    assert launches.read_text().splitlines() == [
+        f"{rt.PROBE_MODULE} unset/unset",
+        "test_gcd 1/1",
+    ]
+
+
 @SKIP_NO_COCOTB
 @needs_icarus
 def test_gcd_worked_example_runs_past_the_probe(tmp_path, monkeypatch, measurements):

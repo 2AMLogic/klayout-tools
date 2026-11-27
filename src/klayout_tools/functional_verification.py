@@ -1568,6 +1568,7 @@ def _run_test(
     waves: bool = False,
     plusargs: list[str] | None = None,
     extra_env: dict[str, str] | None = None,
+    probe_dir: str | None = None,
 ) -> None:
     """``Runner.test()``, with the simulator's own exit code deliberately
     discarded (spike section 4): a :class:`SystemExit` here means only "the
@@ -1575,12 +1576,10 @@ def _run_test(
     from "one test failed" to "nothing ran". The verdict comes from
     :func:`parse_results_xml` instead, which the caller runs next.
 
-    ``module_dirs`` are prepended to ``sys.path`` (list order preserved, so
-    entry 0 shadows entry 1) for the duration of the call. A single directory
-    already on the path keeps its legacy position. This is done
-    because ``Runner._set_env`` propagates the *calling* process's ``sys.path``
-    to the simulator as ``PYTHONPATH`` (verified live) -- there is no
-    ``test_module`` search-path parameter to use instead.
+    Cocotb forwards ``sys.path`` as the simulator's ``PYTHONPATH``. Prepend
+    ``module_dirs`` in order, except that a single directory already on the
+    path keeps its position. The runtime probe adds its scratch directory
+    ahead of that same path for its own test module.
 
     ``random_seed``, when given, is forwarded to ``Runner.test()``'s own
     ``seed`` parameter, which sets ``COCOTB_RANDOM_SEED`` in the simulator
@@ -1614,6 +1613,8 @@ def _run_test(
             *(path for path in original_path if path not in module_dirs),
         ]
     try:
+        if probe_dir is not None:
+            sys.path = [probe_dir, *sys.path]
         engine_runner.test(
             test_module=module,
             hdl_toplevel=hdl_toplevel,
