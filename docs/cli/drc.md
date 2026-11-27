@@ -1661,11 +1661,15 @@ no width rule of **any** kind on `licon1` (66/44) or `mcon` (67/44), so the
 0.22 µm cut the generators drew there was invisible to `klt drc --deck
 sky130` even in principle. That issue adds the minimum halves
 (`licon1.width.1`/`mcon.width.1`, both 0.17 µm) and clamps the generator side
-via `_PDK_CUT_FIXED_SIZE_UM` — the maximum halves stay deferred to #2388
-exactly like `via.width.1`'s, and are additionally gated on the compound-layer
-narrowings this engine cannot evaluate (`licon.1`'s precision-poly-resistor
-exemption, whose licons are 0.19/2.0 µm per `licon.1b/c`; `ct.1_a`/`ct.1_b`'s
-`areaid:ce` scoping and separate ring-shaped-mcon rules `ct.3`/`ct.3_a`).
+via `_PDK_CUT_FIXED_SIZE_UM`. Both rules now check the 0.17 µm maximum
+as well (#2835). For `licon1.width.1`, the deck subtracts the intersection of
+`rpm` or `urpm`, `psdm`, and poly that interacts with `poly_rs`. Any remaining
+part of a cut is measured. For `mcon.width.1`, the deck selects whole, hole-free
+contacts outside `areaid:ce`, as in the seal-enabled runset. A shared edge or
+corner keeps the contact in scope. Any positive overlap exempts the entire contact.
+The maximum uses bounding-box dimensions. Separate rectangularity checks, resistor
+head dimensions (`licon.1b/c`), and ring-width checks (`ct.3/ct.3_a`) remain
+outside the curated deck.
 
 `met2.width.1` was considered for the same backfill and found *not* to need
 it: its own upstream rule (`m2.1`, in both `sky130A_mr.drc` and the resolved
@@ -2162,10 +2166,8 @@ deck has no rule for the contacts on a precision poly resistor's heads:
 `licon.1b` (0.19 µm contact width) and `licon.1c` (2.0 µm contact length,
 and the 2.16 µm poly-contact-extension that `sky130A.tech`'s DRC reports as
 "poly contact extends poly resistor by < 2.16um"), nor `rpm.1`'s minimum
-mask width. `licon.1`'s own 0.17 µm minimum is merely exempted for these
-licons by an approximation (see the `licon1.width.1` note below), not
-replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell reads
-`clean` here, and since issue #5704 the generator also draws its end heads
+mask width. The ordinary 0.17 µm size check excludes these heads. A
+`klt gen res_array` `high`/`xhigh` cell reads `clean` here, and since issue #5704 the generator also draws its end heads
 to the 2.16 µm extension — the two verdicts no longer disagree on that rule
 for generated cells (verified live, 2026-11-17: the pre-#5704 cell reported
 `licon.1c + li.5` under Magic `drc(fast)`/`drc(full)` while this deck said
@@ -2192,15 +2194,11 @@ the DRC-DSL script runner does. `li1.enclosing.licon1.1` and
 enclosure rules (`li.5`, `licon.7`) at their unconditional zero-margin
 floor, the one positive-margin transcription that provably flags no
 correct-by-construction geometry. `licon1.width.1` and `mcon.width.1` (issue
-#2594) carry only the *minimum* half of the two fixed-size cut rules
+#2594) carry both halves (as of issue #2835) of the two fixed-size cut rules
 `licon.1` ("min/max. licon length : 0.17um") and `ct.1`
-("minimum/maximum width of mcon : 0.17um") — the same deliberate, temporary
-`threshold_max_dbu` deferral `via.width.1` has since resolved, plus the same
-permanent rectangularity residue (`licon.1_c`, `ct.1`'s own "non-ring mcon
-should be rectangular"); `licon.1`'s precision-poly-resistor exemption
-(`licon.1b/c`, 0.19/2.0 µm edges) and `ct.1_a`/`ct.1_b`'s `areaid:ce`
-narrowing are compound-layer expressions this engine does not evaluate,
-harmless for a minimum of 0.17 µm since every exempt size exceeds it. Three
+("minimum/maximum width of mcon : 0.17um"). The cut selections above exclude
+precision-resistor geometry and ring-shaped or `areaid:ce` mcon. Rectangularity
+(`licon.1_c`, `ct.1`) remains unchecked. Three
 more (`via.width.1` — rectangularity only —
 `met1.enclosing.via.1`, `met2.enclosing.via.1`) approximate an official rule
 that additionally bounds a max length/rectangularity or a periphery-scoped/
@@ -4858,7 +4856,7 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 `m3.7`/`m4.7`/`m5.7`, and issue #2321's `tap.width.1` cites the same
 `difftap.1` source id `diff.width.1` already carries (both halve the same
 compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
-`licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
+`licon.1` and `ct.1_a`/`ct.1_b`, and every one of issue #2642's 75 `OFFGRID`-group rules
 (38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
 and issue #3031's `nwell.enclosed.hvi.1` cites `nwell.9`, and issue #2934's six `npc`/`nsdm`/`psdm` width and spacing rules cite `npc.1`/`npc.2`/`nsdm.1`/`psdm.1`/`n/psdm.1`, and #3316's four
 `enclosing_adjacent` rules cite `via.5a`/`m2.5`/`via2.5`/`via3.5`,

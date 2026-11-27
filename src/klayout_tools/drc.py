@@ -78,6 +78,7 @@ from .decks import (
     get_unmodeled_rules,
     get_unmodeled_voltage_markers,
 )
+from .decks.sky130_cuts import CUT_SELECTION_LAYERS
 from .drc_attribution import attribute_to_instance as _attribute_to_instance
 from .drc_attribution import attribute_violation
 from .drc_check_kinds import (
@@ -161,7 +162,7 @@ _OTHER_LAYER_SELECTIONS = {"squares"}
 
 # Every `DrcRule.layer_selection` value (the primary-layer counterpart of
 # `_OTHER_LAYER_SELECTIONS`, issues #2943/#3139).
-_LAYER_SELECTIONS = {"squares"}
+_LAYER_SELECTIONS = {"squares", *CUT_SELECTION_LAYERS}
 
 # `run_drc()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1847, adopting the #247 registry beyond its
@@ -1061,6 +1062,8 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                 **edge_band_fields(rule, nominal_dbu_um),
             }
         )
+        if rule.layer_selection:
+            rules[-1]["layer_selection"] = rule.layer_selection
         if rule.scope:
             scope_counts[rule.scope] = scope_counts.get(rule.scope, 0) + 1
         check_counts[rule.check] = check_counts.get(rule.check, 0) + 1
@@ -1379,20 +1382,16 @@ def _restrict_to_tile_centre(state: _DrcState, setup: _DrcSetup) -> None:
 
 def _deck_layer_tuples(deck: Any) -> set[tuple[int, int]]:
     """Every (layer, datatype) any rule in ``deck`` references."""
-    # Deck-static: every (layer, datatype) any rule in this deck references,
-    # regardless of what's actually present in `path`.
     deck_layer_tuples: set[tuple[int, int]] = set()
     for rule in deck:
         deck_layer_tuples.add(rule.layer)
         if rule.other_layer is not None:
             deck_layer_tuples.add(rule.other_layer)
+        if rule.layer_selection:
+            deck_layer_tuples.update(CUT_SELECTION_LAYERS.get(rule.layer_selection, ()))
         deck_layer_tuples.update(_spec_layers(rule) | set(rule.other_layer_subtract))
         if rule.derived_layer is not None:
-            # `rule.layer` is only the derived rule's *reporting* identity
-            # (see DerivedLayer's docstring) -- the layer(s) actually read
-            # to compute the checked region are these, independent of
-            # whether either happens to equal `rule.layer`. `"holes"` mode
-            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
+            # Derived rules also read their source layers.
             deck_layer_tuples.add(rule.derived_layer.base)
             if rule.derived_layer.intersect_with is not None:
                 deck_layer_tuples.add(rule.derived_layer.intersect_with)

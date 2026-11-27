@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .decks import DrcRule
+from .decks import DrcRule, sky130_cuts
 from .drc_check_kinds import (
     _ANTENNA_CHECKS,
     _AREA_CHECKS,
@@ -166,12 +166,16 @@ def cell_primary_region(rule: DrcRule, cell: Any, layer_index: int | None) -> An
     """
     import klayout.db as kdb
 
-    return select_primary_region(
-        rule,
+    region = (
         kdb.Region(cell.begin_shapes_rec(layer_index))
         if layer_index is not None
-        else kdb.Region(),  # absent conductor (#2726)
+        else kdb.Region()
     )
+    if rule.layer_selection == sky130_cuts.ORDINARY_LICON:
+        return sky130_cuts.ordinary_licon(cell, region)
+    if rule.layer_selection == sky130_cuts.ORDINARY_MCON:
+        return sky130_cuts.ordinary_mcon(cell, region)
+    return select_primary_region(rule, region)
 
 
 def selection_empties_every_top_cell(

@@ -790,8 +790,8 @@ class DrcRule:
     sg13g2's ``Cnt.a``/``Cnt.b``): contact bars, and rows of abutting
     contacts that merge into a strip, are left to the ``CntB.*`` family
     rather than measured as one oversized contact. ``None`` (the default)
-    checks the full drawn layer as before; it cannot be combined with
-    ``derived_layer``.
+    checks the full drawn layer. Sky130 ordinary-cut selectors apply the licon.1
+    and ct.1_a/b exemptions (#2835). All selectors exclude ``derived_layer``.
 
     ``report_escapes`` (issue #3001) controls the #318 zero-overlap escape
     term of an ``"enclosing"``/``"enclosed"`` rule. ``True`` (the default,

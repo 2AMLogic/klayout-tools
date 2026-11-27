@@ -84,6 +84,14 @@ def test_ct4_and_li5_are_disclosed():
     assert {"ct.4", "li.5"} <= UNMODELED
 
 
+def test_cut_rectangularity_is_disclosed_beside_the_size_rules():
+    """mcon.width.1 / licon1.width.1 bound the bounding box only (#2835): the
+    native rectangularity halves ct.1 and licon.1_c stay disclosed, and are not
+    credited as implemented by the size rules' provenance."""
+    assert {"ct.1", "licon.1_c"} <= UNMODELED
+    assert not {"ct.1", "licon.1_c"} & IMPLEMENTED
+
+
 def test_no_native_rule_is_silently_uncovered():
     missing = sorted(NATIVE - IMPLEMENTED - UNMODELED - UNTRIAGED)
     assert not missing, (
@@ -138,6 +146,7 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "capm.6",
         "capm.7",
         "capm.8",
+        "ct.1",
         "ct.3",
         "ct.3_a",
         "ct.3_b",
