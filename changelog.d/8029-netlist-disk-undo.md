@@ -1,0 +1,1 @@
+- `klt netlist` reports xschem disk-undo failures and preserves the destination when a hierarchical export is incomplete (#8029).
