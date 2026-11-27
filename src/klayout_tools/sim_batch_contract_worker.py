@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections.abc import Callable, Sequence
+from importlib.resources import files
 from typing import TYPE_CHECKING, Any
 
 from ._digest import normalize_sha256
@@ -151,14 +152,16 @@ def runner_threads_per_worker(report: dict[str, Any] | None) -> int | None:
 #: :mod:`json`. Stdlib only, every probe individually guarded and bounded, and
 #: it always exits 0 -- a failed capture is a ``diagnostics`` entry, never a
 #: job failure. Only allowlisted environment variables are read.
-#: ``@STORE_EVIDENCE@`` expands to the store-evidence probes
-#: (:func:`klayout_tools.pdk_store.worker_store_evidence_source`).
 _WORKER_CAPTURE_PROGRAM = r"""
+@DESCRIPTOR_READER@
 import hashlib, json, os, shutil, sys
 import subprocess as sp
 BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
 capture_digest = sys.argv[1] != "--omit-binary-digest"
 args = sys.argv[1:] if capture_digest else sys.argv[2:]
+pinned_root = None
+if args[0] == "--pdk-root":
+    pinned_root, args = args[1], args[2:]
 out, req_bin, variant, staged = args[:4]
 model_names = args[4:4 + @MODELS@]
 diag = []
@@ -214,14 +217,15 @@ def pdk():
     p = {"variant": clip(variant) or None, "root": clip(root), "stamp_scheme": None,
          "stamp_sha256": None, "stamp_text": None, "models_staged": staged == "1",
          "install": None, "store_layout": None}
+    tree = guard("pdk variant", lambda: evidence_tree(root, variant, pinned_root))
+    if tree is not None:
+        search_root, vdir = tree
+        p["install"] = guard("pdk install", lambda: store_install(vdir))
+        p["store_layout"] = guard("pdk store layout", lambda: store_layout(vdir, search_root))
     if not (root and variant):
         if staged != "1":
             diag.append("pdk root or variant unknown on worker")
         return p
-    vdir = guard("pdk variant", lambda: evidence_variant_dir(root, variant))
-    if vdir is not None:
-        p["install"] = guard("pdk install", lambda: store_install(vdir))
-        p["store_layout"] = guard("pdk store layout", lambda: store_layout(vdir, root))
     # Preserve the root/<variant> stamp used for revision comparison (#6445).
     stamp = os.path.join(root, variant, "SOURCES")
     try:
@@ -279,12 +283,14 @@ with open(tmp, "w") as h:
     h.write(body)
 os.replace(tmp, out)
 """  # noqa: E501
+_DESCRIPTOR_READER = files("klayout_tools").joinpath("_pdk_descriptor_reader.py")
 _WORKER_CAPTURE_PROGRAM = (
     _WORKER_CAPTURE_PROGRAM.replace("@BAN@", str(WORKER_CAPTURE_BANNER_MAX))
     .replace("@STR@", str(WORKER_CAPTURE_STR_MAX))
     .replace("@TIMEOUT@", str(WORKER_CAPTURE_PROBE_TIMEOUT_S))
     .replace("@MODELS@", str(WORKER_CAPTURE_MODEL_INPUTS_MAX))
     .replace("@STORE_EVIDENCE@", worker_store_evidence_source())
+    .replace("@DESCRIPTOR_READER@", _DESCRIPTOR_READER.read_text("utf-8"))
 )
 
 
@@ -300,20 +306,21 @@ def _worker_capture_command(
     variant = models.get("pdk")
     staged = "1" if options.get("stage_model_inputs") else "0"
     args = [
+        f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"',
         shlex.quote(str(binary) if isinstance(binary, str) else ""),
         shlex.quote(str(variant) if isinstance(variant, str) else ""),
         staged,
         *(shlex.quote(name) for name in model_names[:WORKER_CAPTURE_MODEL_INPUTS_MAX]),
     ]
-    target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
-    digest_flag = (
-        "" if _capture_engine_digest(remote_request) else "--omit-binary-digest "
-    )
+    if isinstance(root := models.get("pdk_root"), str):
+        args[:0] = ["--pdk-root", shlex.quote(root)]
+    if not _capture_engine_digest(remote_request):
+        args.insert(0, "--omit-binary-digest")
     return (
         'wt=; command -v timeout >/dev/null 2>&1 && wt="timeout 30"; '
         "{ command -v python3 >/dev/null 2>&1 && "
         f"$wt python3 -I -c {shlex.quote(_WORKER_CAPTURE_PROGRAM)} "
-        f"{digest_flag}{target} {' '.join(args)} 2>/dev/null; true; }}"
+        f"{' '.join(args)} 2>/dev/null; true; }}"
     )
 
 

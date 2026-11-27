@@ -357,13 +357,13 @@ def store_version(vdir):
         return None
     v = d.get("version") if isinstance(d, dict) else None
     return v.strip() if isinstance(v, str) and v.strip() else None
-def read_object(path, max_bytes=None):
+def read_store_object(path):
     if not os.path.isfile(path):
         return None
     try:
         with open(path, "rb") as h:
-            raw = h.read() if max_bytes is None else h.read(max_bytes + 1)
-        if max_bytes is not None and len(raw) > max_bytes:
+            raw = h.read(65537)
+        if len(raw) > 65536:
             return None
         data = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError, RecursionError):
@@ -371,38 +371,43 @@ def read_object(path, max_bytes=None):
     return data if isinstance(data, dict) else None
 def is_variant_tree(directory):
     return (
-        os.path.isfile(os.path.join(directory, @DESCRIPTOR@))
+        has_descriptor(directory)
         or os.path.isdir(os.path.join(directory, "libs.tech"))
         or all(os.path.isdir(os.path.join(directory, *p)) for p in @ASAP7_MARKERS@)
     )
-def tree_name(directory, flat=False):
-    name = os.path.basename(os.path.abspath(directory))
-    descriptor = os.path.join(directory, @DESCRIPTOR@)
-    if os.path.isfile(descriptor):
-        data = read_object(descriptor)
-        if data is None or data.get("schema_version") != 1:
-            return None
-        declared = data.get("variant")
-        if declared is not None and not (isinstance(declared, str) and declared):
-            return None
-        return declared if flat and declared else name
-    return name
 def evidence_variant_dir(root, variant):
+    if not os.path.isdir(root):
+        return None
+    with os.scandir(root) as entries:
+        nested = {entry.name: entry.path for entry in entries
+                  if entry.is_dir() and is_variant_tree(entry.path)}
     aliases = @ALIASES@
     names = [variant] + [name for name, family in aliases.items() if family == variant]
-    for name in names:
-        if os.path.basename(name) != name or name in (".", ".."):
-            continue
-        nested = os.path.join(root, name)
-        if is_variant_tree(nested):
-            return nested if tree_name(nested) == name else None
-    if not is_variant_tree(root):
+    if nested:
+        candidates = names if variant is not None else sorted(nested)
+        for name in candidates:
+            if name in nested:
+                directory = nested[name]
+                if has_descriptor(directory):
+                    load_descriptor(directory)
+                return directory
+    elif is_variant_tree(root):
+        declared = load_descriptor(root)["variant"] if has_descriptor(root) else None
+        if variant is None or (declared or os.path.basename(root) or root) in names:
+            return root
+    return None
+def evidence_tree(root, variant, pinned_root):
+    if not (variant or pinned_root):
         return None
-    # Like find_pdk, discover nested descriptors by presence before trying a flat root.
-    with os.scandir(root) as entries:
-        if any(is_variant_tree(entry.path) for entry in entries if entry.is_dir()):
-            return None
-    return root if tree_name(root, flat=True) in names else None
+    candidates = ([root] if root else []) + @SEARCH_ROOTS@
+    if pinned_root is not None:
+        candidates = [pinned_root]
+    for candidate in candidates:
+        directory = os.path.abspath(os.path.expanduser(candidate))
+        vdir = evidence_variant_dir(directory, variant or os.environ.get("PDK"))
+        if vdir is not None:
+            return directory, vdir
+    return None
 def store_install(vdir):
     real, d = os.path.realpath(vdir), None
     markers = (os.path.join(vdir, ".pdk-store.json"),
@@ -414,7 +419,7 @@ def store_install(vdir):
             continue
         except OSError:
             break
-        d = read_object(cand, max_bytes=65536)
+        d = read_store_object(cand)
         break
     if d is None:
         return None
@@ -457,13 +462,14 @@ def worker_store_evidence_source() -> str:
     """:data:`_WORKER_STORE_EVIDENCE_SOURCE` ready to splice into the batch
     worker capture program, with :data:`klayout_tools.pdk.STORE_DIRS` embedded
     so the worker measures a tree from the same conventional stores."""
-    from .pdk import _ASAP7_MARKERS, STORE_DIRS  # lazy: pdk imports this module
-    from .pdk_descriptor import DESCRIPTOR_FILENAME
+    from .pdk import _ASAP7_MARKERS, CONVENTIONAL_PREFIXES, SHARED_ROOTS, STORE_DIRS
     from .pdk_families import PDK_VARIANT_FAMILY_ALIASES
 
     return (
         _WORKER_STORE_EVIDENCE_SOURCE.replace("@STORES@", repr(list(STORE_DIRS)))
         .replace("@ASAP7_MARKERS@", repr(_ASAP7_MARKERS))
-        .replace("@DESCRIPTOR@", repr(DESCRIPTOR_FILENAME))
+        .replace(
+            "@SEARCH_ROOTS@", repr([*STORE_DIRS, *SHARED_ROOTS, *CONVENTIONAL_PREFIXES])
+        )
         .replace("@ALIASES@", repr(PDK_VARIANT_FAMILY_ALIASES))
     )

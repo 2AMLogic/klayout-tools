@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -62,13 +64,25 @@ def _store_tree(parent, digest=_INSTALL["sha256"], relative=_FAMILY):
     return root
 
 
+def _capture_request(tmp_path, env, models, *, staged=False):
+    """Exercise the preflight command, including its quoted request root."""
+    request = {"models": models, "options": {"stage_model_inputs": staged}}
+    subprocess.run(
+        ["/bin/sh", "-c", sb._worker_capture_command(request)],
+        env=env
+        | {"PATH": os.path.dirname(sys.executable), "EDA_OUTPUT_DIR": str(tmp_path)},
+        check=True,
+        timeout=30,
+    )
+    return json.loads((tmp_path / sb.BATCH_WORKER_ENVIRONMENT_FILENAME).read_text())
+
+
 def _captured(parent, root, staged="0", variant="gf180mcuD"):
-    """The real capture program's document for ``PDK_ROOT=root``."""
-    return _run_capture_program(
+    return _capture_request(
         parent,
-        ngspice_script=None,
-        args=("", variant, staged),
-        env={"PDK_ROOT": str(root)},
+        {"PDK_ROOT": str(root)},
+        {"pdk": variant, "pdk_root": str(root)},
+        staged=staged == "1",
     )
 
 
@@ -174,6 +188,55 @@ def test_nested_descriptor_rules_out_outer_bundle(
         pdk.find_pdk(variant="sky130A", root=str(root))
     worker = _captured(tmp_path, root, variant="sky130A")["pdk"]
     assert _observed(worker) == (None, None)
+
+
+@pytest.mark.parametrize("env_root", [True, False], ids=["other-variant", "unset"])
+def test_worker_finds_fallback_store_unless_root_is_pinned(
+    tmp_path, monkeypatch, env_root
+):
+    store = _store_tree(tmp_path).rename(tmp_path / ".ciel")
+    other = tmp_path / "other root"
+    (other / "sky130A" / "libs.tech").mkdir(parents=True)
+    env = {"HOME": str(tmp_path)}
+    if env_root:
+        env["PDK_ROOT"] = str(other)
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    models = {"pdk": "gf180mcuD"}
+    client = pdk.find_pdk(variant=models["pdk"])
+    worker = _capture_request(tmp_path, env, models)["pdk"]
+    assert client["root"] == str(store)
+    assert _observed(client) == _observed(worker) == (_INSTALL, "manager_family")
+    assert worker["stamp_scheme"] is None
+    pin = models | {"pdk_root": str(other)}
+    assert _observed(_capture_request(tmp_path, env, pin)["pdk"]) == (None, None)
+    pinned = _store_tree(tmp_path / "pinned", "b" * 64, relative="gf180mcuD")
+    env["PDK_ROOT"] = str(store)
+    worker = _capture_request(tmp_path, env, models | {"pdk_root": str(pinned)})["pdk"]
+    assert _observed(worker) == (_INSTALL | {"sha256": "b" * 64}, "flat")
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["nested", "flat"])
+def test_worker_requires_valid_descriptor_before_using_marker(tmp_path, direct):
+    # A later, valid store cannot replace a rejected descriptor.
+    _store_tree(tmp_path).rename(tmp_path / ".ciel")
+    root = _store_tree(tmp_path / "first", relative="gf180mcuD")
+    variant = root / "gf180mcuD"
+    search = variant if direct else root
+    env = {"HOME": str(tmp_path), "PDK_ROOT": str(search)}
+    (variant / "klt-pdk.json").write_text(
+        json.dumps({"schema_version": 1, "liberty": {"cells": {"tt": "timing.lib"}}})
+    )
+    with pytest.raises(pdk.PdkNotFoundError, match="timing.lib"):
+        pdk.find_pdk(variant="gf180mcuD", root=str(search))
+    models = _PDK_REQUEST["models"]
+    rejected = _capture_request(tmp_path, env, models)["pdk"]
+    assert _observed(rejected) == (None, None)
+    (variant / "timing.lib").touch()
+    client = pdk.find_pdk(variant="gf180mcuD", root=str(search))
+    worker = _capture_request(tmp_path, env, models)["pdk"]
+    assert _observed(client) == _observed(worker) == (_INSTALL, "flat")
 
 
 def test_install_alias_resolves_the_same_tree_on_the_worker(tmp_path):
