@@ -38,7 +38,7 @@ Intent file (JSON object)::
 
 Only ``gated_instances`` is required. Pure library: :func:`run_power_intent`
 returns plain JSON-serialisable data and never prints. Parsing and cell-model
-loading are shared with :mod:`.reset_coverage`.
+loading are shared via :mod:`.verilog_cell_models`.
 """
 
 from __future__ import annotations
@@ -46,16 +46,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .reset_coverage import (
-    _CAPTURE_PINS,
-    _CONST_NETS,
-    _POWER_PINS,
-    ResetCoverageError,
-    _CellModel,
-    _read,
+from .verilog_cell_models import (
+    CAPTURE_PINS,
+    CONST_NETS,
+    POWER_PINS,
+    CellModel,
     load_cell_models,
+    load_flat_modules,
+    read_text,
+    reject_hierarchical_instances,
+    select_top_module,
 )
-from .verilog_netlist import VerilogNetlistError, parse_gate_level_verilog
 
 SCHEMA_VERSION = 1
 
@@ -181,13 +182,11 @@ class _Intent:
 
 def load_intent(path: str) -> _Intent:
     try:
-        doc = json.loads(_read(path, "intent file"))
+        doc = json.loads(read_text(path, "intent file", error_cls=PowerIntentError))
     except json.JSONDecodeError as exc:
         raise PowerIntentError(
             f"intent file {path!r} is not valid JSON: {exc}"
         ) from exc
-    except ResetCoverageError as exc:
-        raise PowerIntentError(str(exc)) from exc
     if not isinstance(doc, dict):
         raise PowerIntentError(f"intent file {path!r}: expected a JSON object")
     return _Intent(doc, path)
@@ -204,11 +203,11 @@ def _nets(value: object) -> list[str]:
     return []
 
 
-def _signal_inputs(model: _CellModel) -> list[str]:
-    return [p for p in model.inputs if p not in _POWER_PINS]
+def _signal_inputs(model: CellModel) -> list[str]:
+    return [p for p in model.inputs if p not in POWER_PINS]
 
 
-def _clamp_value(model: _CellModel | None) -> int | None:
+def _clamp_value(model: CellModel | None) -> int | None:
     """0 for a single-``and`` cell, 1 for a single-``or`` cell, else ``None``."""
     if model is None or model.sequential or len(_signal_inputs(model)) < 2:
         return None
@@ -227,7 +226,7 @@ def _clamp_value(model: _CellModel | None) -> int | None:
 
 class _Design:
     def __init__(
-        self, module: dict, models: dict[str, _CellModel], intent: _Intent
+        self, module: dict, models: dict[str, CellModel], intent: _Intent
     ) -> None:
         self.module = module
         self.models = models
@@ -273,7 +272,7 @@ class _Design:
             for net in _nets(value):
                 if pin in model.outputs:
                     self.driver[net] = inst
-                elif pin not in _POWER_PINS:
+                elif pin not in POWER_PINS:
                     self.readers.setdefault(net, []).append((inst, pin))
 
     def passthrough(self, inst: dict) -> bool:
@@ -298,7 +297,7 @@ class _Design:
         return net, None
 
     def is_always_on(self, net: str) -> bool:
-        if net in _CONST_NETS:
+        if net in CONST_NETS:
             return True
         root, driver = self.root(net)
         if driver is not None:
@@ -307,7 +306,7 @@ class _Design:
             listed = self.intent.always_on_instances
             return not listed or driver["name"] in listed
         ports = self.intent.always_on_ports
-        return not ports or root in ports or root in _CONST_NETS
+        return not ports or root in ports or root in CONST_NETS
 
     def clamp_controls_ok(self, inst: dict, data_pin: str) -> bool:
         model = self.models[inst["cell"]]
@@ -453,7 +452,7 @@ def _check_state(design: _Design) -> list[dict[str, Any]]:
             entry["status"] = "fail"
             entry["findings"].append({"reason": "unclassified_state"})
         if entry["domain"] == "retained":
-            capture = [p for p in model.inputs if p in _CAPTURE_PINS]
+            capture = [p for p in model.inputs if p in CAPTURE_PINS]
             stopped = any(
                 design.root(n)[0] in intent.stopped_clocks or n in intent.stopped_clocks
                 for p in capture
@@ -495,32 +494,6 @@ def _check_sequence(intent: _Intent) -> tuple[str, list[dict[str, Any]]]:
     return ("fail" if findings else "pass"), findings
 
 
-def _select_module(
-    modules: list[dict], models: dict[str, _CellModel], top: str | None
-) -> dict:
-    by_name = {str(m["name"]): m for m in modules}
-    if top is None:
-        if len(modules) != 1:
-            raise PowerIntentError(
-                f"netlist has {len(modules)} modules; name the top with --top "
-                f"(one of {sorted(by_name)})"
-            )
-        module = modules[0]
-    elif top in by_name:
-        module = by_name[top]
-    else:
-        raise PowerIntentError(
-            f"top module {top!r} not in netlist (have {sorted(by_name)})"
-        )
-    for inst in module["instances"]:
-        if inst["cell"] not in models and inst["cell"] in by_name:
-            raise PowerIntentError(
-                f"instance {inst['name']!r} is of module {inst['cell']!r} defined in "
-                "the netlist; hierarchical netlists are not supported -- flatten first"
-            )
-    return module
-
-
 def _collect_violations(
     isolation: list[dict[str, Any]],
     state: list[dict[str, Any]],
@@ -547,14 +520,14 @@ def run_power_intent(
 ) -> dict[str, Any]:
     """Build the power-intent report. See the module docstring."""
     intent = load_intent(intent_path)
-    try:
-        models = load_cell_models(cell_model_paths)
-        modules = parse_gate_level_verilog(_read(netlist_path, "netlist"))
-    except ResetCoverageError as exc:
-        raise PowerIntentError(str(exc)) from exc
-    except VerilogNetlistError as exc:
-        raise PowerIntentError(f"cannot parse netlist {netlist_path!r}: {exc}") from exc
-    module = _select_module(modules, models, top)
+    models = load_cell_models(cell_model_paths, error_cls=PowerIntentError)
+    modules = load_flat_modules(netlist_path, error_cls=PowerIntentError)
+    module, netlist_modules = select_top_module(
+        modules, top, error_cls=PowerIntentError
+    )
+    reject_hierarchical_instances(
+        module, netlist_modules, models, error_cls=PowerIntentError
+    )
 
     design = _Design(module, models, intent)
     isolation = _check_isolation(design)

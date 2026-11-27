@@ -934,6 +934,7 @@
         "klayout_tools.request_paths",
         "klayout_tools.resistor_mesh",
         "klayout_tools.touchstone",
+        "klayout_tools.verilog_cell_models",
         "klayout_tools.verilog_module_names",
         "klayout_tools.verilog_netlist",
         "klayout_tools.verilog_pin_bind",
@@ -1230,8 +1231,7 @@
       "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.reset_coverage_cmd",
-        "klayout_tools.reset_coverage",
-        "klayout_tools.reset_coverage_models"
+        "klayout_tools.reset_coverage"
       ]
     },
     "socket_check": {
@@ -1640,11 +1640,6 @@
     },
     {
       "consumer": "functional_verification",
-      "exporter": "reset_coverage",
-      "reason": "options.initial_state derives the gate-level flop list from reset_coverage's netlist/cell-model classification instead of re-parsing (issue #2998)."
-    },
-    {
-      "consumer": "functional_verification",
       "exporter": "env_provenance",
       "reason": "`klt functional-verification` emits its artifact paths as env_provenance's committable repo-relative {path, scope} envelope (issue #4279)."
     },
@@ -1907,11 +1902,6 @@
       "consumer": "power_intent",
       "exporter": "cli-infra",
       "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
-    },
-    {
-      "consumer": "power_intent",
-      "exporter": "reset_coverage",
-      "reason": "Reuses reset_coverage's cell-model loader and netlist conventions instead of re-parsing (issue #4479)."
     },
     {
       "consumer": "reset_coverage",
@@ -2312,36 +2302,6 @@
       "exporter": "klayout_tools.sim",
       "symbol": "_OFFHOST_BACKENDS",
       "reason": "Issue #4911: characterize forwards runner-resolved OSDI entries only for the same off-host backends klt sim recognises; promote to a public name when sim is next split."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_CAPTURE_PINS",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_CONST_NETS",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_CellModel",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_POWER_PINS",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_read",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
     },
     {
       "consumer": "klayout_tools.evidence_lint",
