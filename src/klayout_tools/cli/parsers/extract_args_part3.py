@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from ... import extract_batch, netlist_batch
+from ... import _batch_tree, extract_batch
 
 
 def add_extract_args_part3(extract_parser: argparse.ArgumentParser) -> None:
@@ -415,7 +415,7 @@ def add_extract_args_part3(extract_parser: argparse.ArgumentParser) -> None:
             "uploaded as the job's input tree (default: the layout's git "
             "checkout). The layout must be a tracked file under it; the "
             f"uncompressed total is capped at "
-            f"{netlist_batch.MAX_BATCH_TREE_BYTES // (1024 * 1024)} MiB"
+            f"{_batch_tree.MAX_BATCH_TREE_BYTES // (1024 * 1024)} MiB"
         ),
     )
     extract_parser.add_argument(

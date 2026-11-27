@@ -16,7 +16,7 @@ import pytest
 
 from helpers.fake_s3_batch import FakeS3BatchRunner as _FakeRunner
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _provenance, netlist_batch, sim, sim_batch, sim_commands
+from klayout_tools import _batch_tree, _provenance, sim, sim_batch, sim_commands
 from klayout_tools.sim import SimError, run_sim
 
 FAKE_BUCKET = "fake-batch-jobs-000000000000"
@@ -423,14 +423,14 @@ def test_batch_tree_over_the_cap_is_refused_before_upload(
     tmp_path, fake, no_local_run, monkeypatch
 ):
     (tmp_path / "tb.txt").write_text("0123456789")
-    monkeypatch.setattr(netlist_batch, "MAX_BATCH_TREE_BYTES", 5)
+    monkeypatch.setattr(_batch_tree, "MAX_BATCH_TREE_BYTES", 5)
     with pytest.raises(SimError) as exc:
         run_sim(
             _request(tmp_path, inputs=["tb.txt"]),
             backend="batch",
             command_approvals=_approvals(tmp_path, tb="0123456789"),
         )
-    assert exc.value.code == netlist_batch.BATCH_INPUT_TOO_LARGE_CODE
+    assert exc.value.code == _batch_tree.BATCH_INPUT_TOO_LARGE_CODE
     assert fake.submissions() == []
 
 

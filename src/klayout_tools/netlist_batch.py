@@ -6,8 +6,9 @@ A fleet host that must not run xschem itself sets ``KLT_NETLIST_BACKEND=batch``
 same S3 job contract ``klt sim --backend batch`` already uses. **This module
 owns no transport of its own**: submit, launch, poll and collect, the
 runner-version preflight, and the bucket/profile/provision-script resolution
-are all :mod:`klayout_tools.sim_batch`'s, called as they are. What is
-netlist-specific is small:
+are all :mod:`klayout_tools.sim_batch`'s, called as they are, and the
+git-tracked input tree is :mod:`klayout_tools._batch_tree`'s, shared with
+``klt extract`` and ``klt signoff``. What is netlist-specific is small:
 
 1. **What is uploaded.** The job instance holds no forge credential, so it
    cannot clone the repo. The submitter ships one ``tree.tar.gz`` built from
@@ -51,8 +52,6 @@ from __future__ import annotations
 import functools
 import os
 import shlex
-import subprocess
-import tarfile
 import tempfile
 import time
 from collections.abc import Callable, Sequence
@@ -62,6 +61,7 @@ from typing import Any
 from . import (
     _batch_collect,
     _batch_common,
+    _batch_tree,
     _provenance,
     remote_transport,
     sim_batch,
@@ -78,7 +78,7 @@ from .netlist import (
     _validate_schematic,
     _write_output,
 )
-from .netlist_batch_select import _relative_symbol_dirs, _select_files
+from .netlist_batch_select import _relative_symbol_dirs
 from .netlist_instances import instances_payload
 from .netlist_paths import (
     _rewrite_runner_paths,
@@ -97,11 +97,11 @@ BACKEND_ENV = "KLT_NETLIST_BACKEND"
 #: Values ``--backend`` / ``$KLT_NETLIST_BACKEND`` accept.
 SUPPORTED_BACKENDS = ("local", "batch")
 
-#: Cap on the **uncompressed** total size of the git-tracked files uploaded as the job's
-#: input tree (64 MiB). Schematics, symbols and an ``xschemrc`` are small; a tree above
-#: this almost always means the root also covers layouts or other large tracked
-#: artifacts, so the fix is a narrower ``--batch-root``, not a bigger upload.
-MAX_BATCH_TREE_BYTES = 64 * 1024 * 1024
+#: Cap on the **uncompressed** total size of the git-tracked files uploaded as
+#: the job's input tree. It is :mod:`klayout_tools._batch_tree`'s, re-exported
+#: for ``klt netlist``'s callers and tests: ``package_tree`` reads this
+#: module's binding at call time, so patching ``netlist_batch``'s moves its cap.
+MAX_BATCH_TREE_BYTES = _batch_tree.MAX_BATCH_TREE_BYTES
 
 #: The single input the job receives under ``inputs/``.
 BATCH_TREE_FILENAME = "tree.tar.gz"
@@ -123,7 +123,7 @@ PDK_ROOT_PREFIXES = ("$PDK_ROOT/", "${PDK_ROOT}/")
 BATCH_POLL_TIMEOUT_CODE = "batch_poll_timeout"
 BATCH_JOB_FAILED_CODE = "batch_job_failed"
 BATCH_JOB_TIMEOUT_CODE = "batch_job_timeout"
-BATCH_INPUT_TOO_LARGE_CODE = "batch_input_too_large"
+BATCH_INPUT_TOO_LARGE_CODE = _batch_tree.BATCH_INPUT_TOO_LARGE_CODE
 
 #: Appended to every batch failure message: the reason the backend exists.
 _NO_FALLBACK = "(no local fallback: xschem was not run on this host)"
@@ -151,93 +151,20 @@ def resolve_backend(flag: str | None) -> str:
 
 
 @dataclass(frozen=True)
-class BatchTree:
-    """The git-tracked input tree a batch export ships, fully validated.
+class BatchTree(_batch_tree.TrackedTree):
+    """The git-tracked input tree a batch export ships, fully validated: the
+    measured :class:`~klayout_tools._batch_tree.TrackedTree` plus what the
+    job command passes to ``klt netlist`` on the runner.
 
-    ``files`` are root-relative POSIX paths; ``rcfile_arg`` is the shell
-    fragment the job command passes as ``--rcfile`` (a quoted root-relative
-    path, or ``"$PDK_ROOT"/<rest>`` for a PDK-relative rcfile), else ``None``.
-    """
+    ``rcfile_arg`` is the shell fragment the job command passes as
+    ``--rcfile`` (a quoted root-relative path, or ``"$PDK_ROOT"/<rest>`` for
+    a PDK-relative rcfile), else ``None``; ``symbol_paths`` are
+    root-relative."""
 
-    root: str
-    files: tuple[str, ...]
-    total_bytes: int
     schematic: str
     rcfile_arg: str | None
     rcfile_pdk_relative: bool
     symbol_paths: tuple[str, ...] = ()
-
-
-def _git(cwd: str, *args: str) -> bytes:
-    try:
-        result = subprocess.run(
-            ["git", "-C", cwd, *args], capture_output=True, timeout=60
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise NetlistError(f"could not run git in {cwd}: {exc}") from exc
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", errors="replace").strip()
-        raise NetlistError(f"git {' '.join(args)} failed in {cwd}: {detail}")
-    return result.stdout
-
-
-def _resolve_root(schematic: str, batch_root: str | None) -> str:
-    """``--batch-root`` (which must be inside a git checkout), else the
-    top level of the schematic's own checkout."""
-    if batch_root is not None:
-        root = os.path.realpath(batch_root)
-        if not os.path.isdir(root):
-            raise NetlistError(f"--batch-root is not a directory: {batch_root}")
-        _git(root, "rev-parse", "--show-toplevel")
-        return root
-    start = os.path.dirname(os.path.realpath(schematic))
-    try:
-        top = _git(start, "rev-parse", "--show-toplevel")
-    except NetlistError as exc:
-        raise NetlistError(
-            f"--backend batch uploads the git-tracked files around the "
-            f"schematic, but {schematic} is not in a git checkout ({exc}); "
-            "pass --batch-root, or use --backend local"
-        ) from exc
-    return os.path.realpath(top.decode("utf-8", errors="surrogateescape").strip())
-
-
-def _tracked_files(root: str) -> list[str]:
-    raw = _git(root, "ls-files", "-z")
-    return sorted(
-        item.decode("utf-8", errors="surrogateescape")
-        for item in raw.split(b"\0")
-        if item
-    )
-
-
-def _relative_tracked(
-    path: str, root: str, tracked: set[str], *, what: str, flag: str
-) -> str:
-    """``path`` as a root-relative POSIX path, refusing one outside the root
-    or not tracked by git (it would not be in the upload)."""
-    rel = os.path.relpath(os.path.realpath(path), root)
-    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
-        raise NetlistError(
-            f"{what} {path} is outside the batch root {root}; only files under "
-            f"the root are uploaded -- pass a wider --batch-root{flag}"
-        )
-    rel = rel.replace(os.sep, "/")
-    if rel not in tracked:
-        raise NetlistError(
-            f"{what} {path} is not tracked by git under {root}; --backend "
-            "batch uploads only git-tracked files, so the runner would not "
-            "have it -- commit (or `git add`) it first"
-        )
-    return rel
-
-
-def _require_selected(rel: str, selected: set[str], *, what: str) -> None:
-    if rel not in selected:
-        raise NetlistError(
-            f"{what} {rel} is left out of the upload by --batch-include / "
-            f"--batch-exclude; the {what} must be in the selected file set"
-        )
 
 
 def _pdk_relative_rcfile(rcfile: str, pdk: str) -> str | None:
@@ -291,14 +218,19 @@ def package_tree(
     """
     if max_bytes is None:
         max_bytes = MAX_BATCH_TREE_BYTES
-    root = _resolve_root(schematic, batch_root)
-    files = _tracked_files(root)
-    tracked = set(files)
-    selected = set(_select_files(files, include, exclude))
-    rel_schematic = _relative_tracked(
-        schematic, root, tracked, what="schematic", flag=""
+    root = _batch_tree.resolve_root(
+        schematic, batch_root, what="schematic", err_cls=NetlistError
     )
-    _require_selected(rel_schematic, selected, what="schematic")
+    files = _batch_tree.tracked_files(root, err_cls=NetlistError)
+    tracked = set(files)
+    selected_files = _batch_tree.select_files(files, include, exclude)
+    selected = set(selected_files)
+    rel_schematic = _batch_tree.relative_tracked(
+        schematic, root, tracked, what="schematic", flag="", err_cls=NetlistError
+    )
+    _batch_tree.require_selected(
+        rel_schematic, selected, what="schematic", err_cls=NetlistError
+    )
 
     rcfile_arg: str | None = None
     pdk_relative = False
@@ -309,7 +241,7 @@ def package_tree(
         else:
             if not os.path.isfile(rcfile):
                 raise NetlistError(f"xschemrc file not found: {rcfile}")
-            rel_rcfile = _relative_tracked(
+            rel_rcfile = _batch_tree.relative_tracked(
                 rcfile,
                 root,
                 tracked,
@@ -318,30 +250,20 @@ def package_tree(
                     ", or give a PDK rcfile in its PDK-relative form "
                     "'$PDK_ROOT/$PDK/libs.tech/xschem/xschemrc'"
                 ),
+                err_cls=NetlistError,
             )
-            _require_selected(rel_rcfile, selected, what="--rcfile")
+            _batch_tree.require_selected(
+                rel_rcfile, selected, what="--rcfile", err_cls=NetlistError
+            )
             rcfile_arg = shlex.quote(rel_rcfile)
 
     symbol_rel = _relative_symbol_dirs(symbol_path, root, selected)
 
-    present: list[str] = []
-    total = 0
-    for rel in files:
-        if rel not in selected:
-            continue
-        path = os.path.join(root, rel)
-        try:
-            info = os.lstat(path)
-        except OSError:
-            continue  # tracked but deleted in the working tree
-        if os.path.isdir(path) and not os.path.islink(path):
-            continue  # a submodule's gitlink
-        present.append(rel)
-        total += info.st_size
-    if total > max_bytes:
+    tree = _batch_tree.measure_tree(root, selected_files)
+    if tree.total_bytes > max_bytes:
         raise NetlistError(
-            f"--backend batch input tree under {root} is {total} bytes "
-            f"uncompressed across {len(present)} git-tracked files, above the "
+            f"--backend batch input tree under {root} is {tree.total_bytes} bytes "
+            f"uncompressed across {len(tree.files)} git-tracked files, above the "
             f"{max_bytes}-byte cap; pass a narrower --batch-root (e.g. the "
             "directory holding the schematics, symbols and xschemrc), or "
             "select just the files the schematic needs with --batch-include "
@@ -350,8 +272,8 @@ def package_tree(
         )
     return BatchTree(
         root=root,
-        files=tuple(present),
-        total_bytes=total,
+        files=tree.files,
+        total_bytes=tree.total_bytes,
         schematic=rel_schematic,
         rcfile_arg=rcfile_arg,
         rcfile_pdk_relative=pdk_relative,
@@ -362,14 +284,7 @@ def package_tree(
 def build_tarball(tree: BatchTree, path: str) -> None:
     """Write ``tree``'s files into a gzip tarball at ``path``, with
     root-relative member names. Symlinks are stored as symlinks."""
-    with tarfile.open(path, "w:gz") as archive:
-        for rel in tree.files:
-            archive.add(
-                os.path.join(tree.root, rel),
-                arcname=rel,
-                recursive=False,
-                filter=_batch_common.scrub_tarinfo,
-            )
+    _batch_tree.write_tarball(tree.root, tree.files, path)
 
 
 # --------------------------------------------------------------------------- #
