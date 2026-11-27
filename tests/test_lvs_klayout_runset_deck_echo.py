@@ -9,7 +9,7 @@ import os
 import pytest
 
 import lvs_tmp_repo
-from klayout_tools import lvs_runset
+from klayout_tools import runset_launch
 from klayout_tools.env_provenance import lint_envelope_files
 from klayout_tools.lvs import check_lvs_report, rerun_lvs_report, run_lvs
 from test_lvs_klayout_runset import (  # noqa: F401  (fixture used via pytestmark)
@@ -48,7 +48,7 @@ def test_relative_deck_file_flag_echoes_caller_form(tmp_path, monkeypatch, deck_
     assert report["deck_file"] == deck_file
     assert report["provenance"]["runset"]["deck_file"] == deck_file
     # the runset still resolved and hashed the flag against the CWD
-    assert report["provenance"]["runset"]["content_hash"] == lvs_runset._sha_prefixed(
+    assert report["provenance"]["runset"]["content_hash"] == runset_launch.sha_prefixed(
         str(tmp_path / "pdk.lvs")
     )
 

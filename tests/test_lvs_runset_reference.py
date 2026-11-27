@@ -11,7 +11,7 @@ import pytest
 
 import lvs_tmp_repo
 import test_lvs_klayout_runset as base
-from klayout_tools import lvs_runset
+from klayout_tools import runset_launch
 from klayout_tools.lvs import LvsError, rerun_lvs_report, run_lvs
 
 fake_klayout = base.fake_klayout  # pytest collects the fixture by module-level name
@@ -36,17 +36,17 @@ def _mim_request(tmp_path, **reference):
 def test_subckt_call_converts_mim_for_the_runset(tmp_path, fake_klayout):
     request = _mim_request(tmp_path, form="subckt-call", deck="sky130")
     seen = {}
-    real = lvs_runset._run_runset
+    real = runset_launch.run_runset
 
     def spy(**kw):
         seen["text"] = open(kw["reference"]).read()
         return real(**kw)
 
-    lvs_runset._run_runset = spy
+    runset_launch.run_runset = spy
     try:
         report = run_lvs(json.dumps(request))
     finally:
-        lvs_runset._run_runset = real
+        runset_launch.run_runset = real
     # W=10u L=5u -> A=50 um^2 = 50P, P=2*(10+5)=30 um = 30U (numeric, not assumed).
     assert "C1 a b sky130_fd_pr__model__cap_mim A=50P P=30U" in seen["text"]
     assert "XC1" not in seen["text"]
@@ -110,18 +110,18 @@ RF_SPICE = (
 
 def _capture_reference(request):
     seen = {}
-    real = lvs_runset._run_runset
+    real = runset_launch.run_runset
 
     def spy(**kw):
         seen["text"] = open(kw["reference"]).read()
         seen["path"] = kw["reference"]
         return real(**kw)
 
-    lvs_runset._run_runset = spy
+    runset_launch.run_runset = spy
     try:
         report = run_lvs(json.dumps(request))
     finally:
-        lvs_runset._run_runset = real
+        runset_launch.run_runset = real
     return report, seen
 
 
