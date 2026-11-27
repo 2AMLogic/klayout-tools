@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Compare one area-oriented ABC mapping with the pinned tt06 sky130 baseline.
+r"""Compare one area-oriented ABC mapping with the pinned tt06 sky130 baseline.
 
 Populate the Phase 1 cache as in tt_corpus_baseline.py. With the baseline's
 tools and Liberty on PATH / PDK_ROOT, run from the repository root:
 
     python scripts/tt_corpus_optimize.py prepare --work-dir run
-    # Run the Phase 2.C checker on run/pairs.json to produce verdicts.json.
+    libdir="$PDK_ROOT/sky130A/libs.ref/sky130_fd_sc_hd/lib"
+    python scripts/tt_corpus_equiv.py --pairs run/pairs.json --output verdicts.json \
+        --liberty "$libdir/sky130_fd_sc_hd__tt_025C_1v80.lib"
     python scripts/tt_corpus_optimize.py report --pairs run/pairs.json \
         --verdicts verdicts.json --output results.json
 
@@ -23,6 +25,7 @@ import json
 import re
 import subprocess
 import tarfile
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -38,7 +41,10 @@ SIDES = ("baseline", "candidate")
 
 
 def write_json(path: Path, value: dict) -> None:
-    path.write_text(json.dumps(value, indent=2) + "\n")
+    with tempfile.TemporaryDirectory(dir=path.parent) as tmp:
+        staged = Path(tmp) / path.name
+        staged.write_text(json.dumps(value, indent=2) + "\n")
+        staged.replace(path)
 
 
 def sha256(path: Path) -> str:
@@ -127,19 +133,26 @@ def prepare(snapshot: dict, cache: Path, run: Path) -> dict:
     }
 
 
-def matching_verdict(pair: dict, proofs: list[dict], directory: Path) -> dict:
+def matching_verdict(
+    pair: dict, proofs: list[dict], directory: Path, deck: str
+) -> dict:
     if not proofs:
         raise ValueError("missing formal verdict")
     for side in SIDES:
         if sha256(directory / pair[f"{side}_netlist"]) != pair[f"{side}_sha256"]:
             raise ValueError(f"{side} netlist changed since synthesis")
-    matches = [
-        proof
-        for proof in proofs
-        if all(proof.get(f"{side}_sha256") == pair[f"{side}_sha256"] for side in SIDES)
-    ]
+    identity = {
+        "baseline_sha256": pair["baseline_sha256"],
+        "candidate_sha256": pair["candidate_sha256"],
+        "top": pair["top"],
+        "liberty_sha256": deck.removeprefix("sha256:"),
+    }
+    matches = [p for p in proofs if all(p.get(k) == v for k, v in identity.items())]
     if not matches:
-        raise ValueError("formal verdict does not match this netlist pair")
+        reason = "formal verdict does not match this netlist pair, top or Liberty"
+        if len(proofs) == 1 and proofs[0].get("exclusion_reason"):
+            reason += f": {proofs[0]['exclusion_reason']}"
+        raise ValueError(reason)
     if len(matches) > 1:
         raise ValueError("ambiguous formal verdicts for this netlist pair")
     return matches[0]
@@ -155,7 +168,26 @@ def measured_count(pair: dict, side: str, directory: Path) -> int:
     return count
 
 
-def result_row(pair: dict, proofs: list[dict], directory: Path) -> dict:
+def accepted_counts(pair: dict, checked: dict, directory: Path) -> dict:
+    if checked["proof"]["status"] != "equivalent":
+        raise ValueError("gate lacks a final equivalent proof")
+    original = measured_count(pair, "baseline", directory)
+    optimized = measured_count(pair, "candidate", directory)
+    # Phase 2.C excludes a proven zero baseline from its percentage mean.
+    # An absolute difference in instances is still defined for that pair.
+    zero_baseline = original == 0 and checked.get("exclusion_reason") == (
+        "percentage undefined for a zero baseline"
+    )
+    if checked.get("exclusion_reason") and not zero_baseline:
+        raise ValueError(checked["exclusion_reason"])
+    if checked["baseline_count"] != original:
+        raise ValueError("gate baseline count differs from synthesis evidence")
+    if not zero_baseline and checked.get("candidate_count") != optimized:
+        raise ValueError("gate candidate count differs from synthesis evidence")
+    return {"optimized_count": optimized, "delta": optimized - original}
+
+
+def result_row(pair: dict, proofs: list[dict], directory: Path, deck: str) -> dict:
     keys = (
         "macro",
         "repo",
@@ -172,16 +204,17 @@ def result_row(pair: dict, proofs: list[dict], directory: Path) -> dict:
     if "exclusion_reason" in pair:
         return {**row, "exclusion_reason": pair["exclusion_reason"]}
     try:
-        proof = matching_verdict(pair, proofs, directory)
+        proof = matching_verdict(pair, proofs, directory, deck)
         verdict = proof["verdict"]
         if verdict not in ("equivalent", "not-equivalent", "unestablished"):
             raise ValueError(f"unknown formal verdict: {verdict!r}")
-        row["verdict"] = verdict
         if verdict != "equivalent":
-            return {**row, "exclusion_reason": proof.get("exclusion_reason") or verdict}
-        original = measured_count(pair, "baseline", directory)
-        optimized = measured_count(pair, "candidate", directory)
-        return {**row, "optimized_count": optimized, "delta": optimized - original}
+            return {
+                **row,
+                "verdict": verdict,
+                "exclusion_reason": proof.get("exclusion_reason") or verdict,
+            }
+        return {**row, "verdict": verdict, **accepted_counts(pair, proof, directory)}
     except (OSError, KeyError, ValueError, TypeError) as exc:
         row["exclusion_reason"] = str(exc)
         return row
@@ -193,8 +226,9 @@ def results(pairs: Path, verdicts: Path | None) -> dict:
     if verdicts is not None and verdicts.exists():
         for proof in json.loads(verdicts.read_text())["designs"]:
             proofs[proof["macro"], proof["commit"]].append(proof)
+    deck = ((manifest["pins"] or {}).get("deck") or {}).get("content_hash", "")
     rows = [
-        result_row(pair, proofs[pair["macro"], pair["commit"]], pairs.parent)
+        result_row(pair, proofs[pair["macro"], pair["commit"]], pairs.parent, deck)
         for pair in manifest["designs"]
     ]
     reported = sum("optimized_count" in row for row in rows)

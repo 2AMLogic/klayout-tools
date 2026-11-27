@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from test_tt_corpus_baseline import PROJECTS, cache_project
+from test_tt_corpus_baseline import DECK, PROJECTS, cache_project
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -21,11 +21,11 @@ def sweep(monkeypatch):
     return tt_corpus_optimize
 
 
-def make_pair(directory, macro, candidate_count=92):
+def make_pair(directory, macro, candidate_count=92, baseline_count=100):
     row = {
         "macro": macro,
         "commit": "a" * 40,
-        "baseline_count": 100,
+        "baseline_count": baseline_count,
         "candidate_count": candidate_count,
         "top": macro,
     }
@@ -48,8 +48,24 @@ def make_pair(directory, macro, candidate_count=92):
 
 
 def proof(row, verdict="equivalent", reason=None):
-    keys = ("macro", "commit", "baseline_sha256", "candidate_sha256")
-    return {**{k: row[k] for k in keys}, "verdict": verdict, "exclusion_reason": reason}
+    keys = (
+        "macro",
+        "commit",
+        "top",
+        "baseline_sha256",
+        "candidate_sha256",
+        "baseline_count",
+        "candidate_count",
+    )
+    return {
+        **{k: row[k] for k in keys},
+        "liberty_sha256": DECK["content_hash"].removeprefix("sha256:"),
+        "proof": {
+            "status": "equivalent" if verdict == "equivalent" else "inconclusive"
+        },
+        "verdict": verdict,
+        "exclusion_reason": reason,
+    }
 
 
 def report(sweep, tmp_path, rows, proofs):
@@ -59,7 +75,7 @@ def report(sweep, tmp_path, rows, proofs):
             {
                 "schema_version": 1,
                 "shuttle": "tt06",
-                "pins": {},
+                "pins": {"deck": DECK},
                 "optimization": {},
                 "total": len(rows),
                 "designs": rows,
@@ -174,6 +190,46 @@ def test_missing_verdicts_file_preserves_baselines(sweep, tmp_path):
     assert result["reported"] == 0
     assert result["designs"][0]["baseline_count"] == 100
     assert "missing" in result["designs"][0]["exclusion_reason"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"liberty_sha256": "f" * 64},
+        {"top": "leaf"},
+        {"proof": {"status": "inconclusive"}},
+        {"baseline_count": 20},
+        {"candidate_count": 50},
+        {"exclusion_reason": "invalid count in gate input"},
+    ],
+)
+def test_gate_evidence_must_match_current_measurement(sweep, tmp_path, changes):
+    row = make_pair(tmp_path, "same_bytes")
+    result = report(sweep, tmp_path, [row], [{**proof(row), **changes}])
+    assert result["excluded"] == 1
+    assert "delta" not in result["designs"][0]
+
+
+def test_absolute_delta_for_proven_zero_baseline(sweep, tmp_path):
+    row = make_pair(tmp_path, "empty", candidate_count=2, baseline_count=0)
+    checked = proof(row, reason="percentage undefined for a zero baseline")
+    del checked["candidate_count"]  # Phase 2.C omits the percentage and this count.
+    result = report(sweep, tmp_path, [row], [checked])
+    assert result["reported"] == 1
+    assert result["designs"][0]["delta"] == 2
+
+
+def test_unestablished_before_gate_could_hash_inputs(sweep, tmp_path):
+    row = make_pair(tmp_path, "unreadable")
+    unavailable = {
+        "macro": row["macro"],
+        "commit": row["commit"],
+        "verdict": "unestablished",
+        "exclusion_reason": "Liberty differs from the pinned baseline deck",
+    }
+    result = report(sweep, tmp_path, [row], [unavailable])
+    assert "Liberty differs" in result["designs"][0]["exclusion_reason"]
+    assert "delta" not in result["designs"][0]
 
 
 def test_count_must_come_from_this_netlists_report(sweep, tmp_path):
