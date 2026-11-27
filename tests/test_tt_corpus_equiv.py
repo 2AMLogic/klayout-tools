@@ -23,7 +23,7 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def candidate_report(netlist, count):
+def synthesis_report(netlist, count):
     report = netlist.with_suffix(".report.json")
     report.write_text(
         json.dumps({"netlist_sha256": digest(netlist), "instance_count": count})
@@ -50,14 +50,12 @@ def inputs(tmp_path, counts):
             "baseline_count": before,
             "candidate_count": after,
         }
-        for side in ("baseline", "candidate"):
+        for side, count in (("baseline", before), ("candidate", after)):
             path = tmp_path / f"{top}_{side}.v"
             path.write_text(f"// {side}\nmodule {top}; endmodule\n")
             row[f"{side}_netlist"] = path.name
             row[f"{side}_sha256"] = digest(path)
-        row["candidate_report"] = candidate_report(
-            tmp_path / row["candidate_netlist"], after
-        )
+            row[f"{side}_report"] = synthesis_report(path, count)
         pairs.append(row)
     return {"pins": pins, "designs": baseline}, {"pins": pins, "designs": pairs}, lib
 
@@ -195,6 +193,35 @@ def test_candidate_count_requires_matching_synthesis_evidence(
             assert reason in row["exclusion_reason"]
 
 
+def test_baseline_report_binds_gold_bytes_and_pinned_count(gate, tmp_path, monkeypatch):
+    baseline, pairs, lib = inputs(tmp_path, [(97, 76)] * 3)
+    mixed, wrong_count, missing = pairs["designs"]
+    monkeypatch.setattr(
+        gate, "run_equiv", lambda req: {"engine": "yosys", "status": "equivalent"}
+    )
+    saved = cli(gate, tmp_path, baseline, pairs, lib)
+    assert saved["included"] == 3
+
+    # Keep the original reports and counts, but supply the candidate as gold.
+    mixed["baseline_netlist"] = mixed["candidate_netlist"]
+    mixed["baseline_sha256"] = mixed["candidate_sha256"]
+    # Model a passing proof the previous gate could save for that exact self-pair.
+    saved["designs"][0]["baseline_sha256"] = mixed["baseline_sha256"]
+    synthesis_report(tmp_path / wrong_count["baseline_netlist"], 76)
+    del missing["baseline_report"]
+    monkeypatch.setattr(gate, "run_equiv", lambda req: pytest.fail("unexpected proof"))
+    for evidence in (None, saved):
+        report = cli(gate, tmp_path, baseline, pairs, lib, saved=evidence)
+        assert report["headline"] == "mean unavailable across 0 designs, 3 excluded"
+        for row, reason in zip(
+            report["designs"], ["netlist", "count", "report"], strict=True
+        ):
+            assert row["verdict"] == "unestablished"
+            assert "proof" not in row and "reduction_pct" not in row
+            assert "baseline" in row["exclusion_reason"]
+            assert reason in row["exclusion_reason"]
+
+
 def test_conflicting_source_archive_excludes_fresh_and_replayed_proofs(
     gate, tmp_path, monkeypatch
 ):
@@ -275,6 +302,8 @@ def test_mapped_tt06_pair_through_yosys(gate, tmp_path, monkeypatch, top, engine
     snapshot = json.loads(gate.BASELINE.read_text())
     row = next(design for design in snapshot["designs"] if design["macro"] == top)
     baseline = {"pins": pins, "designs": [{**row, "instance_count": count}]}
+    gold_report = tmp_path / "baseline.report.json"
+    gold_report.write_text(json.dumps(synth))
     pair = {
         **row,
         "top": top,
@@ -284,7 +313,8 @@ def test_mapped_tt06_pair_through_yosys(gate, tmp_path, monkeypatch, top, engine
         "candidate_netlist": candidate.name,
         "baseline_sha256": synth["netlist_sha256"],
         "candidate_sha256": digest(candidate),
-        "candidate_report": candidate_report(candidate, count + 1),
+        "baseline_report": gold_report.name,
+        "candidate_report": synthesis_report(candidate, count + 1),
     }
     pairs = {"pins": pins, "designs": [pair]}
     saved = cli(gate, tmp_path, baseline, pairs, lib)
@@ -331,6 +361,7 @@ def test_report_only_rechecks_digests_and_requires_formal_evidence(
     path = tmp_path / b["baseline_netlist"]
     path.write_text("different baseline")
     b["baseline_sha256"] = digest(path)
+    b["baseline_report"] = synthesis_report(path, b["baseline_count"])
     saved["designs"][2].pop("proof")
     saved["designs"][3]["proof"] = {"engine": "simulation", "status": "equivalent"}
     pairs["designs"].append(e.copy())

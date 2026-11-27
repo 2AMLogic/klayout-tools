@@ -7,7 +7,7 @@ r"""Gate the pinned Tiny Tapeout instance-count distribution on formal equivalen
 The Phase 2.B pairs.json carries the baseline's pins and a designs array. Each
 mapped row has macro, commit, source_sha256 and top. Both baseline and candidate
 have a _netlist (path relative to pairs.json), _sha256 (hex) and _count (instances).
-candidate_report points to the synthesis report measuring the candidate netlist.
+baseline_report and candidate_report point to the corresponding synthesis reports.
 An upstream failure carries exclusion_reason. The Phase 2.A baseline determines
 the sample and its order. The corpus design kind selects the Yosys engine.
 For other samples a row may specify engine (default yosys).
@@ -120,28 +120,29 @@ def classify(proof: dict, engine: str) -> tuple[str, str | None]:
     return "unestablished", reason
 
 
+def check_measurement(
+    root: Path, pair: dict, side: str, digest: str, count: int | None
+) -> None:
+    path = pair.get(f"{side}_report")
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"missing {side} synthesis report path")
+    report = json.loads((root / path).read_text())
+    if not isinstance(report, dict) or report.get("netlist_sha256") != digest:
+        raise ValueError(f"{side} synthesis report does not match the {side} netlist")
+    if type(count) is not int or count < 0:
+        raise ValueError(f"missing or invalid {side} instance count")
+    measured = report.get("instance_count")
+    if type(measured) is not int or measured != count:
+        raise ValueError(
+            f"{side} instance count {count} differs from measured count {measured!r}"
+        )
+
+
 def admit_counts(row: dict, pair: dict, root: Path) -> None:
     before, after = row["baseline_count"], pair.get("candidate_count")
-    if not all(
-        type(n) is int and n >= 0 for n in (before, after, pair.get("baseline_count"))
-    ):
-        raise ValueError("missing or invalid instance count")
-    if before != pair["baseline_count"]:
+    if type(pair.get("baseline_count")) is not int or before != pair["baseline_count"]:
         raise ValueError("baseline instance count differs from the pinned measurement")
-    path = pair.get("candidate_report")
-    if not isinstance(path, str) or not path:
-        raise ValueError("missing candidate synthesis report path")
-    report = json.loads((root / path).read_text())
-    if (
-        not isinstance(report, dict)
-        or report.get("netlist_sha256") != row["candidate_sha256"]
-    ):
-        raise ValueError("candidate synthesis report does not match the proven netlist")
-    measured = report.get("instance_count")
-    if type(measured) is not int or measured != after:
-        raise ValueError(
-            f"candidate instance count {after} differs from measured count {measured!r}"
-        )
+    check_measurement(root, pair, "candidate", row["candidate_sha256"], after)
     if before == 0:
         raise ValueError("percentage undefined for a zero baseline")
     row.update(candidate_count=after, reduction_pct=100 * (before - after) / before)
@@ -180,6 +181,9 @@ def check_design(
             work = Path(tmp)
             identity = checked_inputs(work, root, pair, liberty, deck)
             row.update(identity)
+            check_measurement(
+                root, pair, "baseline", row["baseline_sha256"], row["baseline_count"]
+            )
             proof = (
                 prove(work, pair["top"], engine)
                 if saved is None
