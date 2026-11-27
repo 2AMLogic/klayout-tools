@@ -1,0 +1,1 @@
+- Batch simulation checks the runner’s netlist digest against the staged input before accepting results. Batch-set members also receive distinct report directories when generated names or symlinks collide (#7180).

@@ -4,18 +4,35 @@ Moved verbatim out of the tail of ``run_extract``: given every already-computed
 stage output, build the response dict (schema version, provenance, additive
 optional fields, ``metrics``). It does no geometry work.
 
-The helpers it calls that still live in ``extract.py`` are imported inside the
-function body: ``extract.py`` imports this module at its top level, so a
-module-level ``from .extract import ...`` would be a circular import.
+The netlist digest is resolved at report time through the extraction orchestrator.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from . import env_provenance
 from ._provenance import build_provenance
-from .decks import deck_source_path
+from .decks import FinFETExtractionDeck, deck_source_path
+from .extract_base import SCHEMA_VERSION, _build_metrics, instantiated_device_counts
+from .extract_progress import _staged
+from .extract_report_canonicalize import _normalized_netlist_sha256
+from .extract_resistance_network import RESISTANCE_NETWORK_MODEL_NOTE
+
+
+def finfet_device_census(deck: object, circuit: Any) -> dict[str, Any]:
+    """Disclose both count scopes when a FinFET layout retains subcircuits."""
+    if not isinstance(deck, FinFETExtractionDeck) or circuit is None:
+        return {}
+    if next(iter(circuit.each_subcircuit()), None) is None:
+        return {}
+    counts = instantiated_device_counts(circuit)
+    return {
+        "device_count_scope": "selected_circuit",
+        "instantiated_device_counts": counts,
+        "instantiated_device_count": sum(counts.values()),
+    }
 
 
 def assemble_extract_report(
@@ -27,6 +44,7 @@ def assemble_extract_report(
     dead_metal_omitted: Any,
     dead_metal_summary: Any,
     deck: Any,
+    emit_resistance_network: Any = False,
     deck_name: Any,
     deck_options: Any,
     declared_pins: Any,
@@ -44,10 +62,11 @@ def assemble_extract_report(
     merged_net_labels: Any,
     missing_flavour_markers: Any,
     netlist_sha256: Any,
-    nets: Any,
+    nets: list[dict[str, Any]],
     parasitics_report: Any,
     path: Any,
     pdk_info: Any,
+    report_parasitics_shape: Any,
     pin_renames: Any,
     pin_ties: Any,
     probe_results: Any,
@@ -66,23 +85,13 @@ def assemble_extract_report(
     warnings: Any,
 ) -> dict[str, Any]:
     """Build the ``run_extract`` result dict (byte-identical to the inline code)."""
-    from .extract import (
-        SCHEMA_VERSION,
-        _build_metrics,
-        _describe_device_models,
-        _describe_label_layers,
-        _hierarchy_fields,
-        _normalized_netlist_sha256,
-        _pin_ties_field,
-        _staged,
-    )
-
     # Issue #2659: `file` -- the input layout `provenance.input.content_hash`
     # below covers -- is normalised against the repo root resolved from the
     # layout's own location, the same "walk up from the input" anchor
     # `klt pex` picks for its own `layout`. `netlist_path` below is an
     # *output* path and stays a plain string (see `SCHEMA_VERSION`).
     repo_root = env_provenance.repo_root_for(path)
+
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "file": env_provenance.repo_relative_path(path, repo_root=repo_root),
@@ -268,11 +277,24 @@ def assemble_extract_report(
         # indistinguishable, in its own record, from a deck with no
         # selectable options at all.
         resolve_deck_options=True,
+        # Issue #7824: the default in-process engine opts into the same
+        # engine-drift comparison `klt drc`/`klt lvs` carry (issue #1490) --
+        # an extracted netlist's measured device parameters and parasitic
+        # R/C are first-class engine outputs, so a caller regenerating
+        # committed evidence under a drifted engine sees it at run time,
+        # not by byte-diffing reports later. `--engine klayout-runset`
+        # builds its provenance separately (external standalone
+        # application; pinning that engine is out of scope).
+        include_klayout_version_mismatch=True,
     )
 
     # Additive, independently-optional field (issue #216 addendum): `null`
     # unless `--parasitics` was given, a `parasitics` summary block otherwise.
     result["parasitics"] = parasitics_report
+    # Additive disclosure (issue #6899): with the reduced-network emission
+    # on, `parasitics.model` gains a key stating it -- absent otherwise.
+    if parasitics_report is not None and emit_resistance_network:
+        parasitics_report["model"]["resistance_network"] = RESISTANCE_NETWORK_MODEL_NOTE
 
     # Additive field (issue #948): `null` unless `--spef` was given, the
     # resolved SPEF path otherwise -- see `run_extract`'s `spef_output`
@@ -296,4 +318,55 @@ def assemble_extract_report(
     # `pin_count`/`parasitics.*` above, which stay exactly as documented.
     result["metrics"] = _build_metrics(result, parasitics_report)
 
+    # `--report-parasitics slim` (issue #5816): swap in the slim shape of
+    # the `parasitics` block -- strictly last, so the SPEF writer (which
+    # consumed the full block back in `run_extract`) and `_build_metrics`
+    # above both read the un-slimmed data and slimming corrupts neither.
+    # Applied in place of the full block, never on it: `slim_parasitics_
+    # report` is a pure function and the full object stays untouched for
+    # any still-live reference. `full` (the default, and every run before
+    # this flag existed) never reaches this branch.
+    if report_parasitics_shape == "slim":
+        from .extract_parasitics_slim import slim_parasitics_report
+
+        result["parasitics"] = slim_parasitics_report(result["parasitics"])
+
     return result
+
+
+def _describe_device_models(
+    device_models: Mapping[str, str] | None,
+) -> dict[str, str] | None:
+    """Report echo of ``--device-model`` (issue #4234): sorted, ``None`` if unset."""
+    return dict(sorted(device_models.items())) if device_models else None
+
+
+def _describe_label_layers(
+    label_layers: Mapping[str, tuple[int, int] | None] | None,
+) -> dict[str, list[int] | None] | None:
+    """The response's own ``label_layers`` echo (issue #2656) -- the caller's
+    role -> ``(layer, datatype)`` override mapping as JSON (``[layer,
+    datatype]`` arrays, ``null`` for a cleared role), sorted by role, or
+    ``None`` when no override was given.
+
+    The inverse of :func:`_label_layers_from_report`, which reads the same
+    shape back out of a committed report for ``--check --rerun``.
+    """
+    if not label_layers:
+        return None
+    return {
+        role: (None if layer is None else [layer[0], layer[1]])
+        for role, layer in sorted(label_layers.items())
+    }
+
+
+def _hierarchy_fields(report: dict[str, Any] | None) -> dict[str, Any]:
+    """The additive ``hierarchy`` response field: present only when
+    ``--hierarchical-cells`` was given, so a flat run's JSON is unchanged."""
+    return {} if report is None else {"hierarchy": report}
+
+
+def _pin_ties_field(tie_declared_pins: bool, pin_ties: list[Any]) -> dict[str, Any]:
+    """The ``pin_ties`` key of the extract report (issue #4383), present only
+    under ``--tie-declared-pins``."""
+    return {"pin_ties": pin_ties} if tie_declared_pins else {}

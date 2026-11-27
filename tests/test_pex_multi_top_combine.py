@@ -274,3 +274,15 @@ def test_first_firing_returns_the_first_tops_block():
 
 def test_first_firing_is_none_when_no_top_fires():
     assert _first_firing([{"pin_count_mismatch": None}], "pin_count_mismatch") is None
+
+
+def test_combined_substrate_tie_includes_every_top():
+    first = {"net": "vsubs", "device": "RtieA"}
+    second = {"net": "vsubs", "device": "RtieB"}
+    ties = {"mode": "default", "resistance_ohm": 1e12}
+    blocks = [{"substrate_dc_tie": {**ties, "nets": [net]}} for net in (first, second)]
+
+    assert _combine_parasitics(blocks)["substrate_dc_tie"] == {
+        **ties,
+        "nets": [first, second],
+    }

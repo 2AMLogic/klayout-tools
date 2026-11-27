@@ -17,7 +17,9 @@ A pad that protrudes past the wire is shrunk to the via cut(s) it lands plus
 region. A shrink is kept only when, in every placement, the shrunk pad still
 touches the wire wherever the original pad did; otherwise the pad is left
 alone. Without a cut layer in the layer map, or with no cut under the pad,
-nothing is shrunk.
+nothing is shrunk. The separate M1 extension pass measures complete facing
+sides of placed V1 pads and can add metal along them when a local clearance
+and connectivity check succeeds. Its count refers to placed pairs.
 
 The returned report carries a ``tip_check`` sub-object
 (:mod:`~klayout_tools.place_and_route_via_tip`): what the packaged deck's own
@@ -27,7 +29,12 @@ and, when the caller hands the routed DEF over as ``def_path``, to the
 router's own ``SHAPE DRCFILL`` patch metal
 (:mod:`~klayout_tools.place_and_route_def_drcfill`, issue #5740).
 That is the half ``route_drc_violation_count`` cannot report, and it is why
-"trimmed" never has to be read as "deck-clean".
+"trimmed" never has to be read as "deck-clean". The DEF scan's own
+``status``/``reason``/``unresolved`` ride along as
+``tip_check.router_fill_scan`` (issue #6100), so a zero
+``router_fill_violations`` is interpretable: "the router wrote no DRCFILL"
+does not have to share a reading with "never measured" or "could not
+resolve every item".
 
 Layer scope (issue #4495's follow-up report: the same router-vs-deck
 disagreement is not specific to the V1/M1 landing pad)
@@ -56,7 +63,9 @@ from typing import Any
 
 from .pdk_families import pdk_variant_family
 from .place_and_route_def_drcfill import scan_def_drcfill
+from .place_and_route_via_enclosure import repair_m1_v1_enclosures
 from .place_and_route_via_tip import check_via_pad_tips
+from .place_and_route_via_tip_repair import repair_m1_landing_pairs
 
 _ASAP7_FAMILY = "asap7"
 
@@ -301,17 +310,42 @@ def _trim(
 
 def _drcfill_regions(
     kdb: Any, *, variant: str, def_path: str | None, dbu_um: float
-) -> dict[str, Any] | None:
-    """The routed DEF's reconstructed ``SHAPE DRCFILL`` patch regions, or
-    ``None`` when this pass must not attribute any: no DEF was handed in,
-    the PDK family is not ASAP7 (the scan would be dead work on a pass
-    whose GDS outcome is a documented no-op), or the scan itself skipped
-    (unreadable file, no ``UNITS`` statement) -- all reported as absence,
-    never guessed."""
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The routed DEF's reconstructed ``SHAPE DRCFILL`` patch regions plus the
+    scan's own self-report, or ``(None, None)`` when this pass must not
+    attribute any and has no scan to report: no DEF was handed in, or the PDK
+    family is not ASAP7 (the scan would be dead work on a pass whose GDS
+    outcome is a documented no-op). When the scan ran, the second element is
+    its full return -- ``status`` (``"scanned"``, or ``"skipped"`` with
+    ``reason`` saying why), ``unresolved``, ``segments`` and the rest -- so
+    "measured, zero patches" stays distinguishable from "never measured"
+    instead of both reading ``router_fill`` 0 (issue #6100).
+    """
     if def_path is None or pdk_variant_family(variant) != _ASAP7_FAMILY:
-        return None
+        return None, None
     scanned = scan_def_drcfill(kdb, def_path=def_path, dbu_um=dbu_um)
-    return scanned["regions"] or None
+    return scanned["regions"] or None, scanned
+
+
+def _repair_placed_m1(kdb, layout, top, lef_to_gds, report):
+    """Recheck spacing and enclosure proposals after either changes a facing edge."""
+    total_pads = total_wires = total_enclosures = 0
+    while True:
+        counts = {}
+        pads = repair_m1_landing_pairs(kdb, layout, top, lef_to_gds, report=counts)
+        wires = counts["m1_landing_pad_wire_pairs_extended"]
+        enclosures, remaining = repair_m1_v1_enclosures(kdb, layout, top, lef_to_gds)
+        total_pads += pads
+        total_wires += wires
+        total_enclosures += enclosures
+        if not (pads or wires or enclosures):
+            break
+    report.update(
+        m1_landing_pairs_extended=total_pads,
+        m1_landing_pad_wire_pairs_extended=total_wires,
+        m1_v1_enclosures_repaired=total_enclosures,
+        m1_v1_enclosures_remaining=remaining,
+    )
 
 
 def trim_via_pads(
@@ -335,6 +369,15 @@ def trim_via_pads(
     cannot report. So the repair runs first, and the flag then measures the
     geometry that is actually written -- which is also why it must run after,
     never before, the trim.
+
+    ``tip_check`` also carries ``router_fill_scan`` (issue #6100): the DEF
+    scan's own ``status``/``reason``/``unresolved`` whenever it was attempted,
+    ``None`` when it was not -- no ``def_path`` was handed in, or the PDK
+    family is not ASAP7, where ``tip_check`` itself reports ``"skipped"``.
+    Without it, ``router_fill_violations: 0`` reads identically for "the
+    router wrote no DRCFILL" and "the scan never ran / could not resolve
+    every item"; with it, the zero is interpretable, the way
+    ``min_area_repair`` keeps a ``"skipped"`` pass distinct from a clean one.
     """
     report = _trim(
         kdb,
@@ -343,14 +386,26 @@ def trim_via_pads(
         variant=variant,
         lef_to_gds=lef_to_gds,
     )
+    if pdk_variant_family(variant) == _ASAP7_FAMILY:
+        _repair_placed_m1(kdb, layout, top_cell, lef_to_gds, report)
+    drcfill_regions, drcfill_scan = _drcfill_regions(
+        kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
+    )
     report["tip_check"] = check_via_pad_tips(
         kdb,
         layout=layout,
         top_cell=top_cell,
         variant=variant,
         lef_to_gds=lef_to_gds,
-        drcfill_regions=_drcfill_regions(
-            kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
-        ),
+        drcfill_regions=drcfill_regions,
+    )
+    report["tip_check"]["router_fill_scan"] = (
+        None
+        if drcfill_scan is None
+        else {
+            "status": drcfill_scan["status"],
+            "reason": drcfill_scan["reason"],
+            "unresolved": drcfill_scan["unresolved"],
+        }
     )
     return report

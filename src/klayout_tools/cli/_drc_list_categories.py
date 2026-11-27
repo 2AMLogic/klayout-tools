@@ -119,6 +119,7 @@ def run_list_rule_categories(
                 deck_file,
                 timeout_s=args.timeout_s,
                 deck_vars=deck_vars,
+                native_deck=native,
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
                 deck_name=args.deck or None,

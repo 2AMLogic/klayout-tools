@@ -17,6 +17,7 @@ from klayout_tools.cli import main
 from klayout_tools.pex import PexError, run_pex
 from klayout_tools.pex_dry_run import run_pex_dry_run
 from klayout_tools.pex_multi_top_flags import MULTI_TOP_UNSUPPORTED_CODE
+from klayout_tools.pex_runset import PexRunset
 from test_pex import (
     _PROMOTED_TAP_LABELS,
     _make_sky130_poly_resistor_layout,
@@ -49,6 +50,8 @@ from test_pex_multi_top import (
 #: before this refusal is reached, which would make the test assert the wrong
 #: message.
 _MULTI_TOP_REFUSED_FLAGS = (
+    ({"schematic_top": "SCHEM"}, "--schematic-top", True),
+    ({"runset": PexRunset("deck.lylvs")}, "--engine klayout-runset", True),
     ({"flatten_schematic": True}, "--flatten-schematic", True),
     ({"device_only_leg": True}, "--device-only-leg", True),
     ({"tie_nets": [("vsubs", "0")]}, "--tie-net", True),
@@ -77,7 +80,7 @@ def test_run_pex_multi_top_refuses_unsupported_flag(
     """Refused *before extraction*, by name -- confirmed by making
     `run_extract` unreachable, so the refusal cannot be mistaken for a
     failure discovered after paying for an extraction."""
-    import klayout_tools.pex as pex_module
+    import klayout_tools.pex_runset as pex_module
 
     def _unreachable_run_extract(*_args, **_kwargs):
         raise AssertionError(
@@ -115,7 +118,7 @@ def test_run_pex_single_top_does_not_refuse_those_flags(
     acquire a new refusal from this change. Each flag gets at least as far as
     the extraction it always did -- whatever it then does is unchanged, and
     is covered by that flag's own tests."""
-    import klayout_tools.pex as pex_module
+    import klayout_tools.pex_runset as pex_module
 
     reached = {"extract": False}
 
@@ -149,7 +152,7 @@ def test_run_pex_single_top_does_not_refuse_those_flags(
 def test_run_pex_rejects_a_repeated_top_before_extraction(
     tmp_path, two_top_layout, monkeypatch
 ):
-    import klayout_tools.pex as pex_module
+    import klayout_tools.pex_runset as pex_module
 
     monkeypatch.setattr(
         pex_module,

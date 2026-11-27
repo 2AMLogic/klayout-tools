@@ -71,11 +71,7 @@ def _validate_entry(index: int, entry: Any) -> dict[str, Any]:
     if not isinstance(parameter, str) or not parameter.strip():
         raise InjectedError(f"{where}.parameter must be a non-empty string")
     sigma = entry.get("relative_sigma")
-    if (
-        isinstance(sigma, bool)
-        or not isinstance(sigma, (int, float))
-        or not 0 < sigma < 1
-    ):
+    if not is_number(sigma) or not 0 < sigma < 1:
         raise InjectedError(
             f"{where}.relative_sigma must be a number in (0, 1) (got {sigma!r})"
         )

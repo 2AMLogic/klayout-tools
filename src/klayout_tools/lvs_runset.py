@@ -31,8 +31,8 @@ each side. A runset that recognizes no device on either side yields
 ``status: "inconclusive"`` (exit 4) with ``coverage.nothing_checked`` set --
 a clean-looking empty compare is not evidence.
 
-This module has no load-time dependency on ``lvs.py`` (it imports from it
-inside functions), mirroring ``lvs_netgen.py``.
+Runset validation uses the shared errors and categories from ``lvs_base``.
+The compare path imports runner helpers when it needs them.
 """
 
 from __future__ import annotations
@@ -46,9 +46,21 @@ from typing import TYPE_CHECKING, Any
 from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
 from .env_provenance import repo_relative_path, repo_root_for
+from .lvs_base import (
+    POWER_STATUS_MATCH,
+    POWER_STATUS_MISMATCH,
+    LvsError,
+)
 from .lvs_mismatch import _mismatch
-from .lvs_runset_census import _build_coverage, _class_census
+from .lvs_runset_census import _attach_reference_source, _build_coverage, _class_census
 from .lvs_runset_findings import _circuit_findings, _device_label, _paired_ok
+from .lvs_runset_ports import augment_verdict, strict_top_port_mode
+from .runset_deck_vars import (
+    RESERVED_RUNSET_VARS as RESERVED_RUNSET_VARS,
+)
+from .runset_deck_vars import (
+    normalize_deck_vars,
+)
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -56,17 +68,13 @@ if TYPE_CHECKING:
 RUNSET_ENGINE = "klayout-runset"
 
 #: Default wall-clock budget for the runset (a real PDK runset on a sizeable
-#: block can run for minutes). Override via ``options.runset_timeout_s``.
+#: block can run for minutes); override via ``options.runset_timeout_s``.
 RUNSET_DEFAULT_TIMEOUT_S = 600.0
 
 _KLAYOUT_BINARY_ENV_VAR = "KLT_KLAYOUT_BINARY"
 
-#: ``-rd`` names this engine sets itself; ``deck_vars`` may not override them.
-RESERVED_RUNSET_VARS = ("input", "schematic", "report", "top", "topcell")
-
-#: Request ``options`` keys this engine understands. Anything else is refused
-#: rather than silently ignored (an option the caller believes is in force
-#: but is not would be worse than not supporting it).
+#: Request ``options`` keys this engine understands; anything else is refused,
+#: not silently ignored -- an option believed in force but absent is worse.
 _ALLOWED_OPTIONS = ("runset_timeout_s", "klayout_binary")
 
 _ERROR_LINE_RE = re.compile(r"^\s*ERROR\b", re.IGNORECASE)
@@ -91,7 +99,6 @@ def _sha_prefixed(path: str | None) -> str | None:
 
 
 def _existing_file(raw: Any, request_dir: str, label: str) -> str:
-    from .lvs import LvsError
 
     if not isinstance(raw, str) or not raw:
         raise LvsError(f"engine '{RUNSET_ENGINE}' requires {label}")
@@ -102,26 +109,18 @@ def _existing_file(raw: Any, request_dir: str, label: str) -> str:
 
 
 def _parse_deck_vars(raw_vars: Any) -> dict[str, str]:
-    from .lvs import LvsError
 
-    raw_vars = raw_vars or {}
-    if not isinstance(raw_vars, dict):
-        raise LvsError("request.deck_vars must be a JSON object of name -> value")
-    deck_vars: dict[str, str] = {}
-    for name, value in raw_vars.items():
-        if name in RESERVED_RUNSET_VARS:
-            raise LvsError(
-                f"deck_vars may not set '{name}': the {RUNSET_ENGINE} engine "
-                f"sets {', '.join(RESERVED_RUNSET_VARS)} itself"
-            )
-        if isinstance(value, (dict, list)) or value is None:
-            raise LvsError(f"deck_vars['{name}'] must be a string, number or boolean")
-        deck_vars[name] = str(value).lower() if isinstance(value, bool) else str(value)
-    return deck_vars
+    return normalize_deck_vars(
+        raw_vars,
+        error_cls=LvsError,
+        not_object="request.deck_vars must be a JSON object of name -> value",
+        reserved=f"deck_vars may not set '{{name}}': the {RUNSET_ENGINE} engine "
+        f"sets {{reserved}} itself",
+        not_scalar="deck_vars['{name}'] must be a string, number or boolean",
+    )
 
 
 def _parse_options(raw: Any) -> dict[str, Any]:
-    from .lvs import LvsError
 
     options = raw or {}
     if not isinstance(options, dict):
@@ -158,7 +157,6 @@ def _validate_request(
 
 
 def _resolve_klayout_binary(options: dict[str, Any], request_dir: str) -> str:
-    from .lvs import LvsError
 
     resolved = resolve_tool_binary(
         "klayout",
@@ -193,10 +191,8 @@ def _run_runset(
     """Launch the runset; return ``(lvsdb_path, completed)``. Raises
     ``LvsError`` for a launch failure, timeout, or no database written (a
     non-zero exit that did write one is returned; the caller reads it)."""
-    from .lvs import LvsError
 
-    # The app runs with cwd=work_dir (below), so path arguments must not
-    # depend on klt's own cwd.
+    # cwd=work_dir below: path arguments must not depend on klt's own cwd.
     binary = os.path.abspath(binary) if os.sep in binary else binary
     deck_file, layout, reference = (
         os.path.abspath(p) for p in (deck_file, layout, reference)
@@ -219,8 +215,8 @@ def _run_runset(
     for name, value in deck_vars.items():
         cmd.extend(["-rd", f"{name}={value}"])
     try:
-        # cwd=work_dir: the runset writes side files (``<top>_extracted.cir``)
-        # into its cwd; keep them in the temp dir that is removed afterwards.
+        # cwd=work_dir catches only cwd-relative side files, not where
+        # ``<top>_extracted.cir`` lands (#5481; see extract_runset.py).
         completed = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_s, cwd=work_dir
         )
@@ -303,13 +299,11 @@ def _pair_counts(xref: Any) -> dict[str, dict[str, int]]:
 def _net_correspondence(xref: Any) -> list[dict[str, Any]]:
     """Every net the runset's compare paired successfully, in ``klt lvs``'s
     documented ``net_correspondence[]`` shape (issue #2870).
-
     Item 11's LVS half proves a supply "took part in the compare" by finding
     it paired here (``signoff_power_delivery._lvs_reference_carries_supplies``),
     so this lists only *matched* nets -- same rule as the curated engine's
     ``_build_net_correspondence``. Deduplicated on ``(circuit, layout,
-    reference)`` and sorted for a deterministic report.
-    """
+    reference)`` and sorted for a deterministic report."""
     from .lvs import _name_or_none
 
     rows: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
@@ -334,23 +328,19 @@ def _net_correspondence(xref: Any) -> list[dict[str, Any]]:
     )
 
 
-#: ``power_pins_derivation.rule`` for this engine: the runset has no library
-#: pin-order data, so the power/ground universe is the pins the extracted
-#: subcircuits declare whose *names* classify as supplies.
+#: ``power_pins_derivation.rule`` for this engine: no library pin-order data,
+#: so the power/ground universe is the extracted subcircuits' supply-named pins.
 POWER_PINS_RULE_NAMED_SUBCIRCUIT_PINS = "named-power-ground-pin-of-extracted-subcircuit"
 
 
 def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
-    """The ``power_connectivity`` block for the runset's own extracted
-    netlist (``LayoutVsSchematic.netlist()``, issue #3206), via the same
-    :mod:`.lvs_power` walk the ``klayout`` engine uses: every extracted
-    subcircuit instance's power/ground pins must reach one consistent net.
-
-    ``unchecked`` (with a reason) when there is no extracted netlist, or it
-    holds no subcircuit instance with a supply-named pin -- a flat
-    transistor-level extraction has no instance pins to walk, and "no
-    evidence" is never reported as a clean verdict.
-    """
+    """The ``power_connectivity`` block for the runset's own extracted netlist
+    (``LayoutVsSchematic.netlist()``, issue #3206), via the same :mod:`.lvs_power` walk
+    the ``klayout`` engine uses: every extracted subcircuit instance's power/ground pins
+    must reach one consistent net. ``unchecked`` (with a reason) when there is no
+    extracted netlist, or it holds no subcircuit instance with a supply-named pin -- a
+    flat transistor-level extraction has no instance pins to walk, and "no evidence" is
+    never reported as a clean verdict."""
     from .lvs_power import (
         _power_connectivity_findings,
         _power_connectivity_unchecked,
@@ -390,7 +380,6 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
             "instance-level power connectivity to check",
             derivation if universe else None,
         )
-    from .lvs import POWER_STATUS_MATCH, POWER_STATUS_MISMATCH
 
     findings = _power_connectivity_findings(rows, None)
     return {
@@ -408,15 +397,14 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
 
 
 def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str, Any]:
-    """Verdict for a db with no cross-reference whose extracted netlist holds
-    no devices: the runset recognized nothing, so its compare step never ran.
-
-    The layout side is empty and every reference device is an unmatched
-    ``device.unmatched`` finding (issue #4081). The reference netlist is the
-    one stored in the db when present, else ``reference_path`` parsed as SPICE.
-    ``{}`` when no reference netlist can be obtained (the caller then raises
-    its "no cross-reference" error).
-    """
+    """Verdict for a db with no cross-reference whose extracted netlist
+    holds no devices: the runset recognized nothing, so its compare step
+    never ran. The layout side is empty and every reference device is an
+    unmatched ``device.unmatched`` finding (issue #4081). The reference
+    netlist is the one stored in the db when present, else
+    ``reference_path`` parsed as SPICE; ``{}`` when no reference netlist
+    can be obtained (the caller then raises its "no cross-reference"
+    error)."""
     import klayout.db as kdb
 
     reference = getattr(l2n, "reference", None)
@@ -494,20 +482,16 @@ def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str,
 
 
 def read_lvsdb_verdict(
-    lvsdb_path: str, reference_path: str | None = None
+    lvsdb_path: str, reference_path: str | None = None, *, sg13g2: bool = False
 ) -> dict[str, Any]:
     """Read ``lvsdb_path`` and derive the verdict, mismatches, census and
-    coverage from its cross-reference. Raises ``LvsError`` when the database
-    is unreadable or carries no cross-reference.
-
-    A db with no cross-reference *and no extracted layout devices* (the runset
+    coverage from its cross-reference. Raises ``LvsError`` when the
+    database is unreadable or carries no cross-reference, except that a db
+    with no cross-reference *and no extracted layout devices* (the runset
     recognized nothing, so it never compared) is graded instead: see
     :func:`_empty_extraction_verdict`. ``reference_path`` is the reference
-    SPICE, used when the db does not carry the reference netlist.
-    """
+    SPICE, used when the db does not carry the reference netlist."""
     import klayout.db as kdb
-
-    from .lvs import LvsError
 
     l2n = kdb.LayoutVsSchematic()
     try:
@@ -549,7 +533,15 @@ def read_lvsdb_verdict(
         status = STATUS_INCONCLUSIVE
     else:
         status = STATUS_MATCH
+    from .lvs_passive_pairing import runset_pairing
+
+    counts = _pair_counts(xref)
     return {
+        **(
+            {"sg13g2_passive_pairing": runset_pairing(xref, counts["devices"], status)}
+            if sg13g2
+            else {}
+        ),
         "status": status,
         "mismatches": mismatches,
         "power_connectivity": runset_power_connectivity(l2n.netlist()),
@@ -561,7 +553,7 @@ def read_lvsdb_verdict(
             layout_unnamed + ref_unnamed,
         ),
         "device_census": {"layout": layout_counts, "reference": ref_counts},
-        "counts": _pair_counts(xref),
+        "counts": counts,
         "net_correspondence": _net_correspondence(xref),
         "top": _first_circuit_name(xref, "first"),
         "reference_top": _first_circuit_name(xref, "second"),
@@ -587,9 +579,8 @@ _DEVICE_LIST_ITEM_RE = re.compile(r"""["']([^"']+)["']""")
 def _deck_device_list(deck_file: str) -> set[str]:
     """Upper-cased names in the runset's ``DEVICE_LIST = [...]`` -- the
     subcircuits its SPICE reader delegate converts to devices, including ones
-    it renames (sky130 ``special_nfet_01v8`` -> ``nfet_01v8``) so that no
-    declared device class carries the called name. ``set()`` when the deck
-    has no such list or cannot be read."""
+    it renames (sky130 ``special_nfet_01v8`` -> ``nfet_01v8``). ``set()`` when
+    the deck has no such list or cannot be read."""
     try:
         with open(deck_file, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -602,41 +593,19 @@ def _deck_device_list(deck_file: str) -> set[str]:
     return {n.upper() for n in _DEVICE_LIST_ITEM_RE.findall(body)}
 
 
-def _unresolved_reference_calls(
-    reference_path: str, top: str | None, converted_names: set[str]
-) -> list[dict[str, Any]]:
-    """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
-    calls the runset neither converted nor could resolve.
-
-    The reference is re-read with the plain SPICE reader (hierarchy intact).
-    A callee the runset itself converts (``converted_names``, upper-cased:
-    its declared device classes plus the deck's ``DEVICE_LIST``) is not
-    reported. ``[]`` when the reference cannot be re-read: the
-    runset's own verdict stands."""
-    import klayout.db as kdb
-
-    from .lvs import _unresolved_reference_subckt_calls
-
-    netlist = kdb.Netlist()
-    try:
-        netlist.read(reference_path, kdb.NetlistSpiceReader())
-    except Exception:
-        return []
-    return _unresolved_reference_subckt_calls(
-        netlist,
-        converted_names,
-        form="spice",
-        top=top,
-        reference_path=reference_path,
-    )
-
-
 def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[str, Any]:
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
-    from .lvs import SCHEMA_VERSION, LvsError, _reference_conversion_echo
+    from .lvs import (
+        _DECK_FILE_GIVEN_KEY,
+        SCHEMA_VERSION,
+        _reference_conversion_echo,
+        _unresolved_reference_subckt_calls,
+    )
 
+    # Issue #5795: the caller's own --deck-file form, stashed by _merge_deck_flags.
+    deck_file_echo = request.pop(_DECK_FILE_GIVEN_KEY, None) or request.get("deck_file")
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
     )
@@ -644,37 +613,44 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
     binary = _resolve_klayout_binary(options, request_dir)
 
-    from .lvs_runset_reference import convert_reference
+    from .lvs_passive_pairing import runset_report_field
+    from .lvs_runset_reference import _unresolved_reference_calls, prepare_reference
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
-        # Issue #4805: a ``subckt-call`` reference is converted into work_dir.
-        runset_reference = convert_reference(reference, request, work_dir, deck_file)
+        ref_sp, scan_top, source_top = prepare_reference(
+            reference, request, work_dir, deck_file
+        )
         lvsdb_path, completed = _run_runset(
             binary=binary,
             deck_file=deck_file,
             layout=layout,
-            reference=runset_reference,
+            reference=ref_sp,
             top=top,
             deck_vars=deck_vars,
             timeout_s=timeout_s,
             work_dir=work_dir,
         )
         try:
-            verdict = read_lvsdb_verdict(lvsdb_path, runset_reference)
+            diagnose_passives = (
+                request["reference"].get("deck") == "sg13g2"
+                or os.path.basename(deck_file) == "sg13g2.lvs"
+            )
+            verdict = read_lvsdb_verdict(lvsdb_path, ref_sp, sg13g2=diagnose_passives)
         except LvsError as exc:
             if completed.returncode == 0:
                 raise
             # A crash after extraction left a db with no cross-reference:
             # keep the exit-status diagnosis, not just the db-read message.
             raise LvsError(_nonzero_exit_message(binary, completed)) from exc
-        # Checked on the file the runset saw, before work_dir goes away.
-        declared = verdict["coverage"]["declared_device_classes"]
+        augment_verdict(verdict, lvsdb_path)
+        _attach_reference_source(verdict, ref_sp, deck_file)
         unresolved = _unresolved_reference_calls(
-            runset_reference,
-            request["reference"].get("top") and (top or request["reference"]["top"]),
-            {str(n).upper() for side in declared.values() for n in side or []}
-            | _deck_device_list(deck_file),
+            ref_sp,
+            scan_top,
+            verdict["coverage"]["declared_device_classes"],
+            deck_file,
+            _unresolved_reference_subckt_calls,
         )
     finally:
         import shutil
@@ -699,15 +675,17 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "content_hash": _sha_prefixed(deck_file),
         "released": None,
     }
+    runset_output = (completed.stdout or "") + (completed.stderr or "")
     runset_block = {
-        "deck_file": request["deck_file"],
+        "deck_file": deck_file_echo,
         "deck_vars": deck_vars,
         "content_hash": _sha_prefixed(deck_file),
         "klayout_application_version": _application_version(binary),
         "exit_status": completed.returncode,
-        "engine_error_lines": _error_lines(
-            (completed.stdout or "") + (completed.stderr or "")
-        ),
+        "engine_error_lines": _error_lines(runset_output),
+        # Issue #6903: the strict-port answer and the xref's own log.
+        "strict_top_port_mode": strict_top_port_mode(runset_output),
+        "xref_log": verdict.pop("runset_xref_log", []),
     }
     provenance["runset"] = runset_block
 
@@ -720,8 +698,8 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "layout": repo_relative_path(layout, repo_root=repo_root_for(layout)),
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
-        "reference_top": request["reference"].get("top") or verdict["reference_top"],
-        "deck_file": request["deck_file"],
+        "reference_top": source_top or verdict["reference_top"],
+        "deck_file": deck_file_echo,
         "deck_vars": deck_vars,
         "options": {k: options[k] for k in _ALLOWED_OPTIONS if k in options},
         "hints_applied": None,
@@ -731,6 +709,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "device_parameter_coverage": None,
         "coverage": verdict["coverage"],
         "device_census": verdict["device_census"],
+        **runset_report_field(verdict, diagnose_passives),
         "mismatch_count": len(mismatches),
         "error_count": sum(category_error_counts.values()),
         "category_counts": dict(sorted(category_counts.items())),
@@ -740,7 +719,8 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "environment": {
             "engine": RUNSET_ENGINE,
             "engine_version": runset_block["klayout_application_version"],
-            "klayout_binary": binary,
+            # Issue #5795: basename in both modes; version in engine_version.
+            "klayout_binary": os.path.basename(binary),
             "netgen_binary": None,
             "layout_sha256": sha256_file(layout),
             "reference_sha256": sha256_file(reference),

@@ -1,0 +1,1 @@
+- **`klt functional-verification --check` verifies a committed report's request, sources, synthesized netlist, and original SDF without running a simulator** (#5855, 2026-11-18).

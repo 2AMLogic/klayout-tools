@@ -46,11 +46,11 @@ computed. Every failure is ``status: "error"``, ``value: null`` with a
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from . import sim_crossings, sim_measurement_kind, sim_window
+from ._jsonnum import is_int
 from .sim_errors import SimError
 
 #: Edge polarities that can align a cycle (``either`` would make "one cycle"
@@ -115,11 +115,7 @@ def validate_cycle_mean_spec(name: Any, body: Any) -> None:
             f"{list(CYCLE_EDGES)} (got {edge!r})"
         )
     cycles = body.get("cycles")
-    if (
-        not isinstance(cycles, int)
-        or isinstance(cycles, bool)
-        or not 1 <= cycles <= MAX_CYCLES
-    ):
+    if not is_int(cycles) or not 1 <= cycles <= MAX_CYCLES:
         raise SimError(
             f"measurement '{name}': cycle_mean.cycles is required and must be "
             f"an integer in [1, {MAX_CYCLES}] (got {cycles!r})"
@@ -191,6 +187,11 @@ class CycleMeanOutcome:
     cycles_used: int = 0
     error: str | None = None
     code: str | None = None
+
+    @property
+    def value(self) -> float | None:
+        """Scalar used to grade this measurement."""
+        return self.mean
 
     def report(self) -> dict[str, Any]:
         """The response's ``cycle_mean`` object for this measurement."""
@@ -282,37 +283,27 @@ def extract_corner_cycle_means(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> CycleMeanOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["cycle_mean"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=(
-                f"measurement '{name}': its signal ({body['signal']!r}) or "
-                f"align ({body['align']!r}) did not resolve against this "
-                "transient's saved vectors (no rawfile was written) -- check "
-                "the node/branch names"
-            ),
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=f"measurement '{name}': could not read its cycle_mean rawfile: {exc}",
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 3 or not points:
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=f"measurement '{name}': its signal/align vectors yielded no samples",
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=3,
+        missing_error=(
+            f"measurement '{name}': its signal ({body['signal']!r}) or "
+            f"align ({body['align']!r}) did not resolve against this "
+            "transient's saved vectors (no rawfile was written) -- check "
+            "the node/branch names"
+        ),
+        empty_error=(
+            f"measurement '{name}': its signal/align vectors yielded no samples"
+        ),
+        rawfile_label="cycle_mean rawfile",
+    )
+    if columns is None:
+        return CycleMeanOutcome(code="cycle_mean_vector_missing", error=error)
     outcome = compute_cycle_mean(
-        [point[0] for point in points],
-        [point[1] for point in points],
-        [point[2] for point in points],
+        *columns,
         level=float(body["level"]),
         edge=body.get("edge", "rise"),
         start=sim_window.window_bound(name, body, "from", form="cycle_mean"),

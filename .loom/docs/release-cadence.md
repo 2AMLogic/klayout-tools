@@ -61,6 +61,13 @@ direction (2026-10-09) is **at most one release a day**.
   Anyone with `workflow_dispatch` (write) access can force; it is the operator
   path. A forced bump starts a new window. `force: false` runs the normal gate,
   which is useful for checking what the next run would do.
+- **Minor releases.** Bumps are patch steps. A minor release (`X.Y.Z` →
+  `X.(Y+1).0`) is a forced dispatch with `level: minor`; the push and
+  schedule paths never take it. The fleet publisher refuses any minor step it
+  does not list, so the release is first named in 2am's `github-write`
+  (`src/publish/target.js` `LOOM_MINOR_RELEASES`, the widening that
+  2am#4617 Q26 requires), and that Worker deployed. 0.20.0, the multi-runtime
+  release, was the first.
 - **Fleet floors wait for the daily release.** A `loom_min_version` floor can
   only name a published release, so a fix the fleet needs now waits for the
   next eligible bump unless it is forced. To ship it now: dispatch `force` with
@@ -356,12 +363,12 @@ emits the flat, pre-#8515 wording: it is a `contract`-category script, so the
 classification cannot be added there without first porting the resolution
 behind the daemon.
 Tracked separately in
-[#8654](https://github.com/rjwalters/loom/issues/8654).
+[#8654](https://github.com/2AMLogic/loom/issues/8654).
 
 ## Compatibility contract (#10716)
 
 Each release declares what its two halves need from each other (tracker
-[#10698](https://github.com/rjwalters/loom/issues/10698), D3/D4). Both values
+[#10698](https://github.com/2AMLogic/loom/issues/10698), D3/D4). Both values
 are constants in `loom-daemon/src/install_compat.rs`:
 
 | Constant | Meaning | Recorded where |
@@ -377,7 +384,14 @@ it, never at release time:
   `# requires-daemon: <sub> >= <version>` floor above the current value. Name
   a published release, or the version this change ships as (`VERSION` + 1
   patch) when the dependency lands in the same PR — still the next bump, but
-  that bump may now be up to a release interval away (see Cadence above). The value is a floor, not
+  that bump may now be up to a release interval away (see Cadence above). A
+  `VERSION` + 1 value is provisional (#14985): it names a release that does
+  not exist yet, and it goes stale whenever `main` cuts a release before the
+  PR merges. CI re-checks it — the compat step below probes a hard-floored
+  call's full verb path (`<daemon> <sub> <verb> --help`) against the oldest
+  published release at or above the floor and fails naming the missing verb
+  the moment such a release publishes without it — so on a rebase, raise the
+  value to the release that will actually carry the change. The value is a floor, not
   a tag: releases skip versions (above), so `v<REQUIRES_DAEMON>` may never be
   published, and CI proves the claim against the oldest published release at
   or above it.
@@ -385,6 +399,14 @@ it, never at release time:
   installed files: it starts executing an installed file that older releases
   do not ship, or relies on a changed argument contract. Add any newly
   executed file to `DAEMON_INVOKED_INSTALLED_FILES` in the same PR.
+  The same goes for a fix that spans the daemon binary and `defaults/scripts`
+  (#14015): raise `SUPPORTS_INSTALLED` in that same release. It is the one
+  hard-break lever. A repo one release behind but at or above
+  `SUPPORTS_INSTALLED` is not held while it waits for its workspace resync
+  (#11052), so it runs the new daemon against the old scripts and the fix is
+  half applied (a `claim_lost` is how that showed). Raising the value holds
+  such a repo until its resync lands. `loom-daemon status` and a once-per-repo
+  INFO line show which repos are in that state, but nothing holds them.
 
 The `Compatibility contract across adjacent releases` step of CI's
 `Install Surface Checks` job (`loom-daemon install-compat check`) proves both
@@ -415,8 +437,12 @@ Three things about that step's verdict (#10868):
   `no_shipped_hard_floor_is_above_requires_daemon`
   (`loom-daemon/src/install_compat/tests.rs`) walks `defaults/` with the
   harness's own code and fails when a hard `# requires-daemon:` floor is above
-  `REQUIRES_DAEMON`. It catches a floor that is too high, never one that is
-  too low.
+  `REQUIRES_DAEMON`. It catches a floor that is too high. A floor that is too
+  low is caught by the probe itself (#14985): a call whose subcommand the
+  file hard-floors is probed with its full verb path — the detector's `--list`
+  emits `session-exec claude-seat`, and the harness runs
+  `<daemon> <sub> <verb> --help` — so a floor naming a release that lacks the
+  verb fails direction B as soon as a release at or above the floor publishes.
 
 ### The daily proof of `SUPPORTS_INSTALLED`
 
@@ -438,7 +464,7 @@ When it fails the claim is false, and there are two ways to make it true:
 - **Raise `SUPPORTS_INSTALLED`** to the oldest release for which the command
   above passes (try one with `--supports-installed <v> --prev-ref v<v>`), and
   update the constant's comment. This is the default. What it means: once the
-  dispatch hold ([#10719](https://github.com/rjwalters/loom/issues/10719))
+  dispatch hold ([#10719](https://github.com/2AMLogic/loom/issues/10719))
   acts on the value, a repo installed below it is held until it is resynced.
   Fleet repos are resynced by the daemon; a repo outside the fleet that old
   needs a manual resync.
@@ -459,16 +485,16 @@ does not exist, because then nothing can be run against it.
 - [`.loom/docs/release-glibc-floor.md`](release-glibc-floor.md) — the decided
   minimum glibc `build-daemon`'s Linux artifacts must run against, and why
   the build host is pinned rather than left on `ubuntu-latest`.
-- Issue [#6010](https://github.com/rjwalters/loom/issues/6010) — the original
+- Issue [#6010](https://github.com/2AMLogic/loom/issues/6010) — the original
   release-vs-`VERSION` gap and the `--check` visibility it added.
-- Issue [#8515](https://github.com/rjwalters/loom/issues/8515) — the
+- Issue [#8515](https://github.com/2AMLogic/loom/issues/8515) — the
   create-before-upload visibility race, the deferred Latest pointer, and the
   age/asset-count reporting above.
-- Issue [#10826](https://github.com/rjwalters/loom/issues/10826) — release only
+- Issue [#10826](https://github.com/2AMLogic/loom/issues/10826) — release only
   from a green `main` commit (`workflow_run` on `CI`), `release-main`
   concurrency, and versions skipped by design.
-- Issue [#8290](https://github.com/rjwalters/loom/issues/8290) — the one-off
+- Issue [#8290](https://github.com/2AMLogic/loom/issues/8290) — the one-off
   `gh release create` HTTP 403 that motivated the retry logic and the
   "accepted gap" decision above.
-- Issue [#12132](https://github.com/rjwalters/loom/issues/12132) — the bump
+- Issue [#12132](https://github.com/2AMLogic/loom/issues/12132) — the bump
   blocked by a drained dispatch-App limit, and the manual escape hatch above.

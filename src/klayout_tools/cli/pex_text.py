@@ -14,7 +14,7 @@ from ..env_provenance import render_path_field
 
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
 # prints for its own echo, reused rather than copied.
-from .extract_cmd import _print_label_layers
+from .extract_text import _print_label_layers
 
 
 def _print_submitted_text(report: dict) -> None:
@@ -62,6 +62,40 @@ def _print_mismatch(mismatch: dict | None, name: str) -> None:
     if mismatch["ngspice_message"]:
         print(f"  ngspice: {mismatch['ngspice_message']}")
     print(f"  {mismatch['detail']}")
+
+
+def _print_runset_engine(extraction: dict) -> None:
+    """The additive runset-engine line(s) (issues #6559, #6606): nothing for
+    the curated engine.
+
+    ``parasitics:`` renders the envelope's own ``parasitics_carried`` rather
+    than a constant: a plain runset leg carries none, but a merged leg
+    (``--deck <curated>``, issue #6606) attaches the curated parasitic network
+    to the runset devices, and its ``extraction.deck`` is that curated deck.
+    The substrate return is the one fact of that attachment a reader of the
+    cards cannot see from the leg's own nets, so it is named here as the
+    ``klt signoff`` citation names it."""
+    if not extraction.get("engine"):
+        return
+    uncarried = extraction.get("params_not_carried") or {}
+    correspondence = extraction.get("net_correspondence") or {}
+    if extraction.get("parasitics_carried"):
+        parasitics = (
+            f"carried ({correspondence.get('attached_card_count', 0)} cards, "
+            f"{len(correspondence.get('matched') or [])} nets matched)"
+        )
+    else:
+        parasitics = "none"
+    print(
+        f"engine: {extraction['engine']}  parasitics: {parasitics}  "
+        f"params_not_carried: {', '.join(sorted(uncarried)) or 'none'}"
+    )
+    substrate = correspondence.get("substrate_return")
+    if extraction.get("parasitics_carried") and substrate:
+        print(
+            f"substrate_return: {substrate.get('node')} "
+            f"(runset {substrate.get('runset') or 'unmatched'})"
+        )
 
 
 def _print_schematic_flatten(block: dict | None) -> None:
@@ -176,6 +210,8 @@ def _print_text(report: dict) -> None:
     # counts above are sums over every `--top` and `netlist:` names the
     # combined file. Nothing is printed for a single-top run.
     _print_tops(report.get("tops"))
+    # Additive (issues #6559, #6606): only printed for a runset-engine leg.
+    _print_runset_engine(extraction)
     # Additive (issue #2686): only printed when --label-layer was given.
     _print_label_layers(extraction.get("label_layers"))
     # Additive (issue #976): only printed when --critical-net was given.

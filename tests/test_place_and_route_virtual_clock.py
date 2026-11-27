@@ -96,9 +96,9 @@ def test_virtual_clock_lines_and_io_delays():
     ]
     # No period, no port: nothing (unchanged behavior).
     assert _io_delay_lines(None, None, None) == []
-    # Clocked flows keep the pre-existing Tcl.
+    # The real clock binds to its resolved port.
     assert _clock_lines("clk", 5.0)[-1] == (
-        "create_clock -name clk -period 5.0 [get_ports clk]"
+        "create_clock -name clk -period 5.0 $klt_root"
     )
 
 

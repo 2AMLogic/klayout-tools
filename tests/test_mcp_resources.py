@@ -14,7 +14,6 @@ derivation): together they exceeded the 500-line per-file ratchet ceiling.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -64,6 +63,57 @@ def test_reading_a_resource_returns_the_file_bytes_unchanged(resources):
     # The default argument derives the listing itself.
     socket = "klt://schemas/socket.schema.json"
     assert json.loads(read_resource(socket))["title"]
+
+
+def test_listed_descriptions_link_cli_manual_pages(resources):
+    """Issue #6819: a client without a checkout must get a URL it can open,
+    not a repo-relative `docs/cli/<page>.md` pointer. The URL is spelled out
+    in full (not built from `DOCS_BASE_URL`) so a base-URL edit cannot pass
+    by silently re-pointing every resource description."""
+    from klayout_tools.cli._doc_paths import _DOC_POINTER
+
+    descriptions = {r.name: r.description for r in resources}
+    assert descriptions["cells-response.schema.json"].endswith(
+        "See https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/cells.md."
+    )
+    # The catalog may grow; every listed description must be pointer-free.
+    for name, description in descriptions.items():
+        assert _DOC_POINTER.search(description) is None, (name, description)
+
+
+def test_listing_rewrites_only_standalone_cli_pointers(tmp_path):
+    """The rewrite is surgical: bare pointers become URLs, while existing
+    absolute URLs (idempotence), non-CLI paths and the surrounding prose --
+    including a `#fragment` and trailing punctuation -- are preserved. The
+    page named in the prose is the page linked (`sim.md` here), whatever the
+    schema's own file name is."""
+    from klayout_tools.mcp_resources import derive_resources
+
+    description = (
+        "A klt sim report (docs/cli/sim.md) over the union of the shards' "
+        "corners; the contract already lives at "
+        "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/sim.md "
+        "and the envelope in docs/json-contract.md. Design notes: "
+        "docs/design/netlist-driven-layout-spike.md section 2, and the deep "
+        "link docs/cli/sim.md#merging-per-request-reports-klt-sim-merge-3045."
+    )
+    (tmp_path / "sim-merge-report.schema.json").write_text(
+        json.dumps({"title": "t", "description": description}), encoding="utf-8"
+    )
+
+    (resource,) = derive_resources(tmp_path)
+
+    base = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli"
+    assert resource.description == (
+        f"A klt sim report ({base}/sim.md) over the union of the shards' "
+        "corners; the contract already lives at "
+        f"{base}/sim.md "
+        "and the envelope in docs/json-contract.md. Design notes: "
+        "docs/design/netlist-driven-layout-spike.md section 2, and the deep "
+        f"link {base}/sim.md#merging-per-request-reports-klt-sim-merge-3045."
+    )
+    # The rewrite is listing-only: the schema's own bytes keep the pointer.
+    assert "(docs/cli/sim.md)" in resource.path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -149,31 +199,15 @@ def test_wheel_force_includes_the_schema_directory():
     assert force["docs/schemas"] == expected
 
 
-def test_built_wheel_carries_every_schema(tmp_path):
-    """The schemas must be in the artifact, not only in a source checkout
-    (acceptance criterion 3): build this repo's wheel and read its namelist."""
-    import shutil
+def test_built_wheel_carries_every_schema(built_wheel):
+    """Every schema served from a source checkout must also ship in the wheel."""
     import zipfile
 
-    uv = shutil.which("uv")
-    if uv is None:
-        pytest.skip("needs the `uv` CLI to build a wheel")
     from klayout_tools import mcp_resources
-
-    out = tmp_path / "dist"
-    build = subprocess.run(
-        [uv, "build", "--wheel", "--out-dir", str(out)],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    assert build.returncode == 0, f"uv build failed:\n{build.stdout}\n{build.stderr}"
-    (wheel,) = out.glob("*.whl")
 
     package_dir = Path(mcp_resources.__file__).resolve().parent
     prefix = str(mcp_resources._PACKAGED_SCHEMA_DIR.relative_to(package_dir.parent))
-    with zipfile.ZipFile(wheel) as archive:
+    with zipfile.ZipFile(built_wheel) as archive:
         shipped = {
             n.rsplit("/", 1)[1]
             for n in archive.namelist()
@@ -218,6 +252,12 @@ def test_stdio_round_trip_serves_the_schema_resources():
         "klt://schemas/" + p.name for p in SCHEMA_DIR.glob("*.schema.json")
     }
     assert all(r.mime_type == SCHEMA_MIME_TYPE for r in listed)
+    # The listed description carries a URL a client without a checkout can
+    # open (issue #6819) -- checked here so the wire format is what's proven.
+    cells = next(r for r in listed if r.name == "cells-response.schema.json")
+    assert cells.description.endswith(
+        "See https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/cells.md."
+    )
     (content,) = contents
     assert content.uri == uri and content.mime_type == SCHEMA_MIME_TYPE
     assert (

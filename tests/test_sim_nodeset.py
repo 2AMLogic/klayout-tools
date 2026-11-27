@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
-from klayout_tools import sim, sim_remote
+from klayout_tools import sim, sim_remote, sim_xyce_refusals
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -390,7 +390,7 @@ def test_fail_fast_probe_deck_applies_the_hint(tmp_path, monkeypatch):
 
 def test_xyce_refuses_nodeset():
     with pytest.raises(sim.SimError, match="options.nodeset is not supported"):
-        sim._enforce_xyce_support_boundary(
+        sim_xyce_refusals.enforce_support_boundary(
             engine="xyce",
             backend="local",
             corners_spec={},

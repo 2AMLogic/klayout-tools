@@ -68,9 +68,13 @@ it.
 
 The per-job `timeout-minutes` values `ci.yml` already had are **not** this
 gate. They are hard ceilings sized for pathological hangs — the `test` matrix
-allows 45 minutes for a job whose median is 4 minutes — so a leg can triple in
-cost and stay green. The budget check fires in the band where a real regression
-actually lives.
+allows 90 minutes (raised from 45 by #6281, sized 2026-11-17) for a job whose
+warm-cache `pytest` step has a ~25-minute median (18.7-35.2 min across the 25
+`Tests (Python 3.1x)` legs of 5 recent `main` runs) — so a leg can triple in
+cost and stay green. Those are 2026-11 hosted-runner timings; the 253 s
+medians quoted below are an older sample from the retired Blacksmith pool, so
+do not read the two against each other. The budget check fires in the band
+where a real regression actually lives.
 
 ## Measured baseline (2026-09-17, historical)
 
@@ -110,7 +114,6 @@ Per job, in seconds (`n` = observations on the job's current runner):
 | Native engines (Rust) — static timing | ubuntu-24.04 | 45 | 52 | 64 | 89 | 150 |
 | Native engines (Rust) — yield statistics | blacksmith-4vcpu | 205 | 24 | 36 | 84 | 120 |
 | Native engines (Rust) — waveform build/query | ubuntu-24.04 | 45 | 22 | 35 | 62 | 120 |
-| Native engines (Rust) — congestion pre-check | blacksmith-4vcpu | 205 | 20 | 30 | 102 | 120 |
 | Native engines (Rust) — technology mapping | ubuntu-24.04 | 45 | 19 | 30 | 36 | 120 |
 | klt verify Action smoke test | ubuntu-24.04 | 45 | 25 | 27 | 31 | 120 |
 | Tests (numpy cross-check) | ubuntu-latest | 272 | 17 | 20 | 32 | 120 |
@@ -351,7 +354,10 @@ The trade-off accepted is a dependency on the Actions API, which is why
 [`scripts/fetch_ci_wall_clock_history.py`](../../scripts/fetch_ci_wall_clock_history.py)
 **never fails**: any error writes a valid, empty history and exits 0, and the
 check falls back to the committed ceilings — its pre-#2615 behaviour, not a
-broken build.
+broken build. Transient API failures — an HTTP 5xx, a timeout, a dropped
+connection — are retried a bounded three times with short backoff first
+(#6214, in [`scripts/ci_wall_clock_gh.py`](../../scripts/ci_wall_clock_gh.py));
+only a failure that survives them falls back.
 
 ### What this model does *not* catch
 

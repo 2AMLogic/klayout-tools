@@ -29,15 +29,17 @@ single-unit ``local``-backend run.
 Scope -- what the emitted ``.lib`` deliberately does **not** contain:
 
 - one corner per invocation (no multi-corner ``.lib``);
-- no ``recovery``/``removal`` or async set/reset arcs, no ``ff``/``latch``
-  **state** groups, no latch time borrowing or min-pulse-width;
+- no ``ff``/``latch`` **state** groups, no latch time borrowing or
+  min-pulse-width;
 - no ``when``-qualified splitting, ``bus``/``bundle`` pins or hidden input-pin power.
 
 Power/energy tables (issue #2503) and batch mode have since shipped. A sequential cell
 is characterized when it declares ``cell.clock_pin`` (edge-triggered: clock-to-output,
 issue #4755, and setup/hold for ``cell.constrained_pins``, issue #4756) or
 ``cell.enable_pin`` (latch: transparent, enable-to-output and setup/hold arcs, issue
-#5521); with neither it is refused by name (see :mod:`klayout_tools.characterize_arcs`).
+#5521); ``cell.async_pins`` on a clocked cell adds async set/reset arcs and their
+``recovery``/``removal`` constraints (issue #5520); with neither it is refused by
+name (see :mod:`klayout_tools.characterize_arcs`).
 
 Input **pin capacitance is measured** (issue #2512) -- one extra probe
 instance per input pin on the same deck, emitted as the pin's
@@ -61,9 +63,11 @@ import re
 from functools import partial
 from typing import Any
 
-from . import liberty_writer, sim
-from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
+from . import liberty_writer
+from ._jsonnum import is_finite_number
+from ._paths import _load_request_json, _resolve_relative
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .characterize_capacity import capacity_shard, with_batch_passthrough
 from .characterize_cards import (
@@ -77,7 +81,7 @@ from .characterize_constraints import (
     ConstraintError,
     resolve_constrained_pins,
     resolve_constraint_options,
-    run_constraints,
+    run_sequential_constraints,
 )
 from .characterize_instances import (
     _capacitance_instance_lines,
@@ -88,7 +92,7 @@ from .characterize_instances import (
     _leakage_states,
     _rail_nodes,
 )
-from .characterize_leg import best_effort_pdk, resolve_resume, run_sim_leg
+from .characterize_leg import best_effort_pdk, make_deck_runner, resolve_resume
 from .characterize_osdi import resolve_osdi_preload
 from .characterize_pool import run_cells_partitioned
 from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
@@ -96,10 +100,11 @@ from .characterize_sequential import (
     SequentialSpecError,
     derive_latch_arcs,
     derive_sequential_arcs,
+    resolve_async_pins,
     resolve_sequential,
-    stimulus_schedule,
 )
 from .characterize_split import resolve_split_grid, run_cell_legs
+from .characterize_stimulus import stimulus_schedule
 from .env_provenance import repo_relative_path
 
 #: Version of this command's JSON response shape (per ``docs/json-contract.md``).
@@ -323,11 +328,9 @@ def run_characterize(
             ) from exc
 
     return _build_response(
-        request_path=request_path,
         grid=grid,
         corner=corner,
         thresholds=thresholds,
-        options=options,
         results=results,
         library=library,
         emitted_path=emitted_path,
@@ -371,8 +374,6 @@ def _characterize_cell(
         options=options,
         arcs=arcs,
     )
-    plan = build_plan()
-
     build_request = partial(
         _build_sim_request,
         request=request,
@@ -384,7 +385,6 @@ def _characterize_cell(
 
     legs = run_cell_legs(
         work_dir=work_dir,
-        plan=plan,
         split_grid=options["split_grid"],
         slew_count=len(grid["input_transition_ns"]),
         build_plan=lambda rows: build_plan(slew_rows=rows),
@@ -395,58 +395,42 @@ def _characterize_cell(
         resume=resume,
         batch_shard=batch_shard,
     )
+    plan = legs.plan_metadata
     tables = _build_tables(plan, grid, legs.values, thresholds)
-    _check_settle_margin(plan, grid, tables, options)
+    _check_settle_margin(grid, tables, options)
     power_tables = _build_power_tables(plan, grid, legs.values, corner)
     leakage = _build_leakage(plan, legs.values, corner)
     pin_capacitance = _build_pin_capacitance(plan, legs.values, corner)
 
-    def run_deck(text: str, measurements: list, label: str, stop_ns: float) -> dict:
-        deck_dir = os.path.join(work_dir, "constraints", label)
-        os.makedirs(deck_dir, exist_ok=True)
-        deck_path = os.path.join(deck_dir, "testbench.spice")
-        deck_plan = {
-            "measurements": measurements,
-            "window": {**plan["window"], "stop_ns": stop_ns},
-        }
-        deck_request = build_request(plan=deck_plan, testbench_path=deck_path)
-        request_path = os.path.join(deck_dir, "sim-request.json")
-        try:
-            report = run_sim_leg(
-                testbench_path=deck_path,
-                testbench_text=text,
-                sim_request=deck_request,
-                sim_request_path=request_path,
-                sim_report_path=os.path.join(deck_dir, "sim-report.json"),
-                sim_dir=os.path.join(deck_dir, "sim"),
-                backend=backend,
-                resume=resume,
-                **(batch_shard or {}),
-            )
-        except sim.SimError as exc:
-            raise CharacterizeError(f"constraint simulation failed: {exc}") from exc
-        return _extract_measurements(report, request_path, allow_missing=True)
+    run_deck = make_deck_runner(
+        work_dir=work_dir,
+        window=plan["window"],
+        build_request=build_request,
+        extract=_extract_measurements,
+        error_cls=CharacterizeError,
+        backend=backend,
+        resume=resume,
+        batch_shard=batch_shard,
+    )
 
-    constraints = None
-    if cell["constrained_pins"]:
-        try:
-            constraints = run_constraints(
-                cell=cell,
-                arcs=arcs,
-                grid_ns=grid["input_transition_ns"],
-                rail_nodes=_rail_nodes(cell),
-                vdd=corner["supply_v"],
-                thresholds=thresholds,
-                ramps_ns=options["ramps_ns"],
-                settle_ns=options["settle_ns"],
-                load_pf=min(grid["output_load_pf"]),
-                options=options["constraint"],
-                run_deck=run_deck,
-            )
-        except ConstraintError as exc:
-            raise CharacterizeError(str(exc)) from exc
+    try:
+        async_arcs, constraints = run_sequential_constraints(
+            cell=cell,
+            arcs=arcs,
+            grid=grid,
+            rail_nodes=_rail_nodes(cell),
+            vdd=corner["supply_v"],
+            thresholds=thresholds,
+            ramps_ns=options["ramps_ns"],
+            settle_ns=options["settle_ns"],
+            options=options["constraint"],
+            run_deck=run_deck,
+        )
+    except ConstraintError as exc:
+        raise CharacterizeError(str(exc)) from exc
 
     return {
+        "async_arcs": async_arcs,
         "constraints": constraints,
         "cell": cell,
         "arcs": arcs,
@@ -582,7 +566,10 @@ def _resolve_cell_spec(
 
     try:
         constrained_pins = resolve_constrained_pins(spec, pins, clock_pin, where)
-    except ConstraintError as exc:
+        async_pins = resolve_async_pins(
+            spec, pins, clock_pin, static_inputs, constrained_pins, where
+        )
+    except (ConstraintError, SequentialSpecError) as exc:
         raise CharacterizeError(str(exc)) from exc
 
     declared = {pin["name"] for pin in pins} | set(power.values())
@@ -623,6 +610,7 @@ def _resolve_cell_spec(
         "latch": latch,
         "static_inputs": static_inputs,
         "constrained_pins": constrained_pins,
+        "async_pins": async_pins,
     }
 
 
@@ -739,9 +727,8 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
     """Return ``subckt``'s terminal names, in declaration order.
 
     The order is load-bearing: a SPICE ``X`` instance line is positional, so
-    the generated testbench binds nodes by the position each terminal
-    appears in here, never by the order the request happens to list pins in.
-    """
+    the generated testbench binds nodes by the position each terminal appears
+    in here, never by the order the request happens to list pins in."""
     try:
         with open(netlist_path, encoding="utf-8", errors="replace") as handle:
             lines = handle.read().splitlines()
@@ -749,7 +736,7 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
         raise CharacterizeError(f"could not read '{netlist_path}': {exc}") from exc
 
     for line in fold_spice_continuations(lines):
-        match = _SUBCKT_RE.match(line.split("$")[0])
+        match = _SUBCKT_RE.match(strip_spice_inline_comment(line))
         if match is None:
             continue
         if match.group(1) != subckt:
@@ -780,12 +767,12 @@ def _resolve_corner(request: dict[str, Any]) -> dict[str, Any]:
             "`.lib` reports as its operating_conditions)"
         )
     supply_v = spec.get("supply_v")
-    if not isinstance(supply_v, (int, float)) or isinstance(supply_v, bool):
+    if not is_finite_number(supply_v):
         raise CharacterizeError("request.corner.supply_v is required (volts)")
     if supply_v <= 0:
         raise CharacterizeError("request.corner.supply_v must be positive")
     temperature_c = spec.get("temperature_c")
-    if not isinstance(temperature_c, (int, float)) or isinstance(temperature_c, bool):
+    if not is_finite_number(temperature_c):
         raise CharacterizeError("request.corner.temperature_c is required (Celsius)")
     process = spec.get("process")
     if process is not None and not isinstance(process, str):
@@ -794,7 +781,7 @@ def _resolve_corner(request: dict[str, Any]) -> dict[str, Any]:
             '(e.g. "mos_tt") or omitted'
         )
     nom_process = spec.get("nom_process", 1.0)
-    if not isinstance(nom_process, (int, float)) or isinstance(nom_process, bool):
+    if not is_finite_number(nom_process):
         raise CharacterizeError("request.corner.nom_process must be a number")
     return {
         "name": name,
@@ -822,13 +809,9 @@ def _resolve_axis(raw: Any, field: str) -> tuple[float, ...]:
         raise CharacterizeError(
             f"{field} is required: a non-empty, strictly ascending array of grid values"
         )
-    values: list[float] = []
-    for index, entry in enumerate(raw):
-        if not isinstance(entry, (int, float)) or isinstance(entry, bool):
-            raise CharacterizeError(f"{field}[{index}] must be a number")
-        if entry <= 0:
-            raise CharacterizeError(f"{field}[{index}] must be positive")
-        values.append(float(entry))
+    values = [
+        _positive_number(entry, f"{field}[{index}]") for index, entry in enumerate(raw)
+    ]
     if any(
         later <= earlier for earlier, later in zip(values, values[1:], strict=False)
     ):
@@ -850,7 +833,7 @@ def _resolve_thresholds(request: dict[str, Any]) -> liberty_writer.Thresholds:
     resolved: dict[str, float] = {}
     for field_name in defaults.__dataclass_fields__:
         value = spec.get(field_name, getattr(defaults, field_name))
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        if not is_finite_number(value):
             raise CharacterizeError(f"request.thresholds.{field_name} must be a number")
         resolved[field_name] = float(value)
     unknown = sorted(set(spec) - set(defaults.__dataclass_fields__))
@@ -1069,7 +1052,7 @@ def _optional_positive(value: Any, field: str) -> float | None:
 
 
 def _positive_number(value: Any, field: str) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
+    if not is_finite_number(value):
         raise CharacterizeError(f"{field} must be a number")
     if value <= 0:
         raise CharacterizeError(f"{field} must be positive")
@@ -1722,7 +1705,6 @@ def _build_pin_capacitance(
 
 
 def _check_settle_margin(
-    plan: dict[str, Any],
     grid: dict[str, tuple[float, ...]],
     tables: dict[int, dict[str, liberty_writer.Table2D]],
     options: dict[str, Any],
@@ -1884,6 +1866,10 @@ def _build_liberty_cell(
                 fall_power=power_tables[arc_index]["fall_power"],
             )
         )
+
+    # Forced (async preset/clear) arcs ride the same output pins.
+    for name, forced in (result.get("async_arcs") or {}).get("liberty", {}).items():
+        arcs_by_output.setdefault(name, []).extend(forced)
 
     measured_caps = result["pin_capacitance"]
     constraint_arcs = (result.get("constraints") or {}).get("liberty", {})
@@ -2075,6 +2061,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
     cell, its arcs with all six tables, its leakage states, and its own
     simulation run."""
     cell = result["cell"]
+    async_arcs = cell["async_pins"]
     tables = result["tables"]
     power_tables = result["power_tables"]
     sim_report = result["sim_report"]
@@ -2120,6 +2107,9 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
             for index, arc in enumerate(result["arcs"])
         ],
         "leakage": result["leakage"],
+        # Present only for a cell that declares `async_pins` (issue #5520),
+        # which is what keeps a request without them byte-identical.
+        **({"async_arcs": result["async_arcs"]["entries"]} if async_arcs else {}),
         "constraints": (result.get("constraints") or {}).get("entries", []),
         "simulation": {
             "testbench": result["testbench_path"],
@@ -2141,11 +2131,9 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
 
 def _build_response(
     *,
-    request_path: str,
     grid: dict[str, tuple[float, ...]],
     corner: dict[str, Any],
     thresholds: liberty_writer.Thresholds,
-    options: dict[str, Any],
     results: list[dict[str, Any]],
     library: liberty_writer.Library,
     emitted_path: str,

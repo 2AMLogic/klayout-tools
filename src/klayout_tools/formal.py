@@ -29,7 +29,6 @@ a verdict is ``unknown``, never ``pass`` (cf. ``klt equiv``'s
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -39,15 +38,28 @@ import subprocess
 import time
 from typing import Any
 
+from ._jsonnum import is_int, is_number
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import resolve_tool_binary, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
+    _combined_content_hash,
     build_provenance,
-    sha256_file,
     wasi_sandbox_hint_if_applicable,
 )
+from .request_paths import RequestPaths, resolve_readable_files
 
+
+class FormalError(Exception):
+    """Raised when a formal run cannot even be attempted or completed to a
+    verdict: a malformed request, an unreadable source, a missing ``sby`` or
+    solver binary, or an sby/Yosys elaboration error. A run that did
+    complete -- ``pass``, ``fail`` or ``unknown`` (timeout, unproven
+    induction) -- is never an error; see :func:`run_formal`.
+    """
+
+
+_rpath = RequestPaths(FormalError)
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
@@ -94,16 +106,6 @@ _DONE_RE = re.compile(r"DONE \((PASS|FAIL|UNKNOWN|TIMEOUT|ERROR|PREUNSAT)\b")
 _STEP_RE = re.compile(r"Checking (?:assertions|cover reachability) in step (\d+)")
 # Real sby: "Reached cover statement in step 1 at top: f.v:3.25-3.42 (...)".
 _COVER_REACHED_RE = re.compile(r"Reached cover statement in step (\d+)")
-
-
-class FormalError(Exception):
-    """Raised when a formal run cannot even be attempted or completed to a
-    verdict: a malformed request, an unreadable source, a missing ``sby`` or
-    solver binary, or an sby/Yosys elaboration error.
-
-    A run that did complete -- ``pass``, ``fail`` or ``unknown`` (timeout,
-    unproven induction) -- is never an error; see :func:`run_formal`.
-    """
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -265,7 +267,7 @@ def _validate_request(
         )
 
     depth = request_doc.get("depth", DEFAULT_DEPTH)
-    if not isinstance(depth, int) or isinstance(depth, bool) or depth < 1:
+    if not is_int(depth) or depth < 1:
         raise FormalError("request.depth must be a positive integer")
 
     solver = request_doc.get("solver", DEFAULT_SOLVER)
@@ -277,11 +279,7 @@ def _validate_request(
     effective_timeout_s = timeout_s
     if effective_timeout_s is None:
         effective_timeout_s = request_doc.get("timeout_s", DEFAULT_TIMEOUT_S)
-    if (
-        not isinstance(effective_timeout_s, (int, float))
-        or isinstance(effective_timeout_s, bool)
-        or effective_timeout_s <= 0
-    ):
+    if not is_number(effective_timeout_s) or effective_timeout_s <= 0:
         raise FormalError("timeout_s must be a positive number")
 
     liberty = _resolve_optional_file(request_doc.get("liberty"), request_dir, "liberty")
@@ -343,7 +341,7 @@ def _resolve_optional_file(value: Any, request_dir: str, label: str) -> str | No
         return None
     if not isinstance(value, str) or not value:
         raise FormalError(f"request.{label} must be a non-empty string when given")
-    path = value if os.path.isabs(value) else os.path.join(request_dir, value)
+    path = _rpath(value, request_dir, f"request.{label}")
     if not os.path.isfile(path):
         raise FormalError(f"{label} file not found: {value}")
     return os.path.abspath(path)
@@ -352,17 +350,11 @@ def _resolve_optional_file(value: Any, request_dir: str, label: str) -> str | No
 def _resolve_sources(value: Any, request_dir: str) -> list[str]:
     if value is None:
         return []
-    if not isinstance(value, list) or not all(
-        isinstance(entry, str) and entry for entry in value
-    ):
+    if not isinstance(value, list) or not all(isinstance(e, str) and e for e in value):
         raise FormalError("request.sources must be an array of non-empty strings")
-    resolved = []
-    for entry in value:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
-        if not os.path.isfile(path):
-            raise FormalError(f"source not found: {entry}")
-        resolved.append(os.path.abspath(path))
-    return resolved
+    return resolve_readable_files(
+        value, request_dir, FormalError, field="request.sources entry", noun="source"
+    )
 
 
 def _staged_name(index: int, path: str) -> str:
@@ -502,15 +494,6 @@ def _find_trace(workdir: str) -> str | None:
     return os.path.abspath(found[0]) if found else None
 
 
-def _combined_hash(paths: list[str]) -> str | None:
-    """One ``sha256:`` digest over every input's content (order-independent)."""
-    digests = [sha256_file(path) for path in paths]
-    if None in digests:
-        return None
-    joined = "\n".join(sorted(d for d in digests if d))
-    return "sha256:" + hashlib.sha256(joined.encode()).hexdigest()
-
-
 def _build_report(
     *,
     status: str,
@@ -539,7 +522,7 @@ def _build_report(
     else:
         provenance = build_provenance()
         provenance["input"] = {
-            "content_hash": _combined_hash(inputs),
+            "content_hash": _combined_content_hash(inputs),
             "role": INPUT_ROLE_SOURCE,
         }
     return {

@@ -30,6 +30,9 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from ._jsonnum import is_finite_number
+from .lvs_base import LvsError
+
 #: Seconds between stderr heartbeat lines.
 HEARTBEAT_INTERVAL_S = 30.0
 
@@ -57,26 +60,14 @@ def parse_compare_timeout(options: Mapping[str, Any], engine: str) -> float | No
     if "compare_timeout_s" not in options or options["compare_timeout_s"] is None:
         return None
     value = options["compare_timeout_s"]
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not 0 < value < float("inf")
-    ):
-        raise _request_error(
-            "options.compare_timeout_s must be a positive number of seconds"
-        )
+    if not is_finite_number(value) or value <= 0:
+        raise LvsError("options.compare_timeout_s must be a positive number of seconds")
     if engine != "klayout":
-        raise _request_error(
+        raise LvsError(
             "options.compare_timeout_s is only supported for engine "
             "'klayout' -- use options.netgen_timeout_s for engine 'netgen'"
         )
     return float(value)
-
-
-def _request_error(message: str) -> Exception:
-    from .lvs import LvsError
-
-    return LvsError(message)
 
 
 def _describe(context: Mapping[str, Any]) -> str:
@@ -140,7 +131,7 @@ def run_with_deadline(
     try:
         mp = multiprocessing.get_context("fork")
     except ValueError as exc:
-        raise _request_error(
+        raise LvsError(
             "options.compare_timeout_s needs the 'fork' start method, which "
             "this platform does not provide"
         ) from exc
@@ -161,12 +152,12 @@ def run_with_deadline(
                 try:
                     kind, payload = parent_conn.recv()
                 except EOFError:
-                    raise _request_error(
+                    raise LvsError(
                         "the netlist compare process exited without a result; "
                         "no LVS verdict was reached"
                     ) from None
                 if kind == "error":
-                    raise _request_error(
+                    raise LvsError(
                         "KLayout's netlist comparer failed internally "
                         f"({payload}); no LVS verdict was reached"
                     )

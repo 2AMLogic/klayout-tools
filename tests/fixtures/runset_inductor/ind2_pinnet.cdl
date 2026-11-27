@@ -1,0 +1,5 @@
+* klayout-tools issue #6903 fixture: inductor port nets carry top-level pin
+* labels (the sg13g2-vco shape: net names become LA,VDD / LB,OUT).
+.SUBCKT IND2 VDD OUT
+L1 VDD OUT sub inductor w=2u s=2.1u d=25.35u nr_r=1
+.ENDS

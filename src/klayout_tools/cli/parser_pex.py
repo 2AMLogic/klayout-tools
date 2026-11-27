@@ -13,8 +13,8 @@ from typing import Any
 
 from .. import pex
 from . import pex_cmd
+from ._batch_parser_args import add_wait_for_capacity_arg
 from .parser_pex_extract import add_pex_extraction_args
-from .parser_sim import add_wait_for_capacity_arg
 
 
 def add_pex_parser(
@@ -142,6 +142,15 @@ def add_pex_parser(
         ),
     )
     pex_parser.add_argument(
+        "--timeout-s",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "override each testbench simulation corner's timeout on both sides "
+            "and the device-only leg"
+        ),
+    )
+    pex_parser.add_argument(
         "--measure-timeout-s",
         dest="measure_timeout_s",
         type=float,
@@ -153,6 +162,14 @@ def add_pex_parser(
             f"{pex.MEASURE_COMMAND_TIMEOUT_S:g}s, the same cap `klt signoff` "
             "puts on a command-backed evidence entry. Requires "
             "--measure-command."
+        ),
+    )
+    pex_parser.add_argument(
+        "--schematic-top",
+        metavar="NAME",
+        help=(
+            "Schematic DUT subcircuit called by the testbench when its name "
+            "differs from the physical top. Pins remain positional."
         ),
     )
     pex_parser.add_argument(
@@ -224,7 +241,10 @@ def add_pex_parser(
         help=(
             f"extraction deck to run (currently: {_deck_names_str()}), "
             "passed through to `klt extract --parasitics`. Required unless "
-            "--attach is given alone (issue #4692)."
+            "--attach is given alone (issue #4692), or --engine "
+            "klayout-runset is given: there --deck is optional, and given it "
+            "attaches that curated deck's parasitic network to the runset "
+            "leg through geometric net correspondence (issue #6606)."
         ),
     )
     pex_parser.add_argument(
@@ -321,7 +341,10 @@ def add_pex_parser(
             "each request's `remote.hosts`)."
         ),
     )
-    add_wait_for_capacity_arg(pex_parser, "Applied to every `klt sim` call of the run.")
+    add_wait_for_capacity_arg(
+        pex_parser,
+        "Applied to every `klt sim` call of the run. Ignored under --attach.",
+    )
     pex_parser.add_argument(
         "--resume",
         dest="resume",

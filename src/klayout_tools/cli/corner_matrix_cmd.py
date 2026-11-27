@@ -26,6 +26,7 @@ _LISTS = (
     "extra",
     "duplicate",
     "not_simulated",
+    "errored",
     "non_finite",
     "out_of_bounds",
 )

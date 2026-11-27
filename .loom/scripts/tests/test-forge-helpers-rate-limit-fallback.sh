@@ -557,14 +557,6 @@ echo "Testing merge-pr.sh source wiring (#4856)..."
 # child bash that sources THIS library, so they still reach the #4856 wrappers.
 # The three source greps cannot pass against merge-pr.sh any more; each is
 # retired under the three-part test (defaults/docs/verification-recipes.md §6).
-YELLOW='\033[0;33m'
-retired() { # <what> <property> <structural> <successor>
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${YELLOW}RETIRED${NC}: $1"
-    echo "      property:   $2"
-    echo "      structural: $3"
-    echo "      successor:  $4"
-}
 _moved="the call moved into the Rust orchestrator, which reaches the wrapper through a child bash; merge-pr.sh no longer contains the call text"
 retired "merge-pr.sh's premature-auto-close reopen uses forge_gh_reopen_issue_rl_safe" \
     "the #4569 revert reopens through the rate-limit-safe wrapper, never a raw gh issue reopen" \
@@ -698,7 +690,7 @@ fi
 # `loom-daemon forge issue` must not silently look like an escape hatch: the
 # passthrough either gains the fallback or says out loud that it has none.
 # The `loom-daemon/` Rust crate is vendored only in the source repo
-# (rjwalters/loom itself) -- an installed consumer repo never has a
+# (2AMLogic/loom itself) -- an installed consumer repo never has a
 # `loom-daemon/src/` directory at all, so its absence is a legitimate,
 # SKIPpable state, not a failure (#6736). Only fail when the directory *is*
 # present but forge_cmd.rs lacks the documentation string.

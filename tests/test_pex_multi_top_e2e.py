@@ -258,7 +258,7 @@ def test_run_pex_multi_top_failed_extraction_names_the_top_and_leaves_output_alo
     """A failed *second* extraction names the top that failed and leaves the
     combined `-o` untouched -- the concatenation only runs once every
     extraction has succeeded, which is why `-o` is never half-written."""
-    import klayout_tools.pex as pex_module
+    import klayout_tools.pex_runset as pex_module
     from klayout_tools.extract import ExtractError
 
     real_run_extract = pex_module.run_extract
@@ -338,3 +338,30 @@ def test_integration_cli_pex_multi_top_text_output_names_every_top(
     assert "RESA:" in out
     assert "RESB:" in out
     assert "body_bias=biased" in out
+
+
+def test_multi_top_refuses_a_retained_hierarchy_before_replacing_output(
+    tmp_path, two_top_layout, monkeypatch
+):
+    from klayout_tools import pex_runset
+
+    run_leg = pex_runset.run_extract_leg
+
+    def hierarchical_leg(*args, **kwargs):
+        report = run_leg(*args, **kwargs)
+        if kwargs["options"].top == "RESB":
+            report["instantiated_device_counts"] = {"resistor": 2}
+        return report
+
+    monkeypatch.setattr(pex_runset, "run_extract_leg", hierarchical_leg)
+    combined = tmp_path / "combined.spice"
+    combined.write_text("* previous result\n")
+    with pytest.raises(PexError, match="--top RESB retains a device hierarchy"):
+        run_pex(
+            two_top_layout,
+            [str(_two_top_request(tmp_path))],
+            "sky130",
+            top=["RESA", "RESB"],
+            output=str(combined),
+        )
+    assert combined.read_text() == "* previous result\n"

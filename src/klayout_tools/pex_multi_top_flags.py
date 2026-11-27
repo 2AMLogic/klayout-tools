@@ -122,6 +122,8 @@ def reject_unsupported_flags(
     attach: str | None = None,
     resume: bool | None = None,
     dry_run: bool = False,
+    schematic_top: str | None = None,
+    runset_engine: bool = False,
 ) -> None:
     """Refuse, by name, every flag two or more ``--top`` values do not define
     (issue #5494) -- a no-op for zero or one top.
@@ -154,6 +156,16 @@ def reject_unsupported_flags(
     _reject_multi_top_conflicts(
         tops,
         (
+            (
+                schematic_top is not None,
+                "--schematic-top",
+                "it binds one schematic name to one layout top",
+            ),
+            (
+                runset_engine,
+                "--engine klayout-runset",
+                "each runset netlist may define the same child circuits",
+            ),
             (
                 flatten_schematic,
                 "--flatten-schematic",

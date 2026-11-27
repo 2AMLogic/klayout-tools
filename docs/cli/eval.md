@@ -64,8 +64,9 @@ check-name-agnostic by construction: adding the digital flow's
 Phase 3) and its [`synthesize`](synthesize.md)/
 [`place-and-route`](place-and-route.md) checks (Epic #391 Phase 5) each
 needed no schema change here, only a new invoke adapter (plus, for
-`functional-verification`, a status adapter — `synthesize`/`place-and-route`
-have no gate semantics of their own, see "`gates[]` entries" below). The
+`functional-verification` and `place-and-route`, a status adapter —
+`synthesize` has no gate semantics of its own, see "`gates[]` entries" below).
+The
 analog [`op-sanity`](sim.md#operating-point-lint---op-lint) gate (issue
 #1718) joined on exactly the same terms.
 
@@ -129,8 +130,10 @@ the P&R-produced GDS — the same descriptor shape above, just with digital
       "check": "functional-verification",
       "args": { "request": "fv_request.json" }
     },
+    { "check": "place-and-route", "args": { "request": "pnr_request.json" } },
     {
       "check": "place-and-route",
+      "name": "timing",
       "args": { "request": "pnr_request.json" },
       "threshold": { "metric": "setup_violation_count", "max": 0 }
     },
@@ -172,7 +175,7 @@ to vary per candidate). See `docs/cli/synthesize.md`/
 | `check` | string, required | Which `klt` subcommand to run: `"drc"`, `"lvs"`, `"sim"`, `"op-sanity"`, `"layout-metrics"`, `"functional-verification"`, `"synthesize"`, or `"place-and-route"`. An unknown value is an application error (exit 1). |
 | `name` | string | Label for this gate in the response's `gates[].name` — disambiguates two gates of the same `check` (e.g. two DRC decks). Defaults to `check`. |
 | `args` | object | Arguments forwarded to the underlying check — see "Check `args`" below. `${name}`-style placeholders are substituted from `--candidate` before invocation. |
-| `threshold` | object | Overrides this gate's pass/fail derivation: `{"metric": <dotted path>, "min": <number>, "max": <number>, "equals": <any>}`, at least one of `min`/`max`/`equals`. **Required** for `"layout-metrics"`/`"synthesize"`/`"place-and-route"` gates (none has an exit code above 2 / a "ran but found a problem" outcome of its own — `synthesize`/`place-and-route` always report `"status": "ok"`, see [`klt synthesize`](synthesize.md)/[`klt place-and-route`](place-and-route.md) — so there is no default status to derive); optional for `"drc"`/`"lvs"`/`"sim"`/`"functional-verification"` gates (e.g. gate on a violation-count ceiling instead of "any violation fails", or gate `"place-and-route"` on `worst_slack_ns` >= `0` for timing closure). |
+| `threshold` | object | Overrides this gate's pass/fail derivation: `{"metric": <dotted path>, "min": <number>, "max": <number>, "equals": <any>}`, at least one of `min`/`max`/`equals`. **Required** for `"layout-metrics"`/`"synthesize"` gates (neither has an exit code above 2 / a "ran but found a problem" outcome of its own — `synthesize` always reports `"status": "ok"`, see [`klt synthesize`](synthesize.md) — so there is no default status to derive); optional for `"drc"`/`"lvs"`/`"sim"`/`"op-sanity"`/`"functional-verification"`/`"place-and-route"` gates (e.g. gate on a violation-count ceiling instead of "any violation fails", or gate `"place-and-route"` on `worst_slack_ns` >= `0` for timing closure). **A `threshold` replaces the check's own derivation, verdict included**: a `"place-and-route"` gate thresholded on `worst_slack_ns` alone passes a routed result whose `status` is `"failed"` (a confirmed open or an unrouted net, see [`klt place-and-route`](place-and-route.md)). To keep the verdict *and* a ceiling, declare two gates with identical `args` — one bare, one with the `threshold` (give the second a `name`); the check runs once and both gates read the same cached report. A gate that only wants the verdict can also spell it `{"metric": "status", "equals": "ok"}`, which is the gate `klayout_tools.digital_fleet.build_digital_job_description` ships for each candidate. |
 
 ### Check `args`
 
@@ -185,7 +188,7 @@ to vary per candidate). See `docs/cli/synthesize.md`/
 | `"layout-metrics"` | `block` | Forwarded to `layout_metrics_report(block, deck=...)` — see [`klt layout-metrics`](layout-metrics.md). `block` resolves the same way as `"drc"`'s `file`. Optional `deck` forwards to the DRC-violation-count sub-field. |
 | `"functional-verification"` | `request` | Forwarded to `run_functional_verification(request)` — see [`klt functional-verification`](functional-verification.md). Same `request` resolution as `"lvs"` above. `status: "pass"` → `valid: true`, `status: "fail"` → `valid: false`; a run that never produced a `results.xml` is a `klt eval` error (exit 1), never a `false` score. |
 | `"synthesize"` | `request` | Forwarded to `run_synthesize(request)` — see [`klt synthesize`](synthesize.md). **Unlike** `"lvs"`/`"sim"`/`"functional-verification"`, `request` resolves the same way as `"drc"`'s `file` (a path only — `run_synthesize`'s own `load_request` does not accept the `"-"`/inline-JSON forms). Reports `instance_count`, `area_um2`, `sequential_area_um2`, `netlist_path`, etc.; always `"status": "ok"` (synthesis either produces a netlist or the check itself fails to run — exit 1). |
-| `"place-and-route"` | `request` | Forwarded to `run_place_and_route(request)` — see [`klt place-and-route`](place-and-route.md). Same file-path-only `request` resolution as `"synthesize"` above. Reports `wirelength_um`, `worst_slack_ns`, `total_negative_slack_ns`, `setup_violation_count`/`hold_violation_count`, `gds_path`, etc.; always `"status": "ok"` (same "produces or fails to run" posture as `"synthesize"`). A descriptor chaining `"drc"`/`"layout-metrics"` over the produced `gds_path` closes the loop from RTL candidate to a signed-off digital layout in one `klt eval` invocation. |
+| `"place-and-route"` | `request` | Forwarded to `run_place_and_route(request)` — see [`klt place-and-route`](place-and-route.md). Same file-path-only `request` resolution as `"synthesize"` above. Reports `wirelength_um`, `worst_slack_ns`, `total_negative_slack_ns`, `setup_violation_count`/`hold_violation_count`, `gds_path`, etc.; default status derivation: `status: "ok"` → `pass`/exit `0`; `status: "failed"` — `klt place-and-route`'s own verdict for a confirmed routed open or an unrouted signal net (issue #6905), which exits `1` with the full report — → `fail`/exit `1`. A run that cannot complete at all is still a `klt eval` error (exit 1), never a `false` score. A descriptor chaining `"drc"`/`"layout-metrics"` over the produced `gds_path` closes the loop from RTL candidate to a signed-off digital layout in one `klt eval` invocation. |
 
 ### `objective`
 

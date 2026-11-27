@@ -56,7 +56,6 @@ breakdown rides a new sibling ``energy`` object on that
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -306,36 +305,29 @@ def extract_corner_energy(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> EnergyOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["energy"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return EnergyOutcome(
-            error=(
-                f"measurement '{name}' produced no energy: source "
-                f"{body['source']!r} or voltage {body['voltage']!r} did not "
-                "resolve against this transient's saved vectors (no rawfile "
-                "was written) -- check that the deck has an independent "
-                "source of that name and that the voltage node exists"
-            )
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return EnergyOutcome(
-            error=f"measurement '{name}': could not read its energy rawfile: {exc}"
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 3 or not points:
-        return EnergyOutcome(
-            error=f"measurement '{name}' produced no energy: the source "
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=3,
+        missing_error=(
+            f"measurement '{name}' produced no energy: source "
+            f"{body['source']!r} or voltage {body['voltage']!r} did not "
+            "resolve against this transient's saved vectors (no rawfile "
+            "was written) -- check that the deck has an independent "
+            "source of that name and that the voltage node exists"
+        ),
+        empty_error=(
+            f"measurement '{name}' produced no energy: the source "
             "current / voltage vectors yielded no samples"
-        )
+        ),
+        rawfile_label="energy rawfile",
+    )
+    if columns is None:
+        return EnergyOutcome(error=error)
     outcome = integrate_energy(
-        [point[0] for point in points],
-        [point[1] for point in points],
-        [point[2] for point in points],
+        *columns,
         start=sim_window.window_bound(name, body, "from", form="energy"),
         stop=sim_window.window_bound(name, body, "to", form="energy"),
     )

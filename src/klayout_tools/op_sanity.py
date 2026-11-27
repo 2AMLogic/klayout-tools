@@ -43,31 +43,17 @@ comes from. An optional ``op_lint`` block tunes thresholds, declares extra
 I/O nodes, and overrides per-model conventions; see ``docs/cli/sim.md``'s
 "Operating-point lint" section for the full field reference.
 
-Reading per-device values: ``print @m...[param]``, not ``.meas``
------------------------------------------------------------------
-ngspice has no ``.MEASURE OP`` statement (an operating point has no sweep
-variable to search over -- see ``sim.py``'s ``_validate_meas_card`` and
-issue #205), so per-device operating-point values can only be read with
-``print @<element>[<param>]`` inside a ``.control`` block. That is exactly
-the path ``klt size`` already uses for the single device it is sizing
-(``size.py``'s ``_OP_PARAMS``/``_write_sweep_deck``/``_parse_sweep_log``);
-this module generalises it from "the one sized device" to "every MOS
-instance in an arbitrary netlist". No new SPICE-interaction pattern, and no
-new dependency.
-
-Instance-path resolution is the one wrinkle: a PDK device instantiated as
-``X1 d g s b <model>`` exposes its op-point vectors at
-``@m.<instance>.<inner element>[param]``, and the inner element name is a
-*PDK convention*, not a standard -- sky130 names it ``m`` + the subcircuit
-name (``msky130_fd_pr__nfet_01v8``), gf180mcu names it ``m0`` (both verified
-against the installed PDKs with ngspice 46 while building this module).
-Rather than guess one and silently report nothing, the generated deck
-``print``s *every* candidate path for each device; an unknown vector name is
-a non-fatal ``Error: no such device or model name`` log line in ngspice's
-batch mode (also verified), so the run costs one process either way and the
-candidate that actually answered is recorded per device in
-``devices[].op_point_element``. ``op_lint.models.<model>.op_point_element``
-overrides the candidate list for a PDK that follows neither convention.
+Reading per-device operating points
+-----------------------------------
+Like ``klt size``, the lint uses ``print @<element>[param]`` in a ``.control``
+block because ngspice has no ``.MEASURE OP``. For PDK subcircuits, sky130
+names the inner MOS element ``m<subcircuit name>`` and gf180mcu uses ``m0``.
+An OSDI (Verilog-A) instance uses the ``n.`` prefix, and PSP103 models
+report saturation voltage as ``vdss``. The deck tries each inner name under
+``m.`` then ``n.`` in one run. Unanswered probes are nonfatal in batch mode.
+The responding path is recorded in ``devices[].op_point_element``. To supply
+an inner name, set ``op_lint.models.<model>.op_point_element``. A prefix on
+the override (e.g. ``n.nsg13_hv_pmos``) also selects the element type.
 
 Sign conventions: compare magnitudes
 -------------------------------------
@@ -115,15 +101,15 @@ from typing import Any
 
 from . import _spice_number as spice_number
 from . import env_provenance, op_sanity_diagnostics, sim_osdi_pin
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
-    fold_spice_continuations,
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
-from .pdk import PdkNotFoundError, find_pdk
+from ._spice_text import logical_lines as _logical_lines
+from .op_sanity_pdk import resolve_lint_pdk
 from .sim import (
     _SIMULATION_ABORTED_RE,
     DEFAULT_TIMEOUT_S,
@@ -141,22 +127,25 @@ from .sim import (
     _scale_supply_waveforms,
     _supply_alter_lines,
 )
+from .sim_case_names import validate_request_measurements
+from .sim_request_overrides import _with_pdk_root_override
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
 
-#: Op-point vectors requested per device. Deliberately the same names
-#: ``size.py``'s ``_OP_PARAMS`` uses (minus ``gm``, which no check here
-#: needs), so both modules read one vocabulary out of ngspice.
-_OP_PARAMS = ("vgs", "vth", "vds", "vdsat", "id")
+_OP_PREFIXES = ("m", "n")
 
-#: Response-field name each :data:`_OP_PARAMS` entry parses into.
+#: Unlike ``klt size``, op-lint supports OSDI and probes ``vdss`` for PSP103.
+#: Deck order gives ``vdss`` the final say when both saturation aliases answer.
+_OP_PARAMS = ("vgs", "vth", "vds", "vdsat", "vdss", "id")
+
 _OP_PARAM_KEYS = {
     "vgs": "vgs_v",
     "vth": "vth_v",
     "vds": "vds_v",
     "vdsat": "vdsat_v",
+    "vdss": "vdsat_v",
     "id": "id_a",
 }
 
@@ -336,38 +325,6 @@ class ParsedNetlist:
 ALL_CORNERS = "all"
 
 
-def _strip_comment(line: str) -> str:
-    """Drop a trailing ``;``/``$`` SPICE inline comment."""
-    for marker in (";", "$ "):
-        index = line.find(marker)
-        if index >= 0:
-            line = line[:index]
-    return line.rstrip()
-
-
-def _logical_lines(text: str) -> list[str]:
-    """Join ``+`` continuation lines onto their parent, dropping blank and
-    ``*`` comment lines.
-
-    A leading ``+`` line with nothing preceding it to fold onto (e.g. the
-    very first non-blank/non-comment line of ``text`` starts with ``+``) is
-    dropped, matching this function's pre-#1741 behaviour -- unlike
-    ``pex.py``/``netlist_normalize.py``, which keep such an orphan
-    continuation as a literal line. :func:`fold_spice_continuations` keeps
-    an orphan verbatim (``+`` prefix intact) rather than dropping it, so the
-    post-pass below filters any still-``+``-prefixed entry it returns.
-    """
-    lines: list[str] = []
-    for raw in text.splitlines():
-        line = _strip_comment(raw.strip())
-        if not line or line.startswith("*"):
-            continue
-        lines.append(line)
-    return [
-        line for line in fold_spice_continuations(lines) if not line.startswith("+")
-    ]
-
-
 def _positional_tokens(line: str) -> list[str]:
     """Split an element line into positional tokens, with every
     ``name=value`` parameter assignment removed first."""
@@ -400,18 +357,21 @@ def _op_candidates(instance: str, model: str, override: str | None) -> list[str]
     """ngspice op-point instance paths to probe for one device, most likely
     first. See this module's docstring for why more than one is probed."""
     lowered = instance.lower()
-    # A device inside a user subcircuit carries its instance path
-    # (`xdut.m1`); ngspice names its vectors `m.<path>` and, for a PDK cell,
-    # `m.<path>.<inner element>`.
     leaf = lowered.rsplit(".", 1)[-1]
     if leaf.startswith("x"):
-        inner = (
-            [override]
-            if override
-            else [f"m{model.lower()}", "m0", f"m{model.lower()}_0"]
-        )
-        return [f"m.{lowered}.{name}" for name in inner]
-    # A plain `M` element's vectors live directly under its own name.
+        if override:
+            prefix, sep, rest = override.partition(".")
+            if sep and rest and prefix in _OP_PREFIXES:
+                return [f"{prefix}.{lowered}.{rest}"]
+            elements = [override]
+        else:
+            elements = [f"m{model.lower()}", "m0", f"m{model.lower()}_0"]
+        return [
+            f"{prefix}.{lowered}.{element}"
+            for prefix in _OP_PREFIXES
+            for element in elements
+        ]
+    # A plain M element uses its own name, including any enclosing hierarchy.
     if override:
         return [override]
     return [f"m.{lowered}" if "." in lowered else lowered]
@@ -980,10 +940,10 @@ def _triode_margin_v(temperature_c: float, thresholds: dict[str, Any]) -> float:
     comment for why the thermal voltage is the right scale.
     """
     explicit = thresholds.get("triode_margin_v")
-    if is_number(explicit):
+    if is_finite_number(explicit):
         return float(explicit)
     multiple = thresholds.get("triode_margin_kt", _DEFAULT_TRIODE_MARGIN_KT)
-    if not isinstance(multiple, (int, float)) or isinstance(multiple, bool):
+    if not is_finite_number(multiple):
         multiple = _DEFAULT_TRIODE_MARGIN_KT
     kelvin = float(temperature_c) + 273.15
     return float(multiple) * _KT_OVER_Q_V_PER_K * kelvin
@@ -1043,7 +1003,6 @@ def _classify_region(device: MosInstance, off_current_a: float, margin_v: float)
 def _operating_point_findings(
     devices: list[MosInstance],
     regions: dict[str, str],
-    off_current_a: float,
     margin_v: float,
 ) -> list[dict[str, Any]]:
     """``off``/``triode`` findings, one device at a time, in netlist order."""
@@ -1278,13 +1237,11 @@ def _all_measurement_specs(
     request: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
     """``(label, spec)`` for every measurement object the request declares:
-    the top-level ``measurements[]``, then each ``analysis_steps[]`` step's
-    own (labelled ``<step>.<name>``). Malformed entries are skipped -- ``klt
-    sim`` itself owns validating the request's shape."""
+    the top-level ``measurements[]`` (shape-checked by :func:`load_request`),
+    then each ``analysis_steps[]`` step's own (``<step>.<name>``), whose
+    malformed entries are skipped -- ``klt sim`` owns validating those."""
     specs = [
-        (str(spec.get("name", "?")), spec)
-        for spec in request.get("measurements") or []
-        if isinstance(spec, dict)
+        (str(spec.get("name", "?")), spec) for spec in request.get("measurements", [])
     ]
     steps = request.get("analysis_steps")
     for step in steps if isinstance(steps, list) else []:
@@ -1307,16 +1264,17 @@ def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate an op-sanity request JSON file.
 
     The same document ``klt sim`` takes (see ``sim.load_request``), but only
-    ``netlist`` is required: this verb always runs a plain ``op``, so a
-    request's ``analysis``/``measurements`` are not needed for it to work.
+    ``netlist`` is required: this verb always runs a plain ``op``, so
+    ``analysis`` is optional -- but a supplied ``measurements`` is shape-checked.
     """
-    request = _load_request_json(request_path, OpSanityError)
-    return validate_request_shape(
-        request,
+    request = validate_request_shape(
+        _load_request_json(request_path, OpSanityError),
         "request file",
         error_cls=OpSanityError,
         required_fields=("netlist",),
     )
+    validate_request_measurements(request, error_cls=OpSanityError)  # issue #6590
+    return request
 
 
 def _refuse_param_axis(point: Any) -> None:
@@ -1460,10 +1418,12 @@ def run_op_sanity(
     request_path: str,
     *,
     corner: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
     """Lint the operating point of the netlist declared by the request at
     ``request_path``.
 
+    ``pdk_root`` is the ``--pdk-root`` pin, folded in as on the graded path.
     ``corner`` selects which expanded corner point of the request's own
     ``corners`` matrix to bias at, by ``corner_id``; the first expanded
     point is used when omitted. Exactly one corner is run -- this is a
@@ -1480,6 +1440,10 @@ def run_op_sanity(
     reported as ``status: "error"`` with diagnostics, never raised.
     """
     request = load_request(request_path)
+    try:
+        request = _with_pdk_root_override(request, pdk_root)
+    except SimError as exc:
+        raise OpSanityError(str(exc)) from exc
     request_dir = os.path.dirname(os.path.abspath(request_path))
     repo_root = env_provenance.find_repo_root(request_dir)
 
@@ -1530,22 +1494,12 @@ def run_op_sanity(
         raise OpSanityError(str(exc)) from exc
     point_models_lib = models_lib if _needs_models_lib(point) else None
 
-    provenance_pdk: dict[str, Any] | None = None
-    if models.get("pdk") or models.get("pdk_root"):
-        try:
-            provenance_pdk = find_pdk(
-                variant=models.get("pdk"), root=models.get("pdk_root")
-            )
-        except PdkNotFoundError:
-            provenance_pdk = None
-
+    provenance_pdk = resolve_lint_pdk(models)  # issue #5751
     options = request.get("options") or {}
     timeout_s = op_lint.get("timeout_s", options.get("timeout_s", DEFAULT_TIMEOUT_S))
     # Issue #2513: the sweep's OSDI preload must reach this deck too.
     try:
-        osdi_preload = sim_osdi_pin.resolve_osdi_preload(
-            options, request_dir, pdk_root=sim_osdi_pin.osdi_pdk_root_pin(request)
-        )
+        osdi_preload = sim_osdi_pin.resolve_request_osdi(request, request_dir)
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
 
@@ -1598,7 +1552,9 @@ def run_op_sanity(
                     f"{', '.join('@' + path for path in device.op_candidates)}. "
                     "Set request.op_lint.models."
                     f"{device.model}.op_point_element to this PDK's inner "
-                    "element name to enable the off/triode checks for it."
+                    "element name -- it may carry an m. or n. prefix to pin "
+                    "the element type the PDK device subcircuit wraps -- to "
+                    "enable the off/triode checks for it."
                 ),
             }
         )
@@ -1641,7 +1597,7 @@ def run_op_sanity(
 
     margin_v = _triode_margin_v(point.temperature_c, thresholds)
     off_current_a = thresholds.get("off_current_a", _DEFAULT_OFF_CURRENT_A)
-    if not isinstance(off_current_a, (int, float)) or isinstance(off_current_a, bool):
+    if not is_number(off_current_a):
         off_current_a = _DEFAULT_OFF_CURRENT_A
     off_current_a = float(off_current_a)
 
@@ -1650,9 +1606,7 @@ def run_op_sanity(
         for device in parsed.devices
     }
 
-    findings = _operating_point_findings(
-        parsed.devices, regions, off_current_a, margin_v
-    )
+    findings = _operating_point_findings(parsed.devices, regions, margin_v)
     findings.extend(_wiring_findings(parsed.devices, ground, supply))
     findings.extend(
         _hygiene_findings(parsed, _declared_nodes(request, op_lint), ground, supply)

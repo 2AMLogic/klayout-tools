@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from typing import Any, TypeVar
 
 from . import env_provenance
+from .sim_errors import SimError
 
 # ``ExtractError``/``NetlistError`` share a ``code``/``job_id``/``details``
 # keyword shape that ``type[Exception]`` cannot express, so construction goes
@@ -169,6 +170,18 @@ def job_failure_parts(
     return message, code, details
 
 
+def set_shared_launch_limit(
+    environment: dict[str, Any], shards: Sequence[dict[str, Any] | None]
+) -> None:
+    """Keep a fleet-wide limit only when every reported job has that limit."""
+    limits = {(entry or {}).get("max_launch_attempts") for entry in shards}
+    limit = limits.pop() if len(limits) == 1 else None
+    if limit is None:
+        environment.pop("max_launch_attempts", None)
+    else:
+        environment["max_launch_attempts"] = limit
+
+
 def resumable(
     environment: dict[str, Any] | None, manifest: Any
 ) -> dict[str, Any] | None:
@@ -262,11 +275,13 @@ def resolve_batch_config(
     request, so the fleet config resolves exactly as for ``klt sim``. Its
     ``SimError``/``BatchError`` becomes ``err_cls``."""
     from . import sim_batch
-    from .sim import SimError
 
     try:
         return sim_batch._resolve_batch_config(
-            {"models": {"pdk": pdk}}, corner_count=1, timeout_s=timeout_s
+            {"models": {"pdk": pdk}},
+            corner_count=1,
+            timeout_s=timeout_s,
+            sim_image_profiles=False,
         )
     except (SimError, sim_batch.BatchError) as exc:
         raise _ctor(err_cls)(

@@ -1,0 +1,1 @@
+- Violating GF180 antenna nets now report whether Metal1 contacts diffusion outside the gate (#6975).

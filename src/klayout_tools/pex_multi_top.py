@@ -55,8 +55,10 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
+from . import pex_runset
 from ._provenance import sha256_file
 from .extract import ExtractError, _default_output_path
 from .pex_multi_top_flags import (
@@ -204,7 +206,9 @@ def _require_subckt_per_top(reference_netlist: str, tops: Sequence[str]) -> None
     """
     from .pex import PexError, _read_text, _subckt_interfaces
 
-    declared = _subckt_interfaces(_read_text(reference_netlist) or "")
+    declared = _subckt_interfaces(
+        _read_text(reference_netlist) or "", file_scope_only=True
+    )
     missing = [top for top in tops if top.lower() not in declared]
     if not missing:
         return
@@ -274,6 +278,7 @@ def _per_top_preflight(
                 reference_netlist=schematic_netlist,
                 extracted_netlist=extracted_netlist,
                 subcircuit=top,
+                schematic_top=top,
             )
         )
         order = _pin_order_preflight(
@@ -313,12 +318,13 @@ def _first_firing(entries: Sequence[Mapping[str, Any]], field: str) -> Any:
 
 def extract_every_top(
     layout_path: str,
-    deck_name: str,
+    deck_name: str | None,
     tops: Sequence[str],
     *,
     output: str | None,
     artifacts_dir: str | None,
-    extract_kwargs: Mapping[str, Any],
+    runset: pex_runset.PexRunset | None,
+    options: pex_runset.PexExtractOptions,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Extract ``tops`` and return ``(report, per_top_reports)`` -- issue
     #5494.
@@ -330,7 +336,7 @@ def extract_every_top(
     ``per_top_reports`` is ``[report]``.
 
     **Two or more tops**: one ``run_extract`` call per top, in ``--top``
-    order, each with ``extract_kwargs`` unchanged -- so each top is extracted
+    order, each with the same extraction options -- so each top is extracted
     exactly as a single-top run with the same flags would extract it --
     writing into its own file under ``<outdir>/tops/``. Only once *every*
     extraction has succeeded are those files concatenated into ``-o``
@@ -341,21 +347,17 @@ def extract_every_top(
     _combine_extract_reports` builds, so every downstream reader keeps
     reading one report whose values describe the file the extracted leg ran.
     """
-    # `run_extract` is read off `pex` at call time, deliberately: `pex` is the
-    # one module that names this command's extraction entry point (its
-    # `--device-only-leg` extraction calls it too), so one patch point covers
-    # every extraction a `klt pex` run performs.
-    from .pex import PexError, run_extract
+    from .pex_errors import PexError
     from .pex_multi_top_report import _combine_extract_reports
 
     if len(tops) < 2:
         try:
-            report = run_extract(
+            report = pex_runset.run_extract_leg(
                 layout_path,
                 deck_name,
+                runset=runset,
                 output=output,
-                top=tops[0] if tops else None,
-                **extract_kwargs,
+                options=options,
             )
         except ExtractError as exc:
             raise PexError(f"extraction failed: {exc}") from exc
@@ -377,17 +379,22 @@ def extract_every_top(
     per_top_reports: list[dict[str, Any]] = []
     for index, one_top in enumerate(tops):
         try:
-            per_top_reports.append(
-                run_extract(
-                    layout_path,
-                    deck_name,
-                    output=_per_top_netlist_path(staging_dir, index, one_top),
-                    top=one_top,
-                    **extract_kwargs,
-                )
+            report = pex_runset.run_extract_leg(
+                layout_path,
+                deck_name,
+                output=_per_top_netlist_path(staging_dir, index, one_top),
+                runset=runset,
+                options=replace(options, top=one_top),
             )
         except ExtractError as exc:
             raise PexError(f"extraction failed for --top {one_top}: {exc}") from exc
+        if "instantiated_device_counts" in report:
+            raise PexError(
+                f"--top {one_top} retains a device hierarchy. Multi-top PEX requires "
+                "independent flat extractions; use a single --top for this layout",
+                code=MULTI_TOP_UNSUPPORTED_CODE,
+            )
+        per_top_reports.append(report)
     _concatenate_extractions(
         [report["netlist_path"] for report in per_top_reports],
         tops,

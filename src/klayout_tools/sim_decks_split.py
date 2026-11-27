@@ -23,6 +23,7 @@ import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any, cast
 
 from . import (
@@ -210,8 +211,7 @@ def run_split(
         try:
             sim_batch.submit_job(config, job_id, spec)
             manifest.mark(index, "submitted")
-            manifest.mark(index, "launching")
-            sim_batch.launch_job(config, job_id)
+            sim_batch.launch_job(config, job_id, on_phase=partial(manifest.mark, index))
             manifest.mark(index, "launched")
             report = sim_decks._collect_decks_batch(
                 config, job_id, worker, outdir=outdir
@@ -237,6 +237,7 @@ def run_split(
         [summary for _r, summary in results],
         outdir=outdir,
         shard_map=_batch_common.repo_relative_str(manifest.path),
+        extra_remote=config0.launch_environment(),
     )
 
 
@@ -323,10 +324,14 @@ def attach_split(
                 {"index": index, "job_id": job_id, "state": state, "unit_ids": ids}
             )
         reports.append(report)
-        shards.append(_shard_summary(index, ids, job_id, state))
-    extra: dict[str, Any] = {}
+        summary = _shard_summary(index, ids, job_id, state)
+        remote = report["environment"]["remote"]
+        if "max_launch_attempts" in remote:
+            summary["max_launch_attempts"] = remote["max_launch_attempts"]
+        shards.append(summary)
+    extra = config.launch_environment(shards=shards)
     if unfinished:
-        extra = {"unfinished_shards": unfinished, "resumable": True}
+        extra.update(unfinished_shards=unfinished, resumable=True)
     return merge_reports(
         reports, shards, outdir=outdir, shard_map=manifest_path, extra_remote=extra
     )
@@ -373,7 +378,8 @@ def _attach_shard(
             ),
             "failed",
         )
-    report = sim_decks._collect_decks_batch(config, job_id, worker, outdir=outdir)
+    submitted = sim_batch._submitted_job_config(config, job_id)
+    report = sim_decks._collect_decks_batch(submitted, job_id, worker, outdir=outdir)
     return report, ("collected" if report.get("status") == "pass" else "failed")
 
 
@@ -455,8 +461,9 @@ def _attach_single_job(
                 "bucket/profile/region, or expired)",
                 code=sim_batch.BATCH_UNKNOWN_JOB_CODE,
             )
+        submitted = sim_batch._submitted_job_config(config, job_id)
         report = sim_decks._collect_decks_batch(
-            config, job_id, worker_request, outdir=outdir
+            submitted, job_id, worker_request, outdir=outdir
         )
     except sim_batch.BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc

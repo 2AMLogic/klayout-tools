@@ -112,6 +112,14 @@ def _combine_parasitics(blocks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         combined["critical_nets"] = _union_in_top_order(
             [block.get("critical_nets") or [] for block in blocks]
         )
+    ties = [
+        block["substrate_dc_tie"] for block in blocks if block.get("substrate_dc_tie")
+    ]
+    if ties:
+        combined["substrate_dc_tie"] = {
+            **ties[0],
+            "nets": [net for tie in ties for net in tie["nets"]],
+        }
     summaries = [
         block["integrity"]
         for block in blocks
@@ -198,10 +206,11 @@ def _combine_extract_reports(
 def _extraction_block(
     extract_report: Mapping[str, Any],
     *,
-    deck_name: str,
+    deck_name: str | None,
     netlist_sha256: str | None,
     resistance_graph: bool,
     resistance_graph_r_cut_ohm: float | None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """The report's ``extraction`` block for one ``run_extract`` report.
 
@@ -217,9 +226,10 @@ def _extraction_block(
     :func:`run_pex`), so the extract-time hash no longer identifies the file
     the report points at.
     """
-    from .pex import _parasitic_integrity_report
+    from .pex import _parasitic_integrity_report, _substrate_tie_fields
     from .pex_asap7 import netlist_adaptation_for_deck
     from .pex_resistance_graph import _resistance_graph_echo
+    from .pex_runset import extraction_fields
 
     parasitics = extract_report.get("parasitics") or {}
     return {
@@ -275,6 +285,8 @@ def _extraction_block(
         # actually read -- `klt extract`'s own `pdk` block (`variant`,
         # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
         "pdk": extract_report.get("pdk"),
+        **_substrate_tie_fields(parasitics),
+        **extraction_fields(extract_report),
         # Additive field (issue #2764): the extraction's own
         # per-net parasitic RC network integrity diagnostics --
         # threshold/tolerances, aggregate counts, and one entry per net
@@ -294,7 +306,7 @@ def _extraction_block(
         **(
             {
                 "resistance_graph": _resistance_graph_echo(
-                    parasitics, resistance_graph_r_cut_ohm
+                    parasitics, resistance_graph_r_cut_ohm, resistance_graph_caps
                 )
             }
             if resistance_graph
@@ -308,9 +320,10 @@ def _tops_block(
     per_top_preflight: Sequence[Mapping[str, Any]],
     *,
     multi_top: bool,
-    deck_name: str,
+    deck_name: str | None,
     resistance_graph: bool,
     resistance_graph_r_cut_ohm: float | None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     repo_root: str | None,
 ) -> list[dict[str, Any]] | None:
     """The additive ``tops`` field (issue #5494).
@@ -355,6 +368,7 @@ def _tops_block(
                     netlist_sha256=report["netlist_sha256"],
                     resistance_graph=resistance_graph,
                     resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+                    resistance_graph_caps=resistance_graph_caps,
                 ),
                 # `--tie-net` is refused with two or more tops, so no tie
                 # can apply to a per-top block: `_body_bias_report`'s second

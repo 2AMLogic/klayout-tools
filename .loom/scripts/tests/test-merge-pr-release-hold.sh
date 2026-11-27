@@ -38,6 +38,11 @@ run "$LBL" "<!-- champion:hold-state head=$OLD -->
 <!-- loom:verdict-sha sha=$H verdict=approved -->"
 assert_eq 1 "$RC" "head moved since the hold refuses"
 assert_contains "$OUT" "Nothing was written" "refusal says nothing was written"
+# #14833: the stale-marker refusal names both SHAs and the recovery path.
+assert_contains "$OUT" "hold-state head=$OLD" "refusal names the stale marker's head"
+assert_contains "$OUT" "current head=$H" "refusal names the current head"
+assert_contains "$OUT" "Rerun Champion on this PR" "refusal says to rerun Champion"
+assert_contains "$OUT" "retry \`merge-pr.sh 9 --release-hold\`" "refusal says to retry --release-hold once the current hold is recorded"
 
 run "$LBL" "<!-- champion:hold-state head=$H -->
 <!-- loom:verdict-sha sha=$OLD verdict=approved -->"
