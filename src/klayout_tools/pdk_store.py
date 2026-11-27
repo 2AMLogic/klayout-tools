@@ -380,7 +380,7 @@ def evidence_variant_dir(root, variant):
         return None
     with os.scandir(root) as entries:
         nested = {entry.name: entry.path for entry in entries
-                  if entry.is_dir() and is_variant_tree(entry.path)}
+                  if is_variant_tree(entry.path)}
     aliases = @ALIASES@
     names = [variant] + [name for name, family in aliases.items() if family == variant]
     if nested:

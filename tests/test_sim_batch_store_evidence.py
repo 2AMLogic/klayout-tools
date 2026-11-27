@@ -1,11 +1,5 @@
-"""PDK install evidence on both hosts of a batch run (issue #8007).
-
-The worker's capture program is stdlib-only source shipped to the runner, so
-it cannot import :mod:`klayout_tools.pdk_store`: these tests run the real
-program over the same trees the library reads and hold the two to one answer
--- the bundle a store marker records (``install``) and the layout the tree
-sits in (``store_layout``), beside the revision stamp of
-``test_sim_batch_store_stamp.py``.
+"""Compare the shipped worker capture and the client library on the same PDK
+installs, then check how each host's evidence appears in batch reports (#8007).
 """
 
 from __future__ import annotations
@@ -110,6 +104,7 @@ def test_worker_capture_agrees_with_the_library_on_each_layout(
     tmp_path, relative, layout
 ):
     root = _store_tree(tmp_path, relative=relative)
+    (root / "unused").symlink_to("unused")  # An unrelated loop must not hide the PDK.
 
     report = pdk.find_pdk(variant="gf180mcuD", root=str(root))
 
@@ -190,16 +185,18 @@ def test_nested_descriptor_rules_out_outer_bundle(
     assert _observed(worker) == (None, None)
 
 
-@pytest.mark.parametrize("env_root", [True, False], ids=["other-variant", "unset"])
+@pytest.mark.parametrize("env_root", ["nested", "flat", "unset"])
 def test_worker_finds_fallback_store_unless_root_is_pinned(
     tmp_path, monkeypatch, env_root
 ):
     store = _store_tree(tmp_path).rename(tmp_path / ".ciel")
     other = tmp_path / "other root"
-    (other / "sky130A" / "libs.tech").mkdir(parents=True)
+    sky = other / "sky130A"
+    (sky / "libs.tech").mkdir(parents=True)
+    (sky / ".pdk-store.json").write_text(json.dumps({"version": "sky130-rev"}))
     env = {"HOME": str(tmp_path)}
-    if env_root:
-        env["PDK_ROOT"] = str(other)
+    if env_root != "unset":
+        env["PDK_ROOT"] = str(sky if env_root == "flat" else other)
     monkeypatch.delenv("PDK_ROOT", raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -208,7 +205,12 @@ def test_worker_finds_fallback_store_unless_root_is_pinned(
     worker = _capture_request(tmp_path, env, models)["pdk"]
     assert client["root"] == str(store)
     assert _observed(client) == _observed(worker) == (_INSTALL, "manager_family")
-    assert worker["stamp_scheme"] is None
+    expected_stamp = (
+        ("store-version-sha256", "store:sky130-rev")
+        if env_root == "flat"
+        else (None, None)
+    )
+    assert (worker["stamp_scheme"], worker["stamp_text"]) == expected_stamp
     pin = models | {"pdk_root": str(other)}
     assert _observed(_capture_request(tmp_path, env, pin)["pdk"]) == (None, None)
     pinned = _store_tree(tmp_path / "pinned", "b" * 64, relative="gf180mcuD")
@@ -482,9 +484,8 @@ def test_collected_store_evidence_is_revalidated(
 def test_staged_model_capture_keeps_the_image_scope_beside_its_install(
     tmp_path, monkeypatch
 ):
-    """Under staged models ``stamp_*`` describes the image tree, not the files
-    that ran. The install evidence is read from that same tree and rides along
-    unchanged; the image/executed distinction stays where it was."""
+    """Staging marks the stamp as image-scoped and preserves the install
+    evidence collected for the resolved worker variant."""
     document = _captured(tmp_path, _store_tree(tmp_path), staged="1")
     request = {"netlist": "body.spice", **_PDK_REQUEST}
     files = {"worker_environment.json": json.dumps(document)}
