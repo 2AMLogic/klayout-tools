@@ -30,7 +30,8 @@ Icarus 13.0):
 3. **Measure in-process, never from a helper.** A Python helper process
    would report *its own* libpython. Inside ``vvp``, ``Py_GetVersion`` looked
    up in the process-global symbol table is by definition the CPython
-   supplying the C-API, and ``dladdr`` on its address names the object.
+   supplying the C-API. The kernel mapping at that address identifies the
+   device and inode for checking the path reported by ``dladdr``.
 4. **Only a confirmed difference refuses the run.** Release components are
    compared including level and serial (``3.13.0rc1`` differs from
    ``3.13.18``; compiler and build-date text never enter). Anything the probe
@@ -82,10 +83,6 @@ _PROBE_KILL_GRACE_S = 5.0
 #: copied under this name into the scratch directory, so the simulator
 #: imports it by a name no ``klayout_tools`` module shadows or shares.
 PROBE_MODULE = "klt_python_runtime_probe"
-
-#: Environment variable naming the file the probe's test writes its
-#: measurement to (read back by :func:`_probe_in_process`).
-PROBE_RESULT_ENV = "KLT_PYTHON_RUNTIME_PROBE_RESULT"
 
 _PROBE_VERILOG = f"module {PROBE_MODULE};\nendmodule\n"
 _PROBE_TEST_SOURCE = "functional_verification_python_runtime_probe.py"
@@ -282,6 +279,12 @@ def _probe_in_process(
     """
     build_dir = os.path.join(workdir, "sim_build")
     result_path = os.path.join(workdir, "result.json")
+    # Runner.test merges os.environ over extra_env. Remove user test selectors
+    # from both sources in this forked child so the parent keeps its selection.
+    probe_env = env.copy()
+    for selector in ("COCOTB_TEST_FILTER", "COCOTB_TESTCASE"):
+        os.environ.pop(selector, None)
+        probe_env.pop(selector, None)
     engine_runner = _fv._run_build(
         runner_module,
         engine="icarus",
@@ -309,7 +312,7 @@ def _probe_in_process(
         results_xml=os.path.join(workdir, "results.xml"),
         timescale=timescale,
         parameters={},
-        extra_env={**env, PROBE_RESULT_ENV: result_path},
+        extra_env=probe_env,
         log_path=os.path.join(workdir, "test.log"),
         waves=False,
     )

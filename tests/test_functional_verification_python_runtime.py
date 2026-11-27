@@ -87,7 +87,7 @@ class ProbingRunner(FakeCocotbRunner):
             self.probe_sys_path[0], f"{rt.PROBE_MODULE}.py"
         ).read_bytes()
         Path(kwargs["log_file"]).write_text(self.banner, encoding="utf-8")
-        Path(kwargs["extra_env"][rt.PROBE_RESULT_ENV]).write_text(
+        Path(self.probe_sys_path[0], "result.json").write_text(
             json.dumps(self.measurement), encoding="utf-8"
         )
 
@@ -369,10 +369,7 @@ def test_probe_sees_the_request_env_timescale_and_import_path(tmp_path, monkeypa
     assert (build["timescale"], test["timescale"]) == (("10ns", "1ps"),) * 2
     assert test["test_module"] == test["hdl_toplevel"] == rt.PROBE_MODULE
     assert test["testcase"] is None and test["plusargs"] == []
-    assert test["extra_env"] == {
-        "MY_VAR": "1",
-        rt.PROBE_RESULT_ENV: str(workdir / "result.json"),
-    }
+    assert test["extra_env"] == {"MY_VAR": "1"}
     # ``vvp`` starts where the user's run starts (a relative PATH entry resolves
     # from there); the probe's own artifacts stay in the scratch directory.
     assert test["test_dir"] == runner.test_kwargs["test_dir"] != str(workdir)

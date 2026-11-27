@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import json
+import mmap
+import os
 import runpy
 import subprocess
 import sys
@@ -54,70 +56,94 @@ def _fake_dladdr_reporting(name: bytes):
 
 def test_probe_records_the_host_runtime(probe_module, tmp_path, monkeypatch):
     result = tmp_path / "result.json"
-    monkeypatch.setenv(rt.PROBE_RESULT_ENV, str(result))
+    monkeypatch.setitem(
+        probe_module["probe"].__globals__, "__file__", str(tmp_path / "probe.py")
+    )
     asyncio.run(probe_module["probe"](None))
 
     measured = json.loads(result.read_text())
     assert measured["py_get_version"] == sys.version
-    assert Path(measured["library"]).is_file()
+    if Path("/proc/self/maps").is_file():
+        assert Path(measured["library"]).is_file()
+    else:
+        assert measured["library"] is None
 
 
 def test_probe_library_lookup_can_be_inconclusive(probe_module, monkeypatch):
-    supplying_library = probe_module["supplying_library"]
-    assert supplying_library(None) is None  # No mapping contains the null pointer.
-
+    assert probe_module["supplying_library"](None) is None
     monkeypatch.setattr(ctypes, "CDLL", lambda name: object())  # dladdr unavailable
-    assert supplying_library(_version_address()) is None
+    assert probe_module["_dladdr_name"](_version_address()) is None
 
 
-def test_a_library_path_dladdr_names_is_reported_as_is(probe_module, monkeypatch):
-    """The shared-library case: ``dli_fname`` is already an existing absolute
-    path, so the kernel's mapping table is not consulted."""
-    library = Path(sys.executable).resolve()  # any file will do
-    monkeypatch.setattr(ctypes, "CDLL", _fake_dladdr_reporting(bytes(library)))
+@pytest.fixture
+def loaded_library(probe_module, monkeypatch, tmp_path):
+    """Capture the kernel's file identity before any paths change."""
+    library = tmp_path / "libpython.so"
+    library.touch()
+    info = library.stat()
     lookup = probe_module["supplying_library"]
+    mapping = str(library), info.st_dev, info.st_ino
+    monkeypatch.setitem(lookup.__globals__, "_mapped_file", lambda address: mapping)
+    return library, lookup
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/maps").is_file(), reason="reads /proc/self/maps"
+)
+def test_a_retargeted_loader_symlink_resolves_to_the_mapped_file(
+    probe_module, monkeypatch, tmp_path
+):
+    library = tmp_path / "loaded.so"
+    library.write_bytes(b"x")
+    link = tmp_path / "loader-name.so"
+    link.symlink_to(library)
+    monkeypatch.setattr(ctypes, "CDLL", _fake_dladdr_reporting(bytes(link)))
+    lookup = probe_module["supplying_library"]
+    with link.open("r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping:
+        address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
+        assert Path(lookup(address)).samefile(library)
+
+        replacement = tmp_path / "replacement.so"
+        replacement.touch()
+        link.unlink()
+        link.symlink_to(replacement)
+        assert lookup(address) == str(library)
+
+        # Both names now resolve to the replacement; the original is still mapped.
+        replacement.replace(library)
+        link.unlink()
+        link.symlink_to(library)
+        assert lookup(address) is None
+
+
+def test_a_matching_inode_on_a_different_device_is_unresolved(
+    loaded_library, monkeypatch
+):
+    library, lookup = loaded_library
+    monkeypatch.setattr(ctypes, "CDLL", _fake_dladdr_reporting(bytes(library)))
+    info = library.stat()
     monkeypatch.setitem(
         lookup.__globals__,
         "_mapped_file",
-        lambda address: pytest.fail("a confirmed name needs no second source"),
+        lambda address: (str(library), info.st_dev + 1, info.st_ino),
     )
-
-    assert lookup(_version_address()) == str(library)
+    assert lookup(_version_address()) is None
 
 
 def test_an_executable_found_by_bare_name_is_resolved_through_the_mapping(
-    probe_module, tmp_path, monkeypatch
+    loaded_library, monkeypatch
 ):
-    """The executable-backed case: ``dladdr`` returns ``python3`` as the
-    program was started, which names no file; the file mapped over the
-    address is reported instead."""
-    executable = tmp_path / "python3.12"
-    executable.write_text("")
+    library, lookup = loaded_library
     monkeypatch.setattr(ctypes, "CDLL", _fake_dladdr_reporting(b"python3"))
-    lookup = probe_module["supplying_library"]
-    monkeypatch.setitem(
-        lookup.__globals__, "_mapped_file", lambda address: str(executable)
+    assert lookup(_version_address()) == str(library)
+
+
+def test_an_absolute_name_without_a_mapping_is_unresolved(probe_module, monkeypatch):
+    monkeypatch.setattr(
+        ctypes, "CDLL", _fake_dladdr_reporting(bytes(Path(sys.executable)))
     )
-
-    assert lookup(_version_address()) == str(executable)
-
-
-@pytest.mark.parametrize(
-    "reported,mapped",
-    [
-        (b"python3", None),  # no mapping table to ask
-        (b"python3", "/no/such/dir/python3.12"),  # a name that confirms nothing
-        (b"python3", "/usr/bin/python3.12 (deleted)"),  # the file is gone
-        (b"/no/such/dir/libpython3.13.so", "[heap]"),  # stale name, no file
-    ],
-)
-def test_a_path_nothing_confirms_is_reported_unresolved(
-    probe_module, monkeypatch, reported, mapped
-):
-    monkeypatch.setattr(ctypes, "CDLL", _fake_dladdr_reporting(reported))
     lookup = probe_module["supplying_library"]
-    monkeypatch.setitem(lookup.__globals__, "_mapped_file", lambda address: mapped)
-
+    monkeypatch.setitem(lookup.__globals__, "_mapped_file", lambda address: None)
     assert lookup(_version_address()) is None
 
 
@@ -136,11 +162,11 @@ def test_mapped_file_reads_the_pathname_of_the_mapping_over_an_address(
     def at(address):
         return mapped_file(address, maps_path=str(maps))
 
-    assert at(0x400000) == "/usr/bin/python3.12"
-    assert at(0x4FFFFF) == "/usr/bin/python3.12"
-    assert at(0x7F0000000010) == "/opt/odd dir/libpy.so"  # a space survives
+    assert at(0x400000) == ("/usr/bin/python3.12", os.makedev(8, 1), 1234)
+    assert at(0x4FFFFF) == at(0x400000)
+    assert at(0x7F0000000010) == ("/opt/odd dir/libpy.so", os.makedev(8, 1), 99)
     assert at(0x7F0000100010) is None  # anonymous memory has no file
-    assert at(0x7FFC00000010) == "[stack]"  # a pseudo-path, never an existing file
+    assert at(0x7FFC00000010) is None  # a pseudo-path has no file identity
     assert at(0x500000) is None  # the end of a range is not inside it
     assert at(0x10) is None  # nothing maps it
 

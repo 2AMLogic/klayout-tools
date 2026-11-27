@@ -72,19 +72,38 @@ def test_probe_measures_what_a_disposable_cocotb_test_observes(tmp_path, monkeyp
     assert measured["status"] == "measured", measured
     assert measured["py_get_version"] == seen["version"]
     assert rt._release(measured["py_get_version"]) == tuple(sys.version_info)
-    assert Path(measured["library"]).is_file()
-    if seen["mapped"] is not None:  # always set on Linux
+    if seen["mapped"] is not None:  # Linux
         assert Path(measured["library"]).samefile(seen["mapped"])
+    else:
+        assert measured["library"] is None
+
+
+@pytest.fixture
+def measurements(monkeypatch):
+    outcomes = []
+    measure = rt._measure_vvp_python
+
+    def record(**kwargs):
+        outcome = measure(**kwargs)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(rt, "_measure_vvp_python", record)
+    return outcomes
 
 
 @SKIP_NO_COCOTB
 @needs_icarus
-def test_gcd_worked_example_runs_past_the_probe(tmp_path):
+def test_gcd_worked_example_runs_past_the_probe(tmp_path, monkeypatch, measurements):
     """The probe measures klt's own runtime here, so the ordinary run
     happens -- whatever build version cocotb's banner names, which is the
     wheel's compile-time ``PY_VERSION`` and routinely differs."""
     for name in ("gcd.v", "test_gcd.py", "request.json"):
         shutil.copyfile(EXAMPLE_DIR / name, tmp_path / name)
+
+    caller_file = tmp_path / "caller.json"
+    caller_file.write_text('{"owner": "caller"}')
+    monkeypatch.setenv("KLT_PYTHON_RUNTIME_PROBE_RESULT", str(caller_file))
 
     report = run_functional_verification(str(tmp_path / "request.json"))
 
@@ -100,9 +119,38 @@ def test_gcd_worked_example_runs_past_the_probe(tmp_path):
     assert banner is not None, transcript
     # The run above proceeded on the runtime's say-so: the probe measured
     # klt's own interpreter, whichever build version the banner named.
-    measured = _probe([str(tmp_path)])
+    assert caller_file.read_text() == '{"owner": "caller"}'
+    [measured] = measurements
+    assert measured["status"] == "measured", measured
     assert rt._release(measured["py_get_version"]) == rt._klt_release()
     assert rt._release(banner.group(1)) is not None
+
+
+@SKIP_NO_COCOTB
+@needs_icarus
+@pytest.mark.parametrize("selector", ["COCOTB_TEST_FILTER", "COCOTB_TESTCASE"])
+@pytest.mark.parametrize("source", ["request", "ambient"])
+def test_user_test_selection_preserves_the_probe(
+    tmp_path, monkeypatch, measurements, selector, source
+):
+    for name in ("gcd.v", "test_gcd.py"):
+        shutil.copyfile(EXAMPLE_DIR / name, tmp_path / name)
+    request = json.loads((EXAMPLE_DIR / "request.json").read_text())
+    testcase = "test_gcd_known_pairs"
+    if source == "request":
+        request["env"] = {selector: testcase}
+    else:
+        monkeypatch.setenv(selector, testcase)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+
+    report = run_functional_verification(str(request_path))
+
+    [measured] = measurements
+    assert measured["status"] == "measured", measured
+    assert rt._release(measured["py_get_version"]) == rt._klt_release()
+    assert report["status"] == "pass"
+    assert [test["name"] for test in report["tests"]] == [testcase]
 
 
 @needs_icarus

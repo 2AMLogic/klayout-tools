@@ -18,11 +18,10 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import stat
+from pathlib import Path
 
 import cocotb
-
-#: Environment variable naming the file the measurement is written to.
-RESULT_ENV = "KLT_PYTHON_RUNTIME_PROBE_RESULT"
 
 
 class _DlInfo(ctypes.Structure):
@@ -36,39 +35,29 @@ class _DlInfo(ctypes.Structure):
     ]
 
 
-def _is_file(path: str | None) -> bool:
-    return path is not None and os.path.isabs(path) and os.path.isfile(path)
-
-
-def _mapped_file(address: int, maps_path: str = "/proc/self/maps") -> str | None:
-    """File the kernel reports mapped over ``address`` (Linux
-    ``/proc/self/maps``), or ``None`` where that cannot be read."""
+def _mapped_file(
+    address: int, maps_path: str = "/proc/self/maps"
+) -> tuple[str, int, int] | None:
+    """Path, device and inode of the file mapped over the symbol on Linux."""
     try:
         with open(maps_path, encoding="utf-8", errors="surrogateescape") as maps:
             for line in maps:
                 fields = line.split(None, 5)
                 low, _, high = fields[0].partition("-")
                 if int(low, 16) <= address < int(high, 16):
-                    return fields[5].rstrip("\n") if len(fields) > 5 else None
+                    inode = int(fields[4])
+                    if inode == 0 or len(fields) < 6:
+                        return None
+                    major, minor = fields[3].split(":")
+                    device = os.makedev(int(major, 16), int(minor, 16))
+                    return fields[5].rstrip("\n"), device, inode
     except (OSError, ValueError, IndexError):
         pass
     return None
 
 
-def supplying_library(address: int | None) -> str | None:
-    """Path of the loaded object that contains ``address``, or ``None`` when
-    no existing file can be confirmed as that object.
-
-    ``dladdr`` lives in libc since glibc 2.34 and in ``libdl.so.2`` before
-    that; macOS exports it from libSystem, reachable as ``None`` too. Its
-    ``dli_fname`` is a library's path, but for the main program it is the name
-    the program was started under -- a bare ``python3`` found through
-    ``PATH`` -- which names no file. A name that is not an existing absolute
-    path is therefore replaced by the file the kernel says is mapped there,
-    and reported unresolved when neither confirms.
-    """
-    if address is None:
-        return None
+def _dladdr_name(address: int) -> str | None:
+    """The loader's name for the object, which may be relative or a symlink."""
     for name in (None, "libdl.so.2"):
         try:
             dladdr = ctypes.CDLL(name).dladdr
@@ -81,11 +70,27 @@ def supplying_library(address: int | None) -> str | None:
             dladdr(ctypes.c_void_p(address), ctypes.byref(info)) and info.dli_fname
         ):
             return None
-        reported = os.fsdecode(info.dli_fname)
-        if _is_file(reported):
-            return reported
-        mapped = _mapped_file(address)
-        return mapped if _is_file(mapped) else None
+        return os.fsdecode(info.dli_fname)
+    return None
+
+
+def supplying_library(address: int | None) -> str | None:
+    """Report an existing file only if its identity matches the symbol's mapping."""
+    if address is None:
+        return None
+    mapping = _mapped_file(address)
+    if mapping is None:
+        return None
+    mapped_path, device, inode = mapping
+    for path in (_dladdr_name(address), mapped_path):
+        if path is None or not os.path.isabs(path):
+            continue
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == (device, inode):
+            return path
     return None
 
 
@@ -99,7 +104,7 @@ async def probe(dut) -> None:
     py_get_version.argtypes = []
     py_get_version.restype = ctypes.c_char_p
     address = ctypes.cast(py_get_version, ctypes.c_void_p).value
-    with open(os.environ[RESULT_ENV], "w", encoding="utf-8") as handle:
+    with Path(__file__).with_name("result.json").open("x", encoding="utf-8") as handle:
         json.dump(
             {
                 "py_get_version": os.fsdecode(py_get_version()),
