@@ -1,16 +1,8 @@
 # `klt design-centering`
 
-Turn a completed `klt yield-sensitivity` parameter ranking into re-centering
-candidates against a `klt size` sized device's own geometry -- Phase 3 of
-the statistical/yield epic ([#710](https://github.com/2AMLogic/klayout-tools/issues/710)),
-delivered by [#924](https://github.com/2AMLogic/klayout-tools/issues/924),
-closing the loop the epic's "Why" section describes: [#923](https://github.com/2AMLogic/klayout-tools/issues/923)/
-[`klt yield-sensitivity`](yield-sensitivity.md) answers **which** device/
-process mismatch terms drive a campaign's output spread; this command
-answers the next question -- **what does that mean for a sized design** --
-by mapping each ranked mismatch parameter onto the sized-device instance it
-belongs to and proposing which instances are worth re-centering (growing)
-first.
+Use a completed yield-sensitivity ranking and sizing report to identify which
+device instances would benefit most from additional area. Each candidate
+reports its available geometry and the estimated area multiplier.
 
 ```
 klt design-centering <request> [--measurement <name>] [--format text|json]
@@ -28,30 +20,14 @@ unlike `klt yield`/`klt yield-sensitivity`, this command does no numeric
 fitting; it only reads two already-computed reports and applies a stated
 heuristic (see "What is computed" below).
 
-## Producer-side reference contract, now with a wired #705 consumer too
+## Using the ranking during sizing
 
-This command shipped as a **contract**
-[`docs/cli/yield-sensitivity.md`](yield-sensitivity.md)'s own "Downstream
-consumers" section already reserved (`ranking[].parameter`/
-`ranking[].contribution`, read verbatim -- no new field was added to that
-contract) plus a **reference consumer** that exercises it end-to-end: this
-command itself. At the time, epic [#705](https://github.com/2AMLogic/klayout-tools/issues/705)
-(the analog-sizing engine) was still Phase 1 and had no design-centering
-stage to wire into.
-
-That changed with [#1326](https://github.com/2AMLogic/klayout-tools/issues/1326)
-(epic #705 Phase 2): [`klt size`](size.md) now has its own
-design-centering/yield-aware objective (`request.design_centering`, see
-that command's "Design-centering objective" section) that consumes exactly
-this contract -- not by calling this command, but by importing the two
-pure helpers this command's own `build_recentering_proposal` is itself
-built from (`design_centering.rank_mapped_parameters`/
-`design_centering.suggested_area_multiplier`) and applying them against the
-geometry a sizing run just produced, so it can grow the flagged instance(s)
-and re-verify with ngspice in the same pass. This command and
-`build_recentering_proposal` are unchanged and remain useful standalone --
-e.g. against a `klt size` payload produced by an older release, or by any
-other tool that produces the same JSON shape.
+To apply the same heuristic during a sizing run, pass the ranking and
+parameter map in `request.design_centering`. After its initial solve,
+`klt size` can increase device multiplicity and run ngspice again to verify
+the grown design. Its input comes directly from the sensitivity ranking.
+The standalone command reads a finished sizing report and produces a
+proposal for inspection. [Sizing objective](size.md#design-centering-objective-requestdesign_centering-issue-1326)
 
 ## Input
 
@@ -223,10 +199,9 @@ asserts this exact round-trip.
 
 ## Downstream consumers
 
-Reserved for a future #705 design-centering stage, the same way `klt
-yield-sensitivity`'s own `ranking[]` was reserved for this command (see
-"Producer-side reference contract" above). No `#705`-specific field lives in
-this contract yet.
+A caller inspecting the standalone proposal can read `candidates[]` for
+the mapped devices and suggested area multipliers, and `unmapped_parameters`
+for ranking entries outside its parameter map.
 
 ## Errors
 
@@ -269,8 +244,6 @@ are exhaustive forever.
   not attempt to guess a mismatch-parameter-to-instance mapping from naming
   conventions -- see "The mismatch-parameter vs. sizing-geometry key
   mismatch" above.
-- **No #705 sizing-loop integration yet.** See "Producer-side reference
-  contract" above.
 - **Linear/monotonic-effects ranking only, inherited from `klt
   yield-sensitivity`.** This command trusts the ranking it is handed; it
   does not re-derive or re-validate it.
@@ -283,6 +256,4 @@ are exhaustive forever.
   this command consumes.
 - [#710](https://github.com/2AMLogic/klayout-tools/issues/710) -- the parent
   statistical/yield epic.
-- [#705](https://github.com/2AMLogic/klayout-tools/issues/705) -- the
-  analog-sizing engine this command's contract is reserved for, once it
-  grows a design-centering stage of its own.
+- The analog-sizing epic tracks the integrated sizing objective. [#705](https://github.com/2AMLogic/klayout-tools/issues/705)

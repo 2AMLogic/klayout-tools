@@ -13,7 +13,7 @@ import pytest
 from klayout_tools import post_route_sta
 from klayout_tools import post_route_sta_electrical as electrical
 from klayout_tools.post_route_sta import run_sta
-from test_post_route_sta import _live_sky130_env, _write_request
+from test_post_route_sta import _LIVE_ONLY, _write_request
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -98,11 +98,7 @@ def test_electrical_checks_block_has_slack_classes_issue_5241():
         assert block[key]["worst_slack_ns"] is None
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_min_pulse_width_issue_5241(tmp_path):
     """Engine integration (issue #5241): a 2 ns clock meets every liberty
     min-pulse-width limit (checked, zero); a 0.05 ns clock violates them
@@ -131,3 +127,55 @@ def test_live_engine_min_pulse_width_issue_5241(tmp_path):
     assert fast["min_pulse_width"]["worst_pin"].endswith("/CLK")
     assert fast["min_period"]["coverage"] == "checked"
     assert fast["min_period"]["violation_count"] == 0
+
+
+@pytest.mark.parametrize("marker", ["(violated)", "(Violated)"])
+@pytest.mark.parametrize("check", ["min_pulse_width", "min_period"])
+@pytest.mark.parametrize("malformed", [None, "alone", "mixed"])
+def test_case_variant_slack_rows_preserve_coverage(check, marker, malformed):
+    """A marked but unreadable row makes only its own class unsupported."""
+    pulse = "ff1/CLK (low) 0.08338 0.00782 -0.07557"
+    period = "ff2/CLK 0.151 0.100 -0.051"
+    bodies = {
+        "min_pulse_width": f"{pulse} (VIOLATED)",
+        "min_period": f"{period} (VIOLATED)",
+    }
+    row = pulse if check == "min_pulse_width" else period
+    if malformed == "alone":
+        rows = ["unrecognized columns"]
+    elif malformed == "mixed":
+        rows = [row, "unrecognized columns"]
+    else:
+        rows = [row]
+    bodies[check] = "\n".join(f"{text} {marker}" for text in rows)
+    stdout = "\n".join(
+        _slack_block(
+            begin,
+            end,
+            f"{bodies[key]}\nKLT_ELECTRICAL_NET example {marker}\nKLT_ELECTRICAL_OK",
+        )
+        for key, begin, end in (
+            ("min_pulse_width", electrical._MIN_PULSE_BEGIN, electrical._MIN_PULSE_END),
+            ("min_period", electrical._MIN_PERIOD_BEGIN, electrical._MIN_PERIOD_END),
+        )
+    )
+    block = post_route_sta._electrical_checks_block(stdout, False)
+    for key, pin, slack in (
+        ("min_pulse_width", "ff1/CLK", -0.07557),
+        ("min_period", "ff2/CLK", -0.051),
+    ):
+        result = block[key]
+        if key == check and malformed:
+            assert (
+                result["coverage"],
+                result["violation_count"],
+                result["worst_pin"],
+                result["worst_slack_ns"],
+            ) == ("unsupported", None, None, None)
+        else:
+            assert (
+                result["coverage"],
+                result["violation_count"],
+                result["worst_pin"],
+                result["worst_slack_ns"],
+            ) == ("checked", 1, pin, slack)

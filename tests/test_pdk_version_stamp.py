@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 
@@ -64,6 +65,19 @@ def test_git_clean_and_dirty(tmp_path):
     assert pdk.read_version(str(v)) == f"git:{head}"
     (v / "libs.tech" / "f").write_text("b", encoding="utf-8")
     assert pdk.read_version(str(v)) == f"git:{head}-dirty"
+
+
+@needs_git
+def test_git_stamp_distinguishes_untracked_and_indexed_files(tmp_path):
+    variant = _variant(tmp_path / "root" / "variant")
+    (variant / "model.lib").write_text("model", encoding="utf-8")
+    head = _commit_all(variant.parent)
+    extra = variant / "extra.lib"
+    extra.write_text("local model", encoding="utf-8")
+
+    assert pdk.read_version(str(variant)) == f"git:{head}"
+    _git(variant, "add", "extra.lib")
+    assert pdk.read_version(str(variant)) == f"git:{head}-dirty"
 
 
 @needs_git
@@ -154,3 +168,61 @@ def test_sources_wins_over_store(tmp_path):
 )
 def test_store_version_malformed_is_none(tmp_path, payload):
     assert pdk.read_version(str(_store_bundle(tmp_path, payload))) is None
+
+
+# --------------------------------------------------------------------------- #
+# Issue #5624: the stamp is also accepted at the variant root (where the
+# fleet's provisioner writes it); the nearest stamp wins.
+# --------------------------------------------------------------------------- #
+
+
+def test_store_stamp_at_variant_root(tmp_path):
+    v = _variant(tmp_path / "r" / "v")
+    (v / ".pdk-store.json").write_text(
+        '{"version": "2026.11.14", "sha256": "9f2c"}', encoding="utf-8"
+    )
+    assert pdk.read_version(str(v)) == "store:2026.11.14"
+
+
+def test_store_stamp_at_variant_root_via_symlink(tmp_path):
+    # The repro's shape: <root>/<variant> is a real path through a symlinked
+    # install and the stamp sits inside it.
+    link = _store_bundle(tmp_path, None)
+    (link / ".pdk-store.json").write_text('{"version": "2026.11.14"}', encoding="utf-8")
+    assert pdk.read_version(str(link)) == "store:2026.11.14"
+
+
+def test_store_stamp_nearest_wins(tmp_path):
+    v = _variant(tmp_path / "r" / "v")
+    (v / ".pdk-store.json").write_text('{"version": "near"}', encoding="utf-8")
+    (tmp_path / "r" / ".pdk-store.json").write_text(
+        '{"version": "far"}', encoding="utf-8"
+    )
+    assert pdk.read_version(str(v)) == "store:near"
+
+
+def test_store_stamp_nearest_unusable_is_not_skipped(tmp_path):
+    # A present-but-malformed nearest stamp must not fall through to a valid
+    # farther one (mirrors read_fetched_marker's nearest-wins discipline).
+    v = _variant(tmp_path / "r" / "v")
+    (v / ".pdk-store.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "r" / ".pdk-store.json").write_text(
+        '{"version": "far"}', encoding="utf-8"
+    )
+    assert pdk.read_version(str(v)) is None
+
+
+def test_store_sha256_reader(tmp_path):
+    from klayout_tools import pdk_store
+
+    v = _variant(tmp_path / "r" / "v")
+    digest = "9F2c0A5b" * 8
+    (v / ".pdk-store.json").write_text(
+        json.dumps({"version": "1", "sha256": digest}), encoding="utf-8"
+    )
+    assert pdk_store.read_store_sha256(str(v)) == digest
+    (tmp_path / "r" / ".pdk-store.json").write_text(
+        '{"version": "2"}', encoding="utf-8"
+    )
+    (v / ".pdk-store.json").unlink()
+    assert pdk_store.read_store_sha256(str(v)) is None

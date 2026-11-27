@@ -183,9 +183,20 @@ _operator_gate_title_prefix_match() {
 # Deliberately EXCLUDES `Blocked by` (that phrase drives the distinct
 # loom:blocked machinery) and the `- [ ]` task-list form, exactly as
 # --auto-stack does. Emits the deduplicated referenced issue numbers.
+# The sed stage between the two greps is the #14732/#14750 parent-reference
+# mask the other two-stage consumers ship (byte-identical sed, pinned in
+# test-dependency-parse.sh — no fifth variant): a ref introduced by
+# `Part of (Epic )#N` on a mixed line names the issue's PARENT, not a
+# prerequisite, so it is masked before extraction — otherwise an epic parent
+# carrying an operator-gate label would flag every phase issue whose body
+# uses Loom's generated `Part of Epic #N. Depends on #M` shape (#15021).
+# The mask keys off the introducing phrase, never the number, so a parent
+# genuinely re-declared as a dependency still counts. warn-out-of-set-deps.sh
+# stays the one deliberate opt-out (reporting `Part of` refs is its job).
 parse_operator_gate_deps() {
     local body="$1"
     echo "$body" | grep -E '(Depends on|Requires)[*_:[:space:]]*#[0-9]+' \
+        | sed -E 's/[Pp][Aa][Rr][Tt] [Oo][Ff][*_:.[:space:]]*([Ee][Pp][Ii][Cc][*_:.[:space:]]*)?([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+/ /g' \
         | grep -oE '#[0-9]+' | tr -d '#' | sort -un
 }
 

@@ -16,15 +16,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim
+from ._jsonnum import is_int
 from .characterize_leg import run_sim_leg
 
 
 @dataclass(frozen=True)
 class CellLegs:
-    """The merged outcome of a cell's leg(s): the flat measurement values, a
-    report shaped like one leg's, and the (first) leg's artifact paths."""
+    """Merged measurements, shared plan metadata, and the first leg's artifacts."""
 
     values: dict[str, Any]
+    plan_metadata: dict[str, Any]
     sim_report: dict[str, Any]
     testbench_path: str
     sim_request_path: str
@@ -40,7 +41,7 @@ def resolve_split_grid(
         value, where = spec.get("split_grid", 1), "request.options.split_grid"
     else:
         value, where = cli_value, "--split-grid"
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if not is_int(value) or value < 1:
         raise error_cls(f"{where} must be an integer >= 1, got {value!r}")
     return value
 
@@ -62,7 +63,6 @@ def split_rows(slew_count: int, split_grid: int) -> list[tuple[int, ...]]:
 def run_cell_legs(
     *,
     work_dir: str,
-    plan: dict[str, Any],
     split_grid: int,
     slew_count: int,
     build_plan: Callable[[frozenset[int] | None], dict[str, Any]],
@@ -75,16 +75,15 @@ def run_cell_legs(
 ) -> CellLegs:
     """Run the cell's leg(s). One leg (the default) lives in ``work_dir``;
     with a split, chunk ``k`` (1-based) lives in ``work_dir/grid-<k>/`` so
-    ``--resume`` and batch re-attach work per chunk. ``plan`` is the
-    full-grid plan, used as-is for the single leg."""
+    ``--resume`` and batch re-attach work per chunk."""
     chunks = split_rows(slew_count, split_grid)
     split = len(chunks) > 1
     merged: dict[str, Any] = {}
-    first: tuple[dict[str, Any], str, str, str] | None = None
+    first: tuple[dict[str, Any], dict[str, Any], tuple[str, str, str]] | None = None
     runtime_s = 0.0
     for k, rows in enumerate(chunks, start=1):
         leg_dir = os.path.join(work_dir, f"grid-{k}") if split else work_dir
-        leg_plan = build_plan(frozenset(rows)) if split else plan
+        leg_plan = build_plan(frozenset(rows) if split else None)
         label = f"grid chunk {k}/{len(chunks)} (slew rows {rows[0]}-{rows[-1]}): "
         paths = (
             os.path.join(leg_dir, "testbench.spice"),
@@ -123,10 +122,15 @@ def run_cell_legs(
         entries = report.get("corners") or [{}]
         runtime_s += float(entries[0].get("runtime_s") or 0.0)
         if first is None:
-            first = (report, *paths)
+            metadata = {
+                key: leg_plan[key]
+                for key in ("arc_count", "window", "leakage_states", "cap_points")
+            }
+            first = (metadata, report, paths)
+        del leg_plan
     assert first is not None
-    report = first[0]
+    metadata, report, paths = first
     if split:
         report = copy.deepcopy(report)
         report["corners"][0]["runtime_s"] = runtime_s
-    return CellLegs(merged, report, first[1], first[2], first[3])
+    return CellLegs(merged, metadata, report, *paths)

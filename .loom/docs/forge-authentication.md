@@ -41,6 +41,10 @@ curl -s -H "Authorization: token $GITEA_TOKEN" \
   https://your-gitea-instance/api/v1/user | jq .login
 ```
 
+> Driving Loom **role steps** (Builder/Judge/Doctor) against a local Gitea —
+> the qualification record, what works, and the filed gaps — is documented
+> separately in [`gitea-single-stage.md`](gitea-single-stage.md).
+
 ### Required Token Permissions
 
 Gitea API tokens need the following scopes (if your Gitea version supports scoped tokens):

@@ -8,8 +8,16 @@ name: Release
 #   tag      push to main touching pyproject.toml: when HEAD is that release
 #            commit, tag it vX.Y.Z and dispatch publish.yml on the tag.
 #
-# Neither job auto-merges. Both run scripts/check_native_extras.py first and,
-# on failure, file/refresh a single tracking issue instead of a PR or tag.
+# Neither job auto-merges. Both run scripts/check_native_extras.py first and
+# open no PR or tag when it fails.
+#
+#   report-failure  runs after either job fails and files/refreshes ONE open
+#            "Automated release blocked" issue (failed step, diagnostic, run
+#            URL) with the workflow's own token, so it works even when the
+#            release-PR credential is the thing that failed (issue #6911).
+#
+# The helper logic (setup check, branch recovery, reporting) lives in
+# scripts/release_ci.py, which tests/test_release_ci*.py exercise.
 #
 # Token caveats (RELEASING.md): a PR or tag made with GITHUB_TOKEN does not
 # trigger other workflows' push/pull_request events. Tagging is solved by
@@ -56,7 +64,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      issues: write
+      actions: read # the release-lag report names the last failed release run
     env:
       GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
@@ -99,21 +107,20 @@ jobs:
             > "$RUNNER_TEMP/native.log" 2>&1 || status=$?
           cat "$RUNNER_TEMP/native.log"
           echo "ok=$([ "$status" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          # Fail the job here: the report-failure job reads this step's output.
+          exit "$status"
 
-      - name: Report blocked release (single tracking issue)
-        if: steps.native.outputs.ok == 'false'
+      - name: Check the release PR can be created
+        id: prsetup
+        # Only on the publishing path: due, no open release PR, native gate
+        # passed, not a dry run. Runs before anything is committed or pushed.
+        if: steps.native.outputs.ok == 'true' && !inputs.dry_run
+        env:
+          RELEASE_TOKEN_CONFIGURED: ${{ secrets.RELEASE_BOT_TOKEN != '' }}
         run: |
-          title="Automated release blocked: klt-*-native pin not published"
-          body="$(printf 'The release workflow stopped before opening a release PR (no PR, no tag).\n\nRun: %s/%s/actions/runs/%s\n\n```\n%s\n```\n\nSee docs/releasing-native.md. Re-run the Release workflow once the pin is on PyPI; this issue is refreshed in place, not re-filed.' \
-            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 "$RUNNER_TEMP/native.log")")"
-          num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
-            --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
-          if [ -n "$num" ]; then
-            gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
-          else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
-          fi
-          exit 1
+          args=()
+          if [ "$RELEASE_TOKEN_CONFIGURED" = "true" ]; then args+=(--release-token); fi
+          python3 -I scripts/release_ci.py check-pr-setup --repo "$GITHUB_REPOSITORY" "${args[@]}"
 
       - name: Prepare the release commit
         id: prep
@@ -152,14 +159,14 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Open the release PR
+      - name: Push the release branch and open the PR
         if: steps.prep.outputs.version != '' && !inputs.dry_run
-        run: |
-          v="${{ steps.prep.outputs.version }}"
-          git push origin "release/v$v"
-          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "release/v$v" \
-            --title "chore(release): bump version to $v" \
-            --body "Automated release PR (RELEASING.md, Automated release). Merging it makes the tag job tag \`v$v\` and dispatch \`publish.yml\`. Not auto-merged."
+        env:
+          VERSION: ${{ steps.prep.outputs.version }}
+        # Pushes release/vX.Y.Z, opens the PR, and on a PR failure reconciles
+        # the exact branch it pushed (open PR -> keep; none -> delete under an
+        # expected-SHA lease; inconclusive -> keep). See scripts/release_ci.py.
+        run: python3 -I scripts/release_ci.py publish --repo "$GITHUB_REPOSITORY" --version "$VERSION"
 
   tag:
     name: Tag and publish a merged release commit
@@ -205,20 +212,10 @@ jobs:
             > "$RUNNER_TEMP/native.log" 2>&1 || status=$?
           cat "$RUNNER_TEMP/native.log"
           echo "ok=$([ "$status" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          # Fail the job here: the report-failure job reads this step's output.
+          exit "$status"
 
-      - name: Report blocked tag (single tracking issue)
-        if: steps.native.outputs.ok == 'false'
-        run: |
-          title="Automated release blocked: klt-*-native pin not published"
-          body="$(printf 'The tag job refused to tag v%s (no tag, no publish).\n\nRun: %s/%s/actions/runs/%s\n\n```\n%s\n```\n\nPublish the pin (docs/releasing-native.md), then re-run this job.' \
-            "${{ steps.detect.outputs.version }}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 "$RUNNER_TEMP/native.log")")"
-          num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
-            --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
-          if [ -n "$num" ]; then gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
-          else gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"; fi
-          exit 1
-
-      - name: Tag the bump commit and dispatch publish
+      - name: Tag the bump commit
         if: steps.native.outputs.ok == 'true'
         run: |
           v="v${{ steps.detect.outputs.version }}"
@@ -226,6 +223,13 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$v" -m "Release ${v#v}" "$GITHUB_SHA"
           git push origin "refs/tags/$v"
+
+      # Its own step so a failed dispatch after a successful tag push names
+      # itself in the blocked-release issue (the tag exists; do not re-tag).
+      - name: Dispatch publish on the tag
+        if: steps.native.outputs.ok == 'true'
+        run: |
+          v="v${{ steps.detect.outputs.version }}"
           # GITHUB_TOKEN tag pushes do not trigger publish.yml's `push: tags`;
           # workflow_dispatch on the tag ref does, and builds from the tag.
           gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$v"
@@ -252,3 +256,26 @@ jobs:
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
               --body "Regenerating after tagging differs from the release PR's table (a deck changed between PR head and merge). Run \`python scripts/generate_deck_history.py\` and commit. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           fi
+
+  report-failure:
+    name: Report a failed release job
+    needs: [prepare, tag]
+    if: ${{ always() && (needs.prepare.result == 'failure' || needs.tag.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    env:
+      # The workflow's own token with the issues permission above: never
+      # RELEASE_BOT_TOKEN, which may be exactly what failed.
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: File or refresh the "Automated release blocked" issue
+        run: |
+          python3 -I scripts/release_ci.py report-failure --repo "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

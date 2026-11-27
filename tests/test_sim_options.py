@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
-from klayout_tools import op_sanity, sim, sim_remote
+from klayout_tools import op_sanity, sim, sim_remote, sim_xyce_refusals
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -184,17 +184,12 @@ def test_unrun_corner_report_carries_options():
 
 def test_xyce_refuses_an_options_axis():
     with pytest.raises(sim.SimError, match="corners.options"):
-        sim._enforce_xyce_support_boundary(
+        sim_xyce_refusals.enforce_support_boundary(
             engine="xyce",
             backend="local",
             corners_spec={"options": {"reltol": [1e-3]}},
             monte_carlo_declared=False,
             fail_fast_probe=False,
-            osdi_preload_declared=False,
-            expr_measurements_declared=False,
-            save_mode_declared=False,
-            analysis_steps_declared=False,
-            crossings_declared=False,
         )
 
 

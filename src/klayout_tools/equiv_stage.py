@@ -18,6 +18,7 @@ import os
 import re
 from typing import Any
 
+from ._jsonnum import is_int
 from ._provenance import _combined_content_hash, content_hash
 
 #: ``equiv_status``'s own exact success line (verified live against the
@@ -209,11 +210,7 @@ def _stage_record_shape_error(data: Any, fingerprint: str) -> str | None:
     ):
         return "record's blacklist is not a list of wire names"
     refinements = data.get("refinements")
-    if (
-        not isinstance(refinements, int)
-        or isinstance(refinements, bool)
-        or (refinements < 0)
-    ):
+    if not is_int(refinements) or refinements < 0:
         return "record's refinement count is not a non-negative integer"
     return None
 

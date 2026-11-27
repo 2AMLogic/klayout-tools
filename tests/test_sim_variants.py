@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import sim, sim_xyce_refusals
 
 
 def _variants():
@@ -96,15 +96,31 @@ def test_duplicate_and_empty_rejected():
 def test_variant_overrides_matching_supply_v_key():
     points = sim._expand_corners(
         {
-            "supply_v": {"va": [1.2, 1.5], "vc": [5.0, 5.0]},
+            "supply_v": {"va": [1.2, 1.5], "vc": [5.0, 6.0]},
             "variants": [{"name": "t", "sources": {"va": 0.9}}],
         },
         [],
     )
     assert [p.supply_v for p in points] == [
         {"va": 0.9, "vc": 5.0},
-        {"va": 0.9, "vc": 5.0},
+        {"va": 0.9, "vc": 6.0},
     ]
+
+
+def test_variant_override_collapsing_two_rungs_to_one_id_is_refused():
+    # Issue #5870: with every rung overridden to the same values the two
+    # declared points resolve to one corner_id -- they would share one
+    # artifact directory and one simulation would be mis-attributed to
+    # both -- so the expansion refuses the grid instead of silently
+    # returning the twin points it used to.
+    with pytest.raises(sim.SimError, match="point 1 duplicates point 0"):
+        sim._expand_corners(
+            {
+                "supply_v": {"va": [1.2, 1.5], "vc": [5.0, 5.0]},
+                "variants": [{"name": "t", "sources": {"va": 0.9}}],
+            },
+            [],
+        )
 
 
 def test_exclude_matches_on_variant():
@@ -149,7 +165,7 @@ def test_monte_carlo_samples_keep_variant_ids_distinct():
 
 def test_xyce_refuses_variants():
     with pytest.raises(sim.SimError, match="alter"):
-        sim._enforce_xyce_support_boundary(
+        sim_xyce_refusals.enforce_support_boundary(
             engine="xyce",
             backend="local",
             corners_spec={"variants": _variants()},

@@ -60,7 +60,6 @@ def _split_rollup_report(
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
     _install_fake_batch_transport(monkeypatch, runner=runner)
-    shard_of_job: dict[str, int] = {}
 
     def _capture(argv, timeout_s):
         captured = uploaded_request_of(argv)
@@ -68,7 +67,13 @@ def _split_rollup_report(
             document, job_id = captured
             points = document["_explicit_points"]
             index = int(points[0]["temperature_c"]) // cap
-            shard_of_job[job_id] = index
+            if index == lost_shard:
+                runner.queue(
+                    f"launch --job {job_id} --apply",
+                    fake_completed(
+                        returncode=1, stderr="create-fleet refused every pool"
+                    ),
+                )
             runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
@@ -81,14 +86,6 @@ def _split_rollup_report(
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
 
-    real_launch = sb.launch_job
-
-    def _maybe_lose(config, job_id, *, runner=None):
-        if lost_shard is not None and shard_of_job.get(job_id) == lost_shard:
-            raise sb.BatchError("create-fleet refused every pool")
-        return real_launch(config, job_id, runner=runner)
-
-    monkeypatch.setattr(sb, "launch_job", _maybe_lose)
     monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
 
     _write_body(tmp_path)

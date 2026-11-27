@@ -192,6 +192,68 @@ out="$(printf 'work_log/WORK_LOG_2026-08.md\nsrc/main.rs\n' | docs_only_fast_pat
 assert_eq "NOT ELIGIBLE: src/main.rs" "$out" "an archive file mixed with a non-docs file is ineligible"
 
 echo
+echo "--- closing-reference condition (#14182): a docs-only diff that closes an issue is ineligible ---"
+
+# Mirror of the shipped docs_only_fast_path_closing_check(), extracted from
+# judge.md so this suite exercises the documented code, not a hand copy. `gh`
+# is stubbed: GH_STUB_OUT is its stdout, GH_STUB_RC its exit status.
+gh() { printf '%s' "${GH_STUB_OUT-}"; return "${GH_STUB_RC:-0}"; }
+closing_fn_block() {
+    awk '/^docs_only_fast_path_closing_check\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$1"
+}
+eval "$(closing_fn_block "$JUDGE_MD")"
+
+GH_STUB_RC=0 GH_STUB_OUT='closers=' out="$(docs_only_fast_path_closing_check 1)"
+assert_eq "ELIGIBLE" "$out" "a PR with an empty closing set stays eligible"
+
+GH_STUB_RC=0 GH_STUB_OUT='closers=42' out="$(docs_only_fast_path_closing_check 1)"
+assert_eq "NOT ELIGIBLE: closes #42" "$out" "a PR closing one issue is ineligible"
+
+GH_STUB_RC=0 GH_STUB_OUT='closers=42,77' out="$(docs_only_fast_path_closing_check 1)"
+assert_eq "NOT ELIGIBLE: closes #42, #77" "$out" "a PR closing several issues is ineligible"
+
+GH_STUB_RC=1 GH_STUB_OUT='' out="$(docs_only_fast_path_closing_check 1)"
+assert_eq "NOT ELIGIBLE: closing-reference read failed" "$out" \
+    "a failed read fails closed (not treated as 'no closers')"
+
+GH_STUB_RC=1 GH_STUB_OUT='closers=' out="$(docs_only_fast_path_closing_check 1)"
+assert_eq "NOT ELIGIBLE: closing-reference read failed" "$out" \
+    "a non-zero exit fails closed even when stdout looks like an empty set"
+
+GH_STUB_RC=0 GH_STUB_OUT='' out="$(docs_only_fast_path_closing_check 1)"
+assert_eq "NOT ELIGIBLE: closing-reference read returned no proof" "$out" \
+    "an empty-because-errored read (exit 0, no 'closers=' proof) fails closed"
+
+unset -f gh
+
+JUDGE_CLOSING="$(closing_fn_block "$JUDGE_MD" | grep -v '^[[:space:]]*#')"
+CHAMPION_CLOSING="$(closing_fn_block "$CHAMPION_MD" | grep -v '^[[:space:]]*#')"
+assert_contains "$JUDGE_CLOSING" "docs_only_fast_path_closing_check() {" "judge.md ships docs_only_fast_path_closing_check()"
+assert_eq "$JUDGE_CLOSING" "$CHAMPION_CLOSING" \
+    "judge.md and champion-pr-merge.md closing-check code is identical (comments aside)"
+
+assert_doc_contains "$JUDGE_MD" \
+    'ELIGIBILITY=$(docs_only_fast_path_closing_check "$PR_NUMBER")' \
+    "judge.md folds the closing check into ELIGIBILITY"
+assert_doc_contains "$CHAMPION_MD" \
+    'FAST_PATH_RESULT=$(docs_only_fast_path_closing_check "$PR_NUMBER")' \
+    "champion-pr-merge.md folds the closing check into FAST_PATH_RESULT"
+assert_doc_contains "$JUDGE_MD" "closingIssuesReferences" "judge.md reads closingIssuesReferences"
+assert_doc_contains "$CHAMPION_MD" "closingIssuesReferences" "champion-pr-merge.md reads closingIssuesReferences"
+
+# Inline PROSE restatements of the eligibility condition (#14321). The LLM
+# executing these prompts reads the lead-in / dispatch step before the code
+# block, so prose narrower than the code block's gate (file list only) would
+# grant a fast path the code refuses. Pin the closing-issue clause so adding a
+# condition to the code block without updating its prose turns this red.
+assert_doc_contains "$CHAMPION_MD" \
+    "and the PR has no closing-issue" \
+    "champion-pr-merge.md fast-path lead-in states the no-closing-issue condition (#14182)"
+assert_doc_contains "$JUDGE_MD" \
+    "and the PR has no closing-issue reference" \
+    "judge.md Primary Queue step 4b states the no-closing-issue condition (#14182)"
+
+echo
 echo "--- Judge and Champion allowlist + archive pattern are byte-identical (#12636) ---"
 
 fast_path_block() {
@@ -279,6 +341,526 @@ assert_doc_contains "$GUIDE_MD" \
 assert_doc_contains "$GUIDE_MD" \
     "Judge and Champion never trust it" \
     "guide.md documents that the marker is informational, not authoritative"
+
+# Regression guard for #14176: a closing keyword sitting directly before an
+# issue reference in the docs-PR body (`drops closed #286`) makes GitHub
+# parse it as a closing link, so merging a docs-only PR would close an
+# unrelated issue. The heredoc must carry the keyword-safety note, the
+# post-create backstop must read closingIssuesReferences and close the PR
+# when it is non-empty, and the heredoc itself must stay free of
+# closing-keyword adjacency — the note included, since it is posted
+# verbatim (its examples use "<keyword> #N" placeholders instead).
+echo
+echo "--- Doc pins: docs-PR body keyword safety (#14176) ---"
+
+# Mirror of the PROMPT_DIR probe above (#6725): installed layout keeps
+# .agents/skills at the repo root, source-tree layout under defaults/.
+if [[ -d "$SCRIPTS_DIR/../../.claude/commands/loom" ]]; then
+    GUIDE_SKILL_MD="$SCRIPTS_DIR/../../.agents/skills/loom-guide/SKILL.md"
+else
+    GUIDE_SKILL_MD="$SCRIPTS_DIR/../.agents/skills/loom-guide/SKILL.md"
+fi
+
+heredoc_free_of_closing_keyword() { # file description
+    local region
+    region="$(sed -n "/cat <<'PRBODY'/,/^PRBODY$/p" "$1")"
+    if grep -Eq '(close[sd]?|fix(es|ed)?|resolve[sd]?) #[0-9]' <<<"$region"; then
+        fail "$2 (found closing-keyword adjacency in $1's PRBODY heredoc)"
+    else
+        pass "$2"
+    fi
+}
+
+for f in "$GUIDE_MD" "$GUIDE_SKILL_MD"; do
+    assert_doc_contains "$f" \
+        "Keyword safety (#14176)" \
+        "$(basename "$f") PRBODY heredoc carries the closing-keyword-safety note"
+    assert_doc_contains "$f" \
+        "closingIssuesReferences" \
+        "$(basename "$f") post-create backstop reads closingIssuesReferences"
+    heredoc_free_of_closing_keyword "$f" \
+        "$(basename "$f") PRBODY heredoc is free of closing-keyword adjacency"
+done
+
+# Both shipped mirrors must stay byte-identical across the hunks #14176
+# touches: the PRBODY heredoc (with the note) through the post-create
+# backstop and the lock release that must still run afterward.
+extract_docs_pr_region() {
+    awk '/cat <<'"'"'PRBODY'"'"'/{inregion=1}
+         inregion {print}
+         inregion && /docs-guide-lock\.sh release/{exit}' "$1"
+}
+assert_eq "$(extract_docs_pr_region "$GUIDE_MD")" \
+          "$(extract_docs_pr_region "$GUIDE_SKILL_MD")" \
+          "guide.md and SKILL.md docs-PR hunks stay byte-identical"
+
+echo
+echo "--- WORK_LOG record gate (#13760): new records verify against the base repository ---"
+
+# Extract the shipped function from judge.md so this suite exercises the
+# documented code, not a hand copy (same extraction the closing check above
+# uses). No column-0 `}` may appear inside the function before its end.
+worklog_fn_block() {
+    awk '/^docs_only_fast_path_worklog_check\(\) \{/{p=1} p{print} p && /^\}$/{exit}' "$1"
+}
+WL_FN="$(worklog_fn_block "$JUDGE_MD")"
+[[ -n "$WL_FN" ]] || { echo "FATAL: docs_only_fast_path_worklog_check() not found in judge.md"; exit 1; }
+assert_contains "$(printf '%s\n' "$WL_FN" | grep -v '^[[:space:]]*#')" "docs_only_fast_path_worklog_check() {" \
+    "judge.md ships docs_only_fast_path_worklog_check()"
+
+# Stub `gh`: the PR's base repository is owner/mine (a second, foreign repo
+# owner/other exists but the gate must NEVER query it), reached through
+# WL_BASE_URL — the PR's own URL, answered for `pr view --json url` and then
+# run through the caller's --jq filter with real jq, exactly as gh does. gh
+# has no `baseRepository` field (#15005): any other --json field fails like
+# real gh, so this suite can no longer pass against a field gh does not have
+# (the earlier stub answered every `gh pr view` with the final value). The
+# diff comes from WL_DIFF; the issues/N reads are recorded to WL_CALL_LOG so
+# the tests assert the target actually queried. FAIL_LOOKUP=1 simulates a
+# temporary forge failure on the record reads.
+WL_CALL_LOG="$(mktemp)"
+gh() {
+    case "$1" in
+        pr)
+            case "$2" in
+                view)
+                    local json='' filter=''
+                    shift 2
+                    while [ $# -gt 0 ]; do
+                        case "$1" in
+                            --json) json="${2-}" ;;
+                            --jq) filter="${2-}" ;;
+                        esac
+                        shift
+                    done
+                    if [ "$json" != url ]; then
+                        echo "Unknown JSON field: \"$json\"" >&2
+                        return 1
+                    fi
+                    [ "${WL_BASE_RC:-0}" -eq 0 ] || return "$WL_BASE_RC"
+                    local url="${WL_BASE_URL-https://github.com/owner/mine/pull/1}"
+                    [ -n "$url" ] || return 0
+                    jq -rn --arg url "$url" '{url: $url} | '"${filter:-.}"
+                    return $?
+                    ;;
+                diff) printf '%s' "${WL_DIFF:-}"; return "${WL_DIFF_RC:-0}" ;;
+            esac ;;
+        api)
+            case "$2" in
+                'repos/{owner}/{repo}/pulls/'*)
+                    printf '%s' "${WL_BASE_OUT-owner/mine}"; return "${WL_BASE_RC:-0}" ;;
+            esac
+            printf '%s\n' "$2" >> "$WL_CALL_LOG"
+            [[ "${FAIL_LOOKUP:-}" == 1 ]] && return 1
+            case "$2" in
+                repos/owner/mine/issues/5) printf 'Add widget\ttrue\tclosed\ttrue'; return 0 ;;
+                repos/owner/mine/issues/7) printf 'Fix gizmo\tfalse\tclosed\tfalse'; return 0 ;;
+                repos/owner/mine/issues/10) printf 'Draft thing\ttrue\topen\tfalse'; return 0 ;;
+                repos/owner/mine/issues/11) printf 'Open thing\tfalse\topen\tfalse'; return 0 ;;
+                repos/owner/mine/issues/12) printf 'Closed unmerged\ttrue\tclosed\tfalse'; return 0 ;;
+                *) return 1 ;;
+            esac ;;
+    esac
+    return 1
+}
+eval "$WL_FN"
+
+# A WORK_LOG-only diff adding one merged PR and one closed issue of this repo.
+GOOD_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **PR #5**: Add widget
++- **Issue #7** (closed): Fix gizmo'
+
+# Pure archive rotation: every added record is matched by an identical removal
+# in the same diff, so nothing is new and nothing needs verifying.
+ROTATION_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,4 +1,2 @@
+-- **PR #5**: Add widget
+-- **Issue #7** (closed): Fix gizmo
+diff --git a/work_log/WORK_LOG_2026-10.md b/work_log/WORK_LOG_2026-10.md
+--- /dev/null
++++ b/work_log/WORK_LOG_2026-10.md
+@@ -0,0 +1,2 @@
++- **PR #5**: Add widget
++- **Issue #7** (closed): Fix gizmo'
+
+# Rotation plus one genuinely NEW record (added, never removed).
+ROTATION_PLUS_NEW_DIFF="$ROTATION_DIFF
+diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -2,1 +4,2 @@
++- **PR #9**: Not in this repo"
+
+# Full-literal fixtures (never derived via ${var/pat/rep} — that pattern is a
+# GLOB and matches across newlines, silently mangling multi-line diffs; and
+# assignment-only statements like `VAR=x out="$(fn)"` persist the assignment,
+# so every invocation below puts its env INSIDE the command substitution).
+ABSENT_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **PR #407**: sim: probe the two Row 4b band-edge kickback rejects (supplement)
++- **Issue #7** (closed): Fix gizmo'
+
+TITLE_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **PR #5**: Totally different title
++- **Issue #7** (closed): Fix gizmo'
+
+ISSUE_AS_PR_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **Issue #5** (closed): Add widget
++- **Issue #7** (closed): Fix gizmo'
+
+PR_AS_ISSUE_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **PR #5**: Add widget
++- **PR #7**: Fix gizmo'
+
+FOREIGN_REPO_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **PR owner/other#5**: Add widget
++- **Issue #7** (closed): Fix gizmo'
+
+MIXED_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **PR #5**: Add widget
++- **PR #99**: Not there'
+
+UNPARSEABLE_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,4 @@
++### 2026-11-19
++
++- **PR #zz**: Garbage'
+
+# #14532 review: a duplicate number's LATER record must be verified against
+# the cached fetch, not skipped — conflicting title and wrong kind, in both
+# orders.
+DUP_TITLE_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,6 @@
++### 2026-11-19
++
++- **PR #5**: Add widget
++- **PR #5**: sim: probe the Row 4b band-edge kickback rejects'
+
+DUP_TITLE_REVERSED_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,6 @@
++### 2026-11-19
++
++- **PR #5**: sim: probe the Row 4b band-edge kickback rejects
++- **PR #5**: Add widget'
+
+DUP_KIND_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,6 @@
++### 2026-11-19
++
++- **PR #5**: Add widget
++- **Issue #5** (closed): Add widget'
+
+DUP_KIND_REVERSED_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,6 @@
++### 2026-11-19
++
++- **Issue #5** (closed): Add widget
++- **PR #5**: Add widget'
+
+# State fixtures: an open PR, a closed-unmerged PR, and an open issue — the
+# target set is the base repository's merged PRs and closed issues (#14532).
+OPEN_PR_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **PR #10**: Draft thing'
+
+UNMERGED_PR_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **PR #12**: Closed unmerged'
+
+OPEN_ISSUE_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@
++### 2026-11-19
++
++- **Issue #11** (closed): Open thing'
+
+# Realistic no-op diffs (#14532 review): WORK_PLAN.md's generated region
+# renders backlog bullets as `- **#N**: Title` and README prose carries
+# plain bold bullets — the same bold-bullet SHAPE as WORK_LOG records but in
+# different files. The scan is scoped to WORK_LOG.md / work_log/WORK_LOG_*.md
+# (AC 3), so these must stay no-ops, not "unparseable WORK_LOG record".
+WORKPLAN_ONLY_DIFF='diff --git a/WORK_PLAN.md b/WORK_PLAN.md
+--- a/WORK_PLAN.md
++++ b/WORK_PLAN.md
+@@ -1,3 +1,7 @@
++## Backlog
++
++- **#13816**: fix(hooks): treat >(cmd) process substitution as non-target in vendored guard
++- **#14301**: Add the thing'
+
+README_BOLD_DIFF='diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,4 @@
++## Notes
++
++- **Status**: green'
+
+# File scoping must not skip real records: WORK_PLAN bullets ignored, the
+# WORK_LOG record in the same diff still verified.
+WORKPLAN_PLUS_RECORD_DIFF="$WORKPLAN_ONLY_DIFF
+diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,4 @@
++### 2026-11-19
++
++- **PR #99**: Not there"
+
+: >"$WL_CALL_LOG"
+out="$(WL_DIFF="$GOOD_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "ELIGIBLE" "$out" "a diff adding a matching PR and closed issue is eligible"
+assert_eq "repos/owner/mine/issues/5
+repos/owner/mine/issues/7" "$(cat "$WL_CALL_LOG")" \
+    "the gate read the base repository owner/mine, once per distinct number"
+if grep -q 'owner/other' "$WL_CALL_LOG"; then
+    fail "the gate queried the foreign repository"
+else
+    pass "the gate never queried the foreign repository"
+fi
+
+out="$(FAIL_LOOKUP=1 WL_DIFF="$GOOD_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #5 does not exist in owner/mine, or the read failed — if the record does not exist this IS a content verdict (#13760); if the read failed it is an environment failure. Either way, do NOT treat this as a passed or waived #13760 content check" "$out" \
+    "a temporary forge failure on the target read is not eligible (fails closed, states both readings)"
+
+out="$(WL_DIFF="" docs_only_fast_path_worklog_check 1)"
+assert_eq "ELIGIBLE" "$out" "an empty diff (no canonical records) is eligible"
+
+: >"$WL_CALL_LOG"
+out="$(WL_DIFF="$WORKPLAN_ONLY_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "ELIGIBLE" "$out" "a WORK_PLAN-only diff with bold backlog bullets is eligible — no-op preserved (AC 3)"
+[[ -s "$WL_CALL_LOG" ]] && fail "a WORK_PLAN-only diff queried the forge" || pass "a WORK_PLAN-only diff made zero forge reads"
+
+out="$(WL_DIFF="$README_BOLD_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "ELIGIBLE" "$out" "a README bold prose bullet is never read as a WORK_LOG record"
+
+out="$(WL_DIFF="$WORKPLAN_PLUS_RECORD_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #99 does not exist in owner/mine, or the read failed — if the record does not exist this IS a content verdict (#13760); if the read failed it is an environment failure. Either way, do NOT treat this as a passed or waived #13760 content check" "$out" \
+    "file scoping ignores WORK_PLAN bullets but still verifies a WORK_LOG record in the same diff"
+
+: >"$WL_CALL_LOG"
+out="$(WL_DIFF="$ROTATION_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "ELIGIBLE" "$out" "an exact archive rotation (added records all matched by removals) is eligible"
+[[ -s "$WL_CALL_LOG" ]] && fail "a pure rotation still queried the forge" || pass "a pure rotation made zero forge reads"
+
+out="$(WL_DIFF="$ROTATION_PLUS_NEW_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #9 does not exist in owner/mine, or the read failed — if the record does not exist this IS a content verdict (#13760); if the read failed it is an environment failure. Either way, do NOT treat this as a passed or waived #13760 content check" "$out" \
+    "records moved to a monthly archive are skipped, but a new record alongside them is still verified"
+
+# Wrong-repo listings: a number absent from the target, and a number present
+# in BOTH repos but with a different title or a different kind than recorded.
+out="$(WL_DIFF="$ABSENT_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #407 does not exist in owner/mine, or the read failed — if the record does not exist this IS a content verdict (#13760); if the read failed it is an environment failure. Either way, do NOT treat this as a passed or waived #13760 content check" "$out" \
+    "a foreign repo's real PR number (absent here) is not eligible"
+
+out="$(WL_DIFF="$TITLE_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #5 title mismatch in owner/mine (record 'Totally different title', forge 'Add widget')" "$out" \
+    "a number present in the target under a different title is not eligible"
+
+out="$(WL_DIFF="$ISSUE_AS_PR_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #5 is not an issue in owner/mine: - **Issue #5** (closed): Add widget" "$out" \
+    "a number present in the target with the wrong kind (issue vs PR) is not eligible"
+
+out="$(WL_DIFF="$PR_AS_ISSUE_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #7 is not a PR in owner/mine: - **PR #7**: Fix gizmo" "$out" \
+    "a closed issue recorded as a PR is not eligible"
+
+# Source-supplied repository identity cannot override the target binding:
+# a foreign row carrying the SAME number and title as the real target item.
+out="$(WL_DIFF="$FOREIGN_REPO_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record claims repository owner/other, not the base owner/mine: - **PR owner/other#5**: Add widget" "$out" \
+    "a foreign-repo-identified record is refused even when number and title coincide"
+
+# Mixed valid/invalid: one bad entry refuses the whole approval.
+out="$(WL_DIFF="$MIXED_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #99 does not exist in owner/mine, or the read failed — if the record does not exist this IS a content verdict (#13760); if the read failed it is an environment failure. Either way, do NOT treat this as a passed or waived #13760 content check" "$out" \
+    "one invalid record among valid ones bars the fast path"
+
+# A canonical-shaped line with an unparseable record body fails closed.
+out="$(WL_DIFF="$UNPARSEABLE_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: unparseable WORK_LOG record: - **PR #zz**: Garbage" "$out" \
+    "a canonical-shaped line with a non-numeric number fails closed"
+
+echo
+echo "--- duplicate-number records are each verified, not skipped (#14532) ---"
+
+# Conflicting-title duplicate, both orders: the LATER record for a seen number
+# must be checked against the cached fetch instead of accepted unread.
+: >"$WL_CALL_LOG"
+out="$(WL_DIFF="$DUP_TITLE_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #5 title mismatch in owner/mine (record 'sim: probe the Row 4b band-edge kickback rejects', forge 'Add widget')" "$out" \
+    "a conflicting-title duplicate after a valid record is not eligible"
+assert_eq "repos/owner/mine/issues/5" "$(cat "$WL_CALL_LOG")" \
+    "the duplicate-number diff still reads the distinct number exactly once"
+
+out="$(WL_DIFF="$DUP_TITLE_REVERSED_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #5 title mismatch in owner/mine (record 'sim: probe the Row 4b band-edge kickback rejects', forge 'Add widget')" "$out" \
+    "a conflicting-title duplicate before the valid record is not eligible either"
+
+# Wrong-kind duplicate, both orders.
+out="$(WL_DIFF="$DUP_KIND_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #5 is not an issue in owner/mine: - **Issue #5** (closed): Add widget" "$out" \
+    "a wrong-kind duplicate (PR then issue, same number) is not eligible"
+out="$(WL_DIFF="$DUP_KIND_REVERSED_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #5 is not an issue in owner/mine: - **Issue #5** (closed): Add widget" "$out" \
+    "a wrong-kind duplicate (issue then PR, same number) is not eligible"
+
+echo
+echo "--- state: only merged PRs and closed issues are eligible (#14532) ---"
+
+out="$(WL_DIFF="$OPEN_PR_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #10 is not a merged PR in owner/mine (open or closed unmerged): - **PR #10**: Draft thing" "$out" \
+    "an open PR recorded as a merged-PR record is not eligible"
+
+out="$(WL_DIFF="$UNMERGED_PR_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #12 is not a merged PR in owner/mine (open or closed unmerged): - **PR #12**: Closed unmerged" "$out" \
+    "a closed-unmerged PR is not eligible"
+
+out="$(WL_DIFF="$OPEN_ISSUE_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_LOG record #11 is not a closed issue in owner/mine: - **Issue #11** (closed): Open thing" "$out" \
+    "an open issue recorded as a closed-issue record is not eligible"
+
+# Reads that fail must not read as eligible — and must say ENVIRONMENT so a
+# tooling failure can never read as, or be waved through as, a content-check
+# outcome (#15048): the target and the diff.
+out="$(WL_BASE_RC=1 WL_DIFF="$GOOD_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: base repository read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #13760 content check" "$out" \
+    "a failed base-repository read is not eligible and is flagged as an environment failure, not a content verdict"
+out="$(WL_BASE_URL='' WL_DIFF="$GOOD_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: base repository read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #13760 content check" "$out" \
+    "an empty base-repository read is not eligible and is flagged as an environment failure"
+out="$(WL_DIFF_RC=1 WL_DIFF="$GOOD_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: PR diff read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #13760 content check" "$out" \
+    "a failed diff read is not eligible and is flagged as an environment failure, not a content verdict"
+
+# #15005: gh has no `baseRepository` field, so the target is derived from the
+# PR's own URL — always its base repository's. Only the PR-URL shape is
+# assumed, never the host, so a GH_HOST deployment resolves the same way.
+: >"$WL_CALL_LOG"
+out="$(WL_BASE_URL='https://github.example.test/owner/mine/pull/185' WL_DIFF="$GOOD_DIFF" docs_only_fast_path_worklog_check 1)"
+assert_eq "ELIGIBLE" "$out" "a PR URL on a non-GitHub host (GH_HOST) still resolves the base repository"
+assert_eq "repos/owner/mine/issues/5
+repos/owner/mine/issues/7" "$(cat "$WL_CALL_LOG")" \
+    "a GH_HOST PR URL binds the record reads to the URL's owner/mine"
+
+# A URL that is not a PR URL derives no repository, so the fail-closed guard
+# fires with its own reason — a message only that guard prints, i.e. before
+# any diff or record read.
+for bad_url in 'not-a-url' 'https://github.com/owner/mine' 'https://github.com/owner/mine/issues/5'; do
+    out="$(WL_BASE_URL="$bad_url" WL_DIFF="$GOOD_DIFF" docs_only_fast_path_worklog_check 1)"
+    assert_eq "NOT ELIGIBLE: ENVIRONMENT: base repository read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #13760 content check" "$out" \
+        "a URL that is not a PR URL ('$bad_url') fails closed"
+done
+
+unset -f gh
+
+echo
+echo "--- Doc pins: judge.md wires the record gate into the fast path (#13760) ---"
+
+assert_doc_contains "$JUDGE_MD" \
+    'docs_only_fast_path_worklog_check() {' \
+    "judge.md defines docs_only_fast_path_worklog_check()"
+assert_doc_contains "$JUDGE_MD" \
+    'ELIGIBILITY=$(docs_only_fast_path_worklog_check "$PR_NUMBER")' \
+    "judge.md folds the WORK_LOG record check into ELIGIBILITY"
+assert_doc_contains "$JUDGE_MD" \
+    "#13760" \
+    "judge.md documents the #13760 record gate"
+assert_doc_contains "$JUDGE_MD" \
+    "and every WORK_LOG record the diff adds verifies against the base repository" \
+    "judge.md Primary Queue step 4b states the record-verification condition"
+assert_doc_contains "$JUDGE_MD" \
+    'gh pr diff --repo "$repo" "$pr"' \
+    "judge.md reads the exact reviewed diff against the PR's base repository (not the cwd remote, not Guide's receipts or the PR prose)"
+# #15005: gh has no `baseRepository` field, so the target comes from the PR's
+# own URL; a URL of any other shape derives nothing and the fail-closed
+# `[ -z "$out" ]` guard on that read fires.
+assert_doc_contains "$JUDGE_MD" \
+    '--json url --jq '"'"'.url | capture("^https://[^/]+/(?<r>[^/]+/[^/]+)/pull/[0-9]+/?$").r'"'"'' \
+    "judge.md derives the target repository from the PR's own URL (#15005)"
+assert_doc_lacks "$JUDGE_MD" \
+    "baseRepository" \
+    "judge.md no longer reads the nonexistent baseRepository field (#15005)"
+assert_doc_contains "$JUDGE_MD" \
+    "NOT ELIGIBLE: ENVIRONMENT: base repository read failed" \
+    "judge.md's base-repository read failure says ENVIRONMENT, not a content verdict (#15048)"
+assert_doc_contains "$JUDGE_MD" \
+    "do NOT treat this as a passed or waived #13760 content check" \
+    "judge.md's environment refusals tell the Judge not to waive the #13760 content check"
+
+# The judge SKILL copy ships the same recipe — both must carry the identical
+# edit (#15048 AC: judge.md and SKILL.md stay in lockstep). Mirror of the
+# PROMPT_DIR probe above (#6725).
+if [[ -d "$SCRIPTS_DIR/../../.claude/commands/loom" ]]; then
+    JUDGE_SKILL_MD="$SCRIPTS_DIR/../../.agents/skills/loom-judge/SKILL.md"
+else
+    JUDGE_SKILL_MD="$SCRIPTS_DIR/../.agents/skills/loom-judge/SKILL.md"
+fi
+assert_eq "$(worklog_fn_block "$JUDGE_MD")" "$(worklog_fn_block "$JUDGE_SKILL_MD")" \
+    "judge.md and loom-judge SKILL.md ship a byte-identical worklog gate (#15048)"
+
+# The Guide-side gate is the counterpart — guide.md must ship it and wire it.
+assert_doc_contains "$GUIDE_MD" \
+    'verify_work_log_provenance() {' \
+    "guide.md defines verify_work_log_provenance()"
+assert_doc_contains "$GUIDE_MD" \
+    "#13760" \
+    "guide.md documents the #13760 provenance gate"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

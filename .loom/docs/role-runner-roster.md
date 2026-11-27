@@ -35,7 +35,7 @@ specific than this record — are collected in
 
 ## The gap this closes
 
-[#6374](https://github.com/rjwalters/loom/issues/6374) shipped a **static**
+[#6374](https://github.com/2AMLogic/loom/issues/6374) shipped a **static**
 shard assignment: each host carries `LOOM_ROLE_RUNNER_SHARD_INDEX` within a
 fleet-wide `autonomous.roleRunner.shardCount`, and a workspace's role rotation
 runs on the host where `fnv1a64(shard_key) % count == index`. Exactly one host
@@ -86,8 +86,8 @@ The forge is the coordination substrate **every host already reads and writes**
 for the work it is coordinating. Three properties decide it:
 
 - **A shared clock for free.** Every host reads the *same* server-assigned
-  `updated_at` for the same comment. `peer_claims.rs` timestamps at local
-  receipt and has to correct for skew; a forge comment does not have that
+  `updated_at` for the same comment. The retired safehouse peer-claim channel (#13945) timestamped at local
+  receipt and had to correct for skew; a forge comment does not have that
   problem. This is the same argument [`lease-record.md`](lease-record.md) makes
   for the reclamation gate, and it is what makes the eviction instant
   *computable identically on every host* (see
@@ -122,7 +122,7 @@ below collapses.
 
 ### Rejected: daemon-to-daemon (the safehouse peer mesh)
 
-Deriving the roster from `peer_claims.rs` — the hosts this daemon has recently
+Deriving the roster from the retired peer-claim module — the hosts this daemon has recently
 heard advertisements from over the safehouse room.
 
 **Rejected on four independent grounds:**

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 
 import pytest
 
-from klayout_tools.cli import main
+from klayout_tools.cli import main, output
 from klayout_tools.yield_analysis import _read_samples
 
 
@@ -69,6 +70,57 @@ def test_unwritable_path_is_an_error_envelope(tmp_path, capsys, fake_sim):
     assert code == 1
     assert out.out == ""
     assert json.loads(out.err)["error"]["command"] == "sim"
+
+
+@pytest.mark.parametrize("suffix", [".json", ".json.gz"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_report_serialization_failure_preserves_destination(
+    tmp_path, monkeypatch, suffix, existing
+):
+    path = tmp_path / ("report" + suffix)
+    previous = b"previous report"
+    if existing:
+        path.write_bytes(previous)
+
+    def fail_partway(payload, stream, **kwargs):
+        stream.write('{"partial":')
+        stream.flush()
+        assert (path.read_bytes() if path.exists() else None) == (
+            previous if existing else None
+        )
+        raise OSError("interrupted write")
+
+    monkeypatch.setattr(output.json, "dump", fail_partway)
+    with pytest.raises(OSError, match="interrupted write"):
+        output.write_json_file(_report(), str(path))
+    assert (path.read_bytes() if path.exists() else None) == (
+        previous if existing else None
+    )
+    assert not list(tmp_path.glob(".klt-*.tmp"))
+
+
+def test_atomic_write_follows_report_symlink_and_preserves_permissions(tmp_path):
+    target, link = tmp_path / "actual", tmp_path / "linked.json.gz"
+    target.touch(mode=0o600)
+    link.symlink_to(target.name)
+    output.write_json_file(_report(), str(link))
+    assert link.is_symlink()
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert json.loads(gzip.decompress(target.read_bytes())) == _report()
+
+
+def test_atomic_write_respects_read_only_report(tmp_path):
+    path = tmp_path / "protected.json"
+    path.write_bytes(b"protected")
+    path.chmod(0o444)
+    try:
+        if os.access(path, os.W_OK):
+            pytest.skip("this account can write a read-only file")
+        with pytest.raises(PermissionError):
+            output.write_json_file(_report(), str(path))
+        assert path.read_bytes() == b"protected"
+    finally:
+        path.chmod(0o600)
 
 
 def test_yield_reads_gz_report_identically(tmp_path):

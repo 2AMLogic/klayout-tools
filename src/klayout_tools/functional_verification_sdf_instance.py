@@ -17,6 +17,53 @@ from __future__ import annotations
 
 import re
 
+from .functional_verification_base import (
+    FunctionalVerificationError,
+)
+
+
+def _parse_sdf_inventory_module(chunk: str) -> list[dict[str, object]]:
+    """Read cell instances even when a continuous assignment cannot be resolved.
+
+    SDF inventory callers use only cell and instance names. Keep the full parse
+    when it works and omit assignment statements on retry. The same tokenizer
+    that the netlist parser uses preserves semicolons in escaped identifiers.
+    """
+    from ._verilog_text import split_top_level, strip_verilog_comments
+    from .verilog_netlist import VerilogNetlistError, parse_gate_level_verilog
+
+    try:
+        return parse_gate_level_verilog(chunk)
+    except VerilogNetlistError:
+        statements = split_top_level(strip_verilog_comments(chunk), seps=";")
+        structural = [
+            stmt for stmt in statements if not re.match(r"assign(?![\w$])", stmt)
+        ]
+        if len(structural) == len(statements):
+            raise
+        return parse_gate_level_verilog(" ;\n".join(structural))
+
+
+def _describe_sdf_unresolvable_endpoints(
+    offenders: list[tuple[int, str]], divider: str
+) -> str:
+    """Show the first endpoint for up to three distinct missing instance paths."""
+    from .functional_verification_sdf import _sdf_split_unescaped
+
+    first_by_path: dict[tuple[str, ...], tuple[int, str]] = {}
+    for line, token in offenders:
+        path = tuple(_sdf_split_unescaped(token, divider)[:-1])
+        first_by_path.setdefault(path, (line, token))
+    examples = [
+        f"line {line}: {token}" for line, token in list(first_by_path.values())[:3]
+    ]
+    if len(first_by_path) > len(examples):
+        examples.append("...")
+    return (
+        f"{'; '.join(examples)}; {len(offenders)} unresolvable endpoint(s) "
+        f"across {len(first_by_path)} distinct instance path(s)"
+    )
+
 
 def _sdf_unresolvable_cell_instances(
     text: str, names: set[str], divider: str
@@ -53,7 +100,6 @@ def _reject_sdf_unresolvable_cell_instance(
     instance list cannot be derived, when the ``DIVIDER`` is not ``.``/``/``,
     and for the design's own root cell (empty or ``*`` ``INSTANCE``).
     """
-    from .functional_verification import FunctionalVerificationError
     from .functional_verification_sdf import (
         _find_gate_level_instances,
         _read_verilog_source_texts,

@@ -1,0 +1,10 @@
+Run a Geode field solve. Supply a mesh for capacitance, steady heat or Joule
+self-heating. Capacitance also accepts a layout region and PDK stackup using
+Gmsh. See docs/cli/em.md.
+
+positional arguments:
+  request path to the klt em request JSON
+
+options:
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)

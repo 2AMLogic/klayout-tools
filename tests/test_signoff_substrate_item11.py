@@ -65,13 +65,14 @@ def test_item_11_unmet_when_substrate_isolation_is_disclosed_undecidable(tmp_pat
     the `missing` list reaches `detail.power_delivery`."""
     erc = _substrate_erc(
         erc_coverage=_erc_coverage_block(
+            checked=['erc.missing_tie:["nwell_tie"]'],
             inapplicable=[
                 {
                     "id": "erc.supply_short",
                     "reason": "substrate_isolation_undecidable",
                     "missing": ["substrate_isolation layer for sky130"],
                 }
-            ]
+            ],
         )
     )
 
@@ -89,7 +90,11 @@ def test_item_11_met_when_the_substrate_path_was_evaluated_clean(tmp_path):
     evaluated; a run without the substrate pass carries no such key."""
     erc = _substrate_erc(
         erc_coverage=_erc_coverage_block(
-            checked=["erc.supply_short", "erc.supply_short.substrate"],
+            checked=[
+                'erc.missing_tie:["nwell_tie"]',
+                "erc.supply_short",
+                "erc.supply_short.substrate",
+            ],
             checked_by_assertion=["erc.supply_short.substrate"],
         )
     )

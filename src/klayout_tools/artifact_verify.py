@@ -48,7 +48,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import IO, Any
+from typing import IO, Any, TypeGuard
 from urllib.parse import SplitResult, urlsplit
 
 #: Environment variable naming the broker's base URL (``http(s)://host:port``).
@@ -251,13 +251,7 @@ class BrokerClient:
         any object with ``presign`` and ``fetch_into`` -- an in-process fake
         for offline CI -- in place of a :class:`BrokerClient`."""
         answer = self.presign("get", target.kind, target.repo, target.sha256)
-        _check_key(answer.key, target.sha256)
-        if target.key is not None and answer.key != target.key:
-            raise ArtifactError(
-                "the artifact broker's key differs from the manifest uri's",
-                "key_mismatch",
-                {"key": answer.key, "manifest_key": target.key},
-            )
+        _check_key(answer.key, target.sha256, target.key)
         hasher = hashlib.sha256()
         count = 0
 
@@ -335,7 +329,7 @@ def _parse_headers(raw: Any, op: str) -> dict[str, str]:
     return dict(raw)
 
 
-def _is_int(value: Any) -> bool:
+def _is_int(value: Any) -> TypeGuard[int]:
     """A JSON integer, excluding ``bool`` (a Python int). Inlined from
     ``klayout_tools._jsonnum.is_int`` so this file runs standalone."""
     return not isinstance(value, bool) and isinstance(value, int)
@@ -443,12 +437,18 @@ def uri_key(uri: str) -> str:
     return match.group(1)
 
 
-def _check_key(key: str, sha256: str) -> None:
+def _check_key(key: str, sha256: str, expected_key: str | None = None) -> None:
     if key_digest(key) != sha256:
         raise ArtifactError(
             "the artifact broker's key does not name the requested digest",
             "key_mismatch",
             {"key": key, "sha256": sha256},
+        )
+    if expected_key is not None and key != expected_key:
+        raise ArtifactError(
+            "the artifact broker's key differs from the key in the requested URI",
+            "key_mismatch",
+            {"key": key, "manifest_key": expected_key},
         )
 
 
@@ -532,7 +532,7 @@ def entry_problems(entry: Any) -> list[str]:
     if not isinstance(sha256, str) or not _SHA256_RE.match(sha256):
         problems.append("sha256 must be 64 lowercase hex digits")
     size = entry.get("size")
-    if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+    if not _is_int(size) or size < 1:
         problems.append("size must be a positive integer")
     if entry.get("kind") not in KINDS:
         problems.append(f"kind must be one of {', '.join(KINDS)}")
@@ -715,9 +715,9 @@ def main(argv: list[str] | None = None) -> int:
     the standalone verify run (see the module docstring)."""
     parser = argparse.ArgumentParser(
         prog="artifact_verify.py",
-        description="Verify an artifact manifest against the store through "
-        "its broker (the standalone twin of `klt artifact verify`; see "
-        "docs/cli/artifact.md)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Verify an artifact manifest against the store through a broker.\n"
+        "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/artifact.md",
     )
     parser.add_argument("manifest", metavar="MANIFEST")
     parser.add_argument(

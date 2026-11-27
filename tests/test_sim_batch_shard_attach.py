@@ -18,6 +18,9 @@ from test_sim_batch import (
     _batch_request,
     _ceiling_request,
     _corner_points,
+    _FakeRunner,
+    _install_fake_batch_transport,
+    _sim_report,
     _split_runner,
     _status,
     _write_body,
@@ -54,6 +57,39 @@ def test_attach_shard_map_mismatch_names_the_differing_field(tmp_path, monkeypat
         _attach_shards(tmp_path, other, payload["manifest_path"])
 
     assert "differing request field(s): batch.poll_timeout_s" in str(err.value)
+
+
+@pytest.mark.parametrize(
+    ("submitted", "current", "fields"),
+    [
+        (
+            {"options": {"timeout_s": 5}},
+            {"options": {"timeout_s": 6}},
+            ["options.timeout_s"],
+        ),
+        ({"options": {"max_workers": 3}}, {"options": {}}, ["options.max_workers"]),
+        ({"options": {}}, {}, ["options"]),
+        ({}, {"options": {}}, ["options"]),
+        ({"options": None}, {"options": {}}, ["options"]),
+    ],
+)
+def test_differing_option_fields(submitted, current, fields):
+    sections = sbs.request_section_digests(submitted)
+    assert sbs.differing_request_fields(sections, current) == fields
+
+
+def test_legacy_options_digest_only_reports_changed_sections():
+    options = {"timeout_s": 5}
+    sections = {"options": sbs.legacy_request_sha256(options)[:12]}
+    assert sbs.differing_request_fields(
+        sections, {"options": options, "remote": {}}
+    ) == ["remote"]
+
+
+def test_shard_map_without_section_digests_names_worker_override():
+    document = {"request_sha256": sbs.request_sha256({"options": {"max_workers": 3}})}
+    mismatch = sbs.shard_map_mismatch(document, {})
+    assert mismatch is not None and "--max-workers" in mismatch
 
 
 def test_attach_shard_map_accepts_a_legacy_full_request_digest(tmp_path, monkeypatch):
@@ -355,8 +391,31 @@ def test_apply_attach_gates_hosts_only_for_a_bare_job_id():
     }
     with pytest.raises(sim.SimError, match="single job .*hosts = 1.*shard map"):
         sim._apply_attach({}, "klt-sim-job", "batch", 2)
-    with pytest.raises(sim.SimError, match="requires backend 'batch'"):
+    with pytest.raises(sim.SimError, match="backend 'local'.*--backend batch"):
         sim._apply_attach({}, "out/batch-shards.json", "local", 2)
+
+
+def test_single_unit_attach_with_host_batch_default_names_effective_backend(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    del request["backend"]
+    path = _write_request(tmp_path, request)
+    monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
+
+    with pytest.raises(sim.SimError, match="backend 'local'.*--backend batch") as error:
+        sim.run_sim(str(path), attach_job_id="klt-sim-old")
+    assert "shard" not in str(error.value)
+    assert not runner.calls
+
+    report = sim.run_sim(str(path), backend="batch", attach_job_id="klt-sim-old")
+    assert report["environment"]["remote"]["job_id"] == "klt-sim-old"
+    assert runner.argvs_matching("launch") == []
 
 
 def test_run_sim_hosts_2_attach_goes_to_the_map_not_a_fresh_fleet(

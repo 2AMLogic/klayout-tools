@@ -6,10 +6,8 @@ when parasitics were extracted (``--mom-net`` cross-check,
 and the additive ``parasitics_report[...]`` fields). Returns the
 ``parasitics_report`` (``None`` when parasitics were not requested).
 
-``warnings`` is mutated in place, exactly as the inline block did. The helpers
-it calls that still live in ``extract.py`` are imported inside the function
-body: ``extract.py`` imports this module at its top level, so a module-level
-``from .extract import ...`` would be a circular import.
+The stage appends diagnostics to ``warnings``. It resolves the MoM ground
+cross-check through the extraction orchestrator when needed.
 """
 
 from __future__ import annotations
@@ -18,7 +16,14 @@ import functools
 from collections.abc import Callable
 from typing import Any
 
+from .extract_base import (
+    PARASITIC_MODEL_SCOPE,
+    substrate_tie_mode,
+    substrate_tie_written_ohms,
+)
+from .extract_netselect import _report_net_selectors, _selects_critical
 from .extract_progress import stage
+from .extract_validate import _attach_resistance_paths
 
 
 def _in_parasitics_inject_stage(
@@ -51,6 +56,7 @@ def build_parasitics_report(
     deck_name: Any,
     distributed_rc: Any,
     emit_selected_resistance: Any,
+    emit_resistance_network: Any,
     mom_crosscheck: Any,
     mom_net: Any,
     mom_rlc_capacitance_ff: Any,
@@ -74,15 +80,7 @@ def build_parasitics_report(
 ) -> dict[str, Any] | None:
     import klayout.db as kdb
 
-    from .extract import (
-        PARASITIC_MODEL_SCOPE,
-        _attach_resistance_paths,
-        _mom_ground_entry_for_crosscheck,
-        _report_net_selectors,
-        _selects_critical,
-        substrate_tie_mode,
-        substrate_tie_written_ohms,
-    )
+    from .extract import _mom_ground_entry_for_crosscheck
     from .extract_parasitics import (
         PARASITICS_MODEL_REVISION,
         _inject_parasitics,
@@ -224,6 +222,7 @@ def build_parasitics_report(
                 record_slice_topology=subcircuit_cell is not None,
                 variants=variants,
                 emit_selected_resistance=emit_selected_resistance,
+                emit_resistance_network=emit_resistance_network,
             )
         else:
             parasitics_report = {
@@ -299,6 +298,18 @@ def build_parasitics_report(
             if _selects_critical(net_selectors)
             else (list(critical_nets) if critical_nets else [])
         )
+        # Additive field (issue #5742): machine-readable capability signal
+        # for the `--critical-net` lateral coupling pass -- "computed" when
+        # the deck curates a `metal_sidewalls` coefficient, "unmodelled"
+        # when it curates none, `null` when no critical-net selection was
+        # requested (requested-ness, not matched-ness; full contract in
+        # docs/cli/extract.md). Same `any(...)` predicate as the warning
+        # below, which only fires for a resolved critical set.
+        parasitics_report["lateral_coupling"] = (
+            ("computed" if any(parasitics_deck.metal_sidewalls) else "unmodelled")
+            if (_selects_critical(net_selectors) or bool(critical_nets))
+            else None
+        )
         # Additive field (issue #1700): echoes the `--parasitics-net` request
         # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
         # flag was never given. Without it a scoped run's deliberately-short
@@ -335,14 +346,15 @@ def build_parasitics_report(
                     for n in parasitics_report.get("nets", [])
                     if n.get("rc_model") == "distributed"
                     and (
-                        variants.drops_r(n["net"]) or variants.drops_c_ground(n["net"])
+                        variants.drops_any_r(n["net"])
+                        or variants.drops_c_ground(n["net"])
                     )
                 }
             )
             if distributed_variant:
                 warnings.append(
-                    "--parasitic-variant drop-r/drop-c-ground does not apply "
-                    "to --distributed-rc net(s) "
+                    "--parasitic-variant drop-r/drop-r-body/drop-c-ground "
+                    "does not apply to --distributed-rc net(s) "
                     f"{', '.join(repr(name) for name in distributed_variant)} "
                     "-- their ladder is left unchanged."
                 )
@@ -458,9 +470,8 @@ def build_parasitics_report(
         # capacitance plus vertical-overlap net-to-net coupling, plus
         # `--critical-net`-scoped lateral coupling; single lumped series
         # resistance per net; quasi-static) -- present on every
-        # `parasitics` block regardless of whether any net actually carried
-        # non-zero parasitics, since the model's scope does not depend on
-        # what was found. See `PARASITIC_MODEL_SCOPE`'s docstring.
+        # `parasitics` block regardless of what was found, since the model's
+        # scope does not depend on it. See `PARASITIC_MODEL_SCOPE`'s docstring.
         parasitics_report["model"] = dict(PARASITIC_MODEL_SCOPE)
         # Additive field (issue #2957): the extraction model's own revision,
         # so a consumer can tell a model change from a mere tool bump.

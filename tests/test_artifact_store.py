@@ -264,7 +264,7 @@ def test_reput_is_a_noop_success(broker, report, tmp_path, capsys):
 def test_get_by_manifest_entry_writes_verified_bytes(broker, report, tmp_path, capsys):
     manifest = tmp_path / "m.json"
     _put(report, manifest, capsys)
-    out_path = tmp_path / "fetched.json"
+    out_path = tmp_path / "a" / "b" / "fetched.json"
 
     code, out, _ = _run(
         [
@@ -957,7 +957,7 @@ def test_delete_keep_refuses_all_then_force_overrides(broker, report, tmp_path, 
 
 def test_delete_refusal_and_missing_selector(broker, report, tmp_path, capsys):
     manifest, sha = _stored(broker, report, tmp_path, capsys)
-    broker.refuse["delete"] = (404, "not_found", "no delete op")
+    broker.refuse["delete"] = (403, "not_granted", "not your repo")
     code, _, err = _run(
         ["artifact", "delete", sha, "--repo", REPO, "--yes", "--format", "json"],
         capsys,

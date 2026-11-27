@@ -1,0 +1,1 @@
+- Generator approvals now reject paths beginning with a backslash, matching command approvals (#7947).

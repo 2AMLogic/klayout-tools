@@ -1,5 +1,4 @@
-"""Render one ``klt sim`` waveform signal to a self-contained SVG string --
-the *visual* half of #1723's measurement-miss diagnosis loop.
+"""Prepare measurement annotations and render waveform SVGs for ``klt sim --plot``.
 
 Issue #56 (waveform post-processing / threshold-crossing extraction) is the
 *numeric* half of this gap; this module is the visual half, deliberately
@@ -7,7 +6,7 @@ kept separate (see #1723's "Idea"/"Non-goals" sections). When a `.meas`
 misses, an agent gets the number that missed and nothing else -- for a
 non-starting oscillator, a sticking comparator, or a saturating integrator,
 the *shape* of the waveform is the actual diagnosis. `klt sim --plot <dir>`
-(``sim.py``'s ``_write_corner_plots``) calls :func:`render_waveform_svg` once
+calls :func:`render_waveform_svg` once
 per non-sweep signal captured in a corner's waveform artifact.
 
 Same no-dependency, string-built SVG pattern ``trajectory.render_plot_svg``
@@ -24,9 +23,22 @@ tradeoff.
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import re
+from typing import Any
 
-__all__ = ["render_waveform_svg"]
+from . import _spice_number as spice_number
+from . import sim_derive
+from .sim_slug import _slugify_corner_id, _slugify_signal
+
+__all__ = [
+    "measurement_plot_path",
+    "prepare_annotations",
+    "render_waveform_svg",
+    "write_corner_plots",
+]
 
 _PLOT_WIDTH = 640
 _PLOT_HEIGHT = 360
@@ -226,3 +238,193 @@ def render_waveform_svg(
 
     parts.append("</svg>")
     return "".join(parts)
+
+
+#: The first `v(...)`/`i(...)`-shaped (optionally derivative-prefixed, e.g.
+#: `vd(...)`/`ir(...)`) parenthesized token in a `.meas` card's `spice` text
+#: -- the signal that card is actually about. ngspice itself always lowercases
+#: node/signal names in its rawfile `variables[].name` (see
+#: `parse_ascii_rawfile`'s docstring example), so the reconstructed name below
+#: is lowercased to match, regardless of how the request's own `.meas` text
+#: capitalizes it.
+_MEAS_SIGNAL_TOKEN_RE = re.compile(r"\b([a-z]{1,3})\(([^)]*)\)", re.IGNORECASE)
+
+#: `from=<value>` / `to=<value>` trailers on an `AVG`/`RMS`/`PP`/`MIN`/`MAX`/
+#: `INTEG` measurement -- the "measurement window" #1723 asks to shade on a
+#: `tran` plot.
+_MEAS_FROM_RE = re.compile(r"\bfrom\s*=\s*(\S+)", re.IGNORECASE)
+_MEAS_TO_RE = re.compile(r"\bto\s*=\s*(\S+)", re.IGNORECASE)
+
+#: `WHEN <signal>=<value>` on a threshold-crossing measurement -- the
+#: `.meas` target #1723 asks to draw as a reference line. `\S+` between
+#: `when` and the final `=` is deliberately greedy-then-backtracking so it
+#: still matches when the signal token itself carries no space before its
+#: own `=` (e.g. `when v(out)=1.5`, not `when v(out) = 1.5`).
+_MEAS_WHEN_TARGET_RE = re.compile(
+    r"\bwhen\s+\S+\s*=\s*([-+]?[\d.]+(?:[eE][-+]?\d+)?[a-zA-Z]*)", re.IGNORECASE
+)
+
+
+def _measurement_diagnostic_hints(spice: str) -> dict[str, Any]:
+    """Best-effort extraction of the plotting context a `.meas` card's own
+    ``spice`` text implies: which signal it is about, the time window it
+    integrates/searches over (``from=``/``to=``), and the threshold value it
+    searches for (``WHEN <signal>=<value>``).
+
+    Never raises -- an unrecognised card shape (e.g. a ``TRIG``/``TARG``
+    delay measurement, which has no single window or target this simple
+    parser understands) yields ``{"signal": None, "window": None, "target":
+    None}``, and the caller (:func:`write_corner_plots`) just renders that
+    signal's curve without the extra context rather than failing the whole
+    plot batch. This is deliberately not a general SPICE expression
+    evaluator -- see :mod:`klayout_tools.sim_plot`'s module docstring on
+    scope.
+    """
+    signal_match = _MEAS_SIGNAL_TOKEN_RE.search(spice)
+    signal = (
+        f"{signal_match.group(1).lower()}({signal_match.group(2).lower()})"
+        if signal_match
+        else None
+    )
+
+    window: tuple[float, float] | None = None
+    from_match = _MEAS_FROM_RE.search(spice)
+    to_match = _MEAS_TO_RE.search(spice)
+    if from_match is not None and to_match is not None:
+        from_s = spice_number.parse(from_match.group(1))
+        to_s = spice_number.parse(to_match.group(1))
+        if from_s is not None and to_s is not None:
+            window = (from_s, to_s)
+
+    target: float | None = None
+    when_match = _MEAS_WHEN_TARGET_RE.search(spice)
+    if when_match is not None:
+        target = spice_number.parse_plain(when_match.group(1))
+
+    return {"signal": signal, "window": window, "target": target}
+
+
+def prepare_annotations(
+    measurements_spec: list[dict[str, Any]],
+) -> tuple[dict[str, str | None], dict[str, dict[str, Any]]]:
+    """Index rollup signals by name and merge per-corner annotations by signal."""
+    hints_by_signal: dict[str, dict[str, Any]] = {}
+    signals_by_name: dict[str, str | None] = {}
+    for spec in measurements_spec:
+        spice = spec.get("spice")
+        if not spice:
+            signals_by_name[spec["name"]] = None
+            continue
+        hints = _measurement_diagnostic_hints(spice)
+        signals_by_name[spec["name"]] = hints["signal"]
+        if hints["signal"] is None or sim_derive.is_derive(spec):
+            continue
+        # Merge across every measurement naming this signal (e.g. a `PP`
+        # window-measurement and a separate `WHEN` threshold-measurement
+        # both over `v(out)`) -- the first *non-None* window/target found
+        # wins for each field independently, rather than one measurement's
+        # hints unconditionally shadowing another's.
+        merged = hints_by_signal.setdefault(
+            hints["signal"], {"window": None, "target": None}
+        )
+        if merged["window"] is None and hints["window"] is not None:
+            merged["window"] = hints["window"]
+        if merged["target"] is None and hints["target"] is not None:
+            merged["target"] = hints["target"]
+    return signals_by_name, hints_by_signal
+
+
+def write_corner_plots(
+    *,
+    corner: dict[str, Any],
+    plot_dir: str,
+    analysis_kind: str | None,
+    hints_by_signal: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Render one SVG per non-sweep signal captured in ``corner``'s persisted
+    waveform artifact, writing each to ``plot_dir`` with a deterministic
+    filename (``<corner_slug>__<signal_slug>.svg``).
+
+    Any `tran` measurement whose own signal (see
+    :func:`_measurement_diagnostic_hints`) matches a rendered signal gets its
+    ``from=``/``to=`` window shaded and its ``WHEN``-target drawn as a
+    reference line on that signal's plot -- issue #1723's "the `.meas`
+    target drawn as a line" / "the measurement window shaded" acceptance
+    criteria. `ac` plots use a log-scaled frequency axis; `dc`/`tran` use a
+    linear sweep axis (window shading only applies to `tran`, since
+    ``from=``/``to=`` on a `dc`/`ac` measurement is over the swept
+    source/frequency, not simulated time, and this issue's shading is
+    specifically the *time* window the Proposal describes).
+
+    Returns ``[]`` -- writing nothing -- when this corner has no persisted
+    waveform artifact (an errored corner that never produced a rawfile) or
+    that artifact cannot be read/parsed; never raises, since one corner's
+    bad artifact should not abort plotting every other corner.
+    """
+    waveform_path = corner["artifacts"].get("waveform")
+    if not waveform_path or not os.path.isfile(waveform_path):
+        return []
+    try:
+        with open(waveform_path, encoding="utf-8") as handle:
+            waveform = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    variables = waveform.get("variables") or []
+    points = waveform.get("points") or []
+    if len(variables) < 2 or not points:
+        return []
+
+    sweep_name = variables[0]["name"]
+    x_values = [point[0] for point in points]
+    log_x = analysis_kind == "ac"
+
+    corner_slug = _slugify_corner_id(corner["corner_id"])
+    written: list[dict[str, str]] = []
+    for var in variables[1:]:
+        name = var["name"]
+        y_values = [point[var["index"]] for point in points]
+        hint = hints_by_signal.get(name.lower())
+        window = hint["window"] if hint and analysis_kind == "tran" else None
+        target = hint["target"] if hint else None
+        svg = render_waveform_svg(
+            signal_name=name,
+            corner_id=corner["corner_id"],
+            x_values=x_values,
+            y_values=y_values,
+            x_axis_label=sweep_name,
+            log_x=log_x,
+            window=window,
+            target=target,
+        )
+        path = os.path.join(plot_dir, f"{corner_slug}__{_slugify_signal(name)}.svg")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(svg)
+        written.append({"signal": name, "path": path})
+    return written
+
+
+def measurement_plot_path(
+    entry: dict[str, Any],
+    signal: str | None,
+    plots_by_corner: dict[str, list[dict[str, str]]],
+) -> str | None:
+    """The SVG path (if any) belonging next to one measurement rollup
+    ``entry`` -- its own ``.meas`` card's signal, rendered at its
+    ``worst_case`` corner -- so a `--plot` run's miss report names the
+    picture to look at next to the number that missed (issue #1723).
+
+    Returns ``None`` when there is no worst-case corner (an empty corner
+    matrix), the measurement names no recognisable signal, or that corner
+    rendered no matching plot.
+    """
+    worst_case = entry.get("worst_case")
+    if worst_case is None or signal is None:
+        return None
+    corner_plots = plots_by_corner.get(worst_case["corner_id"])
+    if not corner_plots:
+        return None
+    for plot in corner_plots:
+        if plot["signal"].lower() == signal:
+            return plot["path"]
+    return None

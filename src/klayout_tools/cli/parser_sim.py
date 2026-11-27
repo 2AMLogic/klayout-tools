@@ -6,25 +6,8 @@ import argparse
 from collections.abc import Callable
 from typing import Any
 
-from . import sim_cmd
-
-
-def add_wait_for_capacity_arg(parser: argparse.ArgumentParser, tail: str) -> None:
-    """``--wait-for-capacity`` for ``klt sim`` and ``klt pex`` (issue #5280)."""
-    parser.add_argument(
-        "--wait-for-capacity",
-        dest="wait_for_capacity",
-        metavar="SECONDS",
-        type=float,
-        default=None,
-        help=(
-            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
-            "capacity when the launch is refused (batch_no_capacity / "
-            "batch_concurrency_cap), re-launching the same job with jittered "
-            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
-            "means one attempt. " + tail
-        ),
-    )
+from . import sim_check_cmd
+from ._batch_parser_args import add_wait_for_capacity_arg
 
 
 def add_sim_parser(
@@ -32,12 +15,7 @@ def add_sim_parser(
     _add_pdk_args: Callable[..., Any],
     _add_format_arg: Callable[..., Any],
 ) -> None:
-    """Register the ``sim`` verb for headless SPICE PVT corner sweeps.
-
-    Runs a SPICE process/voltage/temperature corner matrix declared by a
-    request JSON file via `ngspice -b`, one subprocess per corner. See
-    docs/cli/sim.md for the request/response contract.
-    """
+    """Register the sim verb for headless SPICE corner sweeps."""
     sim_parser = subparsers.add_parser(
         "sim",
         help="run a headless SPICE PVT corner matrix (ngspice)",
@@ -89,8 +67,11 @@ def add_sim_parser(
         help=(
             "with --batch-set, re-submit a request refused for fleet capacity "
             "(batch_no_capacity / batch_concurrency_cap) up to N more times "
-            "with doubling backoff (default: 0, off); other failures are "
-            "never retried (issue #3520)"
+            "with doubling backoff; on a sharded single request, re-run the "
+            "shards lost to a capacity refusal in up to N more passes once "
+            "the other shards finish, each with a fresh --wait-for-capacity "
+            "budget (default: 0, off); other failures are never retried "
+            "(issues #3520, #5567)"
         ),
     )
     sim_parser.add_argument(
@@ -114,15 +95,44 @@ def add_sim_parser(
     )
     sim_parser.add_argument(
         "--job-status",
-        dest="job_status",
         metavar="JOB_ID",
-        default=None,
         help=(
             "read one batch job's state by id (one status.json read; "
-            "state `pending` before the instance writes one) and exit. The "
-            "positional request supplies the bucket/region/profile. Submits "
-            "and launches nothing. Unit counts are not published by the "
-            "fleet and are not reported. See docs/cli/sim.md."
+            "state `pending` before the instance writes one) and exit. "
+            "The positional request, when given, supplies the "
+            "bucket/region/profile; without one they resolve from the "
+            "KLT_BATCH_* environment and the fleet batch-fleet.env "
+            "(issue #5810). Submits and launches nothing. Unit counts "
+            "are not published by the fleet and are not reported. See "
+            "docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--require-pdk-match",
+        action="store_true",
+        default=None,
+        help="require the batch worker's PDK revision stamp to match",
+    )
+    sim_parser.add_argument(
+        "--list-jobs",
+        action="store_true",
+        help="list active fleet instances by job and show available capacity",
+    )
+    sim_parser.add_argument(
+        "--cancel",
+        metavar="JOB_ID",
+        help=(
+            "cancel one batch job by id through 2am's "
+            "batch-fleet-provision.sh cancel --apply: its pending/running "
+            "fleet instances are terminated and the job's status.json "
+            "reports cancelled, while its S3 prefix and partial results "
+            "are left in place (issue #4351). The positional request, "
+            "when given, supplies the bucket/region/profile; without one "
+            "they resolve from the KLT_BATCH_* environment and the fleet "
+            "batch-fleet.env. The bucket and jobs prefix must match that "
+            "file. --dry-run conflicts with --cancel. A job with nothing "
+            "live to terminate fails with error.code "
+            "batch_cancel_nothing_to_cancel. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -294,10 +304,12 @@ def add_sim_parser(
             "request's own `options.resume` when given. For a `decks` "
             "request, skips each unit whose <outdir>/<id>/unit.json "
             "completion record still matches and verifies (local, "
-            "local-parallel, batch). With --batch-set, forwarded to every "
-            "request: a sharded request re-attaches to the shard jobs "
-            "recorded in its own directory and resubmits only the lost "
-            "ones. See docs/cli/sim.md."
+            "local-parallel, batch). On a sharded `batch` run, first "
+            "harvests the retained shard map (batch-shards.json): shards "
+            "whose jobs already finished are collected, and only the "
+            "unlaunched/unfinished/failed ones are submitted again. With "
+            "--batch-set, forwarded to every request the same way. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -350,6 +362,14 @@ def add_sim_parser(
             "error. Applies to the `local`/`local-parallel` backends -- an "
             "off-host shard reads the request's own option instead. See "
             "docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--portable-paths",
+        action="store_true",
+        help=(
+            "omit the client binary path from batch reports and make set member "
+            "report paths relative"
         ),
     )
     sim_parser.add_argument(
@@ -418,4 +438,63 @@ def add_sim_parser(
         ),
     )
     _add_format_arg(sim_parser)
-    sim_parser.set_defaults(func=sim_cmd.run)
+    sim_parser.add_argument(
+        "--regrade",
+        dest="regrade",
+        metavar="REPORT",
+        default=None,
+        help=(
+            "re-run only the check-failing points of this same request with "
+            "the tightened solver settings it declares in "
+            "options.tightened_rerun (issue #6778): REPORT is the first "
+            "pass's committed report, --check-id names the failed check and "
+            "--corner selects the affected corner ids from it. Returns a "
+            "companion record holding both attempts' values; the tightened "
+            "observation carries the grade, and a timeout or unusable "
+            "re-run grades unresolved, never pass. A batch baseline "
+            "dispatches the subset on batch even for one unit. See "
+            "docs/cli/sim.md 'Tightened re-run of check-failing points'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--check-id",
+        dest="check_id",
+        metavar="ID",
+        default=None,
+        help=(
+            "with --regrade: the identifier of the failed checker that "
+            "selected the units (recorded per re-run unit; the chip's own "
+            "checker re-grades the tightened observations)"
+        ),
+    )
+    sim_parser.add_argument(
+        "--corner",
+        dest="corners",
+        action="append",
+        metavar="CORNER_ID",
+        default=None,
+        help=(
+            "with --regrade: one corners[].corner_id from the source report "
+            "to re-run tightened (repeatable; each unit is dispatched "
+            "exactly once; zero --corner flags submits zero jobs)"
+        ),
+    )
+    sim_parser.add_argument(
+        "--check",
+        dest="check",
+        metavar="REPORT",
+        default=None,
+        help=(
+            "instead of simulating, re-verify a finished klt sim report's "
+            "environment.netlist_closure/netlist_identity against the working "
+            "tree (no engine, network or PDK). Exit 0 match, 3 drifted, 1 "
+            "unreadable report. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--root",
+        dest="root",
+        default=None,
+        help="with --check: directory to anchor scope=repo closure entries to",
+    )
+    sim_parser.set_defaults(func=sim_check_cmd.run)

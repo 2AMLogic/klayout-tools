@@ -28,6 +28,7 @@ from .lvs_combine import (
     _parse_combine_devices_per_circuit,
 )
 from .lvs_finfet import prepare_finfet_request
+from .lvs_layout_short_nets import parse_layout_short_nets
 from .lvs_mismatch import _parse_parameter_tolerance
 from .lvs_mos_options import parse_ignore_mos_bulk
 from .lvs_power import _parse_power_connectivity
@@ -45,6 +46,7 @@ class _LvsRunOptions:
 
     deck_options: Any
     label_layers: Any
+    join_same_named_nets: bool
     layout_abstraction: Any
     def_net_names: Any
     def_pins: Any
@@ -73,6 +75,7 @@ class _LvsRunOptions:
     compare_timeout_s: Any
     flatten_layout: Any
     netgen_setup_echo: Any
+    layout_short_nets: Any
 
 
 def _parse_flatten_reference(
@@ -91,6 +94,18 @@ def _parse_flatten_reference(
             )
         return list(value) if value else False
     return bool(value)
+
+
+def _parse_join_same_named_nets(layout_spec: dict[str, Any]) -> bool:
+    value = layout_spec.get("join_same_named_nets", False)
+    if not isinstance(value, bool):
+        raise LvsError("request.layout.join_same_named_nets must be a boolean")
+    if value and not (layout_spec.get("file") and layout_spec.get("deck")):
+        raise LvsError(
+            "request.layout.join_same_named_nets requires inline extraction "
+            "with request.layout.file and request.layout.deck"
+        )
+    return value
 
 
 def _parse_lvs_run_options(
@@ -130,9 +145,9 @@ def _parse_lvs_run_options(
     # extraction-only rule. `None` when omitted/`null`.
     label_layers = _parse_layout_label_layers(layout_spec)
     # Issue #2853: `layout.abstract_cells`/`abstract_cell_lef` mirror `klt
-    # extract --abstract-cells`/`--abstract-cell-lef` for inline extraction
-    # only -- see `_parse_layout_abstract_cells` for the shape and the
-    # extraction-only rule.
+    # extract --abstract-cells`/`--abstract-cell-lef`. `abstract_cells` is
+    # inline-extraction only; `abstract_cell_lef` is also accepted alone on
+    # the `layout.netlist` shape, disclosure-only (#5842) -- see the parser.
     layout_abstraction = _parse_layout_abstract_cells(layout_spec, request_dir)
     # Issue #4347: `layout.def_net_names`/`def_pins` mirror `klt extract
     # --def-net-names`/`--def-pins` for inline extraction only.
@@ -219,7 +234,7 @@ def _parse_lvs_run_options(
         anchor_top_level_pins_requested,
         anchor_top_level_pins_echo,
     ) = _parse_anchor_top_level_pins(options, engine)
-    strict_top_level_pin_count = _parse_strict_top_level_pin_count(options, engine)
+    strict_top_level_pin_count = _parse_strict_top_level_pin_count(options)
     compare_mos_flavour = _parse_compare_mos_flavour(
         options, engine, layout_spec, reference_spec
     )
@@ -244,9 +259,17 @@ def _parse_lvs_run_options(
     # exactly as it was given. `null` for every `"klayout"`-engine run (and
     # for a netgen run that let netgen use its own trivial default setup).
     netgen_setup_echo = options.get("netgen_setup")
+    # Issue #5632: `hints.layout_short_nets` -- the layout-side dual of
+    # `hints.short_nets`, applied by `_resolve_layout_stage` before flatten
+    # and combine. Parsed unconditionally here (the same discipline
+    # `ignore_mos_bulk` above follows) so a malformed value is a clean
+    # request error for every engine, with the netgen rejection inside the
+    # parser.
+    layout_short_nets = parse_layout_short_nets(request.get("hints") or {}, engine)
     return _LvsRunOptions(
         deck_options=deck_options,
         label_layers=label_layers,
+        join_same_named_nets=_parse_join_same_named_nets(layout_spec),
         layout_abstraction=layout_abstraction,
         def_net_names=def_net_names,
         def_pins=def_pins,
@@ -275,4 +298,5 @@ def _parse_lvs_run_options(
         compare_timeout_s=compare_timeout_s,
         flatten_layout=flatten_layout,
         netgen_setup_echo=netgen_setup_echo,
+        layout_short_nets=layout_short_nets,
     )

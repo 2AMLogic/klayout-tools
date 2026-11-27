@@ -18,6 +18,23 @@ with ``noise`` states the quantity instead::
   ngspice's own ``inoise_total`` on a band-limited re-run to well under 1e-3
   relative on a reasonably dense grid.
 
+A ``mechanism`` key (issue #5553) narrows the value to the ``"thermal"`` or
+``"flicker"`` share of the total::
+
+    {"name": "flicker_rms", "noise": {"quantity": "onoise",
+                                      "band_hz": [1, 1e5],
+                                      "mechanism": "flicker"}}
+
+That form is *not* lowered the way the total form is -- it is aggregated from
+ngspice's per-device decomposition after the run by
+:mod:`klayout_tools.sim_noise_mechanism`, which owns its suffix table,
+completeness assertion and refusals. Everything below describes the total
+form.
+
+A ``top_n`` key (issue #5558) asks either form for its largest contributors by
+name; the list rides an additive ``noise.contributors`` member and ``value`` is
+untouched (:mod:`klayout_tools.sim_noise_contributors`).
+
 How it is computed
 ------------------
 Lowered, before the deck is written, into ngspice ``let`` lines in the
@@ -31,15 +48,22 @@ the harvest, grading, name-uniqueness and engine-refusal paths are the ones
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from . import _spice_number as spice_number
+from . import sim_measurement_kind, sim_noise_contributors, sim_noise_mechanism
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
+
+#: Spectrum vectors of ngspice's first noise plot, aliased by bare name
+#: into the current (totals) plot for ``expr`` measurements (issue #2893).
+NOISE_SPECTRUM_VECTORS = ("inoise_spectrum", "onoise_spectrum")
 
 #: The ``noise.quantity`` values: input- or output-referred.
 NOISE_QUANTITIES = ("inoise", "onoise")
 
-_ALLOWED_KEYS = frozenset({"quantity", "at_hz", "band_hz"})
+_ALLOWED_KEYS = frozenset({"quantity", "at_hz", "band_hz", "mechanism", "top_n"})
 
 
 def is_noise(spec: dict[str, Any]) -> bool:
@@ -64,12 +88,7 @@ def swept_range(analysis: dict[str, Any]) -> tuple[str, float, float] | None:
 
 
 def _positive_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value == value
-        and 0 < value < float("inf")
-    )
+    return is_finite_number(value) and value > 0
 
 
 def validate_noise_spec(name: Any, body: Any) -> None:
@@ -90,6 +109,8 @@ def validate_noise_spec(name: Any, body: Any) -> None:
             f"measurement '{name}': noise.quantity must be one of "
             f"{list(NOISE_QUANTITIES)} (got {body.get('quantity')!r})"
         )
+    _validate_mechanism(name, body)
+    sim_noise_contributors.validate_top_n(name, body)
     has_at, has_band = "at_hz" in body, "band_hz" in body
     if has_at == has_band:
         raise SimError(
@@ -118,6 +139,36 @@ def validate_noise_spec(name: Any, body: Any) -> None:
             )
 
 
+def _validate_mechanism(name: Any, body: dict[str, Any]) -> None:
+    """Issue #5553: the optional ``mechanism`` key, and the one quantity it
+    cannot be asked for.
+
+    ngspice emits per-contributor spectra for the *output*-referred quantity
+    only: ``noise1`` carries ``onoise_<device>_<generator>`` vectors but no
+    ``inoise_`` counterpart (``noise2``'s ``inoise_total_*`` scalars exist, but
+    only integrated over the whole swept range, so ``at_hz``/``band_hz`` could
+    not keep their meaning). Refused by name rather than silently returning a
+    null value -- verified on ngspice-47.
+    """
+    if "mechanism" not in body:
+        return
+    mechanism = body["mechanism"]
+    if mechanism not in sim_noise_mechanism.NOISE_MECHANISMS:
+        raise SimError(
+            f"measurement '{name}': noise.mechanism must be one of "
+            f"{list(sim_noise_mechanism.NOISE_MECHANISMS)} "
+            f"(got {mechanism!r})"
+        )
+    if body.get("quantity") != "onoise":
+        raise SimError(
+            f"measurement '{name}': noise.mechanism needs "
+            'quantity "onoise" -- ngspice emits no per-contributor '
+            "input-referred spectra, so an inoise mechanism share cannot be "
+            "separated out. Measure it output-referred and divide by the "
+            "gain, or use the total form for inoise"
+        )
+
+
 def validate_noise_context(
     measurements_spec: list[dict[str, Any]], analysis: dict[str, Any]
 ) -> None:
@@ -126,12 +177,14 @@ def validate_noise_context(
     declared = [s for s in measurements_spec if is_noise(s)]
     if not declared:
         return
-    if str(analysis.get("kind", "")).lower() != "noise":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'noise', which "
-            'reads the noise spectrum and so requires analysis.kind "noise" '
-            f"(got {analysis.get('kind')!r})"
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="noise",
+        required="noise",
+        explanation="reads the noise spectrum",
+    )
+    _refuse_missing_pts_per_summary(declared, analysis)
     swept = swept_range(analysis)
     if swept is None:
         return
@@ -148,18 +201,61 @@ def validate_noise_context(
                 )
 
 
+def _refuse_missing_pts_per_summary(
+    declared: list[dict[str, Any]], analysis: dict[str, Any]
+) -> None:
+    """Issue #5553: a ``mechanism`` measurement needs the trailing
+    ``pts_per_summary`` argument on the analysis line -- and, issue #5558, so
+    does a ``top_n`` one.
+
+    Without it ngspice's spectra plot holds exactly ``frequency``,
+    ``inoise_spectrum`` and ``onoise_spectrum`` -- no per-contributor vector
+    exists, so no mechanism can be separated out (measured, ngspice-47). The
+    argument is *not* injected: rewriting the caller's analysis line also
+    multiplies the vector count by the device count, which is the caller's
+    cost to accept. Refused before any run so the request can never come back
+    with a null value instead.
+    """
+    needing = [spec for spec in declared if sim_noise_mechanism.reads_spectra(spec)]
+    if not needing or sim_noise_mechanism.has_pts_per_summary(analysis):
+        return
+    first = needing[0]
+    key = (
+        f"noise.mechanism {first['noise']['mechanism']!r}"
+        if sim_noise_mechanism.is_mechanism(first)
+        else f"noise.top_n {first['noise']['top_n']!r}"
+    )
+    args = str(analysis.get("args", "")).strip()
+    raise SimError(
+        f"measurement '{first['name']}' declares {key}, which needs "
+        "ngspice's per-device noise decomposition -- but analysis.args has "
+        "no trailing pts_per_summary argument, so ngspice emits only the "
+        "total spectrum. "
+        f"Append it: analysis.args = {args + ' 1'!r} (the trailing 1 is "
+        "pts_per_summary)"
+    )
+
+
 def lower_measurements(
     measurements_spec: list[dict[str, Any]], analysis: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """The measurements with every ``noise`` entry lowered to an ``expr``
     entry carrying its helper ``expr_prelude`` lines (see module docstring).
     Other entries are returned untouched; the input is not mutated."""
-    if not any(is_noise(spec) for spec in measurements_spec):
+    if not any(
+        is_noise(spec) and not sim_noise_mechanism.is_mechanism(spec)
+        for spec in measurements_spec
+    ):
         return measurements_spec
     sweep = (swept_range(analysis) or ("lin", 0.0, 0.0))[0]
     lowered = []
     for spec in measurements_spec:
-        if not is_noise(spec):
+        # A `mechanism` entry (issue #5553) is reduced in Python after the run
+        # from the per-contributor spectra rawfile
+        # (:mod:`klayout_tools.sim_noise_mechanism`), never lowered to `let`
+        # lines: the contributor names are unknown until the run and ngspice's
+        # `expr` has no vector glob. It stays a bare `noise` entry here.
+        if not is_noise(spec) or sim_noise_mechanism.is_mechanism(spec):
             lowered.append(spec)
             continue
         prelude, expr = _lines(spec["name"], spec["noise"], sweep)
@@ -205,3 +301,126 @@ def _lines(name: str, body: dict[str, Any], sweep: str) -> tuple[list[str], str]
         f"let {p}t = {p}w*({p}pa+{p}pb)/2*({p}b-{p}a)",
     ]
     return prelude, f"sqrt(mean({p}t)*length({p}t))"
+
+
+# --------------------------------------------------------------------------- #
+# The Python twins of `_lines`
+# --------------------------------------------------------------------------- #
+#
+# The `mechanism` form (issue #5553) cannot be lowered into ngspice at all --
+# its contributor vectors are unknown until the run -- so it reduces density
+# columns in Python after the run instead. These two functions are deliberate
+# transcriptions of the arithmetic `_lines` emits above, interval mask and
+# edge interpolation included, so a mechanism share and a total reduced over
+# the same frequency or band stay directly comparable.
+
+
+def spot_density(
+    freqs: list[float], density: list[float], hz: float, sweep: str
+) -> float | None:
+    """The density interpolated at ``hz``: log-frequency for a ``dec``/``oct``
+    sweep, linear for ``lin``; exact on a grid point. None when the grid
+    cannot bracket ``hz``."""
+    if len(freqs) < 2:
+        return None
+    fmax = max(freqs)
+    total = 0.0
+    hit = False
+    for index in range(len(freqs) - 1):
+        f1, f2 = freqs[index], freqs[index + 1]
+        # The interval holding the point; the last one also owns fmax.
+        owns_top = hz >= fmax and f2 >= fmax and f1 < fmax
+        if not ((f1 <= hz < f2) or owns_top):
+            continue
+        s1, s2 = density[index], density[index + 1]
+        if f2 == f1:
+            fraction = 0.0
+        elif sweep in ("dec", "oct") and f1 > 0 and hz > 0:
+            fraction = math.log(hz / f1) / math.log(f2 / f1)
+        else:
+            fraction = (hz - f1) / (f2 - f1)
+        total += s1 + (s2 - s1) * fraction
+        hit = True
+    return total if hit else None
+
+
+def band_rms(
+    freqs: list[float], density: list[float], lo: float, hi: float
+) -> float | None:
+    """``sqrt(integral of density**2 df)`` over ``[lo, hi]``: trapezoidal on
+    the swept grid with both band edges interpolated linearly in the squared
+    density. ``0.0`` when the band and the grid do not overlap."""
+    if len(freqs) < 2:
+        return None
+    total = 0.0
+    for index in range(len(freqs) - 1):
+        f1, f2 = freqs[index], freqs[index + 1]
+        if f2 <= f1:
+            continue
+        # Interval clipped to the band; an empty one contributes nothing.
+        a = f1 if f1 > lo else lo
+        b = f2 if f2 < hi else hi
+        if b <= a:
+            continue
+        p1, p2 = density[index] ** 2, density[index + 1] ** 2
+        pa = p1 + (p2 - p1) * (a - f1) / (f2 - f1)
+        pb = p1 + (p2 - p1) * (b - f1) / (f2 - f1)
+        total += (pa + pb) / 2 * (b - a)
+    return math.sqrt(total) if total > 0 else 0.0
+
+
+def reduce_density(
+    body: dict[str, Any], sweep: str, freqs: list[float], density: list[float]
+) -> float | None:
+    """``body``'s own reduction (``at_hz`` spot or ``band_hz`` rms) of one
+    amplitude-density column."""
+    if "at_hz" in body:
+        return spot_density(freqs, density, float(body["at_hz"]), sweep)
+    lo, hi = (float(edge) for edge in body["band_hz"])
+    return band_rms(freqs, density, lo, hi)
+
+
+def emittable_exprs(expr_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The subset of ``sim_validate._expr_measurements`` that actually has an
+    ``expr`` for the deck to emit a ``let``/``print`` pair for.
+
+    The two differ for exactly one form: a ``noise`` entry declaring a
+    ``mechanism`` (issue #5553). It counts as an ``expr`` measurement
+    everywhere that decides *engine support* -- it needs ngspice's control
+    block just as much, so ``engine: "xyce"`` must still refuse it -- but it is
+    reduced in Python after the run rather than lowered, so there is nothing to
+    emit for it."""
+    return [spec for spec in expr_specs if spec.get("expr") is not None]
+
+
+def alias_lines(
+    analysis: dict[str, Any], expr_specs: list[dict[str, Any]]
+) -> list[str]:
+    """Issue #2893: after ``noise``, ngspice's current plot is the integrated
+    one (``noise2``: ``onoise_total``/``inoise_total``); the spectra live in
+    ``noise1``. Alias them into the current plot by bare name so an ``expr``
+    resolves either, leaving the totals bare. Emitted after any rawfile
+    ``write``, so that artifact is unchanged. No lines without an ``expr``."""
+    if not expr_specs or analysis.get("kind") != "noise":
+        return []
+    return [f"let {vec} = noise1.{vec}" for vec in NOISE_SPECTRUM_VECTORS]
+
+
+def noise_representation(waveform: dict[str, Any]) -> str:
+    """``"power"`` or ``"amplitude"`` for a parsed ``noise`` waveform dict
+    (issue #3006).
+
+    ngspice's ``sqrnoise`` squares every noise output vector. The rawfile
+    records which mode produced it: the integrated plot is named
+    ``Integrated Noise`` with ``voltage``/``current`` variables, or
+    ``Integrated Noise - V^2 or A^2`` with ``voltage^2``/``current^2`` ones.
+
+    Moved here from :mod:`klayout_tools.sim` (issue #7866) to keep that module
+    inside its size ratchet; ``sim.noise_representation`` is the same function.
+    """
+    if str(waveform.get("plotname", "")).strip().endswith("V^2 or A^2"):
+        return "power"
+    for var in waveform.get("variables", []):
+        if str(var.get("type", "")).endswith("^2"):
+            return "power"
+    return "amplitude"

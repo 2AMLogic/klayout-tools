@@ -28,9 +28,9 @@ Semantics, per named drawing layer:
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
+from ._jsonnum import is_finite_number, is_number
 from ._layout import bbox_um_dict, clip_box, load_layout, resolve_top_cell, write_layout
 
 #: ``prBoundary`` drawing layer/datatype, shared with ``drc.py``.
@@ -92,11 +92,7 @@ class FillError(Exception):
 
 
 def _finite_positive(value: Any, name: str, allow_zero: bool = False) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
+    if not is_finite_number(value):
         raise FillError(f"{name} must be a finite number, got {value!r}")
     if value < 0 or (value == 0 and not allow_zero):
         raise FillError(
@@ -266,11 +262,7 @@ def _validate_params(
         else _finite_positive(fill_gap_um, "--fill-gap", allow_zero=True)
     )
     if target_density is not None:
-        if (
-            isinstance(target_density, bool)
-            or not isinstance(target_density, (int, float))
-            or not (0 < target_density <= 1)
-        ):
+        if not is_number(target_density) or not (0 < target_density <= 1):
             raise FillError(
                 f"--target-density must be in (0, 1], got {target_density!r}"
             )

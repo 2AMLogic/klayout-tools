@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ._jsonnum import is_number
+
 
 def _err(msg: str) -> Exception:
     from .economy import EconomyError  # lazy: economy imports this module
@@ -45,9 +47,7 @@ def _pnr_areas(report: dict[str, Any], path: str) -> tuple[float, float, str]:
                 candidates.append((st, f"stages[{st.get('name')}]"))
     for src, label in candidates:
         die, core = src.get("die_area_um2"), src.get("core_area_um2")
-        if all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) for v in (die, core)
-        ):
+        if all(is_number(v) for v in (die, core)):
             return float(die), float(core), label
     raise _err(
         f"P&R report '{path}' has no die_area_um2/core_area_um2 "
