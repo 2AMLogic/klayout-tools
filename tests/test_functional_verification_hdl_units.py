@@ -12,7 +12,11 @@ from klayout_tools.functional_verification_hdl_units import (
     _active_sources,
     _verilog_time_units,
 )
-from test_functional_verification_verilog_top import _stage_sdf_units
+from test_functional_verification_verilog_top import (
+    _edit,
+    _rewrite_bench,
+    _stage_sdf_units,
+)
 
 
 @needs_icarus
@@ -30,6 +34,10 @@ def test_matching_sdf_inherits_compilation_unit(tmp_path):
 @pytest.mark.parametrize(
     "flags",
     [
+        ["-tvvp"],
+        ["-M", "deps.v"],
+        ["-P", "tb_and2.N=1"],
+        ["-s", "and2"],
         ["-v"],
         ["-pfileline=1"],
         ["-p", "fileline=1"],
@@ -53,15 +61,65 @@ def test_matching_sdf_inherits_compilation_unit(tmp_path):
         ["-T", "typ"],
     ],
 )
-def test_matching_sdf_with_unit_neutral_build_arg(tmp_path, flags):
+def test_matching_sdf_with_unit_neutral_build_arg(tmp_path, flags, monkeypatch):
     request = Path(_stage_sdf_units(tmp_path))
-    spec = json.loads(request.read_text())
-    spec["options"]["build_args"] = flags
-    request.write_text(json.dumps(spec))
-    report = run_functional_verification(str(request))
+    monkeypatch.chdir(tmp_path)  # Icarus resolves the -M output against its cwd.
+    if flags[0] == "-P":
+        _rewrite_bench(
+            tmp_path,
+            "module tb_and2;",
+            "module tb_and2 #(parameter N = 0);\n"
+            '  initial if (N != 1) $fatal(1, "expected parameter override");',
+        )
+    report = run_functional_verification(
+        _edit(request, **{"options.build_args": flags})
+    )
     sdf = report["environment"]["sdf"]
     assert report["status"] == "pass" and sdf["annotated"]
     assert (sdf["timescale"], sdf["time_unit"]) == ("1ns", "1ns")
+    if flags[0] == "-M":
+        assert (
+            str(tmp_path / "and_cell.v")
+            in (tmp_path / "deps.v").read_text().splitlines()
+        )
+
+
+@needs_icarus
+def test_sdf_mismatch_with_unit_neutral_build_arg(tmp_path):
+    request = Path(_stage_sdf_units(tmp_path, sdf_timescale="1ps"))
+    with pytest.raises(FunctionalVerificationError, match="1000x too large"):
+        run_functional_verification(
+            _edit(request, **{"options.build_args": ["-s", "and2"]})
+        )
+
+
+@needs_icarus
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["deps.v"],
+        ["-u"],
+        ["-y", "lib"],
+        ["-Y", ".v"],
+        ["-l", "lib.v"],
+        ["-c", "sources.cf"],
+        ["-f", "sources.f"],
+        ["-tnull"],
+        ["-M"],
+        ["-P"],
+        ["-s"],
+    ],
+)
+def test_sdf_refuses_unmodeled_or_incomplete_args_after_dependency_output(
+    tmp_path, extra, monkeypatch
+):
+    request = Path(_stage_sdf_units(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    flags = ["-M", "deps.v", *extra]
+    with pytest.raises(FunctionalVerificationError) as exc:
+        run_functional_verification(_edit(request, **{"options.build_args": flags}))
+    assert f"options.build_args entry {extra[0]!r}" in str(exc.value)
+    assert not (tmp_path / ".klt/functional-verification/build_icarus.log").exists()
 
 
 def test_verilog_time_units_follow_the_last_directive_in_compile_order(tmp_path):

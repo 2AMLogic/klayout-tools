@@ -835,8 +835,17 @@ supplies `options.timescale` as its compiler default. The Verilog-bench
 path requires a known HDL unit. For sources with macros, conditionals, or
 includes, the preflight runs the Icarus preprocessor with the build's
 include paths, defines, and per-source define wrappers. It refuses before
-build if it cannot establish a retained target's unit, including when
-custom build arguments introduce another compilation unit or command file.
+build if it cannot establish a retained target's unit.
+
+In `options.build_args`, the preflight accepts the default Icarus target
+(`-tvvp`). It also accepts
+`["-M", "dep.txt"]` to write a dependency list, `["-P", "top.N=1"]` to
+override a root-module parameter, and `["-s", "top"]` to select a root module.
+A filename in a positional slot is an additional compiler input. Put HDL
+sources in `request.sources` so the preflight can read them in compile order.
+The preflight refuses positional inputs, separate compilation units (`-u`),
+library inputs (`-y`, `-Y`, `-l`), command files (`-c`, `-f`), and other
+options it cannot model. The error identifies the offending entry.
 
 Two additive fields record the outcome on both the cocotb and the
 Verilog-bench path, so a stored verdict states which timing it is evidence
