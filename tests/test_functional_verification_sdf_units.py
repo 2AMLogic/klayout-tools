@@ -17,7 +17,6 @@ import pytest
 
 from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
 from klayout_tools import functional_verification as fv
-from klayout_tools import functional_verification_hdl_units as units
 from klayout_tools import functional_verification_sdf as sdf
 from klayout_tools import functional_verification_sdf_unit_syntax as syntax
 from test_functional_verification_verilog_top import EXAMPLE_DIR, _stage_sdf_units
@@ -213,39 +212,6 @@ def test_timingcheck_only_cell_is_not_a_delay_target(tmp_path, monkeypatch):
 
 
 # -- the unit scan ----------------------------------------------------------
-
-
-def test_verilog_time_units_follow_the_last_directive_in_compile_order(tmp_path):
-    """What Icarus 13.0 elaborates, each rule measured live on raw ``iverilog``:
-    a directive persists from one source into the next, ``` `resetall ```
-    restores the compile-time default, and a comment declares nothing."""
-    first = tmp_path / "a.v"
-    first.write_text(
-        "`timescale 1ns/10ps\n"
-        "module first(input a, output y); endmodule\n"
-        "// `timescale 100ps/1ps\n"
-        "/* module commented_out; endmodule */\n"
-        "`timescale 100 ps / 1 ps\n"
-        "module second(input a, output y); endmodule\n"
-    )
-    second = tmp_path / "b.v"
-    second.write_text(
-        "module third(input a, output y); endmodule\n"
-        "`resetall\n"
-        "module fourth(input a, output y); endmodule\n"
-        "`timescale 1ps/1ps\n"
-        "module fifth(input a, output y); endmodule\n"
-    )
-    texts = units._active_sources([str(first), str(second)], [], {}, [], None)
-
-    assert units._verilog_time_units(texts, "1ns") == {
-        "first": "1ns",
-        "second": "100ps",
-        "third": "100ps",
-        "fourth": "1ns",
-        "fifth": "1ps",
-    }
-    assert units._verilog_time_units(texts, None)["fourth"] is None
 
 
 @pytest.mark.parametrize(
@@ -471,3 +437,46 @@ def test_uncertain_compilation_unit_refuses_before_build(tmp_path, monkeypatch):
     request.write_text(json.dumps(spec))
     message = _refused(tmp_path, monkeypatch, str(request))
     assert "'u1'" in message and "options.build_args entry '-u'" in message
+
+
+@pytest.mark.parametrize("divider", [".", "/"])
+def test_same_celltype_in_two_annotated_scopes(tmp_path, monkeypatch, divider):
+    # u1 instantiates the global and_cell. In the same DUT, Icarus also
+    # instantiates 'branch.and_cell' directly from the nested declarations.
+    instance = f"branch{divider}and_cell"
+    nested = _LEAF_CELL.replace("INSTANCE u1", f"INSTANCE {instance}")
+    text = _sdf("1ns", _LEAF_CELL, nested).replace(
+        "(DIVIDER .)", f"( DiViDeR {divider})"
+    )
+    request = _stage_sdf_units(tmp_path, sdf_text=text)
+    dut = tmp_path / "and2.v"
+    dut.write_text(
+        dut.read_text().replace(
+            "  and_cell u1",
+            "  module branch; timeunit 1ps/1ps;\n"
+            "    module and_cell; endmodule\n"
+            "  endmodule\n  and_cell u1",
+        )
+    )
+    message = _refused(tmp_path, monkeypatch, request)
+    assert f"'{instance}'" in message and "1000x too small" in message
+    assert "'u1'" not in message
+    (tmp_path / "and2.sdf").write_text(
+        text.replace(_LEAF_CELL, "").replace("1ns", "1ps")
+    )
+    assert _dispatched_annotation(monkeypatch, request)["time_unit"] == "1ps"
+
+
+def test_verilog_dut_instance_is_a_nested_annotation_root(tmp_path, monkeypatch):
+    request = Path(_stage_sdf_units(tmp_path, sdf_text=_sdf("1ns", _ROOT_CELL)))
+    spec = json.loads(request.read_text())
+    spec["testbench"]["dut_instance"] = "tb_and2.and2"
+    request.write_text(json.dumps(spec))
+    bench = tmp_path / "tb_and2.v"
+    bench.write_text(
+        bench.read_text().replace(
+            "  reg a", "  module and2; timeunit 1ps/1ps; endmodule\n  reg a"
+        )
+    )
+    message = _refused(tmp_path, monkeypatch, str(request))
+    assert 'the root CELL (CELLTYPE "and2", `timescale 1ps): 1000x too small' in message

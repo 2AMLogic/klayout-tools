@@ -2396,7 +2396,7 @@ def run_functional_verification(
             sdf,
             sdf_paths,
             sources,
-            hdl_toplevel,
+            verilog_tb["dut_instance"] if verilog_tb else hdl_toplevel,
             timescale[0] if verilog_tb is None else None,
             includes,
             defines,

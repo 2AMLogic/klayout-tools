@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from collections.abc import Iterable
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from tempfile import TemporaryDirectory
 
 from ._text import read_text
@@ -25,7 +27,12 @@ _TOKEN = re.compile(
 _LOCAL_DECLARATION = re.compile(rf"\s*(?P<unit>{_UNIT})\s*(?:/\s*{_UNIT}\s*)?;")
 # A module-local timeunit declaration precedes other module items. In a
 # different scope (e.g. a nested interface), do not attribute it to the module.
-_MODULE_HEADER = re.compile(rf"[^;]*;\s*(?:timeprecision\s+{_UNIT}\s*;\s*)?")
+# Header package imports each have their own semicolon before the optional
+# parameter and port lists. Escaped identifiers can contain literal semicolons.
+_HEADER_FIELD = r"(?:[^;\\]|\\\S+(?=\s))*"
+_MODULE_HEADER = re.compile(
+    rf"(?:\s*import\b{_HEADER_FIELD};)*{_HEADER_FIELD};\s*(?:timeprecision\s+{_UNIT}\s*;\s*)?"
+)
 
 
 def _hdl_code(text: str) -> str:
@@ -162,41 +169,91 @@ def _compilation_default(texts: list[str], compiler_default: str | None) -> str 
     return compiler_default
 
 
-def _local_unit(
-    text: str, start: int, token: re.Match[str], current: str | None
+@dataclass
+class _Module:
+    name: str
+    unit: str | None
+    body_start: int
+    children: dict[str, _Module] = field(default_factory=dict)
+    # Direct module items only. Nested declarations have their own bodies.
+    body: list[tuple[int, int]] = field(default_factory=list)
+
+
+def _instance_type(
+    text: str, body: Iterable[tuple[int, int]], instance: str
 ) -> str | None:
-    declared = _declared_unit(text, token.end())
-    # A later declaration can repeat a module's unit. If it agrees, even
-    # a declaration in a nested scope leaves the established unit intact.
-    if declared == current:
-        return current
-    header = _MODULE_HEADER.match(text, start)
-    if header is None or header.end() != token.start():
-        return None
-    return declared
+    """Find an explicit instantiation, declining an ambiguous name."""
+    name = re.escape(instance.removeprefix("\\"))
+    pattern = re.compile(
+        rf"(?<![\w$.\\])({_NAME})\s*(?:#\s*\([^;]*?\)\s*)?"
+        rf"(?<![\w$])(?:\\{name}\s+|{name}\s*)\("
+    )
+    types = {
+        m[1].removeprefix("\\")
+        for start, end in body
+        for m in pattern.finditer(text, start, end)
+    }
+    return types.pop() if len(types) == 1 else None
+
+
+@dataclass
+class _ModuleTimeUnits:
+    text: str
+    top: dict[str, _Module] = field(default_factory=dict)
+    nested: dict[str, list[_Module]] = field(default_factory=dict)
+
+    def follow(self, module: _Module | None, path: Iterable[str]) -> _Module | None:
+        for instance in path:
+            if module is None:
+                return None
+            name = instance.removeprefix("\\")
+            if name in module.children:
+                # Icarus instantiates a nested declaration under its own name.
+                module = module.children[name]
+            else:
+                cell = _instance_type(self.text, module.body, name)
+                module = self.top.get(cell) if cell else None
+        return module
 
 
 def _verilog_time_units(
     source_texts: list[str], default_unit: str | None
-) -> dict[str, str | None]:
-    """An inline timeunit overrides the active directive for that module only."""
+) -> _ModuleTimeUnits:
+    """Index declarations by lexical scope, retaining each module's own unit."""
     default_unit = _compilation_default(source_texts, default_unit)
-    units: dict[str, str | None] = {}
     directive = None
-    module = None
-    header_start = 0
-    for text in source_texts:
-        for token in _TOKEN.finditer(text):
-            if token["module"] is not None:
-                module = token["module"].removeprefix("\\")
-                header_start = token.end()
-                units[module] = directive or default_unit
-            elif token["directive"] is not None:
-                directive = "".join(token["directive"].split())
-            elif token[0] == "`resetall":
-                directive = None
-            elif token["end"]:
-                module = None
-            elif token["local"] and module is not None:
-                units[module] = _local_unit(text, header_start, token, units[module])
+    stack: list[_Module] = []
+    text = "\n".join(source_texts)
+    units = _ModuleTimeUnits(text)
+    start = 0
+    for token in _TOKEN.finditer(text):
+        if token["module"] is not None:
+            name = token["module"].removeprefix("\\")
+            header = _MODULE_HEADER.match(text, token.end())
+            body_start = header.end() if header else token.end()
+            if stack:
+                parent = stack[-1]
+                parent.body.append((start, token.start()))
+                module = _Module(name, parent.unit, body_start)
+                parent.children[name] = module
+                units.nested.setdefault(name, []).append(module)
+            else:
+                module = _Module(name, directive or default_unit, body_start)
+                units.top[name] = module
+            stack.append(module)
+            start = body_start
+        elif token["directive"] is not None:
+            directive = "".join(token["directive"].split())
+        elif token[0] == "`resetall":
+            directive = None
+        elif token["end"] and stack:
+            stack.pop().body.append((start, token.start()))
+            start = token.end()
+        elif token["local"] and stack:
+            module = stack[-1]
+            declared = _declared_unit(text, token.end())
+            if module.body_start == token.start() or declared == module.unit:
+                module.unit = declared
+            else:
+                module.unit = None
     return units

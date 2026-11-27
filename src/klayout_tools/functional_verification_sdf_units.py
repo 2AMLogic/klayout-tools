@@ -51,8 +51,13 @@ from typing import Any
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._text import read_text
 from .functional_verification_base import FunctionalVerificationError
-from .functional_verification_hdl_units import _active_sources, _verilog_time_units
-from .functional_verification_sdf import _resolve_sdf_scope_module
+from .functional_verification_hdl_units import (
+    _active_sources,
+    _Module,
+    _ModuleTimeUnits,
+    _verilog_time_units,
+)
+from .functional_verification_sdf import _sdf_split_unescaped, _split_sdf_scope
 from .functional_verification_sdf_output_concat import _sdf_output_concat_report
 from .functional_verification_sdf_rename import _sdf_renamed_report
 from .functional_verification_sdf_unit_syntax import (
@@ -66,22 +71,27 @@ from .functional_verification_sdf_unit_syntax import (
 )
 
 
-def _resolve_targets(
-    targets: Iterable[_Target], units: dict[str, str | None], root: str | None
-) -> dict[str | None, tuple[str | None, str | None]]:
-    """Module -> ``(INSTANCE, declared unit)``: the first target naming each
-    module, in file order, however many delays land in it. A ``DELAY`` clause
-    outside any ``CELL`` is attributed to ``root``, the annotation scope's
-    module."""
-    resolved: dict[str | None, tuple[str | None, str | None]] = {}
-    for celltype, instance in targets:
-        # A DELAY clause outside any CELL lands in the annotation root; a
-        # CELL names its own module by CELLTYPE, or names none.
-        module = root if celltype is None and instance is None else celltype
-        if module not in resolved:
-            declared = units.get(module) if module is not None else None
-            resolved[module] = (instance, declared)
-    return resolved
+def _target_declaration(
+    units: _ModuleTimeUnits, root: _Module | None, target: _Target
+) -> _Module | None:
+    celltype, instance, divider = target
+    if instance is None:
+        return root
+    if celltype is None:
+        return None
+    if celltype not in units.nested:
+        return units.top.get(celltype)
+    if instance == "*":
+        nested = units.nested[celltype]
+        first = units.top.get(celltype, nested[0])
+        return first if all(m.unit == first.unit for m in nested) else None
+    path = _sdf_split_unescaped(instance, divider) if instance else []
+    if path and path[-1] != celltype:
+        # Icarus gives an implicit nested instance the declaration's own
+        # name. An explicitly named instance uses the top-level definition.
+        return units.top.get(celltype)
+    module = units.follow(root, path)
+    return module if module and module.name == celltype else None
 
 
 def _target_parts(module: str | None, instance: str | None) -> tuple[str, str]:
@@ -98,7 +108,7 @@ def _target_parts(module: str | None, instance: str | None) -> tuple[str, str]:
 
 
 def _unresolved_reason(
-    module: str | None, units: dict[str, str | None], instance: str | None
+    module: str | None, units: _ModuleTimeUnits, instance: str | None
 ) -> str:
     """Why no time unit could be established for the module a target names."""
     if module is None:
@@ -108,7 +118,7 @@ def _unresolved_reason(
                 "request.sources, so its own unit is unknown"
             )
         return "the CELL names no module to compare"
-    if module not in units:
+    if module not in units.top and module not in units.nested:
         return (
             f"no module '{module}' is declared in request.sources after preprocessing"
         )
@@ -121,8 +131,8 @@ def _unresolved_reason(
 
 def _unit_problems(
     targets: Iterable[_Target],
-    units: dict[str, str | None],
-    root: str | None,
+    units: _ModuleTimeUnits,
+    root: _Module | None,
     timescale: str,
 ) -> tuple[list[tuple[str, str]], list[str], str | None]:
     """``(mismatched, unresolved, applied_unit)`` for ``targets``, each
@@ -134,8 +144,16 @@ def _unit_problems(
     wrong: list[tuple[str, str]] = []
     unknown: list[str] = []
     applied: str | None = None
-    resolved = _resolve_targets(targets, units, root)
-    for module, (instance, declared) in resolved.items():
+    seen: set[tuple[str | None, str | None]] = set()
+    for target in targets:
+        module, instance, _ = target
+        definition = _target_declaration(units, root, target)
+        declared = definition.unit if definition else None
+        if instance is None and root is not None:
+            module = root.name
+        if (module, declared) in seen:
+            continue
+        seen.add((module, declared))
         where, identity = _target_parts(module, instance)
         if declared is None:
             reason = _unresolved_reason(module, units, instance)
@@ -189,7 +207,7 @@ def _check_sdf_time_units(
     sdf: dict[str, Any],
     sdf_paths: list[str],
     sources: list[str],
-    hdl_toplevel: str,
+    dut_path: str,
     default_unit: str | None,
     includes: list[str],
     defines: dict[str, str | None],
@@ -235,7 +253,7 @@ def _check_sdf_time_units(
             cocotb_build_dir,
         )
     except FunctionalVerificationError as exc:
-        target = _target_parts(*targets[0])
+        target = _target_parts(*targets[0][:2])
         raise FunctionalVerificationError(
             f"options.sdf: cannot establish the HDL time unit for {target[0]} "
             f"({target[1]}) in a {timescale_unit} SDF: {exc}"
@@ -244,7 +262,11 @@ def _check_sdf_time_units(
     units = _verilog_time_units(
         source_texts, parsed_default[0] if parsed_default else None
     )
-    root = _resolve_sdf_scope_module(source_texts, hdl_toplevel, sdf.get("scope"))
+    scope = sdf.get("scope")
+    components = iter(_split_sdf_scope(f"{dut_path}.{scope}" if scope else dut_path))
+    root = units.follow(
+        units.top.get(next(components, "").removeprefix("\\")), components
+    )
     wrong, unknown, applied = _unit_problems(targets, units, root, timescale_unit)
     if wrong:
         raise FunctionalVerificationError(_mismatch_refusal(timescale_unit, wrong))

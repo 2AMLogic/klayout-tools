@@ -26,6 +26,7 @@ _PAREN = re.compile(r"[()]")
 _SDF_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|\\.', re.DOTALL)
 _SDF_TIMESCALE_RE = re.compile(r"\(\s*TIMESCALE\b([^)]*)\)", re.IGNORECASE)
 _SDF_DELAYFILE_RE = re.compile(r"\(\s*DELAYFILE\b", re.IGNORECASE)
+_SDF_DIVIDER = re.compile(r"\(\s*DIVIDER\s+([./])\s*\)", re.IGNORECASE)
 _SDF_CELL_RE = re.compile(r"\(\s*CELL\b", re.IGNORECASE)
 _SDF_DELAY_RE = re.compile(r"\(\s*DELAY\b", re.IGNORECASE)
 _SDF_CELLTYPE_RE = re.compile(r'\(\s*CELLTYPE\s*"([^"]*)"', re.IGNORECASE)
@@ -47,7 +48,7 @@ def _sdf_syntax(text: str) -> str:
 #: One delay target of an SDF: the ``CELLTYPE`` and ``INSTANCE`` of a ``CELL``
 #: that carries a delay entry, or ``(None, None)`` for a ``DELAY`` clause
 #: outside any ``CELL``.
-_Target = tuple[str | None, str | None]
+_Target = tuple[str | None, str | None, str]
 
 
 def _parse_time_unit(unit: str) -> tuple[str, int] | None:
@@ -153,14 +154,16 @@ def _sdf_has_delay_entry(text: str, start: int) -> bool:
     return False
 
 
-def _sdf_cell_target(text: str, syntax: str, start: int, end: int) -> _Target:
+def _sdf_cell_target(
+    text: str, syntax: str, start: int, end: int, divider: str
+) -> _Target:
     """``(CELLTYPE, INSTANCE)`` of the ``CELL`` at ``[start:end]``. A
     ``CELL`` with no quoted ``CELLTYPE`` yields ``None``; an empty
     ``(INSTANCE)`` yields ``""``."""
     celltype = _SDF_CELLTYPE_RE.search(syntax, start, end)
     instance = _SDF_INSTANCE_RE.search(syntax, start, end)
     declared = text[slice(*celltype.span(1))] if celltype else None
-    return declared, text[slice(*instance.span(1))] if instance else ""
+    return declared, text[slice(*instance.span(1))] if instance else "", divider
 
 
 def _file_clauses(syntax: str) -> Iterator[tuple[int, int]]:
@@ -180,11 +183,14 @@ def _file_clauses(syntax: str) -> Iterator[tuple[int, int]]:
 def _sdf_delay_targets(text: str, syntax: str) -> list[_Target]:
     """Targets with retained delays, including DELAYs at the annotation root."""
     targets: list[_Target] = []
+    divider = "."
     for start, end in _file_clauses(syntax):
         if _SDF_CELL_RE.match(syntax, start):
             delays = _SDF_DELAY_RE.finditer(syntax, start, end)
             if any(_sdf_has_delay_entry(syntax, delay.start()) for delay in delays):
-                targets.append(_sdf_cell_target(text, syntax, start, end))
+                targets.append(_sdf_cell_target(text, syntax, start, end, divider))
         elif _SDF_DELAY_RE.match(syntax, start) and _sdf_has_delay_entry(syntax, start):
-            targets.append((None, None))
+            targets.append((None, None, divider))
+        elif match := _SDF_DIVIDER.fullmatch(syntax, start, end):
+            divider = match[1]
     return targets

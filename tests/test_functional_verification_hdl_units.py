@@ -8,7 +8,10 @@ import pytest
 from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
 from klayout_tools.functional_verification import run_functional_verification
 from klayout_tools.functional_verification_base import FunctionalVerificationError
-from klayout_tools.functional_verification_hdl_units import _verilog_time_units
+from klayout_tools.functional_verification_hdl_units import (
+    _active_sources,
+    _verilog_time_units,
+)
 from test_functional_verification_verilog_top import _stage_sdf_units
 
 
@@ -59,6 +62,40 @@ def test_matching_sdf_with_unit_neutral_build_arg(tmp_path, flags):
     assert (sdf["timescale"], sdf["time_unit"]) == ("1ns", "1ns")
 
 
+def test_verilog_time_units_follow_the_last_directive_in_compile_order(tmp_path):
+    """What Icarus 13.0 elaborates, each rule measured live on raw ``iverilog``:
+    a directive persists from one source into the next, ``` `resetall ```
+    restores the compile-time default, and a comment declares nothing."""
+    first = tmp_path / "a.v"
+    first.write_text(
+        "`timescale 1ns/10ps\n"
+        "module first(input a, output y); endmodule\n"
+        "// `timescale 100ps/1ps\n"
+        "/* module commented_out; endmodule */\n"
+        "`timescale 100 ps / 1 ps\n"
+        "module second(input a, output y); endmodule\n"
+    )
+    second = tmp_path / "b.v"
+    second.write_text(
+        "module third(input a, output y); endmodule\n"
+        "`resetall\n"
+        "module fourth(input a, output y); endmodule\n"
+        "`timescale 1ps/1ps\n"
+        "module fifth(input a, output y); endmodule\n"
+    )
+    texts = _active_sources([str(first), str(second)], [], {}, [], None)
+
+    modules = _verilog_time_units(texts, "1ns").top
+    assert {name: mod.unit for name, mod in modules.items()} == {
+        "first": "1ns",
+        "second": "100ps",
+        "third": "100ps",
+        "fourth": "1ns",
+        "fifth": "1ps",
+    }
+    assert _verilog_time_units(texts, None).top["fourth"].unit is None
+
+
 @pytest.mark.parametrize("scope", ["package", "interface", "program"])
 @pytest.mark.parametrize(
     "declaration,expected", [("", "100ns"), ("timeunit 10ps;", "10ps")]
@@ -69,7 +106,7 @@ def test_scoped_declaration_preserves_compilation_default(scope, declaration, ex
         f"{scope} other; timeunit 1ns/1ps; end{scope}",
         "module leaf; endmodule",
     ]
-    assert _verilog_time_units(texts, "100ns") == {"leaf": expected}
+    assert _verilog_time_units(texts, "100ns").top["leaf"].unit == expected
 
 
 def test_resetall_restores_compilation_declaration():
@@ -78,7 +115,11 @@ def test_resetall_restores_compilation_declaration():
         "`timescale 1ns/1ps\nmodule a; endmodule",
         "`resetall\nmodule b; endmodule",
     ]
-    assert _verilog_time_units(texts, "100ns") == {"a": "1ns", "b": "10ps"}
+    modules = _verilog_time_units(texts, "100ns").top
+    assert {name: mod.unit for name, mod in modules.items()} == {
+        "a": "1ns",
+        "b": "10ps",
+    }
 
 
 @needs_icarus
@@ -120,4 +161,63 @@ def test_repeated_module_timeunit(tmp_path, sdf_unit):
 
 def test_disagreeing_module_redeclaration_keeps_unit_unknown():
     text = "module leaf; timeunit 1ns/1ps; wire x; timeunit 10ps; endmodule"
-    assert _verilog_time_units([text], "1ns") == {"leaf": None}
+    assert _verilog_time_units([text], "1ns").top["leaf"].unit is None
+
+
+def _assert_matching_ns_edge(tmp_path, request):
+    bench = tmp_path / "tb_and2.v"
+    bench.write_text(
+        bench.read_text().replace(
+            "  task check",
+            "  always @(posedge y) if ($realtime != 10.5)\n"
+            '    $fatal(1, "unexpected SDF delay");\n  task check',
+        )
+    )
+    report = run_functional_verification(request)
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] and sdf["timescale"] == sdf["time_unit"] == "1ns"
+
+
+@needs_icarus
+@pytest.mark.parametrize("leaf_unit,unused_unit", [("1ps", "1ns"), ("1ns", "1ps")])
+def test_unrelated_nested_module_with_same_name(tmp_path, leaf_unit, unused_unit):
+    request = _stage_sdf_units(tmp_path, leaf_timescale=f"{leaf_unit}/1ps")
+    leaf = tmp_path / "and_cell.v"
+    with leaf.open("a") as source:
+        source.write(
+            f"\n`timescale {unused_unit}/1ps\n"
+            "module unrelated; module and_cell; endmodule endmodule\n"
+        )
+    if leaf_unit == "1ps":
+        with pytest.raises(FunctionalVerificationError, match="'u1'.*1000x too small"):
+            run_functional_verification(request)
+        assert not (tmp_path / ".klt/functional-verification/build_icarus.log").exists()
+    else:
+        _assert_matching_ns_edge(tmp_path, request)
+
+
+@needs_icarus
+@pytest.mark.parametrize("sdf_unit", ["1ns", "1ps"])
+def test_module_header_package_imports_before_local_unit(tmp_path, sdf_unit):
+    request = _stage_sdf_units(
+        tmp_path, leaf_timescale="1ps/1ps", sdf_timescale=sdf_unit
+    )
+    leaf = tmp_path / "and_cell.v"
+    leaf.write_text(
+        leaf.read_text()
+        .replace(
+            "module and_cell(",
+            "package model_types; typedef logic pin_t; endpackage\n"
+            "package model_params; parameter N=1; endpackage\n"
+            "module and_cell import model_types::*; import model_params::N; "
+            "#(parameter WIDTH=N) (",
+        )
+        .replace("  and (", "  timeunit 1ns/1ps;\n  and (")
+    )
+    if sdf_unit == "1ps":
+        with pytest.raises(FunctionalVerificationError, match="'u1'.*1000x too large"):
+            run_functional_verification(request)
+        assert not (tmp_path / ".klt/functional-verification/build_icarus.log").exists()
+    else:
+        _assert_matching_ns_edge(tmp_path, request)
