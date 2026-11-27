@@ -933,7 +933,8 @@
         "klayout_tools.verilog_module_names",
         "klayout_tools.verilog_netlist",
         "klayout_tools.verilog_pin_bind",
-        "klayout_tools.runset_deck_vars"
+        "klayout_tools.runset_deck_vars",
+        "klayout_tools.runset_launch"
       ]
     },
     "signoff": {
@@ -1385,11 +1386,6 @@
       "consumer": "pdk",
       "exporter": "env_provenance",
       "reason": "PDK OSDI identity uses repo_root_for and repo_relative_path to emit the same portable path and scope as simulation model evidence (#6904)."
-    },
-    {
-      "consumer": "extract",
-      "exporter": "lvs",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` drives the *same* PDK-runset launcher `klt lvs --engine klayout-runset` built (binary resolution, -rd construction, timeout and error text), through lvs_runset's module-private helpers (`_resolve_klayout_binary`, `_run_runset`, `_application_version`, `_error_lines`) rather than a second copy, and converts its LvsError into an ExtractError. A copy would drift; the two engines must launch runsets identically."
     },
     {
       "consumer": "artifact",
@@ -2221,30 +2217,6 @@
       "exporter": "klayout_tools.cli.extract_text",
       "symbol": "_print_label_layers",
       "reason": "`klt pex` prints the extraction leg's `--label-layer` echo with `klt extract`'s own renderer so the two text surfaces cannot drift. Was a grandfathered pex_cmd -> extract_cmd exception (issue #2767); issue #5464 moved the importing code to cli/pex_text.py and issue #5481 moved the renderer into cli/extract_text.py, so this records the same single-symbol dependency against both new homes."
-    },
-    {
-      "consumer": "klayout_tools.extract_runset",
-      "exporter": "klayout_tools.lvs_runset",
-      "symbol": "_resolve_klayout_binary",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
-    },
-    {
-      "consumer": "klayout_tools.extract_runset",
-      "exporter": "klayout_tools.lvs_runset",
-      "symbol": "_run_runset",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
-    },
-    {
-      "consumer": "klayout_tools.extract_runset",
-      "exporter": "klayout_tools.lvs_runset",
-      "symbol": "_application_version",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
-    },
-    {
-      "consumer": "klayout_tools.extract_runset",
-      "exporter": "klayout_tools.lvs_runset",
-      "symbol": "_error_lines",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
     },
     {
       "consumer": "klayout_tools.lvs_runset_reference",

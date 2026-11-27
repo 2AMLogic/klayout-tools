@@ -19,7 +19,7 @@ import subprocess
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import extract_runset, lvs_runset
+from klayout_tools import extract_runset
 from klayout_tools.extract import run_extract
 from klayout_tools.extract_spef import ExtractError
 
@@ -119,7 +119,7 @@ def fake_klayout(monkeypatch, tmp_path):
             cmd, state["returncode"], state["stdout"], ""
         )
 
-    monkeypatch.setattr(lvs_runset.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
     return state
 
 
@@ -329,8 +329,6 @@ def test_timeout(tmp_path, fake_klayout):
         _run(tmp_path, runset_timeout=0.5)
     message = str(exc.value)
     assert "did not complete within 0.5s" in message
-    # The shared launcher's hint names `klt lvs`' request field; this verb
-    # points at its own flag instead.
     assert "--runset-timeout" in message
     assert "options.runset_timeout_s" not in message
 
@@ -343,7 +341,7 @@ def test_unreadable_database(tmp_path, fake_klayout, monkeypatch):
         open(args["report"], "w").write("not a database\n")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    monkeypatch.setattr(lvs_runset.subprocess, "run", truncated)
+    monkeypatch.setattr(subprocess, "run", truncated)
     with pytest.raises(ExtractError) as exc:
         _run(tmp_path)
     assert "could not read the runset's .lvsdb database" in str(exc.value)
