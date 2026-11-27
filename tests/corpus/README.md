@@ -563,3 +563,16 @@ per-shuttle triage, and job provenance. Report campaign spend from the fleet
 billing records alongside these outputs. Script wall seconds exclude instance
 startup. Cross-reference existing tool defects such as #5893 when reviewing
 the triage drafts.
+
+#### Campaign record, November 25–26, 2026
+
+The first campaign ran the catalogue as five shards (`--count 5`, shard
+arguments `run I/5 --timeout-s 300`) rather than the four in the example
+above. With four, two shards plan to the full 7200 seconds; with five, each
+plans to at most 6000. Every job allowed one paid launch. Spot reclaimed
+two of the five original jobs before they wrote output. Each had used its
+one paid launch, so both shards were resubmitted under new group IDs from
+the same commit and source archive. Seven paid launches produced all 216
+stage records. The outcomes,
+per-design durations, provenance, cost estimates and defect links are in
+[`docs/reports/tt-gf180mcu-corpus-run.md`](../../docs/reports/tt-gf180mcu-corpus-run.md).
