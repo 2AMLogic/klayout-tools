@@ -38,10 +38,8 @@ from .signoff_base import (
     _read_json_source,
 )
 
-# The per-block blocker reduction and the ``--check`` drift comparison
-# live in the sibling modules below; both are re-imported here *by name*
-# so this module stays the subsystem's single import point and
-# ``signoff.py`` re-exports every fleet name from one place.
+# The roll-up uses the per-block reduction helpers here. The signoff runner
+# also imports its fleet report and drift-check entry points from this module.
 from .signoff_fleet_check import DOC_PROSE_REPORT_PATHS as DOC_PROSE_REPORT_PATHS
 from .signoff_fleet_check import RUN_IDENTITY_REPORT_PATHS as RUN_IDENTITY_REPORT_PATHS
 from .signoff_fleet_check import VOLATILE_REPORT_PATHS as VOLATILE_REPORT_PATHS

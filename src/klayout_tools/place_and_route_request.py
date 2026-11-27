@@ -2,8 +2,8 @@
 resolvers that take a request dict (or one of its sections) and return
 validated values or raise :class:`PlaceAndRouteError`.
 
-The main :mod:`klayout_tools.place_and_route` module re-exports these validators
-for its CLI, batch backend, eval and test callers. Stage rendering lives in
+The main :mod:`klayout_tools.place_and_route` module re-exports selected validators,
+including ``_validate_floorplan`` and ``_validate_io``. Stage rendering lives in
 :mod:`klayout_tools.place_and_route_script`.
 
 :class:`PlaceAndRouteError` and the validation-only tables

@@ -93,8 +93,8 @@ from typing import Any, NamedTuple
 from . import _spice_number as spice_number
 
 #: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
-#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
-#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
+#: 2am's EDA batch fleet. `run_sim` dispatches into the batch runners below.
+#: The self-aliased imports preserve the helper paths used by callers.
 from . import (
     _warn,
     env_provenance,

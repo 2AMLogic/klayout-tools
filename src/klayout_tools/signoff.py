@@ -156,14 +156,6 @@ from .signoff_derived_rows import (
     multi_row_info,
     read_require_derived_rows,
 )
-
-# The typed envelope shapes this boundary validates against (issue #2033) live
-# in their own module since issue #2313 -- ~300 lines of pure `TypedDict`
-# declarations with no runtime logic, following the same split as
-# `extract_report.py`. Every moved name is re-imported here *by name* so
-# `signoff.<name>` keeps resolving exactly as it did before the split; the
-# `X as X` form marks the ones with no call site left in this module as
-# deliberate re-exports rather than dead imports.
 from .signoff_details import (
     _DETAIL_BUILDERS,
     _drc_rule_selection_detail,
@@ -179,6 +171,9 @@ from .signoff_disclosed_evidence import (
 # rewriting the cross-check shape into the single-engine `drc` envelope the
 # existing grading rules read, at the ingestion boundary.
 from .signoff_drc_crosscheck import crosscheck_disclosure, crosscheck_project
+
+# Envelope validation uses the shared union and lookup tables from #2313.
+# Keep the functional-verification envelope importable through this module.
 from .signoff_envelopes import (
     _ENVELOPE_SHAPES,
     _SCALAR_CHECKS,
