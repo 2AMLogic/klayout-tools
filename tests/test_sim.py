@@ -4652,12 +4652,13 @@ def test_run_sim_fail_fast_probe_disabled_by_default_never_runs(tmp_path, monkey
 
 @pytest.mark.parametrize("backend", ["local", "local-parallel"])
 def test_run_sim_fail_fast_probe_aborts_grid_before_any_corner_runs(
-    tmp_path, monkeypatch, backend
+    tmp_path, monkeypatch, capsys, backend
 ):
     _write_body(tmp_path)
     options = {"fail_fast_probe": True, "timeout_s": 100}
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "1")
     if backend == "local-parallel":
-        options["max_workers"] = 1
+        options["max_workers"] = 3
     request = _write_request(
         tmp_path,
         {
@@ -4687,25 +4688,21 @@ def test_run_sim_fail_fast_probe_aborts_grid_before_any_corner_runs(
     monkeypatch.setattr(
         sim, "_run_fail_fast_probe", lambda **kwargs: dict(probe_report)
     )
-    real_corner_calls: list[int] = []
-    monkeypatch.setattr(
-        sim.subprocess,
-        "run",
-        # The once-per-sweep `--version` engine_build probe (#3095) is not a corner.
-        lambda cmd, *a, **k: (
-            fake_completed("ngspice-99\n")
-            if "--version" in cmd
-            else real_corner_calls.append(1)
-        ),
-    )
+    _stub_subprocess_run(monkeypatch)
 
+    def unexpected_work(*args, **kwargs):
+        pytest.fail("a probe-cancelled sweep entered the corner scheduler")
+
+    monkeypatch.setattr(sim, "ThreadPoolExecutor", unexpected_work)
+    monkeypatch.setattr(sim, "_run_corner_with_retry", unexpected_work)
     report = sim.run_sim(str(request))
 
-    # `_run_fail_fast_probe` itself is monkeypatched away here (its own
-    # subprocess use is covered by the dedicated `_run_calibration_probe`
-    # tests above) -- this asserts the *dispatch loop* never spawns a real
-    # per-corner `ngspice` once the probe says to abort.
-    assert real_corner_calls == []
+    assert capsys.readouterr().err.count("clamping the local-parallel worker pool") == (
+        1 if backend == "local-parallel" else 0
+    )
+    assert [c["corner_id"] for c in report["corners"]] == [
+        f"default/novdd/{t}C" for t in (10, 20, 30)
+    ]
     assert report["status"] == "error"
     assert report["errored"] == 3
     for corner in report["corners"]:
@@ -10834,8 +10831,9 @@ _EXPECTED_INDIRECT_CODE_SITES = {
     ("klayout_tools.sim", "_classify_diagnostics", "code"),
     # `code` is this function's own parameter; its call sites are rule 3.
     ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
-    # `stop_reason = probe_abort["code"]` -- forwards a code the fail-fast
-    # probe's own abort diagnostic already carries as a literal (rule 3).
+    # The probe supplies its own code. The two schedulers use a nullable
+    # stop reason for the budget and orphan codes from _UNRUN_MESSAGES.
+    ("klayout_tools.sim", "_run_local", "probe_abort['code']"),
     ("klayout_tools.sim", "_run_local_corners_sequentially", "stop_reason"),
     ("klayout_tools.sim", "_run_local_corners_pooled", "stop_reason"),
 }
