@@ -201,7 +201,7 @@ from .ngspice_build import (
 from .ngspice_build import (
     probe_engine_build as _probe_engine_build,
 )
-from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
+from .pdk import PdkNotFoundError, find_pdk
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -321,6 +321,7 @@ from .sim_environment_report import (
 )
 from .sim_expr_hint import unsupported_function_hint
 from .sim_expr_log import expr_control_lines
+from .sim_model_paths import resolve_lib_ref as _resolve_lib_ref
 from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
@@ -4835,27 +4836,6 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
 def _resolve_param_file(points: list[CornerPoint], models: Any, request_dir: str):
     """``models.param_file`` (#4759); see :mod:`klayout_tools.sim_param_file`."""
     return resolve_param_file(points, models, request_dir, _resolve_lib_ref)
-
-
-def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
-    """Apply ``models.lib``'s own resolution rule (see
-    :func:`_resolve_models_lib`) to one library reference, without the
-    existence check -- shared with #2522's per-section corner libraries
-    so a ``corners.process`` ``{"lib": ...}`` entry resolves *identically*:
-    joined against the layout-aware variant directory (``variant_dir_of``;
-    a flat install's variant *is* the root, #522/#6256) when the request
-    names a PDK, else ``$VAR``/``~``-expanded against the request dir.
-    """
-    pdk_variant = models.get("pdk")
-    pdk_root = models.get("pdk_root")
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            resolution = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise SimError(str(exc)) from exc
-        variant_dir = variant_dir_of(resolution) or resolution["root"]
-        return lib if os.path.isabs(lib) else os.path.join(variant_dir, lib)
-    return _resolve_relative(lib, request_dir)
 
 
 def _resolve_corner_section_libs(

@@ -5272,6 +5272,7 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
     """Issue #2961: sg13g2 MOS subcircuit calls classify as `mosfet` (not
     `other`) and `active` follows whether the selected section is a
     `*_mismatch` one; unknown section -> `None`."""
+    (tmp_path / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
     (tmp_path / "body.spice").write_text(
         "Vdd vdd 0 DC 1.2\n"
         "XM1 mid g out b sg13_lv_nmos L=0.13u W=1u\n"
@@ -5279,7 +5280,7 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
     )
     spec: dict = {
         "netlist": "body.spice",
-        "models": {"pdk": "ihp-sg13g2"},
+        "models": {"pdk": "ihp-sg13g2", "pdk_root": str(tmp_path)},
         "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
         "analysis": {"kind": "tran", "args": "1n 1u"},
     }
@@ -5289,13 +5290,6 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
         (tmp_path / "corner.lib").write_text(f".lib {section}\n.endl {section}\n")
     request = _write_request(tmp_path, spec)
     _stub_subprocess_run(monkeypatch)
-    # No ihp-sg13g2 install on CI: stub PDK resolution (the section libs
-    # above are absolute paths, so only the resolution call itself matters).
-    monkeypatch.setattr(
-        sim,
-        "find_pdk",
-        lambda **_kw: {"root": str(tmp_path), "variant": "ihp-sg13g2"},
-    )
 
     report = sim.run_sim(str(request))
 
@@ -10664,7 +10658,7 @@ def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):
         calls.append((args, kwargs))
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(sim, "find_pdk", spy)
+    monkeypatch.setattr(pdk, "find_pdk", spy)
 
     install_root = tmp_path / "install"
     variant_dir = install_root / "sky130A" / "libs.tech"

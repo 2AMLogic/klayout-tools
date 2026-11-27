@@ -158,10 +158,10 @@ def resolve_osdi_preload(
         if index in skip_indices:
             continue
         if isinstance(entry, dict):
-            from .sim import _resolve_lib_ref
+            from .sim_model_paths import resolve_lib_ref
 
             try:
-                path = _resolve_lib_ref(
+                path = resolve_lib_ref(
                     ref, {"pdk": pdk_variant, "pdk_root": pdk_root}, request_dir
                 )
             except SimError as exc:
