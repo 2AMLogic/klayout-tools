@@ -1179,13 +1179,28 @@ def test_deck_rules_layer_refs_parallel_layers_and_resolve_through_layer_table(d
     assert unresolved == expected
 
 
+# Selector inputs an ordinary-cut ``layer_selection`` reads after the rule's own
+# operands, in operand order (#2835). Spelled out here rather than derived from
+# ``CUT_SELECTION_LAYERS`` so the projection is checked against an independent
+# expectation: licon reads RPM, URPM, PSDM, POLY and POLY_RS; mcon reads areaid:ce.
+_CUT_SELECTOR_PAIRS = {
+    "sky130_ordinary_licon": [(86, 20), (79, 20), (94, 20), (66, 20), (66, 13)],
+    "sky130_ordinary_mcon": [(81, 2)],
+}
+
+
 def test_deck_rules_layer_refs_match_the_deck_pair_for_every_rule():
     from klayout_tools.decks import get_deck
 
     report = history.deck_rules("sky130")
+    selected = set()
     for rule, entry in zip(get_deck("sky130"), report["rules"], strict=True):
         pairs = [rule.layer] + ([rule.other_layer] if rule.other_layer else [])
+        pairs += _CUT_SELECTOR_PAIRS.get(rule.layer_selection, [])
         assert [(r["layer"], r["datatype"]) for r in entry["layer_refs"]] == pairs
+        if rule.layer_selection in _CUT_SELECTOR_PAIRS:
+            selected.add(rule.id)
+    assert selected == {"licon1.width.1", "mcon.width.1"}
 
 
 def test_deck_rules_reports_ambiguous_and_unresolved_explicitly(monkeypatch):

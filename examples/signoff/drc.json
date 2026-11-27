@@ -271,6 +271,7 @@
       "capm.6",
       "capm.7",
       "capm.8",
+      "ct.1",
       "ct.3",
       "ct.3_a",
       "ct.3_b",
@@ -1174,7 +1175,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:a7de7ed17241a3dcedada25704131597c9c085ea3b752c5f354db44fdc111426",
+      "content_hash": "sha256:40d62c383aab60bd78156d56222e22836433431c35a4700617b3f420b3ced94d",
       "released": null
     },
     "input": {

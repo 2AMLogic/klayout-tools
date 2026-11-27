@@ -509,6 +509,11 @@ def test_run_drc_coverage_fully_covered_stream(tmp_path):
     for layer_num, datatype in _sky130_deck_layer_tuples():
         layer_index = layout.layer(layer_num, datatype)
         top.shapes(layer_index).insert(kdb.Box(0, 0, 10, 10))
+    # The ordinary licon/mcon size rules (#2835) select cuts away from the
+    # precision-resistor and areaid:ce regions, and the box above sits inside
+    # both, so add one ordinary cut per layer clear of every exemption layer.
+    for cut_layer in ((66, 44), (67, 44)):
+        top.shapes(layout.layer(*cut_layer)).insert(kdb.Box(1000, 1000, 1010, 1010))
     path = tmp_path / "fully_covered.gds"
     layout.write(str(path))
 
