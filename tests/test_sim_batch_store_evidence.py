@@ -135,6 +135,47 @@ def test_worker_reads_the_parent_marker_of_a_matching_flat_root(tmp_path, layout
     assert worker["stamp_scheme"] is None  # revision probing still uses root/<variant>
 
 
+@pytest.fixture
+def descriptor_store(tmp_path):
+    root = _store_tree(tmp_path, relative="gf180mcuD")
+    installed = root / "gf180mcuD"
+    (installed / "libs.tech").rmdir()
+    (installed / "cells.lib").touch()
+    corners = {f"corner_{i}": "cells.lib" for i in range(3000)}
+    descriptor = installed / "klt-pdk.json"
+    descriptor.write_text(
+        json.dumps(
+            {"schema_version": 1, "variant": "gf180mcuD", "liberty": {"cells": corners}}
+        )
+    )
+    assert descriptor.stat().st_size > 65536
+    return root
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["parent", "flat"])
+def test_large_descriptor_preserves_selected_bundle(tmp_path, descriptor_store, direct):
+    root = descriptor_store / "gf180mcuD" if direct else descriptor_store
+    client = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+    worker = _captured(tmp_path, root)["pdk"]
+    assert _observed(client) == _observed(worker) == (_INSTALL, "flat")
+
+
+@pytest.mark.parametrize("malformed", [False, True], ids=["large", "malformed"])
+def test_nested_descriptor_rules_out_outer_bundle(
+    tmp_path, descriptor_store, malformed
+):
+    root = descriptor_store
+    (root / "klt-pdk.json").write_text(
+        json.dumps({"schema_version": 1, "variant": "sky130A"})
+    )
+    if malformed:
+        (root / "gf180mcuD" / "klt-pdk.json").write_text("{")
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="sky130A", root=str(root))
+    worker = _captured(tmp_path, root, variant="sky130A")["pdk"]
+    assert _observed(worker) == (None, None)
+
+
 def test_install_alias_resolves_the_same_tree_on_the_worker(tmp_path):
     root = _store_tree(tmp_path, relative="gf180mcuD")
     installed = (root / "gf180mcuD").rename(root / "ihp-sg13g2")
@@ -181,6 +222,7 @@ def test_worker_skips_nonregular_markers_before_reading(tmp_path, location):
         (_INSTALL, None, _INSTALL),
         (None, _INSTALL, _INSTALL),  # the variant root, where the provisioner writes
         (_INSTALL, "{not json", None),  # the nearer marker is *the* marker
+        (_INSTALL, json.dumps(_INSTALL) + " " * 65536, None),
         ({"version": "v1"}, None, _NO_FACTS | {"version": "v1"}),
         ({"sha256": "short"}, None, None),  # no valid fact is no evidence
         ({"sha256": " " + _INSTALL["sha256"]}, None, None),
@@ -190,6 +232,7 @@ def test_worker_skips_nonregular_markers_before_reading(tmp_path, location):
         "beside",
         "inside",
         "shadowed",
+        "oversized",
         "partial",
         "invalid-digest",
         "padded-digest",
@@ -213,6 +256,28 @@ def test_worker_capture_reads_the_marker_as_the_library_does(
         expected,
         expected,
     )
+
+
+@pytest.mark.parametrize("with_sources", [True, False], ids=["sources", "store-only"])
+def test_deeply_nested_marker_preserves_pdk_report(tmp_path, with_sources):
+    root = _store_tree(tmp_path)
+    variant = root / _FAMILY
+    # A nearer unreadable marker shadows the valid parent even with SOURCES.
+    marker_dir = variant if with_sources else variant.parent
+    if not with_sources:
+        (variant / "SOURCES").unlink()
+    (marker_dir / ".pdk-store.json").write_text(
+        '{"unused":' + "[" * 20000 + "]" * 20000 + "}"
+    )
+
+    client = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+    worker = _captured(tmp_path, root)["pdk"]
+    assert _observed(client) == _observed(worker) == (None, "manager_family")
+    if with_sources:
+        assert client["version"] == f"open_pdks {_STORE_REV}"
+        assert worker["stamp_scheme"] == "sources-sha256"
+    else:
+        assert worker["stamp_scheme"] is None
 
 
 def test_worker_capture_without_a_pdk_root_reports_no_store_evidence(tmp_path):

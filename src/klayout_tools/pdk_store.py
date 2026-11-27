@@ -86,7 +86,7 @@ def _read_store_object(path: str) -> dict[str, Any] | None:
         if len(raw) > _STORE_FILE_MAX:
             return None
         data = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -353,36 +353,40 @@ def store_version(vdir):
         if not os.path.isfile(marker):
             return None
         d = json.loads(read(marker, 65536))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     v = d.get("version") if isinstance(d, dict) else None
     return v.strip() if isinstance(v, str) and v.strip() else None
-def read_bounded_object(path):
+def read_object(path, max_bytes=None):
     if not os.path.isfile(path):
         return None
     try:
         with open(path, "rb") as h:
-            raw = h.read(65537)
-        data = json.loads(raw.decode("utf-8")) if len(raw) <= 65536 else None
-    except (OSError, ValueError):
+            raw = h.read() if max_bytes is None else h.read(max_bytes + 1)
+        if max_bytes is not None and len(raw) > max_bytes:
+            return None
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
+def is_variant_tree(directory):
+    return (
+        os.path.isfile(os.path.join(directory, @DESCRIPTOR@))
+        or os.path.isdir(os.path.join(directory, "libs.tech"))
+        or all(os.path.isdir(os.path.join(directory, *p)) for p in @ASAP7_MARKERS@)
+    )
 def tree_name(directory, flat=False):
     name = os.path.basename(os.path.abspath(directory))
     descriptor = os.path.join(directory, @DESCRIPTOR@)
     if os.path.isfile(descriptor):
-        data = read_bounded_object(descriptor)
+        data = read_object(descriptor)
         if data is None or data.get("schema_version") != 1:
             return None
         declared = data.get("variant")
         if declared is not None and not (isinstance(declared, str) and declared):
             return None
         return declared if flat and declared else name
-    if os.path.isdir(os.path.join(directory, "libs.tech")) or all(
-        os.path.isdir(os.path.join(directory, *parts)) for parts in @ASAP7_MARKERS@
-    ):
-        return name
-    return None
+    return name
 def evidence_variant_dir(root, variant):
     aliases = @ALIASES@
     names = [variant] + [name for name, family in aliases.items() if family == variant]
@@ -390,14 +394,15 @@ def evidence_variant_dir(root, variant):
         if os.path.basename(name) != name or name in (".", ".."):
             continue
         nested = os.path.join(root, name)
-        if tree_name(nested) == name:
-            return nested
-    if tree_name(root, flat=True) in names:
-        # find_pdk considers a flat root only when it has no nested variant.
-        with os.scandir(root) as entries:
-            if not any(tree_name(entry.path) for entry in entries if entry.is_dir()):
-                return root
-    return None
+        if is_variant_tree(nested):
+            return nested if tree_name(nested) == name else None
+    if not is_variant_tree(root):
+        return None
+    # Like find_pdk, discover nested descriptors by presence before trying a flat root.
+    with os.scandir(root) as entries:
+        if any(is_variant_tree(entry.path) for entry in entries if entry.is_dir()):
+            return None
+    return root if tree_name(root, flat=True) in names else None
 def store_install(vdir):
     real, d = os.path.realpath(vdir), None
     markers = (os.path.join(vdir, ".pdk-store.json"),
@@ -409,7 +414,7 @@ def store_install(vdir):
             continue
         except OSError:
             break
-        d = read_bounded_object(cand)
+        d = read_object(cand, max_bytes=65536)
         break
     if d is None:
         return None
