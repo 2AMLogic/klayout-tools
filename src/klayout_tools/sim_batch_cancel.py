@@ -145,7 +145,7 @@ def cancel_job(
     return payload
 
 
-def _classify_cancel_failure(stderr: str) -> str | None:
+def _classify_cancel_failure(stderr: str, _returncode: int) -> str | None:
     """:data:`CANCEL_NOTHING_TO_CANCEL_CODE` when the failed cancel's stderr
     is the provisioner's "nothing to cancel" refusal, else ``None`` (every
     other failure stays unclassified, as with ``launch``)."""

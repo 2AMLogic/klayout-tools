@@ -1,97 +1,22 @@
-"""Design centering: turn a ``klt yield-sensitivity`` parameter ranking into
-re-centering candidates against a ``klt size`` sized device's own geometry
-(``klt design-centering``, issue #924, Phase 3 of the statistical/yield epic
-#710).
+"""Choose device instances to re-center from a yield-sensitivity ranking.
 
-Closes the loop epic #710's "Why" section describes: #923/``klt
-yield-sensitivity`` answers *which* device/process mismatch terms drive a
-Monte Carlo campaign's output spread; this module answers the next question
--- *what does that mean for a sized design* -- by mapping each ranked
-mismatch parameter onto the sized device instance it belongs to and
-proposing which instances are worth re-centering (growing) first.
+``request.parameter_map`` maps each ranked mismatch parameter to a sized
+device instance. :func:`rank_mapped_parameters` preserves the order of the
+ranking and reports unmapped parameters separately.
 
-Producer-side reference contract, not a wired #705 sizing loop
------------------------------------------------------------------
-Epic #705 (the analog-sizing engine) is still Phase 1 as of this issue and
-has no design-centering stage to wire into (verified against
-``src/klayout_tools/size.py`` while building this module: ``klt size``
-reports a geometric sizing result, no re-centering/iteration loop). This
-module therefore ships the **contract** #923's own docs already reserve for
-it (``docs/cli/yield-sensitivity.md``'s "Downstream consumers" section:
-``ranking[].parameter``/``ranking[].contribution``, read verbatim, no new
-field added to that contract) plus a **reference consumer**
-(:func:`build_recentering_proposal`, and the ``klt design-centering`` CLI
-verb) that exercises it end-to-end. If #705 grows a real design-centering
-stage later, that stage should wire into ``ranking[].parameter``/
-``ranking[].contribution`` directly -- this module's proposal shape is a
-worked example of *one* way to consume it, not the only one.
+:func:`suggested_area_multiplier` compares each mapped contribution with
+the next one. Under Pelgrom's mismatch model, standard deviation scales as
+the inverse square root of device area. Holding the sensitivity coefficient
+fixed gives an area multiplier equal to the squared contribution ratio.
+Actual electrical behavior, including gm/Id and topology coupling, needs
+verification at the new geometry. The derivation and a worked example are
+in ``docs/cli/design-centering.md``.
 
-The mismatch-parameter vs. sizing-geometry key mismatch
-----------------------------------------------------------
-``klt yield-sensitivity``'s ranking is keyed by device/process *mismatch*
-parameter names (e.g. ``vth_mismatch_m1``, ``beta_mismatch_m2`` -- whatever
-names the sensitivity sample document's author chose). ``klt size``'s sized
-device output is keyed by *geometry* -- either a single top-level
-``operating_point`` (single-device mode) or a ``devices`` map keyed by
-*instance* name (e.g. ``input_a``, ``mirror_b``, ``tail`` -- coupled
-multi-device topology mode, see ``size.py``'s ``TOPOLOGY_INSTANCES``). There
-is no naming convention shared between the two: a sensitivity sample
-document's parameter names come from whatever harness generated the
-campaign, and a topology's instance names come from ``klt size``'s own
-topology definition. This module does not guess a mapping -- the caller
-supplies one explicitly via ``request.parameter_map`` (``{mismatch_parameter:
-instance_name}``), the bridge the issue's own curation note called out as
-necessary. A ranked parameter absent from the map is not an error (not every
-mismatch/process term corresponds to a device this sizing request touched --
-e.g. a pure-process term with no per-instance representation); it is
-reported separately under ``unmapped_parameters`` rather than silently
-dropped.
-
-Re-centering heuristic (Pelgrom's law, a stated simplification)
---------------------------------------------------------------------
-For each mapped candidate, this module suggests an **area multiplier**: the
-factor by which that instance's area (``W * L * NF * MULT``) would need to
-grow to bring its mismatch term's contribution down to parity with the next
--highest-ranked *mapped* contributor. This follows the standard Pelgrom
-mismatch model (Pelgrom, Duinmaijer & Welbers, 1989): a device mismatch
-term's standard deviation scales as ``sigma ~ 1 / sqrt(area)``, so (holding
-the ranking's own linear-regression coefficient fixed) its *contribution* to
-the output scales the same way, and its squared contribution scales as
-``1 / area``. Reducing a contribution by a factor ``k`` therefore needs
-``area * k**2``. This is a **first-pass, order-of-magnitude heuristic** for
-a reference consumer, not a rigorous re-optimization: it holds the
-regression coefficient fixed (a real re-sized device's coefficient would
-itself shift), ignores every other coupled effect a real re-centering pass
-would need to re-verify (current density, gm/Id, the topology's own
-coupling -- see ``size.py``'s own coupled-topology docstring), and is
-explicitly the kind of unchecked-precision claim epic #710 already refuses
-to ship for its own yield numbers -- callers should treat the multiplier as
-"this is the candidate worth re-exploring, and roughly how much headroom it
-needs", not a literal edit to apply unverified.
-
-Pure library: :func:`build_recentering_proposal` returns plain Python data
-(a JSON-serialisable ``dict``) and never prints -- serialisation and
-human-readable formatting live in ``cli/design_centering_cmd.py``, matching
-every other ``klt`` verb.
-
-A real consumer, at last (issue #1326, epic #705 Phase 2)
-------------------------------------------------------------
-The "producer-side reference contract" section above is now half true:
-``klt size`` gained a design-centering/yield-aware objective mode
-(``request.design_centering``, additive to the worst-corner-margin
-objective #769 shipped) that consumes exactly this module's
-``ranking[].parameter``/``ranking[].contribution`` bridge -- not by calling
-:func:`build_recentering_proposal` itself (that function needs an
-*already-produced* ``klt size`` payload to resolve geometry from, which does
-not exist yet when a sizing run is starting), but by importing this
-module's two pure, sized-device-agnostic helpers,
-:func:`rank_mapped_parameters` and :func:`suggested_area_multiplier`, and
-applying them against the geometry its own run just solved. See
-``klayout_tools/size.py``'s ``_apply_design_centering`` docstring for the
-grow-then-re-verify method. This module's own CLI verb and
-:func:`build_recentering_proposal` are unchanged and remain useful on their
-own (e.g. against a sizing result produced by an older ``klt size`` that
-predates this wiring, or by another tool entirely).
+``klt design-centering`` calls :func:`build_recentering_proposal` with a
+finished sizing report to attach geometry and recommendations to candidates.
+During a sizing run, ``klt size`` uses the same ranking and multiplier
+helpers through ``request.design_centering``. It can then grow device
+multiplicity and re-solve with ngspice.
 """
 
 from __future__ import annotations
@@ -301,15 +226,6 @@ def rank_mapped_parameters(
     (``{mismatch_parameter: instance_name}``), preserving the ranking's own
     order in both lists.
 
-    This is the *sized-device-agnostic* half of this module's contract --
-    the geometry lookup and area-multiplier math a caller that already has
-    a ``klt size`` payload handy layers on top (this module's own
-    :func:`build_recentering_proposal`, or ``klt size``'s own
-    design-centering objective mode, issue #1326 -- see this module's
-    docstring's "A real consumer, at last" section) are kept out of this
-    function so a caller without one (or one mid-solve, still producing
-    its own) can reuse this bridge directly.
-
     Each ``mapped`` entry is ``{"rank", "parameter", "contribution",
     "instance"}``; each ``unmapped`` entry is ``{"rank", "parameter",
     "contribution"}`` (no ``instance`` -- nothing in ``parameter_map``
@@ -348,9 +264,7 @@ def rank_mapped_parameters(
 
 def suggested_area_multiplier(mapped: list[dict[str, Any]], index: int) -> float | None:
     """Pelgrom-law area multiplier for ``mapped[index]`` against the
-    next-lower-ranked mapped contributor ``mapped[index + 1]`` -- see this
-    module's docstring's "Re-centering heuristic" section for the
-    derivation.
+    next-lower-ranked mapped contributor ``mapped[index + 1]``.
 
     Returns ``1.0`` when ``mapped[index]`` is already the weakest mapped
     candidate (nothing lower-ranked to reach parity with -- no re-centering
@@ -467,10 +381,7 @@ def run_design_centering(
 ) -> dict[str, Any]:
     """Load a ``klt design-centering`` request file and build its proposal.
 
-    Thin composition of :func:`load_request` + :func:`build_recentering_proposal`
-    -- split so both a request *file* (this function, the CLI's own path)
-    and an in-process caller already holding a parsed request dict (tests,
-    a future #705 integration) can reuse the same core logic.
+    For an already parsed request, call :func:`build_recentering_proposal`.
     """
     request = load_request(request_path)
     return build_recentering_proposal(request, measurement=measurement)

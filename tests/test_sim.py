@@ -4652,12 +4652,13 @@ def test_run_sim_fail_fast_probe_disabled_by_default_never_runs(tmp_path, monkey
 
 @pytest.mark.parametrize("backend", ["local", "local-parallel"])
 def test_run_sim_fail_fast_probe_aborts_grid_before_any_corner_runs(
-    tmp_path, monkeypatch, backend
+    tmp_path, monkeypatch, capsys, backend
 ):
     _write_body(tmp_path)
     options = {"fail_fast_probe": True, "timeout_s": 100}
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "1")
     if backend == "local-parallel":
-        options["max_workers"] = 1
+        options["max_workers"] = 3
     request = _write_request(
         tmp_path,
         {
@@ -4687,25 +4688,21 @@ def test_run_sim_fail_fast_probe_aborts_grid_before_any_corner_runs(
     monkeypatch.setattr(
         sim, "_run_fail_fast_probe", lambda **kwargs: dict(probe_report)
     )
-    real_corner_calls: list[int] = []
-    monkeypatch.setattr(
-        sim.subprocess,
-        "run",
-        # The once-per-sweep `--version` engine_build probe (#3095) is not a corner.
-        lambda cmd, *a, **k: (
-            fake_completed("ngspice-99\n")
-            if "--version" in cmd
-            else real_corner_calls.append(1)
-        ),
-    )
+    _stub_subprocess_run(monkeypatch)
 
+    def unexpected_work(*args, **kwargs):
+        pytest.fail("a probe-cancelled sweep entered the corner scheduler")
+
+    monkeypatch.setattr(sim, "ThreadPoolExecutor", unexpected_work)
+    monkeypatch.setattr(sim, "_run_corner_with_retry", unexpected_work)
     report = sim.run_sim(str(request))
 
-    # `_run_fail_fast_probe` itself is monkeypatched away here (its own
-    # subprocess use is covered by the dedicated `_run_calibration_probe`
-    # tests above) -- this asserts the *dispatch loop* never spawns a real
-    # per-corner `ngspice` once the probe says to abort.
-    assert real_corner_calls == []
+    assert capsys.readouterr().err.count("clamping the local-parallel worker pool") == (
+        1 if backend == "local-parallel" else 0
+    )
+    assert [c["corner_id"] for c in report["corners"]] == [
+        f"default/novdd/{t}C" for t in (10, 20, 30)
+    ]
     assert report["status"] == "error"
     assert report["errored"] == 3
     for corner in report["corners"]:
@@ -5272,6 +5269,7 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
     """Issue #2961: sg13g2 MOS subcircuit calls classify as `mosfet` (not
     `other`) and `active` follows whether the selected section is a
     `*_mismatch` one; unknown section -> `None`."""
+    (tmp_path / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
     (tmp_path / "body.spice").write_text(
         "Vdd vdd 0 DC 1.2\n"
         "XM1 mid g out b sg13_lv_nmos L=0.13u W=1u\n"
@@ -5279,7 +5277,7 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
     )
     spec: dict = {
         "netlist": "body.spice",
-        "models": {"pdk": "ihp-sg13g2"},
+        "models": {"pdk": "ihp-sg13g2", "pdk_root": str(tmp_path)},
         "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
         "analysis": {"kind": "tran", "args": "1n 1u"},
     }
@@ -5289,13 +5287,6 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
         (tmp_path / "corner.lib").write_text(f".lib {section}\n.endl {section}\n")
     request = _write_request(tmp_path, spec)
     _stub_subprocess_run(monkeypatch)
-    # No ihp-sg13g2 install on CI: stub PDK resolution (the section libs
-    # above are absolute paths, so only the resolution call itself matters).
-    monkeypatch.setattr(
-        sim,
-        "find_pdk",
-        lambda **_kw: {"root": str(tmp_path), "variant": "ihp-sg13g2"},
-    )
 
     report = sim.run_sim(str(request))
 
@@ -10258,14 +10249,14 @@ def _write_ascii_rawfile(
 
 
 def _stub_subprocess_run_with_waveform(monkeypatch, *, points, log_text="clean run\n"):
-    """Like :func:`_stub_subprocess_run`, but also writes a synthetic ASCII
-    rawfile at the corner's own `waveform.raw` path -- the real `ngspice`
-    binary is stubbed out entirely (see `_stub_subprocess_run`), so nothing
-    actually executes the deck's `.control` block `write` command; this
-    fakes that side effect so the plot-writing code under test has a real
-    waveform artifact to read."""
+    """Write a synthetic ngspice log and waveform.raw for each simulated corner.
+    Let other subprocesses, including provenance probes, run normally."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if "-o" not in cmd:
+            return real_run(cmd, **kwargs)
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
@@ -10664,7 +10655,7 @@ def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):
         calls.append((args, kwargs))
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(sim, "find_pdk", spy)
+    monkeypatch.setattr(pdk, "find_pdk", spy)
 
     install_root = tmp_path / "install"
     variant_dir = install_root / "sky130A" / "libs.tech"
@@ -10840,8 +10831,9 @@ _EXPECTED_INDIRECT_CODE_SITES = {
     ("klayout_tools.sim", "_classify_diagnostics", "code"),
     # `code` is this function's own parameter; its call sites are rule 3.
     ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
-    # `stop_reason = probe_abort["code"]` -- forwards a code the fail-fast
-    # probe's own abort diagnostic already carries as a literal (rule 3).
+    # The probe supplies its own code. The two schedulers use a nullable
+    # stop reason for the budget and orphan codes from _UNRUN_MESSAGES.
+    ("klayout_tools.sim", "_run_local", "probe_abort['code']"),
     ("klayout_tools.sim", "_run_local_corners_sequentially", "stop_reason"),
     ("klayout_tools.sim", "_run_local_corners_pooled", "stop_reason"),
 }

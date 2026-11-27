@@ -35,6 +35,12 @@
       "minimum": 1,
       "description": "Divides the instance's *physical* core count to derive $EDA_JOB_CONCURRENCY. Set to remote_launcher.ASSUMED_THREADS_PER_CORNER -- the same per-corner sizing assumption `remote_launcher.select_instance_type` sizes a `remote` instance from -- so both backends agree about how many corners fit at once on a given box."
     },
+    "max_launch_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 999999999,
+      "description": "Maximum paid launches for this job ID, including the initial launch and unattended replacements. Omission leaves launches unlimited. Refusals that start no instance consume zero attempts."
+    },
     "timeout_seconds": {
       "type": "integer",
       "minimum": 1,

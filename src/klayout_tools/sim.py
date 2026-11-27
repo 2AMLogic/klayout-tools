@@ -126,6 +126,7 @@ from . import (
     sim_noise_spectrum,
     sim_op_args,
     sim_passes,
+    sim_plot,
     sim_portable,
     sim_probit_sigma,
     sim_search,
@@ -182,6 +183,7 @@ from ._paths import (
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from ._provenance import sha256_file as sha256_file
+from ._spice_number import parse_plain as _parse_plain_number
 from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
@@ -201,7 +203,7 @@ from .ngspice_build import (
 from .ngspice_build import (
     probe_engine_build as _probe_engine_build,
 )
-from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
+from .pdk import PdkNotFoundError, find_pdk
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -297,7 +299,6 @@ from .sim_corners import (
 )
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
-from .sim_derive_rollup import attach_coverage as _attach_derive_coverage
 from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
     _OFFHOST_BACKENDS,
     NODESET_UNSUPPORTED_WORKER_CODE,
@@ -321,6 +322,7 @@ from .sim_environment_report import (
 )
 from .sim_expr_hint import unsupported_function_hint
 from .sim_expr_log import expr_control_lines
+from .sim_model_paths import resolve_lib_ref as _resolve_lib_ref
 from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
@@ -424,7 +426,8 @@ from .sim_measurement_results import (
 from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
-from .sim_plot import render_waveform_svg
+from .sim_plot import _measurement_diagnostic_hints as _measurement_diagnostic_hints
+from .sim_plot import render_waveform_svg as render_waveform_svg
 from .sim_population_limits import validate_k_sigma as _validate_k_sigma
 
 #: Moved to `sim_raw.py` (issue #6752) so measurement modules read a waveform
@@ -4183,13 +4186,16 @@ def _run_sim_corners(
     # is needed.
     plots_by_corner: dict[str, list[dict[str, str]]] = {}
     if plot_dir is not None:
+        signals_by_name, hints_by_signal = sim_plot.prepare_annotations(
+            measurements_spec
+        )
         os.makedirs(plot_dir, exist_ok=True)
         for corner in corners:
-            corner_plots = _write_corner_plots(
+            corner_plots = sim_plot.write_corner_plots(
                 corner=corner,
                 plot_dir=plot_dir,
                 analysis_kind=analysis.get("kind"),
-                measurements_spec=per_corner_specs,
+                hints_by_signal=hints_by_signal,
             )
             if corner_plots:
                 corner["artifacts"]["plots"] = corner_plots
@@ -4206,17 +4212,16 @@ def _run_sim_corners(
         # acceptance criterion. `None` when no worst-case corner exists (an
         # empty corner matrix) or that measurement's `.meas` card names no
         # recognisable signal/has no matching rendered plot.
-        specs_by_name = {spec["name"]: spec for spec in measurements_spec}
         for entry in measurements_rollup:
-            entry["plot"] = _measurement_plot_path(
-                entry, specs_by_name.get(entry["name"]), plots_by_corner
+            entry["plot"] = sim_plot.measurement_plot_path(
+                entry, signals_by_name.get(entry["name"]), plots_by_corner
             )
 
     grid_stats = sim_probit_sigma.rollup(monte_carlo_stats, corner_points, corners)
-    measurements_rollup.extend(grid_stats)
     coverage = _build_coverage(
-        measurements_spec, corners, capture_only=capture_only, grid_stats=grid_stats
+        measurements_rollup, corners, capture_only=capture_only, grid_stats=grid_stats
     )
+    measurements_rollup.extend(grid_stats)
     graded = _grade_corners(corners, measurements_rollup, coverage)
     passed = graded["passed"]
     failed = graded["failed"]
@@ -4835,27 +4840,6 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
 def _resolve_param_file(points: list[CornerPoint], models: Any, request_dir: str):
     """``models.param_file`` (#4759); see :mod:`klayout_tools.sim_param_file`."""
     return resolve_param_file(points, models, request_dir, _resolve_lib_ref)
-
-
-def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
-    """Apply ``models.lib``'s own resolution rule (see
-    :func:`_resolve_models_lib`) to one library reference, without the
-    existence check -- shared with #2522's per-section corner libraries
-    so a ``corners.process`` ``{"lib": ...}`` entry resolves *identically*:
-    joined against the layout-aware variant directory (``variant_dir_of``;
-    a flat install's variant *is* the root, #522/#6256) when the request
-    names a PDK, else ``$VAR``/``~``-expanded against the request dir.
-    """
-    pdk_variant = models.get("pdk")
-    pdk_root = models.get("pdk_root")
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            resolution = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise SimError(str(exc)) from exc
-        variant_dir = variant_dir_of(resolution) or resolution["root"]
-        return lib if os.path.isabs(lib) else os.path.join(variant_dir, lib)
-    return _resolve_relative(lib, request_dir)
 
 
 def _resolve_corner_section_libs(
@@ -5759,13 +5743,28 @@ def _run_local(
 
     This is the unit a backend implements: given the expanded corner list
     plus the resolved netlist/model paths and run options, return
-    ``(per_corner_reports, engine_version, remote_environment)``. Each
-    scheduler reproduces the original in-line loop byte-for-byte (same
-    ordering, same ``engine_version`` last-writer-wins tracking);
-    ``request`` and (unless ``parallel=True``) ``max_workers`` are
-    parity-only (see :data:`_BACKENDS`) and ignored.
+    ``(per_corner_reports, engine_version, remote_environment)``. A calibration
+    probe can cancel the sweep before scheduling. In that case each pending
+    corner receives the probe diagnostic in input order. Otherwise the scheduler
+    tracks the engine version from the last corner that reports one.
     """
     del request  # unused by either local scheduling strategy, see docstring
+
+    if probe_abort is not None:
+        if parallel:
+            _resolve_max_workers(max_workers)  # Keep the host's clamp notice.
+        corners = [
+            _unrun_corner_report(
+                point,
+                measurements_spec,
+                probe_abort["code"],
+                message=probe_abort["message"],
+                reached_s=probe_abort.get("reached_s"),
+                fraction=probe_abort.get("fraction"),
+            )
+            for point in corner_points
+        ]
+        return corners, None, None
 
     def run_corner(point: CornerPoint) -> tuple[dict[str, Any], str | None]:
         return _run_corner_with_retry(
@@ -5808,7 +5807,6 @@ def _run_local(
         deadline=deadline,
         initial_ppid=initial_ppid,
         checkpoint=checkpoint,
-        probe_abort=probe_abort,
     )
     return corners, engine_version, None
 
@@ -5822,7 +5820,6 @@ def _run_local_corners_sequentially(
     deadline: float | None,
     initial_ppid: int | None,
     checkpoint: _Checkpoint | None,
-    probe_abort: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """The ``local`` scheduling strategy: call ``run_corner`` (the runner
     :func:`_run_local` bound once for the whole sweep, issue #6896) with
@@ -5834,30 +5831,11 @@ def _run_local_corners_sequentially(
     of being run -- a corner already in flight is never interrupted (there
     is only ever one, for this sequential backend). ``checkpoint``, when
     given, records each corner as it completes for a later ``--resume``.
-
-    ``probe_abort`` (issue #1694, the two-pass probe model's fail-fast half
-    -- see ``_run_fail_fast_probe`` and docs/design/sim-corner-reached-s.md)
-    is the ``{"code", "message", "reached_s", "fraction"}`` decision ``run_sim``
-    already made *before* calling the backend at all: when given, **every**
-    corner in ``corner_points`` is reported unrun via
-    :func:`_unrun_corner_report` with that code/message/estimate, and no
-    ``ngspice`` process is ever spawned for this sweep -- the whole point of
-    running the calibration probe first is to make this decision before any
-    real corner (not just the ones after some in-flight budget/orphan check)
-    burns its own ``options.timeout_s``.
     """
     del max_workers  # unused: sequential local run, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
     stop_reason: str | None = None
-    abort_message: str | None = None
-    abort_reached_s: float | None = None
-    abort_fraction: float | None = None
-    if probe_abort is not None:
-        stop_reason = probe_abort["code"]
-        abort_message = probe_abort["message"]
-        abort_reached_s = probe_abort.get("reached_s")
-        abort_fraction = probe_abort.get("fraction")
     for point in corner_points:
         if stop_reason is None:
             if deadline is not None and time.monotonic() >= deadline:
@@ -5865,16 +5843,7 @@ def _run_local_corners_sequentially(
             elif initial_ppid is not None and os.getppid() != initial_ppid:
                 stop_reason = "orphaned"
         if stop_reason is not None:
-            corners.append(
-                _unrun_corner_report(
-                    point,
-                    measurements_spec,
-                    stop_reason,
-                    message=abort_message,
-                    reached_s=abort_reached_s,
-                    fraction=abort_fraction,
-                )
-            )
+            corners.append(_unrun_corner_report(point, measurements_spec, stop_reason))
             continue
         result, version = run_corner(point)
         corners.append(result)
@@ -6005,7 +5974,6 @@ def _run_local_corners_pooled(
     deadline: float | None,
     initial_ppid: int | None,
     checkpoint: _Checkpoint | None,
-    probe_abort: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """The ``local-parallel`` scheduling strategy: fan the expanded corner
     list across a bounded local worker pool, submitting ``run_corner`` (the
@@ -6053,26 +6021,12 @@ def _run_local_corners_pooled(
     given, records each corner the instant its future resolves -- not
     batched at the end -- so a crash mid-sweep loses at most the corners
     still in flight at that moment.
-
-    ``probe_abort`` (issue #1694): identical contract to
-    :func:`_run_local_corners_sequentially`'s own -- when given,
-    ``stop_reason`` starts pre-set to its code, so ``_fill`` never
-    submits a single corner to the pool and every corner comes back
-    through :func:`_unrun_corner_report` with that code/message/estimate.
     """
     resolved_workers = _resolve_max_workers(max_workers)
 
     total = len(corner_points)
     results: list[tuple[dict[str, Any], str | None] | None] = [None] * total
     stop_reason: str | None = None
-    abort_message: str | None = None
-    abort_reached_s: float | None = None
-    abort_fraction: float | None = None
-    if probe_abort is not None:
-        stop_reason = probe_abort["code"]
-        abort_message = probe_abort["message"]
-        abort_reached_s = probe_abort.get("reached_s")
-        abort_fraction = probe_abort.get("fraction")
     next_index = 0
 
     def _stopped() -> str | None:
@@ -6121,12 +6075,7 @@ def _run_local_corners_pooled(
             assert stop_reason is not None
             corners.append(
                 _unrun_corner_report(
-                    corner_points[index],
-                    measurements_spec,
-                    stop_reason,
-                    message=abort_message,
-                    reached_s=abort_reached_s,
-                    fraction=abort_fraction,
+                    corner_points[index], measurements_spec, stop_reason
                 )
             )
             continue
@@ -8625,19 +8574,6 @@ def _classify_xyce_diagnostics(log_text: str) -> list[dict[str, str]]:
 # --------------------------------------------------------------------------- #
 
 
-def _parse_spice_seconds(raw: str) -> float | None:
-    """Parse a SPICE time literal (``100u``, ``1e-4``, ``5n``) to seconds,
-    via the shared :mod:`._spice_number` engineering-notation table, the
-    same one :func:`_parse_width_um` uses for geometry. Unlike a bare
-    geometry literal, a SPICE time literal has no ambiguous "bare" case --
-    seconds is always the implicit base unit -- so, unlike
-    :func:`_parse_width_um`, no additional unit conversion is applied on top
-    of the suffix multiplier. Returns ``None`` for anything that is not a
-    plain numeric literal.
-    """
-    return spice_number.parse(raw)
-
-
 #: Deliberately generous floor used only by :func:`_preflight_timeout_warning`
 #: -- NOT a real per-engine throughput estimate. ngspice's actual rate
 #: depends heavily on circuit size/complexity/convergence behavior and is
@@ -9171,18 +9107,6 @@ _MOS_INSTANCE_RE = re.compile(r"^\s*([MX]\S+)\s+(?:\S+\s+){4}(\S+)(.*)$", re.IGN
 _PARAM_ASSIGN_RE = re.compile(r"(\w+)\s*=\s*(\S+)")
 
 
-def _parse_plain_number(raw: str) -> float | None:
-    """Parse a bare, dimensionless SPICE numeric literal (e.g. an ``nf=``
-    or ``m=`` instance-multiplier value). Returns ``None`` for anything
-    that is not a plain number -- an expression like ``{n*2}`` this
-    diagnostic cannot evaluate.
-    """
-    match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
-    if match is None:
-        return None
-    return float(match.group(1))
-
-
 def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
     """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
     ``100n``) to micrometres (``None`` for non-numerics); ``bare_is_um``
@@ -9594,13 +9518,13 @@ def _summarise_limits(
 
 
 def _build_coverage(
-    measurements_spec: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
     corners: list[dict[str, Any]],
     *,
     capture_only: bool = False,
     grid_stats: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Common checked-work v1 plus the existing simulation coverage counters.
+    """Build checked-work coverage from rolled-up measurements and their corners.
 
     ``capture_only`` (issue #3158) is the request's declared intent to capture waveforms
     with no measurements: each corner that ran clean then counts its capture as the
@@ -9608,7 +9532,7 @@ def _build_coverage(
     not pass stays a skip, so a run failure is never waived.
     """
     limits_declared, measurements_with_limits, unrecognized = _summarise_limits(
-        measurements_spec
+        measurements
     )
 
     grid_stats = grid_stats or []
@@ -9617,20 +9541,20 @@ def _build_coverage(
     sim_probit_sigma.coverage(grid_stats, checked, skipped)
     inapplicable = []
     for corner_index, corner in enumerate(corners):
-        if not measurements_spec:
+        if not measurements:
             corner_checked, corner_skipped = _corner_without_measurements(
                 corner, corner_index, capture_only
             )
             checked.extend(corner_checked)
             skipped.extend(corner_skipped)
-        for spec in sim_derive.per_corner_measurements(measurements_spec):
+        for entry in sim_derive.per_corner_measurements(measurements):
             actual, missing, irrelevant = _measurement_coverage(
-                spec, corner, corner_index
+                entry, corner, corner_index
             )
             checked.extend(actual)
             skipped.extend(missing)
             inapplicable.extend(irrelevant)
-    _attach_derive_coverage(measurements_spec, corners, checked, skipped, inapplicable)
+    sim_derive_rollup.attach_coverage(measurements, checked, skipped, inapplicable)
     reasons = []
     if not corners:
         reasons.append(REASON_EMPTY_CORNER_MATRIX)
@@ -9642,7 +9566,7 @@ def _build_coverage(
 
     block = {
         "corners_simulated": len(corners),
-        "measurements_declared": len(measurements_spec) + len(grid_stats),
+        "measurements_declared": len(measurements) + len(grid_stats),
         "measurements_with_limits": measurements_with_limits + len(grid_stats),
         "unrecognized_limit_keys": unrecognized,
         **build_check_coverage(
@@ -10117,189 +10041,4 @@ def _rollup_measurements(
 # --------------------------------------------------------------------------- #
 
 noise_representation = sim_noise.noise_representation
-
-
-# --------------------------------------------------------------------------- #
-# Waveform plots (`--plot`, issue #1723)
-# --------------------------------------------------------------------------- #
-
-#: The first `v(...)`/`i(...)`-shaped (optionally derivative-prefixed, e.g.
-#: `vd(...)`/`ir(...)`) parenthesized token in a `.meas` card's `spice` text
-#: -- the signal that card is actually about. ngspice itself always lowercases
-#: node/signal names in its rawfile `variables[].name` (see
-#: `parse_ascii_rawfile`'s docstring example), so the reconstructed name below
-#: is lowercased to match, regardless of how the request's own `.meas` text
-#: capitalizes it.
-_MEAS_SIGNAL_TOKEN_RE = re.compile(r"\b([a-z]{1,3})\(([^)]*)\)", re.IGNORECASE)
-
-#: `from=<value>` / `to=<value>` trailers on an `AVG`/`RMS`/`PP`/`MIN`/`MAX`/
-#: `INTEG` measurement -- the "measurement window" #1723 asks to shade on a
-#: `tran` plot.
-_MEAS_FROM_RE = re.compile(r"\bfrom\s*=\s*(\S+)", re.IGNORECASE)
-_MEAS_TO_RE = re.compile(r"\bto\s*=\s*(\S+)", re.IGNORECASE)
-
-#: `WHEN <signal>=<value>` on a threshold-crossing measurement -- the
-#: `.meas` target #1723 asks to draw as a reference line. `\S+` between
-#: `when` and the final `=` is deliberately greedy-then-backtracking so it
-#: still matches when the signal token itself carries no space before its
-#: own `=` (e.g. `when v(out)=1.5`, not `when v(out) = 1.5`).
-_MEAS_WHEN_TARGET_RE = re.compile(
-    r"\bwhen\s+\S+\s*=\s*([-+]?[\d.]+(?:[eE][-+]?\d+)?[a-zA-Z]*)", re.IGNORECASE
-)
-
-
-def _measurement_diagnostic_hints(spice: str) -> dict[str, Any]:
-    """Best-effort extraction of the plotting context a `.meas` card's own
-    ``spice`` text implies: which signal it is about, the time window it
-    integrates/searches over (``from=``/``to=``), and the threshold value it
-    searches for (``WHEN <signal>=<value>``).
-
-    Never raises -- an unrecognised card shape (e.g. a ``TRIG``/``TARG``
-    delay measurement, which has no single window or target this simple
-    parser understands) yields ``{"signal": None, "window": None, "target":
-    None}``, and the caller (:func:`_write_corner_plots`) just renders that
-    signal's curve without the extra context rather than failing the whole
-    plot batch. This is deliberately not a general SPICE expression
-    evaluator -- see :mod:`klayout_tools.sim_plot`'s module docstring on
-    scope.
-    """
-    signal_match = _MEAS_SIGNAL_TOKEN_RE.search(spice)
-    signal = (
-        f"{signal_match.group(1).lower()}({signal_match.group(2).lower()})"
-        if signal_match
-        else None
-    )
-
-    window: tuple[float, float] | None = None
-    from_match = _MEAS_FROM_RE.search(spice)
-    to_match = _MEAS_TO_RE.search(spice)
-    if from_match is not None and to_match is not None:
-        from_s = _parse_spice_seconds(from_match.group(1))
-        to_s = _parse_spice_seconds(to_match.group(1))
-        if from_s is not None and to_s is not None:
-            window = (from_s, to_s)
-
-    target: float | None = None
-    when_match = _MEAS_WHEN_TARGET_RE.search(spice)
-    if when_match is not None:
-        target = _parse_plain_number(when_match.group(1))
-
-    return {"signal": signal, "window": window, "target": target}
-
-
-def _write_corner_plots(
-    *,
-    corner: dict[str, Any],
-    plot_dir: str,
-    analysis_kind: str | None,
-    measurements_spec: list[dict[str, Any]],
-) -> list[dict[str, str]]:
-    """Render one SVG per non-sweep signal captured in ``corner``'s persisted
-    waveform artifact, writing each to ``plot_dir`` with a deterministic
-    filename (``<corner_slug>__<signal_slug>.svg``).
-
-    Any `tran` measurement whose own signal (see
-    :func:`_measurement_diagnostic_hints`) matches a rendered signal gets its
-    ``from=``/``to=`` window shaded and its ``WHEN``-target drawn as a
-    reference line on that signal's plot -- issue #1723's "the `.meas`
-    target drawn as a line" / "the measurement window shaded" acceptance
-    criteria. `ac` plots use a log-scaled frequency axis; `dc`/`tran` use a
-    linear sweep axis (window shading only applies to `tran`, since
-    ``from=``/``to=`` on a `dc`/`ac` measurement is over the swept
-    source/frequency, not simulated time, and this issue's shading is
-    specifically the *time* window the Proposal describes).
-
-    Returns ``[]`` -- writing nothing -- when this corner has no persisted
-    waveform artifact (an errored corner that never produced a rawfile) or
-    that artifact cannot be read/parsed; never raises, since one corner's
-    bad artifact should not abort plotting every other corner.
-    """
-    waveform_path = corner["artifacts"].get("waveform")
-    if not waveform_path or not os.path.isfile(waveform_path):
-        return []
-    try:
-        with open(waveform_path, encoding="utf-8") as handle:
-            waveform = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return []
-
-    variables = waveform.get("variables") or []
-    points = waveform.get("points") or []
-    if len(variables) < 2 or not points:
-        return []
-
-    sweep_name = variables[0]["name"]
-    x_values = [point[0] for point in points]
-    log_x = analysis_kind == "ac"
-
-    hints_by_signal: dict[str, dict[str, Any]] = {}
-    for spec in measurements_spec:
-        hints = _measurement_diagnostic_hints(spec.get("spice", ""))
-        if hints["signal"] is None:
-            continue
-        # Merge across every measurement naming this signal (e.g. a `PP`
-        # window-measurement and a separate `WHEN` threshold-measurement
-        # both over `v(out)`) -- the first *non-None* window/target found
-        # wins for each field independently, rather than one measurement's
-        # hints unconditionally shadowing another's.
-        merged = hints_by_signal.setdefault(
-            hints["signal"], {"window": None, "target": None}
-        )
-        if merged["window"] is None and hints["window"] is not None:
-            merged["window"] = hints["window"]
-        if merged["target"] is None and hints["target"] is not None:
-            merged["target"] = hints["target"]
-
-    corner_slug = _slugify_corner_id(corner["corner_id"])
-    written: list[dict[str, str]] = []
-    for var in variables[1:]:
-        name = var["name"]
-        y_values = [point[var["index"]] for point in points]
-        hint = hints_by_signal.get(name.lower())
-        window = hint["window"] if hint and analysis_kind == "tran" else None
-        target = hint["target"] if hint else None
-        svg = render_waveform_svg(
-            signal_name=name,
-            corner_id=corner["corner_id"],
-            x_values=x_values,
-            y_values=y_values,
-            x_axis_label=sweep_name,
-            log_x=log_x,
-            window=window,
-            target=target,
-        )
-        path = os.path.join(plot_dir, f"{corner_slug}__{_slugify_signal(name)}.svg")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(svg)
-        written.append({"signal": name, "path": path})
-    return written
-
-
-def _measurement_plot_path(
-    entry: dict[str, Any],
-    spec: dict[str, Any] | None,
-    plots_by_corner: dict[str, list[dict[str, str]]],
-) -> str | None:
-    """The SVG path (if any) belonging next to one measurement rollup
-    ``entry`` -- its own ``.meas`` card's signal, rendered at its
-    ``worst_case`` corner -- so a `--plot` run's miss report names the
-    picture to look at next to the number that missed (issue #1723).
-
-    Returns ``None`` when there is no worst-case corner (an empty corner
-    matrix), ``spec`` is missing (should not happen -- every rollup entry
-    comes from a ``measurements_spec`` entry), that card names no
-    recognisable signal, or that corner rendered no matching plot.
-    """
-    worst_case = entry.get("worst_case")
-    if worst_case is None or spec is None:
-        return None
-    corner_plots = plots_by_corner.get(worst_case["corner_id"])
-    if not corner_plots:
-        return None
-    signal = _measurement_diagnostic_hints(spec.get("spice", ""))["signal"]
-    if signal is None:
-        return None
-    for plot in corner_plots:
-        if plot["signal"].lower() == signal:
-            return plot["path"]
-    return None
+_parse_spice_seconds = spice_number.parse

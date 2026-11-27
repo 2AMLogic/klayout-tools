@@ -1,0 +1,1 @@
+- A calibration probe that cancels a local simulation sweep now returns the diagnostic for each pending corner before entering the sequential or parallel scheduler (#8003).

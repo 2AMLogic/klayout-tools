@@ -1812,9 +1812,8 @@ def _prepare_decks_batch(
     worker_request: dict[str, Any],
 ) -> tuple[sim_batch.BatchConfig, sim_batch.BatchJobSpec]:
     """Resolve the batch config and build the one job spec for a deck list,
-    before any S3 write. Job timeout is the fully-serial worst case (every
-    unit's own timeout, one after another) plus slack; the fleet's own
-    ``$EDA_JOB_CONCURRENCY`` sizing still makes a real run far faster."""
+    before any S3 write. The timeout allows for every unit to run in series,
+    plus startup slack."""
     serial_worst_s = sim_batch_plan.deck_serial_worst_s(worker_request[DECKS_FIELD])
     config = sim_batch._resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s
@@ -1831,6 +1830,7 @@ def _prepare_decks_batch(
         pdk_root=(request.get("models") or {}).get("pdk_root"),
         cores_per_job=ASSUMED_THREADS_PER_CORNER,
         timeout_seconds=int(math.ceil(serial_worst_s)) + 120,
+        max_launch_attempts=config.max_launch_attempts,
         inputs=(
             *(
                 sim_batch.BatchJobInput(

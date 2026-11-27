@@ -1273,6 +1273,20 @@ fails before the simulator writes a report, inspect the per-corner
 | `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one -- and that split reports `environment.remote.fleet[]` (one block per job) with only the `job_ids` / `runner_compatibility` roll-ups at the top level, so per-job fields must be read from `fleet[]` (see "Fleet sharding" below). The ceiling bound is a fully-serial upper bound, not a runtime estimate, so an explicit cap is honored even when `timeout_s x shard units + 120` exceeds `max_job_seconds` ([#4982](https://github.com/2AMLogic/klayout-tools/issues/4982)); a stderr warning states the bound is a serial upper bound, and the harness still kills a job that actually runs past the ceiling. A request that should be sized automatically should omit the cap and use `job_ceiling_check: "split"` (largest shard `floor((max_job_seconds - 120) / options.timeout_s)`). Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, or when combined with `job_ceiling_check: "enforce"`. |
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
 | `batch.job_timeout_s` | number > 0 | The caller's stated **whole-job wall bound** for one batch job ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)). A job's units run **concurrently** on the job instance, so covering per-unit contention means raising `options.timeout_s` -- and the serial bound formula (`options.timeout_s x units + 120`) then multiplies that inflated number by the unit count again. This key breaks that coupling: it replaces the serial bound everywhere it is used -- `job.json`'s `timeout_seconds` (the harness still clamps *down* to the fleet's ceiling, never up), the pre-submit ceiling assessment (`environment.remote.job_ceiling` then reports `basis: "caller_job_timeout"`; every field is defined by the stated bound -- see the field table in "Three budgets, and the fleet's whole-job ceiling"), and the default `batch.poll_timeout_s`. `options.timeout_s` keeps its single meaning, the per-unit engine timeout, and every shard of a split run carries the same stated bound. A stated bound that exceeds `max_job_seconds` behaves like any over-ceiling request (warn, or refuse under `"enforce"` / `"split"` -- splitting cannot help, because every shard would carry the same over-ceiling bound), and the warning names `batch.job_timeout_s` as the value to lower. **The trade-off is the bound's honesty**: a stated bound that turns out too low kills the whole job at that age, and units that had finished inside it are lost with it, exactly like a fleet-ceiling kill -- state the wall you actually want the job killed at. Rejected before any S3 write when not a positive, finite number (a `bool` is refused). Unset, everything is sized from the serial bound exactly as before. |
+| `batch.max_launch_attempts` | integer from 1 through 999,999,999 | Maximum paid launches per fleet job ID. Omit for unlimited launches. A limit of two permits the initial launch and one replacement, including an unattended replacement after the submitter exits. A refusal that starts no instance consumes zero attempts. |
+
+For capped corner and deck-list jobs, `klt sim` uploads the limit in each
+`job.json` and asks the provisioner for a report-only launch before spending
+compute. Invalid values, including explicit `null`, produce
+`batch_launch_attempts_invalid` before upload, including during dry-run.
+If the report fails or does not confirm the requested limit, the job
+stops with `batch_launch_attempts_unsupported`. Once the job has used all its
+paid launches, the fleet refuses another launch with exit 76 and `klt sim`
+reports `batch_launch_attempts_exhausted`.
+`environment.remote.max_launch_attempts` records the configured limit.
+Each shard has its own job ID, so three shards capped at two permit up to six
+paid launches. Resubmitting with a fresh job ID starts a new count. Track
+campaign-wide attempts, runtime and cost separately.
 
 ### Asynchronous submit, status and cancel (`--submit-only`, `--job-status`, `--cancel`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073), [#4351](https://github.com/2AMLogic/klayout-tools/issues/4351))
 
@@ -2998,7 +3012,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). Regular ngspice batch captures include `binary_sha256` when the worker resolves the executable. It is a lowercase SHA-256 digest, or `null` if hashing failed. Older captures, unresolved executables, deck-list requests and Xyce requests omit the key. |
 | `ngspice_init` | Issue #6045. Corner-mode worker report's `{source, lines, sha256}`: path-free `source` is `request`, `thread_pin`, `home` or `none`; `lines` is retained only for klt-written `request`/`thread_pin` files, never home contents. Digest is `sha256:<hex>` (`null` for `none`). Missing/legacy, Xyce or malformed observations are `null`. Collected from the worker's simulation report after execution, independently of preflight `capture`, including recovered failed jobs and each fleet shard. Init lines are bounded to 256 entries, 2000 characters per entry and 32768 characters total including newlines; oversized content is rejected as `null`, never truncated beside its full-file digest. The client's `environment.ngspice_init.source` remains `runner`; SSH and deck-mode provenance are outside this field's scope. |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
-| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
+| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true, and also on a deck-list job with a unit whose `.include`/`.lib` closure stages one of that unit's declared `inputs[]` (issue #7981): the engine then ran client-supplied bytes, whatever `models_staged` says, so `stamp_*` describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
 | `omp_num_threads` | The worker's ambient `OMP_NUM_THREADS` at preflight, before klt launches ngspice. A successful capture reports `null` when unset. |
 | `threads_per_worker` | Positive integer launch pin from the worker's corner-mode simulation report. An unpinned run, missing report, legacy field omission or malformed value gives `null`. |
@@ -3006,6 +3020,60 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `diagnostics` | Bounded list of capture problems (missing binary, unreadable stamp, ...). |
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the submitting client's own `environment.client_engine_build.version_banner` (whitespace-normalised; issue #5566 — on an off-host report `environment.engine_build` is the worker's, so the client's probe is the one kept under `client_engine_build`). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. With a valid `binary_sha256` on both sides (the worker's `simulator.binary_sha256`, the client's `environment.client_engine_build.binary_sha256`; issue #7959) the object also carries `digest`: `match` or `mismatch`, the same binary or not. `status` and `digest` are independent — `{"status": "match", "digest": "mismatch"}` is the same version built differently. The member is omitted when either hash is absent, `null` or malformed (an older worker capture, a hash that failed), leaving the banner-only object. |
+
+**Closure-only deck caveat (issue
+[#7985](https://github.com/2AMLogic/klayout-tools/issues/7985)): `stamp_scope`
+can read `executed` for a deck that ran the caller's models.** On a deck-list
+(`decks[]`) batch job, a relative `.include` / `.inc` / `.lib <file> <section>`
+target that resolves next to the deck (or next to the file
+including it) is staged with the deck's closure on its own. It needs no
+`decks[].inputs[]` declaration (see "Pre-composed decks"), and staging it
+alone leaves `stamp_scope` at `executed`. With `model.lib` beside the deck
+and a unit declared as `{"id": "pinned", "deck": "pinned.spice"}` -- no
+`inputs` -- this deck stages the library:
+
+```spice
+* pinned.spice -- model.lib sits beside it; inputs[] never names it
+.include model.lib
+```
+
+The file-bearing `.lib model.lib tt` form stages it the same way. Either way
+the worker request's unit lists the file under `includes` only (`inputs` is
+empty), and `environment.remote.worker_environment.pdk` reads:
+
+```json
+{"variant": "gf180mcuD", "root": "/opt/pdk", "stamp_scheme": "sources-sha256",
+ "stamp_sha256": "<hex>", "stamp_text": "open_pdks <hash>",
+ "models_staged": false, "stamp_scope": "executed"}
+```
+
+even though the engine ran the caller's bytes for it, never the image's. The
+stamp identifies the worker image's PDK tree; it cannot establish the origin
+of every model the simulator read. The presence or count of a staged include
+does not settle that either, because the same closure stages a stimulus or a
+measurement block. One unit can carry both sources: a local stimulus staged
+through a relative `.include`, and the image's PDK read through a
+`$PDK_ROOT/<variant>/...` reference, which the unit lists under `host_resolved`
+rather than `includes`. A unit that *does* declare the file in
+`decks[].inputs[]` is the separate shape of
+[#7981](https://github.com/2AMLogic/klayout-tools/issues/7981).
+
+To verify the staged bytes, hash your local file and compare it with the
+entry in the unit's completion record `<outdir>/<id>/unit.json`:
+
+```console
+$ sha256sum model.lib
+<sha256 of your model.lib>  model.lib
+$ jq '.key.includes["model.lib"]' <outdir>/pinned/unit.json
+"<sha256 of your model.lib>"
+```
+
+`<outdir>` is the report's `outdir` (the `-o` directory; by default
+`.klt/sim/` next to the request file). A declared `inputs[]` file is digested
+under `key.inputs` the same way. The deck ships byte-for-byte, so its own
+directives say which staged files it names: a matching digest shows which
+bytes were staged beside the deck, not that the simulator opened them -- klt
+does not trace simulator file access.
 
 Four sibling fields sit on `environment.remote` itself (and on each `fleet[]`
 member), for a runner whose image has no readable `SOURCES` stamp. The first
@@ -3138,6 +3206,14 @@ staged files than the bounded worker list). `client_stamp` carries the
 submitter's own `SOURCES` stamp (`variant`, `stamp_scheme`, `stamp_sha256`)
 when readable, so a caller can pin the PDK revision. klt does not fail the run
 on a mismatch; the caller decides.
+A deck-list job that reads a declared input reports `stamp_scope: "image"`
+with `models_staged: false` (issue #7981). The scope alone does not switch
+`pdk_stamp_comparison` to the digest basis -- only `options.stage_model_inputs`
+does, on corner-mode runs -- so a deck job's comparison still compares the
+worker image's stamp with the submitter's local PDK stamp. To confirm the bytes
+a deck unit ran, read the `key.inputs` and `key.includes` hashes in its
+`<outdir>/<id>/unit.json`, which cover every declared input and staged include
+by unit-relative name.
 The text summary prints `pdk_stamp: <status> (<reason>)` (plus the `mismatch`
 warning) and `models_staged: <bool>` for batch runs; set
 `options.stage_model_inputs` to execute the submitter's model files
