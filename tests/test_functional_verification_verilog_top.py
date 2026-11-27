@@ -269,7 +269,7 @@ def test_integration_sdf_unrelated_module_unit_does_not_invalidate(tmp_path):
 def test_integration_sdf_interconnect_mode_compares_only_retained_delays(tmp_path):
     """``entries: "interconnect"`` drops every IOPATH, so the ``1ps`` leaf no
     longer receives a delay and its unit is no longer compared; the retained
-    INTERCONNECT lands in the ``1ns`` root, which matches the SDF."""
+    INTERCONNECT uses the ``1ns`` annotation module, which matches the SDF."""
     request = _stage_sdf_units(
         tmp_path,
         leaf_timescale="1ps/1ps",

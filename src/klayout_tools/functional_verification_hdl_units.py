@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from tempfile import TemporaryDirectory
@@ -13,15 +13,21 @@ from tempfile import TemporaryDirectory
 from ._text import read_text
 from .functional_verification_base import FunctionalVerificationError
 
-# Keep escaped names intact even if they contain a quote or a comment opener.
-_HDL_LITERAL = re.compile(r'\\\S+|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
+# Keep escaped identifiers and the language names consumed by `begin_keywords.
+_LANGUAGE = r"(?:1364|1800)-\d{4}(?:-noconfig)?"
+_HDL_LITERAL = re.compile(
+    rf'(?P<keep>\\\S+|"{_LANGUAGE}")|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL
+)
 _PREPROCESSING = re.compile(r"`(?!(?:timescale|resetall)\b)")
 _UNIT = r"(?:100|10|1)\s*(?:ms|us|ns|ps|fs|s)"
 _NAME = r"(?:[A-Za-z_][\w$]*|\\\S+)"
 _TOKEN = re.compile(
     rf"\\\S+|`timescale\s+(?P<directive>{_UNIT})\s*/\s*{_UNIT}|`resetall\b"
+    rf'|`begin_keywords\s+"(?P<language>{_LANGUAGE})"|`end_keywords\b'
     rf"|(?<![\w$])(?:module|macromodule)\s+(?:(?:static|automatic)\s+)?(?P<module>{_NAME})"
-    r"|(?<![\w$])(?P<scope>package|interface|program)(?![\w$])"
+    rf"|(?<![\w$])(?P<scope>package|interface|program)\b\s*(?:(?:static|automatic)\s+)?"
+    rf"(?P<scope_name>{_NAME})?\s*(?=[;(#]|import\b)"
+    r"|(?<![\w$])(?P<scope_end>endpackage|endinterface|endprogram)(?![\w$])"
     r"|(?<![\w$])(?P<end>endmodule)(?![\w$])|(?<![\w$])(?P<local>timeunit)(?![\w$])"
 )
 _LOCAL_DECLARATION = re.compile(rf"\s*(?P<unit>{_UNIT})\s*(?:/\s*{_UNIT}\s*)?;")
@@ -36,7 +42,22 @@ _MODULE_HEADER = re.compile(
 
 
 def _hdl_code(text: str) -> str:
-    return _HDL_LITERAL.sub(lambda m: m[0] if m[0][0] == "\\" else " ", text)
+    return _HDL_LITERAL.sub(lambda m: m["keep"] or " ", text)
+
+
+def _hdl_tokens(text: str) -> Iterator[re.Match[str]]:
+    """Recognize SystemVerilog keywords only in an active IEEE 1800 region."""
+    system_verilog = [True]  # both runners compile with -g2012
+    for token in _TOKEN.finditer(text):
+        if token["language"]:
+            system_verilog.append(token["language"].startswith("1800-"))
+        elif token[0] == "`end_keywords":
+            if len(system_verilog) > 1:
+                system_verilog.pop()
+        elif system_verilog[-1] or not (
+            token["local"] or token["scope"] or token["scope_end"]
+        ):
+            yield token
 
 
 # Icarus accepts both forms of each of these feature switches. They leave
@@ -158,14 +179,13 @@ def _declared_unit(text: str, start: int) -> str | None:
     return "".join(value["unit"].split()) if value else None
 
 
-def _compilation_default(texts: list[str], compiler_default: str | None) -> str | None:
+def _compilation_default(text: str, compiler_default: str | None) -> str | None:
     """A compilation-unit timeunit precedes design elements and spans source files."""
-    for text in texts:
-        for token in _TOKEN.finditer(text):
-            if token["module"] or token["scope"]:
-                return compiler_default
-            if token["local"]:
-                return _declared_unit(text, token.end())
+    for token in _hdl_tokens(text):
+        if token["module"] or token["scope"]:
+            return compiler_default
+        if token["local"]:
+            return _declared_unit(text, token.end())
     return compiler_default
 
 
@@ -202,6 +222,21 @@ class _ModuleTimeUnits:
     top: dict[str, _Module] = field(default_factory=dict)
     nested: dict[str, list[_Module]] = field(default_factory=dict)
 
+    def open_scope(
+        self, token: re.Match[str], parent: _Module | None, default_unit: str | None
+    ) -> _Module:
+        name = (token["module"] or token["scope_name"] or "").removeprefix("\\")
+        header = _MODULE_HEADER.match(self.text, token.end())
+        body_start = header.end() if header else token.end()
+        module = _Module(name, parent.unit if parent else default_unit, body_start)
+        if token["module"]:
+            if parent is None:
+                self.top[name] = module
+            else:
+                parent.children[name] = module
+                self.nested.setdefault(name, []).append(module)
+        return module
+
     def follow(self, module: _Module | None, path: Iterable[str]) -> _Module | None:
         for instance in path:
             if module is None:
@@ -220,33 +255,27 @@ def _verilog_time_units(
     source_texts: list[str], default_unit: str | None
 ) -> _ModuleTimeUnits:
     """Index declarations by lexical scope, retaining each module's own unit."""
-    default_unit = _compilation_default(source_texts, default_unit)
     directive = None
     stack: list[_Module] = []
     text = "\n".join(source_texts)
+    default_unit = _compilation_default(text, default_unit)
     units = _ModuleTimeUnits(text)
     start = 0
-    for token in _TOKEN.finditer(text):
-        if token["module"] is not None:
-            name = token["module"].removeprefix("\\")
-            header = _MODULE_HEADER.match(text, token.end())
-            body_start = header.end() if header else token.end()
+    for token in _hdl_tokens(text):
+        if token.start() < start:
+            continue
+        if token["module"] or token["scope"]:
+            parent = stack[-1] if stack else None
             if stack:
-                parent = stack[-1]
-                parent.body.append((start, token.start()))
-                module = _Module(name, parent.unit, body_start)
-                parent.children[name] = module
-                units.nested.setdefault(name, []).append(module)
-            else:
-                module = _Module(name, directive or default_unit, body_start)
-                units.top[name] = module
+                stack[-1].body.append((start, token.start()))
+            module = units.open_scope(token, parent, directive or default_unit)
             stack.append(module)
-            start = body_start
+            start = module.body_start
         elif token["directive"] is not None:
             directive = "".join(token["directive"].split())
         elif token[0] == "`resetall":
             directive = None
-        elif token["end"] and stack:
+        elif (token["end"] or token["scope_end"]) and stack:
             stack.pop().body.append((start, token.start()))
             start = token.end()
         elif token["local"] and stack:

@@ -2,7 +2,7 @@
 its delays land in is refused before the build; a matching run reports both.
 
 Icarus Verilog 13.0 (stable) ignores an SDF file's ``(TIMESCALE ...)`` and
-applies every delay number in the **annotated module's own** time unit. A
+applies cell path delays in the annotated module's time unit. A
 Liberty ``time_unit`` of ``1ps`` makes OpenSTA's ``write_sdf`` emit
 ``(TIMESCALE 1ps)``, and over cell models that declare `` `timescale 1ns ``
 that annotates every delay 1000x too large while the transcript stays clean
@@ -13,12 +13,10 @@ and at **5.100 ns** from ``0.100`` in a ``1ns`` file.
 
 The unit each delay lands in, as Icarus elaborates it:
 
-* An entry in a ``CELL`` is applied in the ``CELL``'s own module, the one
-  its ``CELLTYPE`` names -- an ``IOPATH`` in the cell itself, an
-  ``INTERCONNECT`` in the cell that contains the two instances (measured: a
-  ``0.100`` entry in the root ``CELL`` took the root's ``1ns``, not the
-  ``1ps`` leaf's unit). A ``DELAY`` clause at the file's top level lands in
-  the annotation root.
+* An ``IOPATH`` uses the unit of its ``CELLTYPE`` at the annotated instance.
+  An ``INTERCONNECT`` uses the unit of the module calling ``$sdf_annotate``,
+  even when the interconnect is in a child cell. The generated annotation
+  module is included in the same source-order scan as the design.
 * A module-local ``timeunit`` overrides the active directive for that
   module. Otherwise the unit is the last `` `timescale `` before its declaration, read
   across the sources in compile order: the directive persists from one file
@@ -50,7 +48,10 @@ from typing import Any
 
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._text import read_text
-from .functional_verification_base import FunctionalVerificationError
+from .functional_verification_base import (
+    SDF_ANNOTATE_MODULE,
+    FunctionalVerificationError,
+)
 from .functional_verification_hdl_units import (
     _active_sources,
     _Module,
@@ -74,7 +75,7 @@ from .functional_verification_sdf_unit_syntax import (
 def _target_declaration(
     units: _ModuleTimeUnits, root: _Module | None, target: _Target
 ) -> _Module | None:
-    celltype, instance, divider = target
+    celltype, instance, divider, _ = target
     if instance is None:
         return root
     if celltype is None:
@@ -94,13 +95,17 @@ def _target_declaration(
     return module if module and module.name == celltype else None
 
 
-def _target_parts(module: str | None, instance: str | None) -> tuple[str, str]:
+def _target_parts(target: _Target, root: _Module | None = None) -> tuple[str, str]:
     """``(where the SDF puts the target, how it names the module)``."""
-    if instance is None:
-        root = (
-            "the annotation root" if module is None else f"annotation root '{module}'"
+    if target.interconnect:
+        return (
+            "the retained INTERCONNECT entries",
+            f"annotation module '{SDF_ANNOTATE_MODULE}'",
         )
-        return "the DELAY clauses outside any CELL", root
+    module, instance = target.celltype, target.instance
+    if instance is None:
+        identity = f"annotation root '{root.name}'" if root else "the annotation root"
+        return "the DELAY clauses outside any CELL", identity
     where = "the root CELL" if not instance else f"'{instance}'"
     if module is None:
         return where, "no CELLTYPE"
@@ -146,17 +151,20 @@ def _unit_problems(
     applied: str | None = None
     seen: set[tuple[str | None, str | None]] = set()
     for target in targets:
-        module, instance, _ = target
-        definition = _target_declaration(units, root, target)
+        module: str | None
+        if target.interconnect:
+            definition = units.top.get(SDF_ANNOTATE_MODULE)
+            module = SDF_ANNOTATE_MODULE
+        else:
+            definition = _target_declaration(units, root, target)
+            module = root.name if target.instance is None and root else target.celltype
         declared = definition.unit if definition else None
-        if instance is None and root is not None:
-            module = root.name
         if (module, declared) in seen:
             continue
         seen.add((module, declared))
-        where, identity = _target_parts(module, instance)
+        where, identity = _target_parts(target, root)
         if declared is None:
-            reason = _unresolved_reason(module, units, instance)
+            reason = _unresolved_reason(module, units, target.instance)
             unknown.append(f"{where} ({identity}): {reason}")
         elif not _same_time_unit(declared, timescale):
             wrong.append((f"{where} ({identity}, `timescale {declared})", declared))
@@ -184,11 +192,9 @@ def _mismatch_refusal(timescale: str, wrong: list[tuple[str, str]]) -> str:
         details.append(f"... and {len(wrong) - 3} more")
     return (
         f"options.sdf: the SDF file is in {timescale} but Icarus Verilog "
-        "ignores an SDF's TIMESCALE and applies every delay in the annotated "
-        "module's own time unit. Delay targets declared in another unit: "
-        f"{'; '.join(details)}. Write "
-        "the SDF in the models' unit, or the models in the SDF's unit, so "
-        "both state the same time unit"
+        "ignores an SDF's TIMESCALE. Delays applied in another HDL time unit: "
+        f"{'; '.join(details)}. Use the same time unit for the SDF and "
+        "the HDL modules that supply these delays' units"
     )
 
 
@@ -197,8 +203,8 @@ def _unresolved_refusal(timescale: str, unknown: list[str]) -> str:
     return (
         "options.sdf: the time unit of these delay targets in a "
         f"{timescale} SDF cannot be established: {_listing(unknown)}. Icarus "
-        "Verilog applies every SDF delay in the annotated module's own time "
-        "unit, so an unverified unit could annotate every delay 1000x off "
+        "Verilog ignores the SDF's TIMESCALE, so an unverified unit could "
+        "annotate delays 1000x off "
         "while the transcript stays clean and the report says annotated: true"
     )
 
@@ -253,7 +259,7 @@ def _check_sdf_time_units(
             cocotb_build_dir,
         )
     except FunctionalVerificationError as exc:
-        target = _target_parts(*targets[0][:2])
+        target = _target_parts(targets[0])
         raise FunctionalVerificationError(
             f"options.sdf: cannot establish the HDL time unit for {target[0]} "
             f"({target[1]}) in a {timescale_unit} SDF: {exc}"

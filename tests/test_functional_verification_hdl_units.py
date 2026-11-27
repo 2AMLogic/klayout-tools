@@ -180,6 +180,48 @@ def _assert_matching_ns_edge(tmp_path, request):
 
 
 @needs_icarus
+@pytest.mark.parametrize("scope", ["interface", "program"])
+def test_nested_time_declaration_belongs_to_its_own_scope(tmp_path, scope):
+    request = _stage_sdf_units(tmp_path)
+    leaf = tmp_path / "and_cell.v"
+    leaf.write_text(
+        leaf.read_text().replace(
+            "  and (",
+            f"  {scope} nested; timeunit 1ps/1ps; end{scope}\n  and (",
+        )
+    )
+    _assert_matching_ns_edge(tmp_path, request)
+
+
+@needs_icarus
+def test_timeunit_identifier_in_verilog_2005(tmp_path):
+    request = _stage_sdf_units(tmp_path)
+    leaf = tmp_path / "and_cell.v"
+    leaf.write_text(
+        '`begin_keywords "1364-2005"\n'
+        + leaf.read_text().replace("  and (", "  wire timeunit;\n  and (")
+        + "`end_keywords\n"
+    )
+    _assert_matching_ns_edge(tmp_path, request)
+
+
+def test_end_keywords_restores_the_enclosing_language_across_files():
+    texts = [
+        '`begin_keywords "1364-2005"\nmodule a; wire timeunit; endmodule',
+        '`begin_keywords "1800-2012"\nmodule b; timeunit 1ps; endmodule\n`end_keywords',
+        "module c; wire timeunit; endmodule\n`end_keywords",
+        "module d; timeunit 10ps; endmodule",
+    ]
+    modules = _verilog_time_units(texts, "1ns").top
+    assert {name: mod.unit for name, mod in modules.items()} == {
+        "a": "1ns",
+        "b": "1ps",
+        "c": "1ns",
+        "d": "10ps",
+    }
+
+
+@needs_icarus
 @pytest.mark.parametrize("leaf_unit,unused_unit", [("1ps", "1ns"), ("1ns", "1ps")])
 def test_unrelated_nested_module_with_same_name(tmp_path, leaf_unit, unused_unit):
     request = _stage_sdf_units(tmp_path, leaf_timescale=f"{leaf_unit}/1ps")

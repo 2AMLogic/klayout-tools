@@ -297,7 +297,7 @@ def test_delay_outside_any_cell_under_an_unresolvable_scope_is_refused(
             "(DELAYFILE\n"
             '  (SDFVERSION "3.0")\n'
             "  (TIMESCALE 1ns)\n"
-            "  (DELAY (ABSOLUTE (INTERCONNECT a u_inv.a (1:1:1))))\n"
+            "  (DELAY (ABSOLUTE (IOPATH a y (1:1:1))))\n"
             ")\n"
         ),
         scope="no_such_instance",

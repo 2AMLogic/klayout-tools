@@ -1,7 +1,7 @@
 """SDF ``TIMESCALE`` versus the annotated module's time unit (issue #7983).
 
-Icarus ignores an SDF's ``TIMESCALE`` and applies every delay in the
-annotated module's own unit, so ``klt`` refuses a differing unit before the
+Icarus ignores an SDF's ``TIMESCALE``, so ``klt`` checks the HDL unit for
+each retained delay and refuses a differing unit before the
 build. A dispatch spy on the public Verilog-bench request verifies a
 refusal precedes compilation. A real Icarus run checks that a matching,
 preprocessed model still annotates successfully.
@@ -149,9 +149,7 @@ def test_delay_outside_any_cell_is_compared_with_the_annotation_root(
 ):
     request = _stage_sdf_units(
         tmp_path,
-        sdf_text=_sdf(
-            "1ps", "  (DELAY (ABSOLUTE (INTERCONNECT a u1.A (500:500:500))))\n"
-        ),
+        sdf_text=_sdf("1ps", "  (DELAY (ABSOLUTE (IOPATH a y (500:500:500))))\n"),
     )
     message = _refused(tmp_path, monkeypatch, request)
     assert "annotation root 'and2'" in message
@@ -188,8 +186,7 @@ def test_mixed_scope_refusal_names_only_the_mismatched_cell(tmp_path, monkeypatc
 
 
 def test_matching_mixed_scope_reaches_the_build(tmp_path, monkeypatch):
-    """The same root ``CELL`` alone passes, and the dispatch receives the
-    root's unit as the one the retained delay is applied in."""
+    """The root's INTERCONNECT matches the shim even when the leaf uses ps."""
     request = _stage_sdf_units(
         tmp_path, leaf_timescale="1ps/1ps", sdf_text=_sdf("1ns", _ROOT_CELL)
     )
@@ -394,7 +391,10 @@ def test_each_mismatched_target_has_its_own_factor(tmp_path, monkeypatch):
     )
     message = _refused(tmp_path, monkeypatch, request)
     assert 'CELLTYPE "and_cell", `timescale 1ps): 10x too small' in message
-    assert 'CELLTYPE "and2", `timescale 1ns): 100x too large' in message
+    assert (
+        "annotation module 'klt_sdf_annotate', `timescale 1ns): 100x too large"
+        in message
+    )
 
 
 @needs_icarus
@@ -468,7 +468,8 @@ def test_same_celltype_in_two_annotated_scopes(tmp_path, monkeypatch, divider):
 
 
 def test_verilog_dut_instance_is_a_nested_annotation_root(tmp_path, monkeypatch):
-    request = Path(_stage_sdf_units(tmp_path, sdf_text=_sdf("1ns", _ROOT_CELL)))
+    root_iopath = _ROOT_CELL.replace("INTERCONNECT a u1.A", "IOPATH a y")
+    request = Path(_stage_sdf_units(tmp_path, sdf_text=_sdf("1ns", root_iopath)))
     spec = json.loads(request.read_text())
     spec["testbench"]["dut_instance"] = "tb_and2.and2"
     request.write_text(json.dumps(spec))
