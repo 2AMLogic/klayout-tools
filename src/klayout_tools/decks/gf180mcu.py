@@ -22,8 +22,8 @@ the canonical source repository for this issue:
     the opposite way round from ``NP.3b``/``NP.3c``. Only ``NP.1``/``NP.2``/
     ``NP.3a``/``NP.5a``/``NP.5b`` and their ``PP.*`` mirrors are
     transcribed; the per-context splits (``NP.3b``-``NP.3e``, ``NP.4a``/
-    ``NP.4b``, ``NP.5c``/``NP.5d``, ``NP.6``-``NP.12``, and the ``PP.*``
-    equivalents) each key off a ``DNWELL``/``LVPWELL``/``SAB``/butting-edge
+    ``NP.4b``, ``NP.5c``, ``NP.6``-``NP.12``, and the ``PP.*`` equivalents)
+    each key off a ``DNWELL``/``LVPWELL``/``SAB``/butting-edge
     context this deck's curated layer set does not draw.
   - ``drm_07_13.rst`` / ``tables_clear/21_Contact_56.csv`` — 7.12 Contact (``CO.*``)
   - ``drm_07_14.rst`` / ``tables_clear/22_Metaln_58.csv`` — 7.13 Metaln (``Mn.*``,
@@ -341,30 +341,29 @@ are always the real, unmodified DRM values:
   ``NP.5b``/``PP.5b`` exclude butting edges (``nplus.edges.not
   (nplus_butted_edges)``) and are relaxed to as little as 0.02um by the
   ``NP.5c``/``NP.5d`` (``PP.5c``/``PP.5d``) well-context splits for a tap
-  further than 0.43um from an ``LVPWELL``/``Nwell`` edge; neither
-  sub-threshold split is expressible here, so the strict 0.16um is applied
-  to every NCOMP/PCOMP edge this rule actually checks -- **except** (issue
-  #3484) for ``pplus.enclosing.comp.1``'s PCOMP, which is now split by
-  ``DerivedLayer.context``: PCOMP within 0.429um of an ``Nwell`` or touching a
-  ``Dnwell`` stays on the strict 0.16um, the rest moves to
-  ``pplus.enclosing.comp.far.1`` (``PP.5di``, 0.02um). ``NP.5c``/``NP.5d`` and
-  ``PP.5ci`` remain unexpressed (strict). They also measure
-  with KLayout's default ``euclidian`` metric where the official rules use
-  ``projection`` -- again the conservative direction (a corner distance the
+  further than 0.43um from an ``LVPWELL``/``Nwell`` edge. Both well-distance
+  splits are expressed: (issue #3484) ``pplus.enclosing.comp.1``'s PCOMP by
+  ``DerivedLayer.context`` -- strict within 0.429um of an ``Nwell`` or
+  touching a ``Dnwell``, otherwise ``pplus.enclosing.comp.far.1`` (0.02um);
+  (issue #7955) ``nplus.enclosing.comp.1``'s NCOMP edges, per edge by
+  ``band_spec`` -- strict within 0.429um of the boundary of a pure ``Nwell``
+  (``NP.5di``; no ``DNWELL`` contact), 0.02um deeper inside (``NP.5dii``).
+  Butted edges and the ``DNWELL``/``LVPWELL`` splits (``NP.5c``, ``PP.5ci``)
+  stay unexpressed (strict), as does the ``euclidian``-for-``projection``
+  metric outside ``NP.5di``'s band -- conservative: a corner distance the
   official rule ignores can be reported, never the reverse). **Unlike
   ``NP.5b``, whose two sub-cases both resolve to the same 0.16um regardless
   of well context, ``PP.5b`` itself only ever applies to a PCOMP shape
   "(1) Inside NWELL (2) outside LVPWELL but inside DNWELL"** -- a PCOMP
   shape with no ``Nwell``/``Dnwell`` context anywhere instead falls under
   ``PP.5di``/``PP.5dii`` at the much looser 0.02-0.16um range above,
-  structurally incapable of being correctly checked at a flat 0.16um
-  (issue #2634, confirmed a false positive on ordinary ``ppolyf_u_*``
-  poly-resistor P+ substrate taps against a real fetched
-  ``rule_decks/pplus.drc``). ``pplus.enclosing.comp.1`` therefore also
-  carries ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``):
-  a layout drawing neither anywhere skips the whole rule rather than
-  misapplying it, while a layout drawing either keeps the approximations
-  above unchanged. ``nplus.enclosing.comp.1`` needs no equivalent gate.
+  structurally incapable of being correctly checked at a flat 0.16um (issue
+  #2634, a confirmed false positive on real ``ppolyf_u_*`` P+ substrate taps).
+  ``pplus.enclosing.comp.1`` therefore also carries
+  ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``): a layout
+  drawing neither anywhere skips the whole rule rather than misapplying it,
+  while a layout drawing either keeps the approximations above unchanged.
+  ``nplus.enclosing.comp.1`` needs no equivalent gate.
 - ``comp.coverage.1`` (``DF.12``): evaluated flat (no deep/hierarchical
   mode) on merged regions, as the upstream ``comp.rb`` expression
   ``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``. A COMP
@@ -528,6 +527,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from ..drc_edge_band import EdgeBandSpec
 from . import (
     BipolarDevice,
     CapacitorDevice,
@@ -1738,27 +1738,26 @@ DECK: list[DrcRule] = [
         other_layer=(32, 0),  # Nplus -- the enclosing side of the `enclosed` check
         check="enclosed",
         threshold_dbu=160,  # 0.16 um
-        # DRM 7.8 Nplus, rule "NP.5b": "Extension beyond COMP for the COMP
-        # (1) inside LVPWELL (2) outside Nwell and DNWELL" -> 0.16 (issue
-        # #2369), i.e. `ncomp.edges.enclosed(nplus_edges, 0.16.um,
-        # projection)` in `rule_decks/nplus.drc`. Spelled the same way here:
-        # the checked region is the real NCOMP boolean (`Comp` AND `Nplus`,
-        # via `DerivedLayer`) and the enclosing `other_layer` is `Nplus`, so
-        # only diffusion this implant actually covers is measured -- an
-        # unscoped `Nplus`-encloses-`Comp` check would instead flag every
-        # PCOMP that happens to touch `Nplus` (and, via the zero-overlap
-        # escape term, the whole of any COMP polygon shared by a butted
-        # NCOMP/PCOMP pair). Two approximations: (a) the PDK deck excludes
-        # butting edges (`np5b_nplus_slct = nplus.edges.not
-        # (nplus_butted_edges)`) and scopes by well context (NP.5c/NP.5d
-        # relax the extension to 0.02 for a tap far from an LVPWELL/Nwell
-        # edge), neither expressible here, so the strict 0.16 is applied to
-        # every NCOMP edge including a butted one; (b) the official check
-        # uses the `projection` metric while our `enclosed_check` uses
-        # KLayout's default `euclidian`, which additionally measures
-        # corner-to-corner distances -- the conservative direction (it can
-        # report a corner the official rule ignores, never the reverse).
-        # Threshold value unmodified.
+        # DRM 7.8 Nplus, rule "NP.5b": "Extension beyond COMP for the COMP (1)
+        # inside LVPWELL (2) outside Nwell and DNWELL" -> 0.16 (issue #2369),
+        # i.e. `ncomp.edges.enclosed(np5b_nplus, 0.16.um, projection)` in
+        # `rule_decks/nplus.drc`. Spelled the same way here: the checked region
+        # is the real NCOMP boolean (`Comp` AND `Nplus`, via `DerivedLayer`)
+        # and the enclosing `other_layer` is `Nplus`, so only diffusion this
+        # implant actually covers is measured -- an unscoped
+        # `Nplus`-encloses-`Comp` check would instead flag every PCOMP that
+        # happens to touch `Nplus` (and, via the zero-overlap escape term, the
+        # whole of any COMP polygon shared by a butted NCOMP/PCOMP pair).
+        # `band_spec` (issue #7955) adds the deck's `NP.5di`/`NP.5dii` split
+        # per edge: within 0.429um of the boundary of a pure Nwell (one
+        # touching no DNWELL) this 0.16 stands, deeper inside only 0.02 is
+        # required; the remaining approximations are in this module's docstring.
+        band_spec=EdgeBandSpec(
+            context_layers=((21, 0),),  # Nwell
+            exclude_layers=((12, 0),),  # DNWELL
+            band_width_um=0.429,
+            inner_threshold_dbu=20,  # 0.02 um, NP.5dii
+        ),
         derived_layer=DerivedLayer(
             base=(32, 0),  # Nplus, unsized -- `ncomp = comp AND nplus`
             sized_by_um=0.0,
