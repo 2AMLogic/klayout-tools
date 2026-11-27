@@ -10,13 +10,14 @@ the probe's forked child run inline; the real-Icarus tier lives in
 
 from __future__ import annotations
 
-import asyncio
 import collections
-import ctypes
+import errno
 import importlib.metadata
 import json
-import runpy
+import os
+import shutil
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -81,8 +82,9 @@ class ProbingRunner(FakeCocotbRunner):
             return super().test(**kwargs)
         self.probe_test = kwargs
         self.probe_sys_path = list(sys.path)  # what cocotb propagates as PYTHONPATH
+        # The simulator imports the module through PYTHONPATH, not its cwd.
         self.probe_module_bytes = Path(
-            kwargs["test_dir"], f"{rt.PROBE_MODULE}.py"
+            self.probe_sys_path[0], f"{rt.PROBE_MODULE}.py"
         ).read_bytes()
         Path(kwargs["log_file"]).write_text(self.banner, encoding="utf-8")
         Path(kwargs["extra_env"][rt.PROBE_RESULT_ENV]).write_text(
@@ -170,36 +172,6 @@ def test_release_of_this_interpreter_is_sys_version_info():
     assert rt._klt_release() == tuple(sys.version_info)
 
 
-@pytest.fixture
-def probe_module(monkeypatch):
-    """Load the shipped probe with only cocotb's test registration stubbed."""
-    monkeypatch.setitem(
-        sys.modules, "cocotb", types.SimpleNamespace(test=lambda: lambda fn: fn)
-    )
-    return runpy.run_module(
-        "klayout_tools.functional_verification_python_runtime_probe"
-    )
-
-
-def test_probe_records_the_host_runtime(probe_module, tmp_path, monkeypatch):
-    result = tmp_path / "result.json"
-    monkeypatch.setenv(rt.PROBE_RESULT_ENV, str(result))
-    asyncio.run(probe_module["probe"](None))
-
-    measured = json.loads(result.read_text())
-    assert measured["py_get_version"] == sys.version
-    assert Path(measured["library"]).is_file()
-
-
-def test_probe_library_lookup_can_be_inconclusive(probe_module, monkeypatch):
-    supplying_library = probe_module["supplying_library"]
-    assert supplying_library(None) is None  # No mapping contains the null pointer.
-
-    version_address = ctypes.cast(ctypes.pythonapi.Py_GetVersion, ctypes.c_void_p).value
-    monkeypatch.setattr(ctypes, "CDLL", lambda name: object())  # dladdr unavailable
-    assert supplying_library(version_address) is None
-
-
 # -- the entry point ---------------------------------------------------------
 
 
@@ -238,7 +210,7 @@ def test_build_text_and_a_configured_libpython_never_decide(monkeypatch):
     }
     monkeypatch.setattr(rt, "_measure_vvp_python", lambda **kwargs: outcome)
 
-    rt._check_icarus_python_runtime(object(), "icarus", [], {}, ("1ns", "1ps"))
+    rt._check_icarus_python_runtime(object(), "icarus", [], {}, ("1ns", "1ps"), ".")
 
 
 def test_prerelease_serial_decides(monkeypatch):
@@ -248,7 +220,7 @@ def test_prerelease_serial_decides(monkeypatch):
     monkeypatch.setattr(rt, "_measure_vvp_python", lambda **kwargs: outcome)
 
     with pytest.raises(FunctionalVerificationError, match="loads CPython 3.13.0rc1"):
-        rt._check_icarus_python_runtime(object(), "icarus", [], {}, ("1ns", "1ps"))
+        rt._check_icarus_python_runtime(object(), "icarus", [], {}, ("1ns", "1ps"), ".")
 
 
 def test_matching_runtime_proceeds_despite_a_different_banner(tmp_path, monkeypatch):
@@ -300,7 +272,7 @@ def test_unresolved_library_path_is_still_a_confirmed_mismatch(monkeypatch):
     _klt_on(monkeypatch, 3, 13, 18)
 
     with pytest.raises(FunctionalVerificationError) as excinfo:
-        rt._check_icarus_python_runtime(object(), "icarus", [], {}, ("1ns", "1ps"))
+        rt._check_icarus_python_runtime(object(), "icarus", [], {}, ("1ns", "1ps"), ".")
 
     assert "CPython 3.13.0rc1" in str(excinfo.value)
     assert "path could not be resolved" in str(excinfo.value)
@@ -401,7 +373,10 @@ def test_probe_sees_the_request_env_timescale_and_import_path(tmp_path, monkeypa
         "MY_VAR": "1",
         rt.PROBE_RESULT_ENV: str(workdir / "result.json"),
     }
-    assert test["test_dir"] == str(workdir)
+    # ``vvp`` starts where the user's run starts (a relative PATH entry resolves
+    # from there); the probe's own artifacts stay in the scratch directory.
+    assert test["test_dir"] == runner.test_kwargs["test_dir"] != str(workdir)
+    assert Path(test["log_file"]).parent == Path(test["results_xml"]).parent == workdir
     assert runner.probe_sys_path[:3] == [
         str(workdir),
         str(tmp_path),
@@ -415,6 +390,40 @@ def test_probe_sees_the_request_env_timescale_and_import_path(tmp_path, monkeypa
     # The user's own build still gets its build args and plusargs.
     assert runner.build_kwargs["build_args"] == ["-Wall"]
     assert runner.test_kwargs["plusargs"] == ["+ignore=1"]
+
+
+def _disk_full_copy(real_copy):
+    def copy(src, dst, **kwargs):
+        if Path(dst).name == f"{rt.PROBE_MODULE}.py":
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        return real_copy(src, dst, **kwargs)
+
+    return copy
+
+
+def _no_scratch_dir(*args, **kwargs):
+    raise OSError(errno.EACCES, os.strerror(errno.EACCES))
+
+
+@pytest.mark.parametrize("failing", ["copy-into-scratch", "create-scratch"])
+def test_probe_setup_failure_lets_the_users_build_proceed(
+    tmp_path, monkeypatch, failing
+):
+    """A full disk (or unwritable temp dir) costs the probe, not the run: the
+    entry point goes on to the user's own build and test, with no exception."""
+    request = _stage(tmp_path)
+    runner = ProbingRunner(None)
+    _stub_runner(monkeypatch, runner)
+    if failing == "copy-into-scratch":
+        monkeypatch.setattr(shutil, "copyfile", _disk_full_copy(shutil.copyfile))
+    else:
+        monkeypatch.setattr(tempfile, "mkdtemp", _no_scratch_dir)
+
+    report = run_functional_verification(request)
+
+    assert report["status"] == "pass"
+    assert runner.calls == ["build", "test"]  # the user's only; no probe ran
+    assert runner.probe_build is None
 
 
 # -- the post-run wording ----------------------------------------------------

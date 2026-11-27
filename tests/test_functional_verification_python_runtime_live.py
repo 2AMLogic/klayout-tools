@@ -10,6 +10,7 @@ the checked-in examples are run through the verb as a user would.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -23,6 +24,7 @@ from klayout_tools import functional_verification_python_runtime as rt
 from klayout_tools.functional_verification import run_functional_verification
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+REAL_VVP = shutil.which("vvp")
 EXAMPLE_DIR = REPO_ROOT / "examples" / "functional-verification"
 needs_icarus = pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog/vvp not installed")
 _BANNER = re.compile(r"Using Python (\S+) interpreter")
@@ -34,6 +36,7 @@ def _probe(module_dirs: list[str]) -> dict:
         module_dirs=module_dirs,
         env={},
         timescale=("1ns", "1ps"),
+        test_dir=module_dirs[0],  # any existing directory will do
     )
 
 
@@ -114,3 +117,38 @@ def test_verilog_bench_bypasses_the_probe(tmp_path, monkeypatch):
     report = run_functional_verification(str(tmp_path / "request-rtl.json"))
 
     assert report["status"] == "pass"
+
+
+def _recording_vvp(directory: Path, label: str, log: Path) -> None:
+    """A ``vvp`` that logs which launcher was chosen and from which working
+    directory, then hands over to the real Icarus."""
+    directory.mkdir(parents=True)
+    wrapper = directory / "vvp"
+    wrapper.write_text(
+        f'#!/bin/sh\necho "{label} $(pwd -P)" >> "{log}"\nexec "{REAL_VVP}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+
+
+@SKIP_NO_COCOTB
+@needs_icarus
+def test_probe_and_user_run_select_the_same_vvp_launcher(tmp_path, monkeypatch):
+    """A relative ``PATH`` entry resolves from the simulator's working
+    directory. With an output-relative ``tools/vvp`` ahead of an absolute
+    fallback, the probe and the user's run must pick the same one -- else a
+    wrapper that chooses libpython makes the pre-flight measure a runtime the
+    run never loads."""
+    for name in ("gcd.v", "test_gcd.py", "request.json"):
+        shutil.copyfile(EXAMPLE_DIR / name, tmp_path / name)
+    out, log = tmp_path / "out", tmp_path / "launches.log"
+    _recording_vvp(out / "tools", "output-relative", log)
+    _recording_vvp(tmp_path / "fallback", "fallback", log)
+    path = ["tools", str(tmp_path / "fallback"), os.environ["PATH"]]
+    monkeypatch.setenv("PATH", os.pathsep.join(path))
+
+    run_functional_verification(str(tmp_path / "request.json"), output_dir=str(out))
+
+    launches = [line.split(" ", 1) for line in log.read_text().splitlines()]
+    simulations = [(label, cwd) for label, cwd in launches if cwd == str(out.resolve())]
+    # The probe's simulator, then the user's: the same wrapper, from the same place.
+    assert simulations == [("output-relative", str(out.resolve()))] * 2, launches

@@ -36,12 +36,39 @@ class _DlInfo(ctypes.Structure):
     ]
 
 
+def _is_file(path: str | None) -> bool:
+    return path is not None and os.path.isabs(path) and os.path.isfile(path)
+
+
+def _mapped_file(address: int, maps_path: str = "/proc/self/maps") -> str | None:
+    """File the kernel reports mapped over ``address`` (Linux
+    ``/proc/self/maps``), or ``None`` where that cannot be read."""
+    try:
+        with open(maps_path, encoding="utf-8", errors="surrogateescape") as maps:
+            for line in maps:
+                fields = line.split(None, 5)
+                low, _, high = fields[0].partition("-")
+                if int(low, 16) <= address < int(high, 16):
+                    return fields[5].rstrip("\n") if len(fields) > 5 else None
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def supplying_library(address: int | None) -> str | None:
-    """Path of the loaded object that contains ``address``, or ``None``.
+    """Path of the loaded object that contains ``address``, or ``None`` when
+    no existing file can be confirmed as that object.
 
     ``dladdr`` lives in libc since glibc 2.34 and in ``libdl.so.2`` before
-    that; macOS exports it from libSystem, reachable as ``None`` too.
+    that; macOS exports it from libSystem, reachable as ``None`` too. Its
+    ``dli_fname`` is a library's path, but for the main program it is the name
+    the program was started under -- a bare ``python3`` found through
+    ``PATH`` -- which names no file. A name that is not an existing absolute
+    path is therefore replaced by the file the kernel says is mapped there,
+    and reported unresolved when neither confirms.
     """
+    if address is None:
+        return None
     for name in (None, "libdl.so.2"):
         try:
             dladdr = ctypes.CDLL(name).dladdr
@@ -50,9 +77,15 @@ def supplying_library(address: int | None) -> str | None:
         dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DlInfo)]
         dladdr.restype = ctypes.c_int
         info = _DlInfo()
-        if dladdr(ctypes.c_void_p(address), ctypes.byref(info)) and info.dli_fname:
-            return os.fsdecode(info.dli_fname)
-        return None
+        if not (
+            dladdr(ctypes.c_void_p(address), ctypes.byref(info)) and info.dli_fname
+        ):
+            return None
+        reported = os.fsdecode(info.dli_fname)
+        if _is_file(reported):
+            return reported
+        mapped = _mapped_file(address)
+        return mapped if _is_file(mapped) else None
     return None
 
 

@@ -35,10 +35,11 @@ Icarus 13.0):
    compared including level and serial (``3.13.0rc1`` differs from
    ``3.13.18``; compiler and build-date text never enter). Anything the probe
    cannot establish -- a ``vvp`` that cannot start Python, a result it cannot
-   read, a platform without ``fork`` -- is *inconclusive*: the ordinary run
-   proceeds and keeps its own failure diagnostics. A pre-flight that cannot
-   measure must never fail a run the simulator might still serve, which is
-   the discipline the wheel-tag check already follows.
+   read, a platform without ``fork``, a scratch directory or pipe it cannot
+   create -- is *inconclusive*: the ordinary run proceeds and keeps its own
+   failure diagnostics. A pre-flight that cannot measure must never fail a
+   run the simulator might still serve, which is the discipline the
+   wheel-tag check already follows.
 5. **The probe measures only as far as Python gets.** Its test runs once
    cocotb's regression does. A *cross-minor* libpython usually breaks the
    embedded interpreter before that -- reproduced live by pointing
@@ -59,6 +60,7 @@ import multiprocessing.connection
 import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
 from typing import Any
@@ -149,13 +151,17 @@ def _probe_child(
     """Target of the forked child :func:`_run_bounded` starts. ``os.setpgrp()``
     moves it into its own process group *before* it can spawn the simulator,
     so a timeout kill reaches that grandchild too (the shape of
-    ``_mutation_subprocess_entry``). The outcome is relayed over the pipe,
-    never raised across the process boundary."""
+    ``_mutation_subprocess_entry``). A child that cannot get its own group
+    measures nothing: it would otherwise still be in klt's group, and
+    cleaning it up must never be able to signal that. The outcome is relayed
+    over the pipe, never raised across the process boundary."""
     try:
-        os.setpgrp()
-    except OSError:  # pragma: no cover - defensive; absent on non-POSIX
-        pass
-    try:
+        try:
+            os.setpgrp()
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not give the probe its own process group ({exc})"
+            ) from exc
         conn.send(("measured", target(**kwargs)))
     except BaseException as exc:
         try:
@@ -164,6 +170,28 @@ def _probe_child(
             pass
     finally:
         conn.close()
+
+
+def _kill_probe_child(pid: int | None) -> None:
+    """SIGKILL the probe child, and its whole process group only when the
+    child leads a group of its own (``_probe_child`` makes it so before it
+    starts anything). A child that does not -- isolation failed, or the lookup
+    did -- is signalled alone: the group it would report is klt's own, and
+    ``_kill_process_tree`` signals whichever group it is handed. Never
+    raises."""
+    if pid is None:
+        return
+    try:
+        leads_group = os.getpgid(pid) == pid
+    except OSError:
+        leads_group = False
+    if leads_group:
+        _kill_process_tree(pid)
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def _run_bounded(target: Any, **kwargs: Any) -> dict[str, Any]:
@@ -183,7 +211,10 @@ def _run_bounded(target: Any, **kwargs: Any) -> dict[str, Any]:
         context = multiprocessing.get_context("fork")
     except ValueError as exc:
         return _inconclusive(f"no fork start method on this platform ({exc})")
-    parent_conn, child_conn = context.Pipe(duplex=False)
+    try:
+        parent_conn, child_conn = context.Pipe(duplex=False)
+    except OSError as exc:  # out of file descriptors, say
+        return _inconclusive(f"could not open the probe's result pipe ({exc})")
     try:
         process = context.Process(
             target=_probe_child, args=(child_conn, target, kwargs), daemon=True
@@ -206,11 +237,11 @@ def _run_bounded(target: Any, **kwargs: Any) -> dict[str, Any]:
                 outcome = None  # the child closed its end without a result
     finally:
         # A child still alive -- past its deadline, or after closing its end
-        # without exiting -- is killed group and all, then reaped, so neither
-        # it nor its simulator outlives this call.
+        # without exiting -- is killed (its own group and all), then reaped,
+        # so neither it nor its simulator outlives this call.
         parent_conn.close()
         if process.is_alive():
-            _kill_process_tree(process.pid)
+            _kill_probe_child(process.pid)
         process.join(_PROBE_KILL_GRACE_S)
     if outcome is not None:
         return outcome
@@ -227,6 +258,7 @@ def _probe_in_process(
     module_dirs: list[str],
     env: dict[str, str],
     timescale: tuple[str, str],
+    test_dir: str,
     workdir: str,
 ) -> dict[str, str | None]:
     """Build and run the probe through the request's own ``_fv._run_build`` /
@@ -234,6 +266,13 @@ def _probe_in_process(
     ``GPI_USERS`` and ``PYTHONPATH`` cocotb derives from this process, and the
     same ``request.env`` -- then return what its test wrote. Raises whatever
     stops it; :func:`_probe_child` relays that as inconclusive.
+
+    ``vvp`` starts in ``test_dir``, the working directory the request's own
+    run gets, because that is where a relative ``PATH`` entry (a wrapper
+    ``tools/vvp``) is resolved from: a probe started elsewhere could select
+    another launcher and measure a runtime the real run never loads. Only
+    the probe's artifacts -- build, logs, ``results.xml``, its result file --
+    stay in the scratch ``workdir``.
 
     The user's ``module_dirs`` stay on the import path ahead of everything
     but the scratch directory itself, exactly as in the real run: a helper of
@@ -266,7 +305,7 @@ def _probe_in_process(
         testcase=None,
         random_seed=None,
         build_dir=build_dir,
-        test_dir=workdir,
+        test_dir=test_dir,
         results_xml=os.path.join(workdir, "results.xml"),
         timescale=timescale,
         parameters={},
@@ -295,26 +334,35 @@ def _measure_vvp_python(
     module_dirs: list[str],
     env: dict[str, str],
     timescale: tuple[str, str],
+    test_dir: str,
 ) -> dict[str, Any]:
     """The probe's outcome: ``{"status": "measured", "py_get_version": ...,
-    "library": ...}`` or :func:`_inconclusive`. Never raises."""
-    with tempfile.TemporaryDirectory(prefix="klt-python-runtime-probe-") as workdir:
-        shutil.copyfile(
-            os.path.join(_PROBE_SOURCE_DIR, _PROBE_TEST_SOURCE),
-            os.path.join(workdir, f"{PROBE_MODULE}.py"),
-        )
-        with open(
-            os.path.join(workdir, f"{PROBE_MODULE}.v"), "w", encoding="utf-8"
-        ) as handle:
-            handle.write(_PROBE_VERILOG)
-        return _run_bounded(
-            _probe_in_process,
-            runner_module=runner_module,
-            module_dirs=module_dirs,
-            env=env,
-            timescale=timescale,
-            workdir=workdir,
-        )
+    "library": ...}`` or :func:`_inconclusive`. Never raises: a scratch
+    directory, copy or write that fails (a full disk, say) costs the probe,
+    not the user's run."""
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="klt-python-runtime-probe-", ignore_cleanup_errors=True
+        ) as workdir:
+            shutil.copyfile(
+                os.path.join(_PROBE_SOURCE_DIR, _PROBE_TEST_SOURCE),
+                os.path.join(workdir, f"{PROBE_MODULE}.py"),
+            )
+            with open(
+                os.path.join(workdir, f"{PROBE_MODULE}.v"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write(_PROBE_VERILOG)
+            return _run_bounded(
+                _probe_in_process,
+                runner_module=runner_module,
+                module_dirs=module_dirs,
+                env=env,
+                timescale=timescale,
+                test_dir=test_dir,
+                workdir=workdir,
+            )
+    except OSError as exc:
+        return _inconclusive(f"could not stage the probe ({exc})")
 
 
 def _mismatch_message(
@@ -344,15 +392,17 @@ def _check_icarus_python_runtime(
     module_dirs: list[str],
     env: dict[str, str],
     timescale: tuple[str, str],
+    test_dir: str,
 ) -> None:
     """Before the user's build: refuse the run when the CPython the Icarus
     ``vvp`` process loads is measurably not klt's own; silent on a match and
     on anything the probe could not establish.
 
-    ``engine``/``module_dirs``/``env``/``timescale`` are the request's own,
-    so the probe sees the launcher, import path, ``request.env`` and
-    timescale the real run will get. No-op for every engine but Icarus
-    (Verilator is out of scope); a Verilog bench never reaches this function.
+    ``engine``/``module_dirs``/``env``/``timescale``/``test_dir`` are the
+    request's own, so the probe sees the launcher (``vvp`` is started in the
+    same working directory), import path, ``request.env`` and timescale the
+    real run will get. No-op for every engine but Icarus (Verilator is out of
+    scope); a Verilog bench never reaches this function.
     """
     if engine != "icarus":
         return
@@ -361,6 +411,7 @@ def _check_icarus_python_runtime(
         module_dirs=module_dirs,
         env=env,
         timescale=timescale,
+        test_dir=test_dir,
     )
     raw_version = outcome.get("py_get_version")
     if outcome.get("status") != "measured" or not isinstance(raw_version, str):

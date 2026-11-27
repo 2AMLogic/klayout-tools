@@ -1,8 +1,12 @@
 """Process and timeout handling for the Icarus Python runtime probe."""
 
+import errno
+import multiprocessing
 import os
+import signal
 import subprocess
 import time
+import types
 
 import pytest
 
@@ -63,3 +67,91 @@ def test_run_bounded_kills_a_hung_child_and_its_simulator(tmp_path, monkeypatch)
             time.sleep(0.1)
         else:
             pytest.fail(f"process {pid} outlived the probe")
+
+
+def test_run_bounded_reports_a_pipe_it_cannot_open_as_inconclusive(monkeypatch):
+    def _no_pipe(duplex):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(
+        multiprocessing,
+        "get_context",
+        lambda method: types.SimpleNamespace(Pipe=_no_pipe),
+    )
+
+    outcome = rt._run_bounded(lambda: {"never": "reached"})
+
+    assert outcome["status"] == "inconclusive"
+    assert "result pipe" in outcome["reason"]
+    assert "Too many open files" in outcome["reason"]
+
+
+def test_a_child_that_cannot_isolate_its_group_measures_nothing(tmp_path, monkeypatch):
+    """Still in klt's own process group, the child must not go on to start a
+    simulator that a later cleanup could only reach by signalling that group."""
+    ran = tmp_path / "ran"
+    signalled = []
+
+    def _refused():
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "setpgrp", _refused)  # inherited by the forked child
+    monkeypatch.setattr(os, "killpg", lambda *args: signalled.append(args))
+
+    def _start_the_simulator():
+        ran.write_text("started")
+        return {}
+
+    outcome = rt._run_bounded(_start_the_simulator)
+
+    assert outcome["status"] == "inconclusive"
+    assert "its own process group" in outcome["reason"]
+    assert not ran.exists()
+    assert signalled == []
+
+
+def _record_signals(monkeypatch, group_of):
+    """Replace the three ways ``_kill_probe_child`` can signal, so nothing is
+    ever sent, and return what it tried to."""
+    sent = []
+    monkeypatch.setattr(os, "getpgid", group_of)
+    monkeypatch.setattr(os, "killpg", lambda g, sig: sent.append(("group", g, sig)))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append(("pid", pid, sig)))
+    return sent
+
+
+def test_kill_probe_child_signals_the_group_the_child_leads(monkeypatch):
+    sent = _record_signals(monkeypatch, lambda pid: pid)
+
+    rt._kill_probe_child(4242)
+
+    assert sent == [("group", 4242, signal.SIGKILL)]
+
+
+def test_kill_probe_child_never_signals_a_group_it_does_not_lead(monkeypatch):
+    """A child that stayed in klt's group is signalled alone, never the group
+    ``getpgid`` reports for it -- klt's, and its caller's."""
+    klt_group = os.getpgrp()
+    sent = _record_signals(monkeypatch, lambda pid: klt_group)
+
+    rt._kill_probe_child(4242)
+
+    assert sent == [("pid", 4242, signal.SIGKILL)]
+
+
+def test_kill_probe_child_survives_a_child_that_is_already_gone(monkeypatch):
+    def _gone(pid):
+        raise ProcessLookupError(pid)
+
+    sent = _record_signals(monkeypatch, _gone)
+    rt._kill_probe_child(None)
+    assert sent == []
+
+    rt._kill_probe_child(4242)
+    assert sent == [("pid", 4242, signal.SIGKILL)]
+
+    def _already_exited(pid, sig):
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(os, "kill", _already_exited)
+    rt._kill_probe_child(4242)  # no exception

@@ -494,12 +494,11 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
 
 
 #: Transcript markers of the Python cocotb *loaded* inside the simulator
-#: disagreeing with what its compiled VPI module was built for (issue #1103's
-#: live finding: a ``cp312`` wheel in a CPython 3.14 simulator subprocess).
-#: The second is only the embed function's name in older cocotb log lines, so
-#: neither is proof on its own. The pre-flights (the ``WHEEL``-tag check, the
-#: Icarus runtime probe) run first; these are the fallback for what they leave
-#: unanswered, scanned once ``results.xml`` is confirmed missing.
+#: disagreeing with its compiled VPI module (issue #1103: a ``cp312`` wheel in
+#: a CPython 3.14 simulator subprocess). The second is only the embed
+#: function's name in older cocotb log lines, so neither is proof alone. The
+#: pre-flights (wheel-tag check, Icarus runtime probe) run first; these cover
+#: what they leave open, scanned once ``results.xml`` is confirmed missing.
 INTERPRETER_MISMATCH_MARKERS = (
     "Unexpected sys.executable value",
     "_embed_init_python",
@@ -894,10 +893,9 @@ def _parse_run_results(
     try:
         return parse_results_xml(spec_xml)
     except FunctionalVerificationError as exc:
-        # Fallback for what the pre-flights (the wheel-tag check, the Icarus
-        # runtime probe) leave unanswered. Only fires when `results.xml` is
-        # confirmed missing, so a genuinely unparseable or unreadable results
-        # file keeps its own unaugmented message.
+        # Fallback for what the pre-flights (wheel-tag check, Icarus runtime
+        # probe) leave open; only when `results.xml` is confirmed missing, so
+        # a genuinely unparseable results file keeps its own message.
         diagnostic = None
         if not os.path.isfile(spec_xml):
             diagnostic = _scan_interpreter_mismatch_diagnostics(
@@ -2417,7 +2415,9 @@ def run_functional_verification(
 
     runner_module = _import_runner()
     _check_cocotb_abi_compatibility()
-    _check_icarus_python_runtime(runner_module, engine, module_dirs, env, timescale)
+    _check_icarus_python_runtime(
+        runner_module, engine, module_dirs, env, timescale, output_dir
+    )
     engine_runner = _run_build(
         runner_module,
         engine=engine,

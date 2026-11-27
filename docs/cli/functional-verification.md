@@ -244,9 +244,13 @@ the reviewer-side check.
 - **A Python runtime probe runs before your build** (issue #8015). With
   `engine: "icarus"` and a cocotb testbench, klt first compiles an empty
   module and runs one throwaway cocotb test through the same `vvp` launcher,
-  cocotb loading path and `request.env` your own run will use (~0.5 s on an
-  idle host, bounded at 60 s). Inside that `vvp` it calls `Py_GetVersion()`
-  and records the loaded object supplying it. When that release differs from
+  cocotb loading path and `request.env` your own run will use, started from
+  the same working directory (so a relative `PATH` entry such as a `tools/vvp`
+  wrapper selects the same launcher in both) -- ~0.5 s on an idle host,
+  bounded at 60 s. Inside that `vvp` it calls `Py_GetVersion()` and records
+  the loaded object supplying it, as a path only when that names an existing
+  file the kernel confirms is mapped there (otherwise the error says the path
+  could not be resolved). When that release differs from
   klt's own interpreter — patch and pre-release included, so `3.13.0rc1` is
   not `3.13.18` — nothing of yours is built, and the error names all three
   facts: `klt is running on CPython 3.13.18, but the Icarus vvp process
@@ -258,8 +262,8 @@ the reviewer-side check.
   `cocotb_tools.config --libpython` names, which is only what cocotb asks
   the loader for. When the probe cannot establish the runtime — `vvp` fails
   to start Python at all, which is what a libpython from another minor
-  release usually does, or the probe cannot run on this platform — klt says
-  nothing and the ordinary run proceeds with its usual diagnostics: a
+  release usually does, or the probe cannot run on this platform or stage its
+  scratch files (a full disk, say) — klt says nothing and the ordinary run proceeds with its usual diagnostics: a
   missing `results.xml` whose transcript carries an embed marker is reported
   as a lead, not as proof that the wheel is wrong.
 
