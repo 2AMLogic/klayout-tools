@@ -1,4 +1,4 @@
-"""SKY130 layer references in deck metadata and DRC coverage reports."""
+"""SKY130 rule metadata, layer references, and DRC coverage reports."""
 
 import klayout.db as kdb
 
@@ -13,6 +13,20 @@ _CUT_SELECTOR_PAIRS = {
     "sky130_ordinary_licon": [(86, 20), (79, 20), (94, 20), (66, 20), (66, 13)],
     "sky130_ordinary_mcon": [(81, 2)],
 }
+
+
+def test_contact_sizes_cite_the_pinned_mpw_precheck_runset():
+    rules = {entry["id"]: entry for entry in history.deck_rules("sky130")["rules"]}
+    for rule_id, native_id in (
+        ("licon1.width.1", "licon.1"),
+        ("mcon.width.1", "ct.1_a/ct.1_b"),
+    ):
+        assert rules[rule_id]["provenance"] == {
+            "source_repo": "fossi-foundation/mpw_precheck",
+            "source_path": "checks/tech-files/sky130A_mr.drc",
+            "rule_id": native_id,
+            "commit": "86b7362dacd931bf1fd957c84501bfbe7955fa7c",
+        }
 
 
 def test_deck_rules_layer_refs_match_the_deck_pair_for_every_rule():

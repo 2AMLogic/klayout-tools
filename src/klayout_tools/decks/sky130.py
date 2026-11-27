@@ -389,20 +389,13 @@ from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
 
 DRC_RULE_SOURCES = ("sky130_cuts", "sky130_offgrid", "sky130_unmodeled")
 
-# `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
-# rule's provenance below (issue #747, piloted on this deck's 11 width/space
-# rules only -- see the module docstring's own citation of this repo/commit
-# for the resistor/capacitor coefficients above, the same `ciel enable
-# --pdk sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` fetch this deck's DRC
-# rule values were themselves verified against, per the "met2/via rule
-# coverage" note above).
+# The open-pdks revision used to install the SKY130 PDK and verify these rules.
 _OPEN_PDKS_REPO = "fossi-foundation/open-pdks"
 _OPEN_PDKS_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
-    """:class:`RuleProvenance` for a sky130 rule (issue #747); repo/commit are
-    deck-wide (module constants above), `source_path`/`rule_id` per call."""
+    """Identify a rule in the pinned open-pdks source tree."""
     return RuleProvenance(
         source_repo=_OPEN_PDKS_REPO,
         source_path=source_path,
@@ -411,10 +404,18 @@ def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
     )
 
 
+def _mpw_precheck_provenance(rule_id: str) -> RuleProvenance:
+    """Identify a rule in the MR runset copied by the open-pdks SKY130 Makefile."""
+    return RuleProvenance(
+        source_repo="fossi-foundation/mpw_precheck",
+        source_path="checks/tech-files/sky130A_mr.drc",
+        rule_id=rule_id,
+        commit="86b7362dacd931bf1fd957c84501bfbe7955fa7c",
+    )
+
+
 # `RuleProvenance` for `EXTRACTION_DECK`'s device-recognition entries (issue
-# #868, Epic #711 Phase 2a). Unlike the DRC rules above (transcribed from
-# `sky130.lydrc`/`sky130A_mr.drc`, both vendored into `fossi-foundation/
-# open-pdks` itself), device-recognition/extraction rules are transcribed
+# #868, Epic #711 Phase 2a). Device-recognition/extraction rules are transcribed
 # from the companion **KLayout LVS deck**, `sky130.lvs` -- a different
 # upstream repo, `efabless/sky130_klayout_pdk`, per this module's own
 # docstring provenance note above (the MiM-capacitor/resistor section).
@@ -807,7 +808,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc: licon.not((rpm | urpm) & psdm & poly.interacting(poly_rs)).
         layer_selection=ORDINARY_LICON,
         scope="licon",
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "licon.1"),
+        provenance=_mpw_precheck_provenance("licon.1"),
     ),
     DrcRule(
         id="diff.enclosing.licon.1",
@@ -927,7 +928,7 @@ DECK: list[DrcRule] = [
         # Non-ring mcon outside areaid:ce includes edge- and corner-touching cuts.
         layer_selection=ORDINARY_MCON,
         scope="ct",
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "ct.1_a/ct.1_b"),
+        provenance=_mpw_precheck_provenance("ct.1_a/ct.1_b"),
     ),
     DrcRule(
         id="mcon.space.1",
