@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from itertools import count
+
 import pytest
 
 from klayout_tools import sim, sim_peak_rss
@@ -73,3 +76,42 @@ def test_unit_report_carries_peak_rss_when_high_water_mark_rose(tmp_path, monkey
     )
     report = sim.run_sim(str(request))
     assert report["corners"][0]["peak_rss_bytes"] == 9000
+
+
+@pytest.mark.parametrize(
+    "backend,hosts,worker_cap,temperatures,expect_rss",
+    [
+        pytest.param("local-parallel", 1, 2, [10, 20], False, id="two-workers"),
+        pytest.param("local", 2, 1, [10, 20], False, id="two-local-shards"),
+        pytest.param("local-parallel", 1, 1, [10, 20], True, id="capped-worker"),
+        pytest.param("local-parallel", 1, 2, [10], True, id="single-corner"),
+    ],
+)
+def test_local_peak_rss_depends_on_possible_overlap(
+    tmp_path, monkeypatch, backend, hosts, worker_cap, temperatures, expect_rss
+):
+    _write_body(tmp_path)
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+    monkeypatch.setenv("KLT_SIM_MAX_WORKERS", str(worker_cap))
+    # Every read raises the shared high-water mark, regardless of thread order.
+    monkeypatch.setattr(sim_peak_rss, "children_max_rss_bytes", count(1000).__next__)
+    # Keep the completed checkpoint so we can inspect what was persisted.
+    monkeypatch.setattr(sim._Checkpoint, "clear", lambda self: None)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"temperature_c": temperatures},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"max_workers": 2, "resume": True},
+        },
+    )
+    report = sim.run_sim(str(request), backend=backend, hosts=hosts)
+    checkpoint = json.loads((tmp_path / ".klt/sim/checkpoint.json").read_text())
+    assert len(report["corners"]) == len(temperatures)
+    for corner in report["corners"]:
+        persisted = checkpoint["completed"][corner["corner_id"]]
+        assert corner["status"] == "pass"
+        assert persisted["runtime_s"] == corner["runtime_s"] >= 0
+        for record in (persisted, corner):
+            assert ("peak_rss_bytes" in record) == expect_rss
