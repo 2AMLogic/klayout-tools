@@ -1,40 +1,13 @@
-"""File-selection helpers for ``netlist_batch`` (split out for the size ratchet)."""
+"""``--symbol-path`` validation for ``netlist_batch``, split out for the size
+ratchet; the include / exclude glob filter it once held is
+:mod:`klayout_tools._batch_tree`'s."""
 
 from __future__ import annotations
 
-import fnmatch
 import os
 from collections.abc import Sequence
 
 from .netlist import NetlistError
-
-_GLOB_CHARS = frozenset("*?[")
-
-
-def _matches_glob(rel: str, pattern: str) -> bool:
-    """``rel`` (a root-relative POSIX path) against one ``--batch-include`` /
-    ``--batch-exclude`` pattern. ``fnmatch`` semantics, so ``*`` also crosses
-    ``/``; a pattern with no glob character names a file or a directory and
-    matches that file or everything under that directory."""
-    while pattern.startswith("./"):
-        pattern = pattern[2:]
-    if not any(char in _GLOB_CHARS for char in pattern):
-        bare = pattern.rstrip("/")
-        return rel == bare or rel.startswith(bare + "/")
-    return fnmatch.fnmatchcase(rel, pattern)
-
-
-def _select_files(
-    files: list[str], include: Sequence[str], exclude: Sequence[str]
-) -> list[str]:
-    """``files`` kept by ``include`` (every file when empty) and not dropped
-    by ``exclude``."""
-    return [
-        rel
-        for rel in files
-        if (not include or any(_matches_glob(rel, pat) for pat in include))
-        and not any(_matches_glob(rel, pat) for pat in exclude)
-    ]
 
 
 def _relative_symbol_dirs(

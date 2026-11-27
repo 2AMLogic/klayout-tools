@@ -198,6 +198,25 @@ def test_only_tracked_files_are_uploaded(repo, fake, tmp_path):
     assert "layout/scratch.gds" not in members
 
 
+def test_layout_outside_git_is_refused_naming_the_layout(repo, fake, tmp_path, capsys):
+    """The shared input-tree stage names the file *this* verb ships, never
+    ``klt netlist``'s schematic (issue #8023)."""
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "top.gds").write_bytes(b"GDS")
+    argv = _argv(repo, tmp_path / "o.spice")
+    argv[1] = str(loose / "top.gds")
+    assert main(argv) == 1
+    error = _error(capsys)
+    assert (
+        f"around the layout, but {loose / 'top.gds'} is not in a git checkout"
+        in (error["message"])
+    )
+    assert "schematic" not in error["message"]
+    assert "code" not in error
+    assert fake.calls == []
+
+
 def test_request_document_is_forwarded_with_root_relative_inputs(repo, fake, tmp_path):
     doc = repo / "layout" / "run.json"
     doc.write_text(
