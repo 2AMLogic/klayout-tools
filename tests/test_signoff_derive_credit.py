@@ -75,7 +75,7 @@ def _derive_envelope(min_limit: float = 0.20, **flags: bool) -> dict:
         if not (exclude and supply == 1.0 and code == 128)
     ]
     measurements = sim._rollup_measurements(specs, corners)
-    coverage = sim._build_coverage(specs, corners)
+    coverage = sim._build_coverage(measurements, corners)
     failed = sum(c["status"] == "fail" for c in corners)
     return {
         **SIM_PASS_ENVELOPE,
