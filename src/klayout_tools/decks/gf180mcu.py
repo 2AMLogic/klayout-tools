@@ -672,6 +672,34 @@ def _tap_distance_spec(
     )
 
 
+def _routing_metal_rules() -> list[DrcRule]:
+    # DRM 7.13 Metaln gives the same minimum for width (Mn.1) and spacing (Mn.2a).
+    scope = "7.13 Metaln"
+    metals = (
+        ("metal1", 34, 230),
+        ("metal2", 36, 280),
+        ("metal3", 42, 280),
+        ("metal4", 46, 280),
+        ("metal5", 81, 280),
+    )
+    return [
+        DrcRule(
+            id=f"{metal}.{check}.1",
+            description=f"minimum {metal} {measurement}",
+            layer=(gds_layer, 0),
+            check=check,
+            threshold_dbu=threshold_dbu,
+            scope=scope,
+            provenance=_gf180mcu_provenance(scope, rule_id),
+        )
+        for metal, gds_layer, threshold_dbu in metals
+        for check, measurement, rule_id in (
+            ("width", "width", "Mn.1"),
+            ("space", "spacing", "Mn.2a"),
+        )
+    ]
+
+
 # D1 and D3 from the module's known approximations, disclosed per checked rule.
 _TAP_DISTANCE_APPROXIMATIONS = (
     {
@@ -1187,106 +1215,7 @@ DECK: list[DrcRule] = [
         # (Metal5 as the conductor above Via4).
         provenance=_gf180mcu_klayout_deck_provenance("via", "V4.4a"),
     ),
-    DrcRule(
-        id="metal1.width.1",
-        description="minimum metal1 width",
-        layer=(34, 0),  # Metal1
-        check="width",
-        threshold_dbu=230,  # 0.23 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.23 (n = 1)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal1.space.1",
-        description="minimum metal1 spacing",
-        layer=(34, 0),  # Metal1
-        check="space",
-        threshold_dbu=230,  # 0.23 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.23 (n = 1)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
-    DrcRule(
-        id="metal2.width.1",
-        description="minimum metal2 width",
-        layer=(36, 0),  # Metal2
-        check="width",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal2.space.1",
-        description="minimum metal2 spacing",
-        layer=(36, 0),  # Metal2
-        check="space",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
-    DrcRule(
-        id="metal3.width.1",
-        description="minimum metal3 width",
-        layer=(42, 0),  # Metal3
-        check="width",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal3.space.1",
-        description="minimum metal3 spacing",
-        layer=(42, 0),  # Metal3
-        check="space",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
-    DrcRule(
-        id="metal4.width.1",
-        description="minimum metal4 width",
-        layer=(46, 0),  # Metal4
-        check="width",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal4.space.1",
-        description="minimum metal4 spacing",
-        layer=(46, 0),  # Metal4
-        check="space",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
-    DrcRule(
-        id="metal5.width.1",
-        description="minimum metal5 width",
-        layer=(81, 0),  # Metal5
-        check="width",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal5.space.1",
-        description="minimum metal5 spacing",
-        layer=(81, 0),  # Metal5
-        check="space",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
+    *_routing_metal_rules(),
     DrcRule(
         id="metaltop.width.1",
         description="minimum metaltop width (standard 6K angstrom thickness)",
