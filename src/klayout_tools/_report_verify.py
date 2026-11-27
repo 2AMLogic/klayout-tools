@@ -86,6 +86,10 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         # Issue #5863: how the PDK was resolved (search roots vs $PDK_ROOT
         # vs --pdk-root) -- resolution provenance, not evidence.
         ("provenance", "pdk", "source"),
+        # Issue #8007: what placed the PDK tree and where this host keeps it
+        # -- how the install was come by, like ``source``.
+        ("provenance", "pdk", "install"),
+        ("provenance", "pdk", "store_layout"),
     }
 )
 

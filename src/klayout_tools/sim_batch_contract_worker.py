@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._digest import normalize_sha256
 from ._jsonnum import is_int
+from .pdk_store import worker_store_evidence_source
 from .sim_batch_contract import (
     _BATCH_PREFLIGHT_REJECT_EXIT,
     _DECKS_BASE_RELEASE,
@@ -150,6 +151,8 @@ def runner_threads_per_worker(report: dict[str, Any] | None) -> int | None:
 #: :mod:`json`. Stdlib only, every probe individually guarded and bounded, and
 #: it always exits 0 -- a failed capture is a ``diagnostics`` entry, never a
 #: job failure. Only allowlisted environment variables are read.
+#: ``@STORE_EVIDENCE@`` expands to the store-evidence probes
+#: (:func:`klayout_tools.pdk_store.worker_store_evidence_source`).
 _WORKER_CAPTURE_PROGRAM = r"""
 import hashlib, json, os, shutil, sys
 import subprocess as sp
@@ -212,14 +215,20 @@ def store_version(vdir):
         return None
     v = d.get("version") if isinstance(d, dict) else None
     return v.strip() if isinstance(v, str) and v.strip() else None
+@STORE_EVIDENCE@
 def pdk():
     root = os.environ.get("PDK_ROOT")
     p = {"variant": clip(variant) or None, "root": clip(root), "stamp_scheme": None,
-         "stamp_sha256": None, "stamp_text": None, "models_staged": staged == "1"}
+         "stamp_sha256": None, "stamp_text": None, "models_staged": staged == "1",
+         "install": None, "store_layout": None}
     if not (root and variant):
         if staged != "1":
             diag.append("pdk root or variant unknown on worker")
         return p
+    vdir = os.path.join(root, variant)
+    # Issue #8007: what placed the tree and where it sits, whatever SOURCES says below.
+    p["install"] = guard("pdk install", lambda: store_install(vdir))
+    p["store_layout"] = guard("pdk store layout", lambda: store_layout(vdir, root))
     # root/<variant> only, deliberately: this standalone payload cannot import klayout_tools, so a flat install (#522) degrades to the "pdk stamp unreadable" diagnostic below, never a wrong stamp (#6445).
     stamp = os.path.join(root, variant, "SOURCES")
     try:
@@ -282,6 +291,7 @@ _WORKER_CAPTURE_PROGRAM = (
     .replace("@STR@", str(WORKER_CAPTURE_STR_MAX))
     .replace("@TIMEOUT@", str(WORKER_CAPTURE_PROBE_TIMEOUT_S))
     .replace("@MODELS@", str(WORKER_CAPTURE_MODEL_INPUTS_MAX))
+    .replace("@STORE_EVIDENCE@", worker_store_evidence_source())
 )
 
 
