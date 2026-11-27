@@ -288,10 +288,6 @@
       "lines": 1938
     },
     {
-      "path": "src/klayout_tools/extract_batch.py",
-      "lines": 525
-    },
-    {
       "path": "src/klayout_tools/extract_finfet.py",
       "lines": 1066
     },
@@ -437,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 753
+      "lines": 652
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",
@@ -509,7 +505,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4108
+      "lines": 4089
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -553,7 +549,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
-      "lines": 649
+      "lines": 630
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",

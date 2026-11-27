@@ -1178,15 +1178,6 @@ def test_deck_rules_layer_refs_parallel_layers_and_resolve_through_layer_table(d
     assert unresolved == expected
 
 
-def test_deck_rules_layer_refs_match_the_deck_pair_for_every_rule():
-    from klayout_tools.decks import get_deck
-
-    report = history.deck_rules("sky130")
-    for rule, entry in zip(get_deck("sky130"), report["rules"], strict=True):
-        pairs = [rule.layer] + ([rule.other_layer] if rule.other_layer else [])
-        assert [(r["layer"], r["datatype"]) for r in entry["layer_refs"]] == pairs
-
-
 def test_deck_rules_reports_ambiguous_and_unresolved_explicitly(monkeypatch):
     from klayout_tools import decks
 

@@ -76,13 +76,11 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import hashlib
 import json
 import math
 import os
 import re
 import signal
-import statistics
 import subprocess
 import tempfile
 import threading
@@ -126,6 +124,7 @@ from . import (
     sim_noise_spectrum,
     sim_op_args,
     sim_passes,
+    sim_plot,
     sim_portable,
     sim_probit_sigma,
     sim_search,
@@ -182,6 +181,7 @@ from ._paths import (
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from ._provenance import sha256_file as sha256_file
+from ._spice_number import parse_plain as _parse_plain_number
 from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
@@ -231,6 +231,7 @@ from .sim_batch_features import (
     worker_ngspice_binary,
 )
 from .sim_batch_hints import attach_runner_hints as _attach_runner_hints
+from .sim_batch_knobs import _resolve_max_launch_attempts
 from .sim_batch_plan import dry_run_job_ceiling
 from .sim_batch_resume import _is_unrun_batch_corner, _record_batch_checkpoint
 from .sim_checkpoint import (  # noqa: F401 -- keep runner checkpoint imports working
@@ -320,7 +321,45 @@ from .sim_environment_report import (
 )
 from .sim_expr_hint import unsupported_function_hint
 from .sim_expr_log import expr_control_lines
+
+#: Moved to ``sim_mismatch_activity`` (issue #8020) so this module stays
+#: under its per-file size ratchet; re-exported here -- self-aliased where
+#: nothing below calls them -- so ``klayout_tools.sim.<name>`` keeps working.
+from .sim_mismatch_activity import _MISMATCH_ACTIVITY as _MISMATCH_ACTIVITY
+from .sim_mismatch_activity import _classify_device_family as _classify_device_family
+from .sim_mismatch_activity import (
+    _detect_device_families,
+    _mismatch_family_report,
+    _mismatch_scan_closure,
+)
 from .sim_model_paths import resolve_lib_ref as _resolve_lib_ref
+
+#: Moved to ``sim_monte_carlo`` / ``sim_monte_carlo_rollup`` (issue #8020)
+#: so this module stays under its per-file size ratchet; re-exported here --
+#: self-aliased where nothing below calls them -- so
+#: ``klayout_tools.sim.<name>`` keeps working.
+from .sim_monte_carlo import DEFAULT_MC_QUANTILES as DEFAULT_MC_QUANTILES
+from .sim_monte_carlo import SUPPORTED_MC_SEED_MODES as SUPPORTED_MC_SEED_MODES
+from .sim_monte_carlo import SUPPORTED_MC_SEED_SCOPES as SUPPORTED_MC_SEED_SCOPES
+from .sim_monte_carlo import SUPPORTED_MC_VARY as SUPPORTED_MC_VARY
+from .sim_monte_carlo import _derive_mc_seed as _derive_mc_seed
+from .sim_monte_carlo import (
+    _expand_monte_carlo,
+    _resolve_mismatch_scale,
+    _validate_mc_statistics_spec,
+)
+from .sim_monte_carlo import _validate_monte_carlo_spec as _validate_monte_carlo_spec
+from .sim_monte_carlo_rollup import MC_WINDOW_SCOPES as MC_WINDOW_SCOPES
+from .sim_monte_carlo_rollup import _base_corner_id as _base_corner_id
+from .sim_monte_carlo_rollup import _evaluate_sigma_window as _evaluate_sigma_window
+from .sim_monte_carlo_rollup import (
+    _mc_window_scope_echo,
+    _monte_carlo_rollup,
+    _validate_mc_window_scope,
+)
+from .sim_monte_carlo_rollup import _percentile as _percentile
+from .sim_monte_carlo_rollup import _quantile_key as _quantile_key
+from .sim_monte_carlo_rollup import _sample_statistics as _sample_statistics
 from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
@@ -424,7 +463,8 @@ from .sim_measurement_results import (
 from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
-from .sim_plot import render_waveform_svg
+from .sim_plot import _measurement_diagnostic_hints as _measurement_diagnostic_hints
+from .sim_plot import render_waveform_svg as render_waveform_svg
 from .sim_population_limits import validate_k_sigma as _validate_k_sigma
 
 #: Moved to `sim_raw.py` (issue #6752) so measurement modules read a waveform
@@ -757,409 +797,6 @@ def _yield_host_default_backend(
         return "local"
     return backend
 
-
-#: Recognised values for ``request.monte_carlo.vary`` -- which axis (or
-#: axes) of statistical variation the sample sequence is declared to
-#: exercise. See :func:`_expand_monte_carlo` and this module's "Monte Carlo
-#: sampling" section below for the seed-derivation contract this drives, and
-#: docs/cli/sim.md's "Monte Carlo" section for the request/response shape.
-SUPPORTED_MC_VARY = ("mismatch", "process", "both")
-
-#: Recognised values for ``request.monte_carlo.seed_scope`` -- what, besides
-#: ``seed`` and ``sample_index``, enters each sample's seed derivation (issue
-#: #2899). ``per_corner`` (the default) keys on the point's position in this
-#: request's expanded corner list and is bit-identical to the pre-#2899
-#: behaviour; ``shared`` drops the corner entirely (sample *k* is the same
-#: die at every corner); ``point`` keys on the point's own identity, so any
-#: partition or reordering of a grid yields the same samples.
-SUPPORTED_MC_SEED_SCOPES = ("per_corner", "shared", "point")
-
-#: Recognised values for ``request.monte_carlo.seed_mode`` -- how each
-#: sample's ``rndseed`` (the integer written as ``.options seed=``) is
-#: produced (issue #4173). ``derived`` (the default) is the SHA-256
-#: construction; ``sequential`` pins it to ``seed + sample_index`` so a
-#: campaign with a documented ``base + draw_index`` rule can be re-expressed
-#: draw-for-draw. ``process_seed``/``mismatch_seed`` stay derived either way.
-SUPPORTED_MC_SEED_MODES = ("derived", "sequential")
-
-#: Per-``(pdk_family, device_family)`` mismatch-activity table consulted by
-#: :func:`_mismatch_family_report` (issue #355). A vendor model deck's global
-#: mismatch switch/section does not necessarily enable *every* device
-#: family's per-instance variation -- gf180mcu's poly-resistor subcircuits
-#: carry the `(1 + mis_r * <switch>)` hook, but `mis_r`'s default is a
-#: hardcoded ``0`` and the accompanying Pelgrom-style sigma formula
-#: (``var_r = ... / sqrt(par*r_l*r_w)``, ``mis_r = agauss(0, var_r, 1)``)
-#: ships **commented out** in the vendored deck, while MOS and BJT ship that
-#: formula active under the same switch. A run that turns mismatch on gets
-#: MOS/BJT variation and silently gets none for the resistor family, with
-#: nothing in the request, deck, log, or (pre-#355) response distinguishing
-#: that from "this family contributes negligibly". This table is the tool's
-#: side of that gap: curated, documented per-family knowledge, cited to the
-#: same vendored decks ``docs/cli/sim.md``'s "Known-good mismatch
-#: mechanisms" section already documents. A ``(pdk_family, device_family)``
-#: pair absent here -- including an unrecognised ``pdk_family`` -- is
-#: reported with ``active: None`` ("not independently verified"), never
-#: assumed active.
-_MISMATCH_ACTIVITY: dict[tuple[str, str], dict[str, Any]] = {
-    ("gf180mcu", "mosfet"): {
-        "active": True,
-        "note": (
-            "MOS per-instance mismatch (the fets_mm include) is gated by "
-            "the model-level sw_stat_mismatch switch and scales the "
-            "per-device delvto/mulu0 terms -- active whenever that switch "
-            "is set (see docs/cli/sim.md's 'Known-good mismatch "
-            "mechanisms')."
-        ),
-    },
-    ("gf180mcu", "bipolar"): {
-        "active": True,
-        "note": (
-            "BJT per-instance mismatch (the bjt_mc include) is gated by "
-            "the same sw_stat_mismatch switch as MOS -- active whenever "
-            "that switch is set (see docs/cli/sim.md's 'Known-good "
-            "mismatch mechanisms')."
-        ),
-    },
-    ("gf180mcu", "resistor"): {
-        "active": False,
-        "note": (
-            "The poly-resistor subcircuits' per-instance mismatch hook "
-            "(mis_r, scaling body resistance via `(1 + mis_r * <switch>)`) "
-            "defaults to a hardcoded 0, and the accompanying Pelgrom-style "
-            "sigma formula ships commented out in the vendored deck -- "
-            "resistor mismatch is structurally disabled regardless of "
-            "sw_stat_mismatch. A run with mismatch enabled samples no "
-            "resistor variation. See issue #355."
-        ),
-    },
-    ("gf180mcu", "capacitor"): {
-        "active": False,
-        "note": (
-            "The MIM-capacitor subcircuits (cap_mim_*) reference only the "
-            "global sw_stat_global terms (one draw per run shared by every "
-            "instance); sw_stat_mismatch is not referenced inside them, so "
-            "no per-instance capacitor mismatch is sampled. See issue #2898."
-        ),
-    },
-    ("sky130", "mosfet"): {
-        "active": True,
-        "note": (
-            "MOS per-instance mismatch is active in any _mm-suffixed "
-            "process-corner section (e.g. tt_mm) -- select that section "
-            "via corners.process to sample it (see docs/cli/sim.md's "
-            "'Known-good mismatch mechanisms')."
-        ),
-    },
-    ("sky130", "bipolar"): {
-        "active": True,
-        "note": (
-            "BJT per-instance mismatch is active in any _mm-suffixed "
-            "process-corner section, validated by sky130-bandgap's "
-            "pnp-mismatch simulation harness (see docs/cli/sim.md's "
-            "'Known-good mismatch mechanisms')."
-        ),
-    },
-    ("sky130", "resistor"): {
-        "active": True,
-        "note": (
-            "Poly-resistor subcircuits (e.g. sky130_fd_pr__res_high_po_*) "
-            "draw a per-instance AGAUSS term (res_match, rend) scaled by "
-            "MC_MM_SWITCH, which any _mm-suffixed process-corner section "
-            "(e.g. tt_mm) sets to 1 -- identical instances sample "
-            "independent values (see docs/cli/sim.md's 'Known-good "
-            "mismatch mechanisms'). Corner-level var_mult is a separate, "
-            "shared term. See issue #3032."
-        ),
-    },
-    # Section-dependent: the static entry is only the "section unknown"
-    # fallback; `_sg13g2_mosfet_activity` refines it per selected section.
-    ("sg13g2", "mosfet"): {
-        "active": None,
-        "note": (
-            "MOS per-instance mismatch (sg13_lv_*/sg13_hv_* subcircuits) is "
-            "active only in a *_mismatch process-corner section (e.g. "
-            "mos_tt_mismatch); the selected section could not be determined "
-            "(set corners.process). See issue #2961."
-        ),
-    },
-}
-
-#: SPICE element-type letter (first character of the instance name) ->
-#: canonical device family, for a circuit body written with plain primitive
-#: elements rather than PDK subcircuit calls. Used by
-#: :func:`_classify_device_family`.
-_ELEMENT_TYPE_FAMILY: dict[str, str] = {
-    "R": "resistor",
-    "C": "capacitor",
-    "D": "diode",
-    "Q": "bipolar",
-    "M": "mosfet",
-}
-
-#: Case-insensitive substrings recognised in an ``X`` (subcircuit call)
-#: line's own text -- covers a circuit body written against PDK subcircuit
-#: calls (e.g. ``XM1 ... nfet_03v3 ...``), where the device family is
-#: carried in the subcircuit name rather than the element-type letter.
-#: First match wins (order matters only for a name that would otherwise
-#: match more than one entry, which the PDK naming conventions this table
-#: was built against do not produce).
-_SUBCKT_FAMILY_KEYWORDS: tuple[tuple[str, str], ...] = (
-    ("nfet", "mosfet"),
-    ("pfet", "mosfet"),
-    ("mosfet", "mosfet"),
-    ("npn", "bipolar"),
-    ("pnp", "bipolar"),
-    ("bjt", "bipolar"),
-    ("moscap", "capacitor"),
-    ("mimcap", "capacitor"),
-    ("cap_", "capacitor"),
-    ("capacitor", "capacitor"),
-    # sg13g2 MOS calls (``sg13_lv_nmos``/``sg13_hv_pmos``, issue #2961); after
-    # the capacitor keywords so a ``..._nmoscap`` name still wins as capacitor.
-    ("nmos", "mosfet"),
-    ("pmos", "mosfet"),
-    ("res_", "resistor"),
-    ("resistor", "resistor"),
-    ("diode", "diode"),
-)
-
-
-#: gf180mcu's own resistor subcircuit names (``ppolyf_u_1k``,
-#: ``npolyf_s_1k``, ``nplus_u_*``, ``pplus_s_*``, ``rm1``..``rm3``/``tm*``
-#: metal resistors) carry no ``res_`` keyword (issue #2898), so they are
-#: matched against the X line's subcircuit-name token (the last token
-#: before any ``name=value`` parameters) rather than the whole line.
-_SUBCKT_NAME_FAMILY_RE: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?:ppolyf|npolyf|nplus|pplus)_[a-z0-9_]+"), "resistor"),
-    (re.compile(r"(?:rm|tm)\d+[a-z0-9_]*"), "resistor"),
-)
-
-
-def _subckt_name_token(line: str) -> str | None:
-    """Subcircuit name of an ``X`` call line: the last token before the
-    first ``name=value`` parameter (or the last token), lower-cased."""
-    tokens = line.split()[1:]
-    plain: list[str] = []
-    for tok in tokens:
-        if "=" in tok:
-            break
-        plain.append(tok)
-    return plain[-1].lower() if len(plain) > 1 else None
-
-
-def _classify_device_family(element_type: str, line: str) -> str | None:
-    """Canonical device family for one netlist element line, or ``None``
-    when ``element_type`` never names a PDK device (sources, controlled
-    sources, transmission lines, ...). ``element_type`` is the instance
-    name's first character, upper-cased; ``line`` is the full stripped
-    element line (only consulted for ``X`` subcircuit calls, whose family
-    lives in the referenced subcircuit name -- see
-    :data:`_SUBCKT_FAMILY_KEYWORDS`). An ``X`` call matching no known
-    keyword is classified ``"other"`` rather than dropped -- an
-    unrecognised subcircuit may still be a mismatch-relevant device this
-    table simply has no PDK-specific knowledge of yet."""
-    if element_type in _ELEMENT_TYPE_FAMILY:
-        return _ELEMENT_TYPE_FAMILY[element_type]
-    if element_type == "X":
-        name = _subckt_name_token(line)
-        if name is not None:
-            for pattern, family in _SUBCKT_NAME_FAMILY_RE:
-                if pattern.fullmatch(name):
-                    return family
-        lowered = line.lower()
-        for keyword, family in _SUBCKT_FAMILY_KEYWORDS:
-            if keyword in lowered:
-                return family
-        return "other"
-    return None
-
-
-def _detect_device_families(netlist_text: str) -> list[str]:
-    """Distinct device families ``netlist_text`` instantiates, in
-    first-seen order. Comment (``*``/``;``), continuation (``+``), and
-    dot-command (``.subckt``/``.control``/...) lines never name a device
-    and are skipped, along with blank lines."""
-    families: list[str] = []
-    seen: set[str] = set()
-    for raw_line in netlist_text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith(("*", ";", "+", ".")):
-            continue
-        element_type = line[0].upper()
-        family = _classify_device_family(element_type, line)
-        if family is not None and family not in seen:
-            seen.add(family)
-            families.append(family)
-    return families
-
-
-def _mismatch_scan_closure(
-    request: dict[str, Any] | None, netlist_path: str, repo_root: str | None
-) -> tuple[list[tuple[str, str]], list[dict[str, str]]]:
-    """Files ``family_mismatch`` scans (issue #2928): the top-level netlist
-    plus its resolved ``.include``/``.inc`` closure (same resolver as
-    ``environment.netlist_closure``). Returns ``([(report_path, abs_path)],
-    not_scanned)``; ``not_scanned`` lists directives left to the executing
-    host (``env_var``/``pdk_root``) or the whole closure when it cannot be
-    resolved -- the top-level file is still scanned in that case."""
-    from . import env_provenance
-
-    top = (
-        env_provenance.repo_relative_path(netlist_path, repo_root=repo_root),
-        netlist_path,
-    )
-    try:
-        staged = sim_staging.stage_netlist(
-            netlist_path,
-            netlist_staged_name="netlist.cir",
-            roots=sim_staging.host_resolved_roots(request or {}),
-        )
-    except sim_staging.IncludeStagingError as exc:
-        return (
-            [(_scan_label(top[0], netlist_path), netlist_path)],
-            [{"target": "<include closure>", "reason": f"unresolved: {exc}"}],
-        )
-    files: list[tuple[str, str]] = []
-    for item in staged.files:
-        source = item.source_path or item.local_path
-        # stage_netlist always sets one of the two (source_path whenever
-        # content rewrote the file, local_path otherwise).
-        assert source is not None
-        info = env_provenance.repo_relative_path(source, repo_root=repo_root)
-        files.append((_scan_label(info, source), source))
-    not_scanned = [
-        {"target": target, "reason": reason}
-        for target, reason in staged.host_resolved_detail
-    ]
-    return files, not_scanned
-
-
-def _scan_label(info: dict[str, Any], source: str = "") -> str:
-    """Report label for a scanned file: repo-relative path, else
-    ``<scope>/<basename>`` (never an absolute external path, like other
-    report fields)."""
-    return (
-        info.get("path")
-        or f"<{info.get('scope', 'external')}>/{os.path.basename(source)}"
-    )
-
-
-def _sg13g2_mosfet_activity(sections: list[str] | None) -> dict[str, Any] | None:
-    """Section-dependent ``("sg13g2", "mosfet")`` activity (issue #2961), or
-    ``None`` to keep the static table entry. IHP's ``cornerMOSlv/hv.lib``
-    include the per-instance ``agauss()`` mismatch subcircuits only in
-    ``mos_<corner>_mismatch`` sections; plain ``mos_<corner>`` and
-    ``mos_tt_stat`` sections carry none."""
-    if not sections:
-        return None
-    flags = {name.lower().endswith("_mismatch") for name in sections}
-    if flags == {True}:
-        return {
-            "active": True,
-            "note": (
-                "MOS per-instance mismatch is active: every selected "
-                "process section is a *_mismatch section "
-                f"({', '.join(sorted(set(sections)))}), which includes the "
-                "agauss() mismatch subcircuits (see docs/cli/sim.md's "
-                "'Known-good mismatch mechanisms')."
-            ),
-        }
-    if flags == {False}:
-        return {
-            "active": False,
-            "note": (
-                "No selected process section "
-                f"({', '.join(sorted(set(sections)))}) is a *_mismatch "
-                "section; plain mos_<corner> and mos_tt_stat sections carry "
-                "no per-instance mismatch, so no MOS mismatch is sampled -- "
-                "select e.g. mos_tt_mismatch via corners.process."
-            ),
-        }
-    return None
-
-
-def _mismatch_family_report(
-    netlist_path: str,
-    pdk_variant: str | None,
-    *,
-    request: dict[str, Any] | None = None,
-    process_sections: list[str] | None = None,
-    repo_root: str | None = None,
-    scan: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    """Per-device-family mismatch-activity report for a ``monte_carlo.vary``
-    request that includes ``"mismatch"`` (issue #355).
-
-    For every distinct device family :func:`_detect_device_families` finds
-    in the netlist, states whether that family's per-instance mismatch is
-    structurally active in the selected PDK's model deck, per
-    :data:`_MISMATCH_ACTIVITY` -- so a hard-zero-mismatch family (e.g.
-    gf180mcu's poly resistor) is never left indistinguishable from a family
-    that actually got sampled just because the request's global mismatch
-    switch/section was engaged. A family with no curated table entry --
-    including when ``pdk_variant`` is absent/unrecognised -- gets
-    ``active: None`` ("not independently verified"), never a guessed
-    ``True``/``False``.
-    """
-    # Issue #2928: scan the whole `.include` closure, not just the top-level
-    # file, so a wrapper testbench reports the families its included flat
-    # netlist actually instantiates. When ``scan`` is passed it is filled
-    # with ``{"scanned": [...], "not_scanned": [...]}`` for the caller.
-    files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
-    families: list[str] = []
-    seen_families: set[str] = set()
-    for _label, path in files:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                text = handle.read()
-        except (OSError, UnicodeDecodeError):
-            not_scanned.append({"target": _label, "reason": "unreadable"})
-            continue
-        for family in _detect_device_families(text):
-            if family not in seen_families:
-                seen_families.add(family)
-                families.append(family)
-    if scan is not None:
-        scan["scanned"] = [label for label, _ in files]
-        scan["not_scanned"] = not_scanned
-
-    pdk_family = pdk_variant_family(pdk_variant) if pdk_variant else None
-
-    report: list[dict[str, Any]] = []
-    for family in families:
-        entry = _MISMATCH_ACTIVITY.get((pdk_family, family)) if pdk_family else None
-        if (pdk_family, family) == ("sg13g2", "mosfet"):
-            entry = _sg13g2_mosfet_activity(process_sections) or entry
-        if entry is not None:
-            report.append(
-                {"family": family, "active": entry["active"], "note": entry["note"]}
-            )
-        else:
-            if pdk_family is None:
-                note = (
-                    f"PDK family could not be determined for this request "
-                    f"(set models.pdk) -- mismatch activity for the "
-                    f"'{family}' family could not be verified; treat any "
-                    f"sampled spread for it as unconfirmed."
-                )
-            else:
-                note = (
-                    f"mismatch activity for the '{family}' family is not "
-                    f"independently verified for PDK family '{pdk_family}'; "
-                    f"treat any sampled spread for it as unconfirmed."
-                )
-            report.append({"family": family, "active": None, "note": note})
-    return report
-
-
-#: Quantiles (percentiles, ``0``-``100``) reported per measurement for a
-#: Monte Carlo sample set when ``request.monte_carlo.quantiles`` is omitted:
-#: the median plus the symmetric 5%/95% tails, which is what both canary
-#: repos' hand-rolled rollups report today. Percentiles rather than
-#: ``0``-``1`` fractions so the response keys read as ``p5``/``p50``/``p95``
-#: -- see :func:`_sample_statistics` and docs/cli/sim.md's "Monte Carlo
-#: statistics" section.
-DEFAULT_MC_QUANTILES = (5.0, 50.0, 95.0)
 
 #: Assumed ngspice worker-thread count used to derive the ``local-parallel``
 #: backend's conservative default ``max_workers`` -- see :func:`_default_max_workers`.
@@ -3706,6 +3343,7 @@ def _run_sim_corners(
         if resume
         else corner_points
     )
+    fleet_hosts = sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points)
     sim_subckt_override.refuse_on_host_default(
         netlist_overrides_report,
         backend_is_offhost=backend in _OFFHOST_BACKENDS,
@@ -3915,16 +3553,16 @@ def _run_sim_corners(
     )
     if dry_run:
         published_runner: dict[str, Any] = {}
-        feature_diagnostic, job_ceiling = (
-            dry_run_job_ceiling(
+        feature_diagnostic: dict[str, Any] | None = None
+        job_ceiling: dict[str, Any] | None = None
+        if backend == "batch":
+            feature_diagnostic, job_ceiling = dry_run_job_ceiling(
                 request,
                 corner_count=len(dispatch_points),
                 timeout_s=timeout_s,
                 runner_out=published_runner,
+                hosts=fleet_hosts,
             )
-            if backend == "batch"
-            else (None, None)
-        )
         return _build_dry_run_report(
             request,
             feature_diagnostic=feature_diagnostic,
@@ -3969,8 +3607,7 @@ def _run_sim_corners(
         attach_job_id,
     )
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
-        # Issue #5775: an all-covered resume dispatches nothing -- never the
-        # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
+        # An all-covered resume dispatches nothing (#5775).
         corners_new, backend_engine_version, remote_environment = [], None, None
     elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         corners_new, backend_engine_version, remote_environment = _BACKENDS[backend](
@@ -4031,7 +3668,7 @@ def _run_sim_corners(
             want_waveforms=want_waveforms,
             artifacts_dir=artifacts_dir,
             request=request,
-            hosts=sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points),
+            hosts=fleet_hosts,
             measurements_spec=per_corner_specs,
             request_dir=request_dir,
             **shard_kwargs,
@@ -4043,6 +3680,7 @@ def _run_sim_corners(
         ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
             return _BACKENDS[backend](
                 corner_points=shard_points,
+                concurrent_shards=len(dispatch_points) > 1,
                 netlist_path=dispatch_netlist_path,
                 models_lib=models_lib,
                 analysis=analysis,
@@ -4183,13 +3821,16 @@ def _run_sim_corners(
     # is needed.
     plots_by_corner: dict[str, list[dict[str, str]]] = {}
     if plot_dir is not None:
+        signals_by_name, hints_by_signal = sim_plot.prepare_annotations(
+            measurements_spec
+        )
         os.makedirs(plot_dir, exist_ok=True)
         for corner in corners:
-            corner_plots = _write_corner_plots(
+            corner_plots = sim_plot.write_corner_plots(
                 corner=corner,
                 plot_dir=plot_dir,
                 analysis_kind=analysis.get("kind"),
-                measurements_spec=per_corner_specs,
+                hints_by_signal=hints_by_signal,
             )
             if corner_plots:
                 corner["artifacts"]["plots"] = corner_plots
@@ -4206,10 +3847,9 @@ def _run_sim_corners(
         # acceptance criterion. `None` when no worst-case corner exists (an
         # empty corner matrix) or that measurement's `.meas` card names no
         # recognisable signal/has no matching rendered plot.
-        specs_by_name = {spec["name"]: spec for spec in measurements_spec}
         for entry in measurements_rollup:
-            entry["plot"] = _measurement_plot_path(
-                entry, specs_by_name.get(entry["name"]), plots_by_corner
+            entry["plot"] = sim_plot.measurement_plot_path(
+                entry, signals_by_name.get(entry["name"]), plots_by_corner
             )
 
     grid_stats = sim_probit_sigma.rollup(monte_carlo_stats, corner_points, corners)
@@ -4688,16 +4328,13 @@ def _build_dry_run_report(
     assessment, emitted additively under the ``environment.remote.job_ceiling``
     name and shape; ``None`` leaves the field out.
     """
+    max_launch_attempts = None
     if backend == "batch":
-        # Issue #3917: a real batch submit refuses an unresolvable model
-        # library before any S3 write; the dry-run must say the same.
+        # Validate the model paths (#3917, #5449) and resolve the per-job limit
+        # even on hosts where the provision script or bucket is unavailable.
         _validate_batch_models_lib(request)
-        # Issue #5449: and the same for a `models.pdk_root` that is a
-        # directory on *this* host (issue #4097's refusal). The real submit
-        # makes this check during config resolution. Validate directly here
-        # so a dry run refuses a host-local path just like a submit does
-        # whether or not this host can resolve a bucket or provision script.
         _validate_batch_pdk_root(request)
+        max_launch_attempts = _resolve_max_launch_attempts(request.get("batch") or {})
     units: list[dict[str, Any]] = []
     for point in corner_points:
         unit: dict[str, Any] = {"corner_id": point.corner_id}
@@ -4725,6 +4362,8 @@ def _build_dry_run_report(
         "staged_files": staged_model_environment.get("staged_model_inputs", []),
         "warnings": warnings,
     }
+    if max_launch_attempts is not None:
+        report["batch"] = {"max_launch_attempts": max_launch_attempts}
     if job_ceiling is not None:
         report["job_ceiling"] = job_ceiling
     if published_runner is not None:
@@ -4996,15 +4635,18 @@ def _nodeset_failures(point: CornerPoint, log_text: str) -> list[dict[str, Any]]
 # Monte Carlo sampling
 # --------------------------------------------------------------------------- #
 #
-# Two halves of #344's decomposition live in this module. *Sampling* (phase
-# 1, #348) is here: request schema, seed handling, fan-out mechanics --
+# Two halves of #344's decomposition, each in its own leaf module since
+# issue #8020 and re-exported by this one. *Sampling* (phase 1, #348) is
+# ``sim_monte_carlo``: request schema, seed handling, fan-out mechanics --
 # N reproducibly-seeded samples per corner point. *Statistics* (phase 2,
-# #349) reduce those samples to a verdict and live with the rest of the
-# aggregation code, next to `_rollup_measurements`: see
-# :func:`_sample_statistics` (mean/sigma/quantiles) and
+# #349) reduce those samples to a verdict in ``sim_monte_carlo_rollup``:
+# see :func:`_sample_statistics` (mean/sigma/quantiles) and
 # :func:`_evaluate_sigma_window` (the optional `mean +/- k*sigma` inside
 # `measurements[].limits` check), both reached from
-# :func:`_monte_carlo_rollup`.
+# :func:`_monte_carlo_rollup`. What stays here is the runner glue around
+# them: instance gating, netlist subckt overrides, spec-row and
+# plausibility-range validation, and the injected / per-family mismatch
+# report.
 #
 # ``request.monte_carlo`` is additive and orthogonal to `corners.*`: the PVT
 # axes still select *which* process/supply/temperature points are simulated
@@ -5144,96 +4786,6 @@ def _maybe_override_subckts(
     return new_path, {"subckt": entries}
 
 
-def _validate_monte_carlo_spec(mc_spec: dict[str, Any]) -> tuple[int, int, str]:
-    """Validate ``request.monte_carlo`` and return its ``(n, seed, vary)``
-    fields. Raises :class:`SimError` with an actionable message for a
-    missing/malformed field -- mirroring the request-level validation style
-    used elsewhere in :func:`run_sim` (e.g. ``request.analysis``,
-    ``request.measurements[]``)."""
-    if not isinstance(mc_spec, dict):
-        raise SimError("request.monte_carlo must be an object")
-
-    n = mc_spec.get("n")
-    if not is_int(n) or n < 1:
-        raise SimError("request.monte_carlo.n must be a positive integer")
-
-    seed = mc_spec.get("seed")
-    if not is_int(seed):
-        raise SimError("request.monte_carlo.seed must be an integer")
-
-    vary = mc_spec.get("vary")
-    if vary not in SUPPORTED_MC_VARY:
-        raise SimError(
-            "request.monte_carlo.vary must be one of "
-            f"{', '.join(SUPPORTED_MC_VARY)} (got {vary!r})"
-        )
-
-    _validate_mc_seed_scope(mc_spec)
-    seed_mode = _validate_mc_seed_mode(mc_spec)
-    if seed_mode == "sequential" and (seed < 0 or seed + n - 1 >= _MC_SEED_MODULUS):
-        raise SimError(
-            "request.monte_carlo.seed_mode 'sequential' needs "
-            f"0 <= seed and seed + n - 1 < {_MC_SEED_MODULUS} "
-            f"(got seed={seed}, n={n}); lower the seed or n, or use "
-            "seed_mode 'derived'"
-        )
-
-    return n, seed, vary
-
-
-def _validate_mc_seed_mode(mc_spec: dict[str, Any]) -> str:
-    """Validate the optional ``request.monte_carlo.seed_mode`` (issue #4173)
-    and return it, defaulting to ``"derived"`` when absent."""
-    mode = mc_spec.get("seed_mode", DEFAULT_MC_SEED_MODE)
-    if mode not in SUPPORTED_MC_SEED_MODES:
-        raise SimError(
-            "request.monte_carlo.seed_mode must be one of "
-            f"{', '.join(SUPPORTED_MC_SEED_MODES)} (got {mode!r})"
-        )
-    return mode
-
-
-def _validate_mc_seed_scope(mc_spec: dict[str, Any]) -> str:
-    """Validate the optional ``request.monte_carlo.seed_scope`` (issue #2899)
-    and return it, defaulting to ``"per_corner"`` when absent."""
-    scope = mc_spec.get("seed_scope", DEFAULT_MC_SEED_SCOPE)
-    if scope not in SUPPORTED_MC_SEED_SCOPES:
-        raise SimError(
-            "request.monte_carlo.seed_scope must be one of "
-            f"{', '.join(SUPPORTED_MC_SEED_SCOPES)} (got {scope!r})"
-        )
-    return scope
-
-
-def _mc_point_identity(point: CornerPoint) -> str:
-    """A stable string naming ``point`` independent of its position in the
-    request (``seed_scope: "point"``): process name, process sections,
-    supply rails and temperature."""
-    return json.dumps(
-        {
-            "process": point.process,
-            "process_sections": point.process_sections,
-            "supply_v": point.supply_v,
-            "temperature_c": point.temperature_c,
-        },
-        sort_keys=True,
-        default=str,
-    )
-
-
-def _resolve_mismatch_scale(
-    mc_spec: dict[str, Any], pdk: Any, **kwargs: Any
-) -> sim_mismatch_scale.MismatchScale | None:
-    """``request.monte_carlo.mismatch_scale`` (issues #3942, #5486), resolved
-    to the deck ``.param`` cards that apply it -- see
-    :func:`klayout_tools.sim_mismatch_scale.resolve` for the two PDK shapes
-    (a verified multiplicative switch, or sigma ``.param``s scanned out of
-    the selected mismatch sections' libraries)."""
-    return sim_mismatch_scale.resolve(
-        mc_spec, pdk, resolve_lib_ref=_resolve_lib_ref, **kwargs
-    )
-
-
 def _validate_spec_row(value: Any, field: str) -> str | None:
     """Validate ``request.measurements[].spec_row`` (issue #3778): the id of
     the spec row this measurement grades, a non-empty string (``None`` when
@@ -5338,89 +4890,6 @@ def _resolve_plausible_ranges(
     for spec in measurements_spec:
         if spec.get("plausible_range") is None and spec.get("unit") == "V":
             spec["plausible_range"] = node_voltage_bounds
-
-
-def _validate_mc_statistics_spec(
-    mc_spec: dict[str, Any],
-) -> tuple[tuple[float, ...], float | None]:
-    """Validate the *statistics* half of ``request.monte_carlo`` and return
-    its ``(quantiles, k_sigma)``.
-
-    Kept separate from :func:`_validate_monte_carlo_spec` (which validates
-    the *sampling* half -- ``n``/``seed``/``vary``) because the two are
-    consumed at different points: sampling drives corner fan-out before any
-    run, statistics drive the rollup after every run. Both are still
-    validated up front by :func:`run_sim`, so a malformed field is the same
-    "the sweep never started" class of error as a bad ``vary``.
-
-    ``quantiles`` are percentiles in ``[0, 100]``, defaulting to
-    :data:`DEFAULT_MC_QUANTILES`; duplicates are dropped, declaration order
-    is preserved. ``k_sigma`` is ``None`` when the request declares no
-    run-wide sigma multiple (individual measurements may still declare their
-    own).
-    """
-    raw_quantiles = mc_spec.get("quantiles")
-    if raw_quantiles is None:
-        quantiles: tuple[float, ...] = DEFAULT_MC_QUANTILES
-    else:
-        if not isinstance(raw_quantiles, (list, tuple)) or not raw_quantiles:
-            raise SimError(
-                "request.monte_carlo.quantiles must be a non-empty array of "
-                "percentiles in [0, 100]"
-            )
-        ordered: list[float] = []
-        for entry in raw_quantiles:
-            if not is_number(entry):
-                raise SimError(
-                    "request.monte_carlo.quantiles entries must be numbers in "
-                    f"[0, 100] (got {entry!r})"
-                )
-            if not 0 <= entry <= 100:
-                raise SimError(
-                    "request.monte_carlo.quantiles entries must be numbers in "
-                    f"[0, 100] (got {entry!r})"
-                )
-            value = float(entry)
-            if value not in ordered:
-                ordered.append(value)
-        quantiles = tuple(ordered)
-
-    raw_k = mc_spec.get("k_sigma")
-    k_sigma = (
-        None
-        if raw_k is None
-        else _validate_k_sigma(raw_k, "request.monte_carlo.k_sigma")
-    )
-    return quantiles, k_sigma
-
-
-#: Modulus applied to every derived Monte Carlo seed component -- the
-#: largest signed 32-bit prime (``2**31 - 1``), safely inside the range
-#: ngspice's own ``.options seed=<int>`` accepts. Not itself
-#: security-sensitive (this is reproducible sampling, not cryptography); it
-#: only needs to be a fixed, documented constant so the same inputs always
-#: derive the same seed.
-_MC_SEED_MODULUS = 2_147_483_647
-
-
-def _derive_mc_seed(base_seed: int, *parts: object) -> int:
-    """Deterministically derive a reproducible integer seed from
-    ``base_seed`` and ``parts``.
-
-    SHA-256-based, deliberately never Python's built-in ``hash()`` -- string
-    hashing is salted per-process by default (``PYTHONHASHSEED``), which
-    would silently break the "same seed -> same sampled sequence" contract
-    the moment two runs happened to land in different interpreters. Two
-    calls with identical arguments always return the same value, in any
-    process, on any machine, forever -- this is the seed-reproducibility
-    guarantee :func:`_expand_monte_carlo` and ``docs/cli/sim.md``'s "Monte
-    Carlo" section build on. ``parts`` disambiguates *what* is being
-    derived (axis name, corner index, sample index, ...) so unrelated
-    derivations from the same ``base_seed`` never collide by construction.
-    """
-    payload = ":".join(str(part) for part in (base_seed, *parts)).encode("utf-8")
-    digest = hashlib.sha256(payload).digest()
-    return int.from_bytes(digest[:4], "big") % _MC_SEED_MODULUS
 
 
 def _with_family_mismatch(
@@ -5537,153 +5006,6 @@ def _injected_family_report(
     return list(groups.values())
 
 
-def _mc_sample_seed(
-    mc_spec: dict[str, Any],
-    seeding: tuple[int, str, str],
-    varies: tuple[bool, bool],
-    scope_key: object,
-    sample_index: int,
-    mismatch_scale: sim_mismatch_scale.MismatchScale | None,
-) -> dict[str, Any]:
-    """The ``mc_seed`` record of one Monte Carlo sample (see
-    :func:`_expand_monte_carlo`'s seed contract)."""
-    seed, seed_scope, seed_mode = seeding
-    vary_process, vary_mismatch = varies
-    process_seed = _derive_mc_seed(
-        seed, "process", scope_key, sample_index if vary_process else "fixed"
-    )
-    mismatch_seed = _derive_mc_seed(
-        seed, "mismatch", scope_key, sample_index if vary_mismatch else "fixed"
-    )
-    if seed_mode == "sequential":
-        # Issue #4173: the caller pins the integer ngspice receives.
-        rndseed = seed + sample_index
-    else:
-        rndseed = _derive_mc_seed(seed, "rndseed", process_seed, mismatch_seed)
-    mc_seed: dict[str, Any] = {
-        "process_seed": process_seed,
-        "mismatch_seed": mismatch_seed,
-        "rndseed": rndseed,
-    }
-    if "seed_scope" in mc_spec:
-        # Echoed only when the request declared it, like
-        # `quantiles`/`k_sigma`, so a request that omits the field
-        # keeps its pre-#2899 response shape.
-        mc_seed["seed_scope"] = seed_scope
-    if "seed_mode" in mc_spec:
-        # Echoed only when declared (issue #4173), like seed_scope.
-        mc_seed["seed_mode"] = seed_mode
-    if mismatch_scale is not None:
-        # Rides the point (and so the fleet wire and the deck
-        # writer); echoed only when declared (issue #3942/#5486).
-        mc_seed.update(mismatch_scale.seed_fields())
-    return mc_seed
-
-
-def _expand_monte_carlo(
-    corner_points: list[CornerPoint],
-    mc_spec: dict[str, Any],
-    injected: tuple[list[dict[str, Any]], float] | None = None,
-    mismatch_scale: sim_mismatch_scale.MismatchScale | None = None,
-) -> tuple[list[CornerPoint], dict[str, Any]]:
-    """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
-    points, returning ``(sampled_points, monte_carlo_info)``.
-
-    All backends consume this same list of sample points. Order is deterministic
-    (outer: original corner order from :func:`_expand_corners`; inner:
-    ``sample_index`` ``0..n-1``), matching the odometer-style determinism
-    :func:`_expand_corners` already guarantees for the PVT axes.
-
-    **Seed contract.** Each sample derives two independent seed components
-    from ``mc_spec["seed"]`` via :func:`_derive_mc_seed` -- ``process_seed``
-    and ``mismatch_seed`` -- and a combined ``rndseed`` fed to ngspice (see
-    ``_write_corner_deck``'s ``.options seed=`` card). A component only
-    varies across ``sample_index`` when ``mc_spec["vary"]`` actually asks
-    for that axis (``"process"``/``"mismatch"``/``"both"``); otherwise every
-    sample of that corner derives the same value for it. This is the
-    **deterministic negative control**: request ``vary: "process"`` and
-    every sample's reported ``mismatch_seed`` -- and anything downstream
-    that consumes ``mc_mismatch_seed`` directly -- is identical across the
-    N samples (sigma=0), proving the sampler isn't silently injecting
-    variation nobody asked for. The control does **not** extend to a deck
-    that draws mismatch from ngspice's own RNG (``agauss``/``gauss`` in
-    ``.param`` expressions): ngspice receives only the combined
-    ``.options seed=<rndseed>``, derived from both components, so it still
-    changes per sample under ``vary: "process"``. For such decks, request
-    ``monte_carlo.mismatch_scale: 0`` (issues #3942/#5486) to switch the
-    deck's own mismatch off and get a sigma=0 control.
-
-    Requesting the *same* ``mc_spec["seed"]`` again (same process, different
-    process, doesn't matter) reproduces the exact same sequence of derived
-    seeds -- see :func:`_derive_mc_seed`.
-
-    ``injected`` (issue #2911) is ``(resolved, scale)`` from
-    :func:`_resolve_injected`: each sample then also records its design-owned
-    mismatch draws, a pure function of that sample's ``mismatch_seed`` (see
-    :mod:`klayout_tools.sim_injected`).
-    """
-    n, seed, vary = _validate_monte_carlo_spec(mc_spec)
-    seed_scope = _validate_mc_seed_scope(mc_spec)
-    seed_mode = _validate_mc_seed_mode(mc_spec)
-    vary_process = vary in ("process", "both")
-    vary_mismatch = vary in ("mismatch", "both")
-
-    sampled: list[CornerPoint] = []
-    for corner_index, base in enumerate(corner_points):
-        # What keys the derivation besides seed/axis/sample (issue #2899).
-        # `per_corner` passes the bare positional index so every derived
-        # integer stays bit-identical to the pre-#2899 contract.
-        if seed_scope == "shared":
-            scope_key: object = "shared"
-        elif seed_scope == "point":
-            scope_key = f"point:{_mc_point_identity(base)}"
-        else:
-            scope_key = corner_index
-        for sample_index in range(n):
-            mc_seed = _mc_sample_seed(
-                mc_spec,
-                (seed, seed_scope, seed_mode),
-                (vary_process, vary_mismatch),
-                scope_key,
-                sample_index,
-                mismatch_scale,
-            )
-            mismatch_seed = mc_seed["mismatch_seed"]
-            sampled.append(
-                CornerPoint(
-                    base.process,
-                    base.supply_v,
-                    base.temperature_c,
-                    process_sections=base.process_sections,
-                    process_section_libs=base.process_section_libs,
-                    params=base.params,
-                    variant=base.variant,
-                    nodeset=base.nodeset,
-                    initial_conditions=base.initial_conditions,
-                    analysis_args=base.analysis_args,
-                    options=base.options,
-                    sample_index=sample_index,
-                    mc_seed=mc_seed,
-                    supply_waveforms=base.supply_waveforms,
-                    mc_injected=(
-                        sim_injected.draw(injected[0], mismatch_seed, injected[1])
-                        if injected
-                        else None
-                    ),
-                )
-            )
-    info: dict[str, Any] = {"n": n, "seed": seed, "vary": vary}
-    if injected:
-        info["injected_scale"] = injected[1]
-    if "seed_scope" in mc_spec:
-        info["seed_scope"] = seed_scope
-    if "seed_mode" in mc_spec:
-        info["seed_mode"] = seed_mode
-    if mismatch_scale is not None:
-        info.update(mismatch_scale.seed_fields())
-    return sampled, info
-
-
 # --------------------------------------------------------------------------- #
 # Execution backends
 # --------------------------------------------------------------------------- #
@@ -5724,6 +5046,7 @@ def _run_local(
     threads_per_worker: int | None = None,
     pdk_root: str | None = None,
     parallel: bool = False,
+    concurrent_shards: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend -- and, since issue #6896, the one shared local
     entry point both local backends bind their corner runner at.
@@ -5738,17 +5061,35 @@ def _run_local(
 
     This is the unit a backend implements: given the expanded corner list
     plus the resolved netlist/model paths and run options, return
-    ``(per_corner_reports, engine_version, remote_environment)``. Each
-    scheduler reproduces the original in-line loop byte-for-byte (same
-    ordering, same ``engine_version`` last-writer-wins tracking);
-    ``request`` and (unless ``parallel=True``) ``max_workers`` are
-    parity-only (see :data:`_BACKENDS`) and ignored.
+    ``(per_corner_reports, engine_version, remote_environment)``. A calibration
+    probe can cancel the sweep before scheduling. In that case each pending
+    corner receives the probe diagnostic in input order. Otherwise the scheduler
+    tracks the engine version from the last corner that reports one.
     """
     del request  # unused by either local scheduling strategy, see docstring
+    workers = _resolve_max_workers(max_workers) if parallel else 1
+    measure_peak_rss = not concurrent_shards and min(workers, len(corner_points)) <= 1
+
+    if probe_abort is not None:
+        if parallel:
+            _resolve_max_workers(max_workers)  # Keep the host's clamp notice.
+        corners = [
+            _unrun_corner_report(
+                point,
+                measurements_spec,
+                probe_abort["code"],
+                message=probe_abort["message"],
+                reached_s=probe_abort.get("reached_s"),
+                fraction=probe_abort.get("fraction"),
+            )
+            for point in corner_points
+        ]
+        return corners, None, None
 
     def run_corner(point: CornerPoint) -> tuple[dict[str, Any], str | None]:
         return _run_corner_with_retry(
             point=point,
+            measure_peak_rss=measure_peak_rss,
             netlist_path=netlist_path,
             models_lib=models_lib,
             analysis=analysis,
@@ -5783,11 +5124,10 @@ def _run_local(
         run_corner,
         corner_points=corner_points,
         measurements_spec=measurements_spec,
-        max_workers=max_workers,
+        max_workers=workers,
         deadline=deadline,
         initial_ppid=initial_ppid,
         checkpoint=checkpoint,
-        probe_abort=probe_abort,
     )
     return corners, engine_version, None
 
@@ -5801,7 +5141,6 @@ def _run_local_corners_sequentially(
     deadline: float | None,
     initial_ppid: int | None,
     checkpoint: _Checkpoint | None,
-    probe_abort: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """The ``local`` scheduling strategy: call ``run_corner`` (the runner
     :func:`_run_local` bound once for the whole sweep, issue #6896) with
@@ -5813,30 +5152,11 @@ def _run_local_corners_sequentially(
     of being run -- a corner already in flight is never interrupted (there
     is only ever one, for this sequential backend). ``checkpoint``, when
     given, records each corner as it completes for a later ``--resume``.
-
-    ``probe_abort`` (issue #1694, the two-pass probe model's fail-fast half
-    -- see ``_run_fail_fast_probe`` and docs/design/sim-corner-reached-s.md)
-    is the ``{"code", "message", "reached_s", "fraction"}`` decision ``run_sim``
-    already made *before* calling the backend at all: when given, **every**
-    corner in ``corner_points`` is reported unrun via
-    :func:`_unrun_corner_report` with that code/message/estimate, and no
-    ``ngspice`` process is ever spawned for this sweep -- the whole point of
-    running the calibration probe first is to make this decision before any
-    real corner (not just the ones after some in-flight budget/orphan check)
-    burns its own ``options.timeout_s``.
     """
     del max_workers  # unused: sequential local run, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
     stop_reason: str | None = None
-    abort_message: str | None = None
-    abort_reached_s: float | None = None
-    abort_fraction: float | None = None
-    if probe_abort is not None:
-        stop_reason = probe_abort["code"]
-        abort_message = probe_abort["message"]
-        abort_reached_s = probe_abort.get("reached_s")
-        abort_fraction = probe_abort.get("fraction")
     for point in corner_points:
         if stop_reason is None:
             if deadline is not None and time.monotonic() >= deadline:
@@ -5844,16 +5164,7 @@ def _run_local_corners_sequentially(
             elif initial_ppid is not None and os.getppid() != initial_ppid:
                 stop_reason = "orphaned"
         if stop_reason is not None:
-            corners.append(
-                _unrun_corner_report(
-                    point,
-                    measurements_spec,
-                    stop_reason,
-                    message=abort_message,
-                    reached_s=abort_reached_s,
-                    fraction=abort_fraction,
-                )
-            )
+            corners.append(_unrun_corner_report(point, measurements_spec, stop_reason))
             continue
         result, version = run_corner(point)
         corners.append(result)
@@ -5980,11 +5291,10 @@ def _run_local_corners_pooled(
     *,
     corner_points: list[CornerPoint],
     measurements_spec: list[dict[str, Any]],
-    max_workers: int | None,
+    max_workers: int,
     deadline: float | None,
     initial_ppid: int | None,
     checkpoint: _Checkpoint | None,
-    probe_abort: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """The ``local-parallel`` scheduling strategy: fan the expanded corner
     list across a bounded local worker pool, submitting ``run_corner`` (the
@@ -6009,15 +5319,8 @@ def _run_local_corners_pooled(
     as ``run_corner`` reports it (:func:`_run_corner` never raises) and
     does not abort any sibling corner -- each future is independent.
 
-    **Pool size and the host cap.** ``max_workers`` (the request's
-    ``options.max_workers``, or ``--max-workers``) sizes the pool; when it is
-    ``None`` the conservative CPU-derived default from
-    :func:`_default_max_workers` is used instead. Either way the host-level
-    ``$KLT_SIM_MAX_WORKERS`` cap, when set, is an upper bound on the result
-    (issue #2286) -- a request for more workers than the cap is **clamped,
-    not refused**, with a one-line stderr notice per sweep. See
-    :func:`_resolve_max_workers` and docs/cli/sim.md's "Useful on a
-    workstation, harmful on a shared worker" section.
+    ``max_workers`` is the pool size resolved by :func:`_resolve_max_workers`
+    from the request or CPU-derived default and the ``KLT_SIM_MAX_WORKERS`` cap.
 
     ``deadline``/``initial_ppid`` (issue #473): unlike the naive "submit
     everything up front" the pre-#473 implementation used (which lets the
@@ -6032,26 +5335,10 @@ def _run_local_corners_pooled(
     given, records each corner the instant its future resolves -- not
     batched at the end -- so a crash mid-sweep loses at most the corners
     still in flight at that moment.
-
-    ``probe_abort`` (issue #1694): identical contract to
-    :func:`_run_local_corners_sequentially`'s own -- when given,
-    ``stop_reason`` starts pre-set to its code, so ``_fill`` never
-    submits a single corner to the pool and every corner comes back
-    through :func:`_unrun_corner_report` with that code/message/estimate.
     """
-    resolved_workers = _resolve_max_workers(max_workers)
-
     total = len(corner_points)
     results: list[tuple[dict[str, Any], str | None] | None] = [None] * total
     stop_reason: str | None = None
-    abort_message: str | None = None
-    abort_reached_s: float | None = None
-    abort_fraction: float | None = None
-    if probe_abort is not None:
-        stop_reason = probe_abort["code"]
-        abort_message = probe_abort["message"]
-        abort_reached_s = probe_abort.get("reached_s")
-        abort_fraction = probe_abort.get("fraction")
     next_index = 0
 
     def _stopped() -> str | None:
@@ -6063,14 +5350,14 @@ def _run_local_corners_pooled(
                 stop_reason = "orphaned"
         return stop_reason
 
-    with ThreadPoolExecutor(max_workers=resolved_workers) as pool:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         in_flight: dict[Any, int] = {}
 
         def _fill() -> None:
             nonlocal next_index
             while (
                 next_index < total
-                and len(in_flight) < resolved_workers
+                and len(in_flight) < max_workers
                 and _stopped() is None
             ):
                 point = corner_points[next_index]
@@ -6100,12 +5387,7 @@ def _run_local_corners_pooled(
             assert stop_reason is not None
             corners.append(
                 _unrun_corner_report(
-                    corner_points[index],
-                    measurements_spec,
-                    stop_reason,
-                    message=abort_message,
-                    reached_s=abort_reached_s,
-                    fraction=abort_fraction,
+                    corner_points[index], measurements_spec, stop_reason
                 )
             )
             continue
@@ -6937,6 +6219,7 @@ def _mc_seed_optional_echo(mc_seed: dict[str, Any]) -> dict[str, Any]:
 def _run_corner(
     *,
     extra_options_card: str | None = None,
+    measure_peak_rss: bool = True,
     point: CornerPoint,
     netlist_path: str,
     models_lib: str | None,
@@ -7031,7 +6314,7 @@ def _run_corner(
 
         diagnostics: list[dict[str, str]] = list(include_diagnostics)
         diagnostics.extend(_par_call_cap_preflight(deck_path, is_xyce))
-        started = sim_peak_rss.RunWatch()
+        started = sim_peak_rss.RunWatch(measure_peak_rss=measure_peak_rss)
         timed_out = False
         engine_aborted = False
         analysis_never_started = False
@@ -8604,19 +7887,6 @@ def _classify_xyce_diagnostics(log_text: str) -> list[dict[str, str]]:
 # --------------------------------------------------------------------------- #
 
 
-def _parse_spice_seconds(raw: str) -> float | None:
-    """Parse a SPICE time literal (``100u``, ``1e-4``, ``5n``) to seconds,
-    via the shared :mod:`._spice_number` engineering-notation table, the
-    same one :func:`_parse_width_um` uses for geometry. Unlike a bare
-    geometry literal, a SPICE time literal has no ambiguous "bare" case --
-    seconds is always the implicit base unit -- so, unlike
-    :func:`_parse_width_um`, no additional unit conversion is applied on top
-    of the suffix multiplier. Returns ``None`` for anything that is not a
-    plain numeric literal.
-    """
-    return spice_number.parse(raw)
-
-
 #: Deliberately generous floor used only by :func:`_preflight_timeout_warning`
 #: -- NOT a real per-engine throughput estimate. ngspice's actual rate
 #: depends heavily on circuit size/complexity/convergence behavior and is
@@ -9150,18 +8420,6 @@ _MOS_INSTANCE_RE = re.compile(r"^\s*([MX]\S+)\s+(?:\S+\s+){4}(\S+)(.*)$", re.IGN
 _PARAM_ASSIGN_RE = re.compile(r"(\w+)\s*=\s*(\S+)")
 
 
-def _parse_plain_number(raw: str) -> float | None:
-    """Parse a bare, dimensionless SPICE numeric literal (e.g. an ``nf=``
-    or ``m=`` instance-multiplier value). Returns ``None`` for anything
-    that is not a plain number -- an expression like ``{n*2}`` this
-    diagnostic cannot evaluate.
-    """
-    match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
-    if match is None:
-        return None
-    return float(match.group(1))
-
-
 def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
     """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
     ``100n``) to micrometres (``None`` for non-numerics); ``bare_is_um``
@@ -9636,264 +8894,6 @@ def _build_coverage(
     return block
 
 
-def _quantile_key(percentile: float) -> str:
-    """Response key for a percentile: ``5 -> "p5"``, ``2.5 -> "p2.5"``."""
-    return f"p{percentile:g}"
-
-
-def _percentile(sorted_values: list[float], percentile: float) -> float:
-    """Linearly-interpolated percentile of ``sorted_values`` (ascending).
-
-    The "inclusive"/linear method (numpy's default, and
-    :func:`statistics.quantiles`' ``method="inclusive"``): the requested
-    percentile indexes ``(n - 1) * p / 100`` into the sorted sample and
-    interpolates between the two neighbouring order statistics. Hand-rolled
-    rather than routed through :func:`statistics.quantiles` because that API
-    returns a fixed set of equally-spaced cut points, not an arbitrary
-    caller-declared percentile list (``request.monte_carlo.quantiles``).
-    ``p0``/``p100`` degenerate to the sample min/max.
-    """
-    if len(sorted_values) == 1:
-        return sorted_values[0]
-    position = (len(sorted_values) - 1) * (percentile / 100.0)
-    lower = int(position)
-    upper = min(lower + 1, len(sorted_values) - 1)
-    weight = position - lower
-    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
-
-
-def _evaluate_sigma_window(
-    mean: float,
-    stddev: float,
-    k_sigma: float,
-    limits: dict[str, float] | None,
-) -> dict[str, Any]:
-    """Evaluate whether the ``mean +/- k_sigma * stddev`` window stays inside
-    ``limits``, returning ``{k, low, high, status, margin}``.
-
-    Both window endpoints are scored with :func:`_evaluate_limits` -- the
-    same function (and therefore the same ``min``/``max`` handling and
-    ``margin`` sign convention) a single deterministic value goes through --
-    rather than a parallel comparison path. The window is inside the limits
-    iff *both* endpoints are, so the endpoint statuses combine as
-    ``fail`` > ``pass`` and ``margin`` is the worse (smaller) of the two: the
-    nearest binding limit when passing, the worst violation when failing. No
-    ``limits`` -> ``pass`` with a ``null`` margin, exactly as for a single
-    value.
-
-    This function deliberately has no ``inconclusive`` branch (issues #2492
-    + #2493): it scores a window, and by the time it is called the
-    ``mean``/``stddev`` it is handed were already computed over the
-    *trusted* samples only -- distrusted samples are excluded upstream, in
-    :func:`_monte_carlo_rollup`/
-    :func:`_sample_statistics`, and counted there. Grading here would
-    double-count the same fact and leave the window's own endpoints
-    describing a population the verdict then disowned.
-    """
-    low = mean - k_sigma * stddev
-    high = mean + k_sigma * stddev
-    low_status, low_margin = _evaluate_limits(low, limits)
-    high_status, high_margin = _evaluate_limits(high, limits)
-    margins = [m for m in (low_margin, high_margin) if m is not None]
-    return {
-        "k": k_sigma,
-        "low": low,
-        "high": high,
-        "status": "fail" if "fail" in (low_status, high_status) else "pass",
-        "margin": min(margins) if margins else None,
-    }
-
-
-def _sample_statistics(
-    values: list[float],
-    *,
-    errored: int,
-    inconclusive: int = 0,
-    absent: int | None = None,
-    quantiles: tuple[float, ...],
-    k_sigma: float | None,
-    limits: dict[str, float] | None,
-) -> dict[str, Any]:
-    """Reduce one measurement's Monte Carlo sample ``values`` to the reported
-    statistics block: ``{n, errored, inconclusive, mean, stddev, min, max,
-    quantiles, sigma_window}``.
-
-    ``n`` counts only samples that produced a number *and* were trusted
-    enough to grade; ``errored`` counts the samples whose value was
-    unextractable (``null``) and were therefore excluded from every
-    statistic -- a sample set is never silently reduced without saying so.
-
-    ``inconclusive`` (issues #2492 + #2493) counts the samples that *did*
-    produce a number the run declines to trust -- either the sample's corner
-    emitted a diagnostic code the request listed in
-    ``options.fail_on_diagnostic``, or the sampled value fell outside a
-    declared ``options.node_voltage_bounds``/``measurements[].plausible_range``.
-    Those samples are excluded from
-    ``mean``/``stddev``/``min``/``max``/``quantiles`` and therefore from the
-    ``sigma_window`` derived from them, and counted here instead: keeping
-    them would let a sample the run has explicitly disowned move the very
-    mean and sigma the window verdict is computed from, which is strictly
-    worse than reporting the window over the trusted subset and saying how
-    many samples were set aside. ``n + errored + inconclusive`` always
-    equals the number of samples drawn for this measurement.
-
-    ``absent`` (issue #2925) counts the samples of an ``optional`` measurement
-    that legitimately produced no value; the key is present only for such a
-    measurement (``absent is None`` omits it, keeping every other request's
-    block unchanged) and the identity becomes ``n + errored + inconclusive +
-    absent``. Absent samples are excluded from every statistic and are *not*
-    ``errored``, which keeps meaning "the simulation failed".
-
-    ``stddev`` is the **sample** standard deviation (Bessel-corrected,
-    ``n - 1``), the estimator appropriate for a finite Monte Carlo draw from
-    a population, and is ``null`` for ``n < 2`` (undefined, never faked as
-    ``0.0`` -- a fabricated zero sigma would read as "no variation" and
-    silently pass any window check). ``sigma_window`` is ``null`` unless a
-    sigma multiple was declared *and* ``mean``/``stddev`` both exist.
-    """
-    ordered = sorted(values)
-    n = len(ordered)
-    mean = statistics.fmean(ordered) if n else None
-    stddev = statistics.stdev(ordered) if n >= 2 else None
-
-    sigma_window: dict[str, Any] | None = None
-    if k_sigma is not None and mean is not None and stddev is not None:
-        sigma_window = _evaluate_sigma_window(mean, stddev, k_sigma, limits)
-
-    absent_field = {} if absent is None else {"absent": absent}
-    return {
-        "n": n,
-        "errored": errored,
-        "inconclusive": inconclusive,
-        **absent_field,
-        "mean": mean,
-        "stddev": stddev,
-        "min": ordered[0] if n else None,
-        "max": ordered[-1] if n else None,
-        "quantiles": {
-            _quantile_key(q): (_percentile(ordered, q) if n else None)
-            for q in quantiles
-        },
-        "sigma_window": sigma_window,
-    }
-
-
-def _base_corner_id(corner: dict[str, Any]) -> str:
-    """The corner a Monte Carlo sample was drawn from: its ``corner_id`` with
-    the ``/mc<sample_index>`` suffix removed (see :attr:`CornerPoint.corner_id`).
-
-    Derived from the sample's own ``monte_carlo.sample_index`` rather than by
-    pattern-matching the id, so a process/supply label that happens to
-    contain ``/mc`` can never be mis-split.
-    """
-    corner_id = corner["corner_id"]
-    suffix = f"/mc{corner['monte_carlo']['sample_index']}"
-    if corner_id.endswith(suffix):
-        return corner_id[: -len(suffix)]
-    return corner_id
-
-
-MC_WINDOW_SCOPES = ("pooled", "per_corner")
-
-
-def _validate_mc_window_scope(mc_spec: dict[str, Any]) -> str:
-    """Validate ``request.monte_carlo.window_scope`` (issue #2960): which
-    population's ``mean +/- k*sigma`` window gates a measurement's status.
-    ``"pooled"`` (the default; an explicit ``null`` reads as not declared)
-    grades the union across corners, ``"per_corner"`` grades every
-    ``by_corner[]`` population on its own."""
-    raw = mc_spec.get("window_scope")
-    if raw is None:
-        return "pooled"
-    if not isinstance(raw, str) or raw not in MC_WINDOW_SCOPES:
-        raise SimError(
-            "request.monte_carlo.window_scope must be one of "
-            f"{', '.join(repr(v) for v in MC_WINDOW_SCOPES)} (got {raw!r})"
-        )
-    return raw
-
-
-def _mc_window_scope_echo(mc_spec: dict[str, Any], window_scope: str) -> dict[str, str]:
-    """``environment.monte_carlo`` echo for ``window_scope``: only when the
-    request declared it, so a sampling-only request keeps its shape."""
-    if mc_spec.get("window_scope") is None:
-        return {}
-    return {"window_scope": window_scope}
-
-
-def _monte_carlo_rollup(
-    entries: list[tuple[dict[str, Any], dict[str, Any]]],
-    spec: dict[str, Any],
-    quantiles: tuple[float, ...],
-    default_k_sigma: float | None,
-) -> dict[str, Any] | None:
-    """Monte Carlo statistics for one measurement, or ``None`` when no
-    sampled corner contributed to it.
-
-    Top-level statistics pool **every** sample of every corner; ``by_corner``
-    breaks the same samples down per originating (pre-sampling) corner, in
-    corner order. For the common single-corner Monte Carlo request the two
-    describe the same draw; for a request that combines a PVT matrix *with*
-    ``monte_carlo``, ``by_corner`` is the statistically meaningful view (each
-    corner is its own population) and the pooled block is the union across
-    corners -- see docs/cli/sim.md.
-    """
-    sampled = [(c, m) for c, m in entries if c.get("monte_carlo") is not None]
-    if not sampled:
-        return None
-
-    limits = spec.get("limits")
-    # An explicit `null` reads as "not declared" (the house convention for
-    # optional fields), so it falls back to the run-wide default.
-    override = spec.get("k_sigma")
-    k_sigma = default_k_sigma if override is None else float(override)
-
-    def _stats(pairs: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
-        # Issues #2492 + #2493: a distrusted sample is set aside *before*
-        # any statistic is computed (see `_sample_statistics`), not merely
-        # reported alongside one -- an untrusted number must not be allowed
-        # to move the mean/sigma the window verdict rests on. Both reasons
-        # are screened here, and they need screening at two different
-        # levels: `options.fail_on_diagnostic` disqualifies the sample's
-        # whole *corner* (its measurement can still read `pass`/`fail`,
-        # graded against `limits` before the corner was disqualified), while
-        # a plausibility-bound violation is graded onto the *measurement*
-        # itself. Neither is caught by the pre-existing `value is not None`
-        # filter, since a distrusted sample has a real, non-null value --
-        # that is exactly what makes it dangerous to the pooled statistics.
-        absent = sum(1 for _, m in pairs if m["status"] == _ABSENT_STATUS)
-        # The `absent` count is reported only for a measurement declared
-        # `optional`, so every other request keeps its exact statistics shape.
-        report_absent = absent if spec.get("optional") is True else None
-        trusted = [
-            (c, m)
-            for c, m in pairs
-            if c.get("status") != _INCONCLUSIVE_STATUS
-            and m["status"] not in (_INCONCLUSIVE_STATUS, _ABSENT_STATUS)
-        ]
-        values = [m["value"] for _, m in trusted if m["value"] is not None]
-        return _sample_statistics(
-            values,
-            errored=len(trusted) - len(values),
-            inconclusive=len(pairs) - len(trusted) - absent,
-            absent=report_absent,
-            quantiles=quantiles,
-            k_sigma=k_sigma,
-            limits=limits,
-        )
-
-    grouped: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
-    for corner, m in sampled:
-        grouped.setdefault(_base_corner_id(corner), []).append((corner, m))
-
-    rollup = _stats(sampled)
-    rollup["by_corner"] = [
-        {"corner_id": corner_id, **_stats(pairs)}
-        for corner_id, pairs in grouped.items()
-    ]
-    return rollup
-
-
 def _attach_not_reached_count(
     report: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
@@ -10096,189 +9096,4 @@ def _rollup_measurements(
 # --------------------------------------------------------------------------- #
 
 noise_representation = sim_noise.noise_representation
-
-
-# --------------------------------------------------------------------------- #
-# Waveform plots (`--plot`, issue #1723)
-# --------------------------------------------------------------------------- #
-
-#: The first `v(...)`/`i(...)`-shaped (optionally derivative-prefixed, e.g.
-#: `vd(...)`/`ir(...)`) parenthesized token in a `.meas` card's `spice` text
-#: -- the signal that card is actually about. ngspice itself always lowercases
-#: node/signal names in its rawfile `variables[].name` (see
-#: `parse_ascii_rawfile`'s docstring example), so the reconstructed name below
-#: is lowercased to match, regardless of how the request's own `.meas` text
-#: capitalizes it.
-_MEAS_SIGNAL_TOKEN_RE = re.compile(r"\b([a-z]{1,3})\(([^)]*)\)", re.IGNORECASE)
-
-#: `from=<value>` / `to=<value>` trailers on an `AVG`/`RMS`/`PP`/`MIN`/`MAX`/
-#: `INTEG` measurement -- the "measurement window" #1723 asks to shade on a
-#: `tran` plot.
-_MEAS_FROM_RE = re.compile(r"\bfrom\s*=\s*(\S+)", re.IGNORECASE)
-_MEAS_TO_RE = re.compile(r"\bto\s*=\s*(\S+)", re.IGNORECASE)
-
-#: `WHEN <signal>=<value>` on a threshold-crossing measurement -- the
-#: `.meas` target #1723 asks to draw as a reference line. `\S+` between
-#: `when` and the final `=` is deliberately greedy-then-backtracking so it
-#: still matches when the signal token itself carries no space before its
-#: own `=` (e.g. `when v(out)=1.5`, not `when v(out) = 1.5`).
-_MEAS_WHEN_TARGET_RE = re.compile(
-    r"\bwhen\s+\S+\s*=\s*([-+]?[\d.]+(?:[eE][-+]?\d+)?[a-zA-Z]*)", re.IGNORECASE
-)
-
-
-def _measurement_diagnostic_hints(spice: str) -> dict[str, Any]:
-    """Best-effort extraction of the plotting context a `.meas` card's own
-    ``spice`` text implies: which signal it is about, the time window it
-    integrates/searches over (``from=``/``to=``), and the threshold value it
-    searches for (``WHEN <signal>=<value>``).
-
-    Never raises -- an unrecognised card shape (e.g. a ``TRIG``/``TARG``
-    delay measurement, which has no single window or target this simple
-    parser understands) yields ``{"signal": None, "window": None, "target":
-    None}``, and the caller (:func:`_write_corner_plots`) just renders that
-    signal's curve without the extra context rather than failing the whole
-    plot batch. This is deliberately not a general SPICE expression
-    evaluator -- see :mod:`klayout_tools.sim_plot`'s module docstring on
-    scope.
-    """
-    signal_match = _MEAS_SIGNAL_TOKEN_RE.search(spice)
-    signal = (
-        f"{signal_match.group(1).lower()}({signal_match.group(2).lower()})"
-        if signal_match
-        else None
-    )
-
-    window: tuple[float, float] | None = None
-    from_match = _MEAS_FROM_RE.search(spice)
-    to_match = _MEAS_TO_RE.search(spice)
-    if from_match is not None and to_match is not None:
-        from_s = _parse_spice_seconds(from_match.group(1))
-        to_s = _parse_spice_seconds(to_match.group(1))
-        if from_s is not None and to_s is not None:
-            window = (from_s, to_s)
-
-    target: float | None = None
-    when_match = _MEAS_WHEN_TARGET_RE.search(spice)
-    if when_match is not None:
-        target = _parse_plain_number(when_match.group(1))
-
-    return {"signal": signal, "window": window, "target": target}
-
-
-def _write_corner_plots(
-    *,
-    corner: dict[str, Any],
-    plot_dir: str,
-    analysis_kind: str | None,
-    measurements_spec: list[dict[str, Any]],
-) -> list[dict[str, str]]:
-    """Render one SVG per non-sweep signal captured in ``corner``'s persisted
-    waveform artifact, writing each to ``plot_dir`` with a deterministic
-    filename (``<corner_slug>__<signal_slug>.svg``).
-
-    Any `tran` measurement whose own signal (see
-    :func:`_measurement_diagnostic_hints`) matches a rendered signal gets its
-    ``from=``/``to=`` window shaded and its ``WHEN``-target drawn as a
-    reference line on that signal's plot -- issue #1723's "the `.meas`
-    target drawn as a line" / "the measurement window shaded" acceptance
-    criteria. `ac` plots use a log-scaled frequency axis; `dc`/`tran` use a
-    linear sweep axis (window shading only applies to `tran`, since
-    ``from=``/``to=`` on a `dc`/`ac` measurement is over the swept
-    source/frequency, not simulated time, and this issue's shading is
-    specifically the *time* window the Proposal describes).
-
-    Returns ``[]`` -- writing nothing -- when this corner has no persisted
-    waveform artifact (an errored corner that never produced a rawfile) or
-    that artifact cannot be read/parsed; never raises, since one corner's
-    bad artifact should not abort plotting every other corner.
-    """
-    waveform_path = corner["artifacts"].get("waveform")
-    if not waveform_path or not os.path.isfile(waveform_path):
-        return []
-    try:
-        with open(waveform_path, encoding="utf-8") as handle:
-            waveform = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return []
-
-    variables = waveform.get("variables") or []
-    points = waveform.get("points") or []
-    if len(variables) < 2 or not points:
-        return []
-
-    sweep_name = variables[0]["name"]
-    x_values = [point[0] for point in points]
-    log_x = analysis_kind == "ac"
-
-    hints_by_signal: dict[str, dict[str, Any]] = {}
-    for spec in measurements_spec:
-        hints = _measurement_diagnostic_hints(spec.get("spice", ""))
-        if hints["signal"] is None:
-            continue
-        # Merge across every measurement naming this signal (e.g. a `PP`
-        # window-measurement and a separate `WHEN` threshold-measurement
-        # both over `v(out)`) -- the first *non-None* window/target found
-        # wins for each field independently, rather than one measurement's
-        # hints unconditionally shadowing another's.
-        merged = hints_by_signal.setdefault(
-            hints["signal"], {"window": None, "target": None}
-        )
-        if merged["window"] is None and hints["window"] is not None:
-            merged["window"] = hints["window"]
-        if merged["target"] is None and hints["target"] is not None:
-            merged["target"] = hints["target"]
-
-    corner_slug = _slugify_corner_id(corner["corner_id"])
-    written: list[dict[str, str]] = []
-    for var in variables[1:]:
-        name = var["name"]
-        y_values = [point[var["index"]] for point in points]
-        hint = hints_by_signal.get(name.lower())
-        window = hint["window"] if hint and analysis_kind == "tran" else None
-        target = hint["target"] if hint else None
-        svg = render_waveform_svg(
-            signal_name=name,
-            corner_id=corner["corner_id"],
-            x_values=x_values,
-            y_values=y_values,
-            x_axis_label=sweep_name,
-            log_x=log_x,
-            window=window,
-            target=target,
-        )
-        path = os.path.join(plot_dir, f"{corner_slug}__{_slugify_signal(name)}.svg")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(svg)
-        written.append({"signal": name, "path": path})
-    return written
-
-
-def _measurement_plot_path(
-    entry: dict[str, Any],
-    spec: dict[str, Any] | None,
-    plots_by_corner: dict[str, list[dict[str, str]]],
-) -> str | None:
-    """The SVG path (if any) belonging next to one measurement rollup
-    ``entry`` -- its own ``.meas`` card's signal, rendered at its
-    ``worst_case`` corner -- so a `--plot` run's miss report names the
-    picture to look at next to the number that missed (issue #1723).
-
-    Returns ``None`` when there is no worst-case corner (an empty corner
-    matrix), ``spec`` is missing (should not happen -- every rollup entry
-    comes from a ``measurements_spec`` entry), that card names no
-    recognisable signal, or that corner rendered no matching plot.
-    """
-    worst_case = entry.get("worst_case")
-    if worst_case is None or spec is None:
-        return None
-    corner_plots = plots_by_corner.get(worst_case["corner_id"])
-    if not corner_plots:
-        return None
-    signal = _measurement_diagnostic_hints(spec.get("spice", ""))["signal"]
-    if signal is None:
-        return None
-    for plot in corner_plots:
-        if plot["signal"].lower() == signal:
-            return plot["path"]
-    return None
+_parse_spice_seconds = spice_number.parse

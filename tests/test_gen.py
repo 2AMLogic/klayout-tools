@@ -2087,7 +2087,7 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     dbu = layout.dbu
     licon = layout.layer(66, 44)
     li1 = layout.layer(67, 20)
-    half = CONTACT_SIZE_UM / 2.0
+    half = gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0
     insert_licon_with_li1_landing(
         layout, top, licon, li1, gate["x_um"], gate["y_um"], half, dbu
     )
@@ -2442,7 +2442,7 @@ def test_mos_array_series_fingers_gate_contacts_are_drc_clean(tmp_path, pdk_root
     dbu = layout.dbu
     licon = layout.layer(66, 44)
     li1 = layout.layer(67, 20)
-    half = gen.CONTACT_SIZE_UM / 2.0
+    half = gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0
     for port in report["ports"]:
         if port["name"].startswith("U0_G"):
             insert_licon_with_li1_landing(

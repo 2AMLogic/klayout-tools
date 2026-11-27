@@ -170,6 +170,7 @@
         "klayout_tools.deck_global_defaults",
         "klayout_tools.drc",
         "klayout_tools.drc_attribution",
+        "klayout_tools.drc_butted_diffusion",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_deck_includes",
@@ -372,12 +373,15 @@
         "klayout_tools.functional_verification_run_inputs",
         "klayout_tools.functional_verification_tools",
         "klayout_tools.functional_verification_run_results",
+        "klayout_tools.functional_verification_hdl_units",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_internal_bus",
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_output_concat",
         "klayout_tools.functional_verification_sdf_rename",
         "klayout_tools.functional_verification_sdf_steps",
+        "klayout_tools.functional_verification_sdf_unit_syntax",
+        "klayout_tools.functional_verification_sdf_units",
         "klayout_tools.functional_verification_search_path",
         "klayout_tools.functional_verification_verilog_top"
       ]
@@ -685,6 +689,7 @@
         "klayout_tools.decks.sg13g2_svaricap",
         "klayout_tools.decks.sg13g2_unmodeled",
         "klayout_tools.decks.sky130",
+        "klayout_tools.decks.sky130_cuts",
         "klayout_tools.decks.sky130_lvt",
         "klayout_tools.decks.sky130_offgrid",
         "klayout_tools.decks.sky130_unmodeled",
@@ -869,6 +874,7 @@
         "klayout_tools._batch_approvals",
         "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
+        "klayout_tools._batch_tree",
         "klayout_tools._check_result",
         "klayout_tools._deck_hash",
         "klayout_tools._devices",
@@ -1127,6 +1133,7 @@
         "klayout_tools.sim_form_signals",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
+        "klayout_tools.sim_mismatch_activity",
         "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_mismatch_scale",
@@ -1135,6 +1142,8 @@
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_measurement_template",
+        "klayout_tools.sim_monte_carlo",
+        "klayout_tools.sim_monte_carlo_rollup",
         "klayout_tools.sim_netlist_identity",
         "klayout_tools.sim_netlist_includes",
         "klayout_tools.sim_noise",
@@ -2142,16 +2151,6 @@
       "reason": "Issue #7267: the in-flow P&R timing report splices the same public SPEF_SKIP_DRIVER_ONLY Tcl fragment (_sta_request_diag) into its design-side SPEF correlation loop as standalone `klt sta`, rather than a second hand-maintained copy the two verbs' annotation_complete verdicts could drift apart on."
     },
     {
-      "consumer": "sim",
-      "exporter": "netlist",
-      "reason": "Issue #4443: `klt sim` command-list requests ship their unit trees through the Spot batch backend and enforce the same batch tree size cap and error code as netlist_batch rather than duplicating them."
-    },
-    {
-      "consumer": "signoff",
-      "exporter": "netlist",
-      "reason": "Issue #3289: operator-approved generator execution reuses the existing Spot batch lifecycle (sim_batch submit/launch/poll/collect) and the netlist batch tree packaging rather than adding another runner."
-    },
-    {
       "consumer": "signoff",
       "exporter": "sim",
       "reason": "Issue #3289: operator-approved generator execution reuses the existing Spot batch lifecycle (sim_batch submit/launch/poll/collect) and the netlist batch tree packaging rather than adding another runner."
@@ -2160,11 +2159,6 @@
       "consumer": "synthesize",
       "exporter": "characterize",
       "reason": "Issue #3709: restructure and synthesize read Liberty pins through liberty_compare.parse_liberty_text (the one real Liberty parser) instead of a second regex scraper; the scraper found 0 cells on the sky130 library, the parser finds 428."
-    },
-    {
-      "consumer": "extract",
-      "exporter": "netlist",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
       "consumer": "extract",
@@ -2638,18 +2632,6 @@
     },
     {
       "consumer": "klayout_tools.signoff_generator_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_tracked_files",
-      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
-    },
-    {
-      "consumer": "klayout_tools.signoff_generator_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_select_files",
-      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
-    },
-    {
-      "consumer": "klayout_tools.signoff_generator_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_classify_collected_report",
       "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
@@ -2683,36 +2665,6 @@
       "exporter": "klayout_tools.extract_abstract",
       "symbol": "_load_abstract_cell_lefs",
       "reason": "Issue #4363: the well-pin exclusion must read LEF pin layers with the exact parser `klt extract` uses for abstract-cell probes; promote to a public name when extract_abstract is next reworked."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_relative_tracked",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_require_selected",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_resolve_root",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_select_files",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_tracked_files",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
       "consumer": "klayout_tools.extract_batch",

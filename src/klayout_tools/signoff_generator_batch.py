@@ -19,7 +19,8 @@ ruling on #3289:
    requested argv must be ``[interpreter, script, *allowed_arguments]``.
 2. **Existing Spot lifecycle, no runner of its own.** Submit, launch, poll and
    collect are :mod:`klayout_tools.sim_batch`'s, with the git-tracked input
-   tree packaged exactly as :mod:`klayout_tools.netlist_batch` packages one.
+   tree packaged by :mod:`klayout_tools._batch_tree` exactly as the ``klt
+   netlist`` and ``klt extract`` batch backends package theirs.
    Fleet/forge/LLM/submitter credentials are never placed in ``job.json``.
 3. **No fallback.** Any submit, launch, poll, collect or packaging failure is
    a *failed execution* -- never ``met``, never ``executed_by_klt: true``,
@@ -49,8 +50,8 @@ from typing import Any
 from . import (
     _batch_approvals,
     _batch_common,
+    _batch_tree,
     _provenance,
-    netlist_batch,
     remote_transport,
     sim_batch,
 )
@@ -339,47 +340,28 @@ def _fail(failure: str, message: str, evidence: dict[str, Any]) -> GeneratorOutc
 # --------------------------------------------------------------------------- #
 
 
-def _select_tree(root: str, approval: GeneratorApproval) -> netlist_batch.BatchTree:
+def _select_tree(root: str, approval: GeneratorApproval) -> _batch_tree.TrackedTree:
     """The git-tracked files the approval ships, capped in size; the approved
-    script must be among them."""
+    script must be among them. Every refusal is a :class:`GeneratorApprovalError`."""
     resolved = os.path.realpath(root)
-    files = netlist_batch._tracked_files(resolved)
-    selected = netlist_batch._select_files(files, approval.include, ())
+    files = _batch_tree.tracked_files(resolved, err_cls=GeneratorApprovalError)
+    selected = _batch_tree.select_files(files, approval.include, ())
     if approval.script not in files:
-        raise netlist_batch.NetlistError(
+        raise GeneratorApprovalError(
             f"approved script {approval.script} is not tracked by git under the root"
         )
     if approval.script not in selected:
-        raise netlist_batch.NetlistError(
+        raise GeneratorApprovalError(
             f"approved script {approval.script} is left out by the approval's include"
         )
-    present: list[str] = []
-    total = 0
-    for rel in selected:
-        path = os.path.join(resolved, rel)
-        try:
-            info = os.lstat(path)
-        except OSError:
-            continue
-        if os.path.isdir(path) and not os.path.islink(path):
-            continue
-        present.append(rel)
-        total += info.st_size
-    if total > netlist_batch.MAX_BATCH_TREE_BYTES:
-        raise netlist_batch.NetlistError(
-            f"generator input tree is {total} bytes, above the "
-            f"{netlist_batch.MAX_BATCH_TREE_BYTES}-byte cap; narrow the "
-            "approval's include globs",
-            code=netlist_batch.BATCH_INPUT_TOO_LARGE_CODE,
+    tree = _batch_tree.measure_tree(resolved, selected)
+    if tree.total_bytes > _batch_tree.MAX_BATCH_TREE_BYTES:
+        raise GeneratorApprovalError(
+            f"generator input tree is {tree.total_bytes} bytes, above the "
+            f"{_batch_tree.MAX_BATCH_TREE_BYTES}-byte cap; narrow the "
+            "approval's include globs"
         )
-    return netlist_batch.BatchTree(
-        root=resolved,
-        files=tuple(present),
-        total_bytes=total,
-        schematic=approval.script,
-        rcfile_arg=None,
-        rcfile_pdk_relative=False,
-    )
+    return tree
 
 
 def _package(
@@ -387,10 +369,10 @@ def _package(
 ) -> tuple[str, dict[str, Any]]:
     """Archive the git-tracked tree and verify the approved script *as
     shipped*. Returns ``(tarball_path, input_tree_provenance)``; raises
-    :class:`netlist_batch.NetlistError` for a packaging refusal."""
+    :class:`GeneratorApprovalError` for a packaging refusal."""
     tree = _select_tree(root, approval)
     tarball = os.path.join(scratch, TREE_FILENAME)
-    netlist_batch.build_tarball(tree, tarball)
+    _batch_tree.write_tarball(tree.root, tree.files, tarball)
 
     digest = hashlib.sha256()
     shipped_script: bytes | None = None
@@ -410,7 +392,7 @@ def _package(
         shipped_script is None
         or _provenance.content_hash_bytes(shipped_script) != approval.script_sha256
     ):
-        raise netlist_batch.NetlistError(
+        raise GeneratorApprovalError(
             f"approved script {approval.script} does not hash to the approved "
             f"{approval.script_sha256}; it changed since it was approved"
         )
@@ -542,7 +524,6 @@ def run_approved_generator(
             )
         except (
             GeneratorApprovalError,
-            netlist_batch.NetlistError,
             sim_batch.BatchError,
             OSError,
         ) as exc:
