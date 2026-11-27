@@ -170,6 +170,7 @@
         "klayout_tools.deck_global_defaults",
         "klayout_tools.drc",
         "klayout_tools.drc_attribution",
+        "klayout_tools.drc_butted_diffusion",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_deck_includes",
