@@ -11,6 +11,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
+from klayout_tools.cli import main
 from test_sim_batch import (
     _CAP_REFUSAL,
     _CAPACITY_REFUSAL,
@@ -48,27 +49,50 @@ def resolve(tmp_path, **knobs):
 @pytest.mark.parametrize(
     "limit", [0, -1, 1_000_000_000, True, False, 1.5, 2.0, "2", None]
 )
-@pytest.mark.parametrize("dry_run", [False, True])
-def test_invalid_limit_stops_before_transport(tmp_path, monkeypatch, limit, dry_run):
-    request = _ceiling_request(tmp_path, max_launch_attempts=limit)
+@pytest.mark.parametrize(
+    "make_request", [_ceiling_request, _request], ids=["corners", "decks"]
+)
+def test_invalid_limit_stops_before_transport(
+    tmp_path, monkeypatch, limit, make_request, capsys
+):
+    request = make_request(tmp_path, max_launch_attempts=limit)
     _write_body(tmp_path)
     monkeypatch.setattr(
         sb, "_run_subprocess", lambda *args: pytest.fail("unexpected transport")
     )
+    path = str(_write_request(tmp_path, request))
     with pytest.raises(sim.SimError) as exc:
-        sim.run_sim(str(_write_request(tmp_path, request)), dry_run=dry_run)
+        sim.run_sim(path)
     assert exc.value.code == "batch_launch_attempts_invalid"
+    assert main(["sim", path, "--dry-run", "--format", "json"]) == 1
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == exc.value.code
 
 
+def dry_run_json(tmp_path, request, capsys, monkeypatch):
+    path = _write_request(tmp_path, request)
+    with monkeypatch.context() as dry:
+        dry.setattr(
+            sb, "_run_subprocess", lambda *_: pytest.fail("unexpected transport")
+        )
+        assert main(["sim", str(path), "--dry-run", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "valid"
+    return report
+
+
+@pytest.mark.parametrize(
+    "make_request", [_ceiling_request, _request], ids=["corners", "decks"]
+)
 @pytest.mark.parametrize("limit", [1, 999_999_999])
-def test_valid_boundaries_on_submit_and_dry_run(tmp_path, limit):
-    request = _ceiling_request(tmp_path, max_launch_attempts=limit)
+def test_valid_boundaries_on_submit_and_dry_run(
+    tmp_path, make_request, limit, capsys, monkeypatch
+):
+    request = make_request(tmp_path, max_launch_attempts=limit)
     _write_body(tmp_path)
     assert resolve(tmp_path, max_launch_attempts=limit).max_launch_attempts == limit
-    assert (
-        sim.run_sim(str(_write_request(tmp_path, request)), dry_run=True)["status"]
-        == "valid"
-    )
+    report = dry_run_json(tmp_path, request, capsys, monkeypatch)
+    reported = report["batch"]["max_launch_attempts"]
+    assert type(reported) is int and reported == limit
 
 
 def test_job_schema_limits():
@@ -95,7 +119,7 @@ def assert_launch_limit(record, capped):
 @pytest.mark.parametrize("capped", [False, True])
 @pytest.mark.parametrize("hosts", [1, 2])
 def test_corner_upload_probe_apply_order_and_report(
-    tmp_path, monkeypatch, capped, hosts
+    tmp_path, monkeypatch, capped, hosts, capsys
 ):
     request = _batch_request(tmp_path)
     if hosts == 1:
@@ -131,6 +155,8 @@ def test_corner_upload_probe_apply_order_and_report(
     if capped:
         request["batch"]["max_launch_attempts"] = 2
     _write_body(tmp_path)
+    dry = dry_run_json(tmp_path, request, capsys, monkeypatch)
+    assert_launch_limit(dry.get("batch", {}), capped)
     report = sim.run_sim(str(_write_request(tmp_path, request)))
     remote = report["environment"]["remote"]
     jobs = remote.get("fleet", [remote])
@@ -145,12 +171,13 @@ def test_corner_upload_probe_apply_order_and_report(
 
 @pytest.mark.parametrize("capped", [False, True])
 @pytest.mark.parametrize("shard_size", [1, 3])
-def test_deck_contracts_and_report(tmp_path, monkeypatch, capped, shard_size):
-    fleet = _install_and_fleet(monkeypatch)
+def test_deck_contracts_and_report(tmp_path, monkeypatch, capped, shard_size, capsys):
     batch = {"max_launch_attempts": 2} if capped else {}
-    report = _run(
-        tmp_path, _request(tmp_path, count=3, max_units_per_job=shard_size, **batch)
-    )
+    request = _request(tmp_path, count=3, max_units_per_job=shard_size, **batch)
+    dry = dry_run_json(tmp_path, request, capsys, monkeypatch)
+    assert_launch_limit(dry.get("batch", {}), capped)
+    fleet = _install_and_fleet(monkeypatch)
+    report = _run(tmp_path, request)
     assert len(fleet.specs) == 3 // shard_size
     documents = [spec.to_job_json() for spec in fleet.specs.values()]
     for record in [*documents, report["environment"]["remote"]]:
