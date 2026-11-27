@@ -134,7 +134,7 @@ def route_failure_congestion(
     ``PlaceAndRouteError.details`` payload (issue #6952); ``None`` for any
     other stage, whose error envelope stays byte-identical.
 
-    ``completed`` is the stage's ``_OpenRoadResult`` (duck-typed for
+    ``completed`` is the stage's ``OpenRoadResult`` (duck-typed for
     ``stdout`` -- typed ``Any`` because the engine module's result type is
     private to its own import-boundary group).
 

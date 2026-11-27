@@ -232,8 +232,8 @@ def test_driver_group_signal_reaps_wrapper_container(
         [
             sys.executable,
             "-c",
-            "from klayout_tools._openroad_engine import _run_openroad; "
-            "_run_openroad('stage.tcl', 'metrics.json', error_cls=RuntimeError, "
+            "from klayout_tools._openroad_engine import run_openroad; "
+            "run_openroad('stage.tcl', 'metrics.json', error_cls=RuntimeError, "
             f"container_id_wait_s={poll_s})",
         ],
         env=env,

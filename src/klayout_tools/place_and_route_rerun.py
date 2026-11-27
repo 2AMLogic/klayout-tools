@@ -22,7 +22,7 @@ from ._report_verify import strip_keys
 #: diff (issue #2224), via :func:`klayout_tools._report_verify.strip_keys`.
 #:
 #: ``engine_logs`` is the whole reason this exists: every entry is keyed by a
-#: fresh ``uuid4`` ``invocation_id`` (``_openroad_engine._run_openroad``) and
+#: fresh ``uuid4`` ``invocation_id`` (``_openroad_engine.run_openroad``) and
 #: its retained log ``directory``/``stdout_path``/``stderr_path``/
 #: ``metadata_path`` are named after that id, so two identical runs never
 #: agree on the block. The stage scripts' own ``script_sha256`` goes with it

@@ -209,7 +209,7 @@ def _invoke_openroad(proj: Path, monkeypatch, *, repo_root: Any, exit_code: int 
         )
 
     patch_openroad_run(monkeypatch, local_process)
-    return engine._run_openroad(
+    return engine.run_openroad(
         str(script),
         str(proj / "metrics.json"),
         error_cls=EngineError,
@@ -306,7 +306,7 @@ def test_launch_failure_diagnostic_embeds_the_anchored_record(tmp_path, monkeypa
     patch_openroad_run(monkeypatch, missing)
     monkeypatch.chdir(_checkout(tmp_path / "checkout-b"))
     with pytest.raises(EngineError, match="engine missing") as exc:
-        engine._run_openroad(
+        engine.run_openroad(
             str(proj / "run.tcl"),
             "metrics",
             error_cls=EngineError,
