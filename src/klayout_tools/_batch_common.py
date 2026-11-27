@@ -170,6 +170,18 @@ def job_failure_parts(
     return message, code, details
 
 
+def set_shared_launch_limit(
+    environment: dict[str, Any], shards: Sequence[dict[str, Any] | None]
+) -> None:
+    """Keep a fleet-wide limit only when every reported job has that limit."""
+    limits = {(entry or {}).get("max_launch_attempts") for entry in shards}
+    limit = limits.pop() if len(limits) == 1 else None
+    if limit is None:
+        environment.pop("max_launch_attempts", None)
+    else:
+        environment["max_launch_attempts"] = limit
+
+
 def resumable(
     environment: dict[str, Any] | None, manifest: Any
 ) -> dict[str, Any] | None:

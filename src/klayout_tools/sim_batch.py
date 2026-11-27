@@ -100,6 +100,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from . import (
@@ -142,6 +143,14 @@ from .sim_batch_reattach import (
     _resume_attach_config,
     _resume_or_submit_one_job,
     _try_reattach_shard,
+)
+from .sim_batch_transport import (
+    _RETRYABLE_LAUNCH_CODES,
+    LAUNCH_LIMIT_EXHAUSTED,
+    LAUNCH_LIMIT_UNSUPPORTED,
+    _classify_launch_failure,
+    _run_checked,
+    _verify_launch_limit,
 )
 from .sim_batch_version_remedy import older_client_remedy
 from .sim_batch_warn import warn_over_serial_bound_once
@@ -279,6 +288,7 @@ from .sim_batch_knobs import (
     _resolve_interrupted_grace_s,
     _resolve_max_concurrent_jobs,
     _resolve_max_job_seconds,
+    _resolve_max_launch_attempts,
     _resolve_runner_version_check,
     _validate_batch_request_knobs,
     resolve_capacity_retries,
@@ -336,6 +346,25 @@ class BatchConfig:
     image_pointer_key: str = "images/eda-batch-runner/current.json"
     runner_images: list[dict[str, Any]] | None = None
     image_profile: str | None = None
+    max_launch_attempts: int | None = None
+
+    def launch_environment(
+        self,
+        *,
+        include_concurrency: bool = False,
+        shards: Sequence[dict[str, Any] | None] | None = None,
+    ) -> dict[str, Any]:
+        """Report a shared fleet limit only when every supplied shard confirms it."""
+        fields: dict[str, Any] = {}
+        if self.image_profile is not None:
+            fields["image_profile"] = self.image_profile
+        if shards is not None:
+            _batch_common.set_shared_launch_limit(fields, shards)
+        elif self.max_launch_attempts is not None:
+            fields["max_launch_attempts"] = self.max_launch_attempts
+        if include_concurrency and self.max_concurrent_jobs is not None:
+            fields["max_concurrent_jobs"] = self.max_concurrent_jobs
+        return fields
 
     def runner_identities(self, pdk: str | None) -> list[dict[str, Any]]:
         """Reuse the pointer snapshot across all gates and shards of this request."""
@@ -630,6 +659,10 @@ def _resolve_batch_config(
     _validate_batch_models_lib(request)
     _validate_batch_pdk_root(request)
     batch_spec = request.get("batch") or {}
+    # Non-sim batch verbs also use this config resolver.
+    max_launch_attempts = (
+        _resolve_max_launch_attempts(batch_spec) if sim_image_profiles else None
+    )
     provision_script = _resolve_provision_script(batch_spec)
     fleet = _read_fleet_config(provision_script)
 
@@ -682,6 +715,7 @@ def _resolve_batch_config(
         poll_interval_s=resolve_poll_interval_s(batch_spec),
         poll_timeout_s=resolve_poll_timeout_s(batch_spec, default_poll_timeout_s),
         capacity_wait_s=capacity_wait_s,
+        max_launch_attempts=max_launch_attempts,
         capacity_retries=resolve_capacity_retries(batch_spec),
         runner_version_check=runner_version_check,
         max_job_seconds=max_job_seconds,
@@ -1088,88 +1122,6 @@ def _aws_argv(config: BatchConfig, *args: str) -> list[str]:
     return argv + list(args)
 
 
-def _run_checked(
-    runner: remote_transport.CommandRunner,
-    argv: list[str],
-    timeout_s: float,
-    label: str,
-    *,
-    classify: Callable[[str], str | None] | None = None,
-    redact: str | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Run one transport command; any non-zero exit becomes a
-    :class:`BatchError`. ``classify``, when given, maps the failed command's
-    stderr to the error's machine-readable ``code`` (``None`` = unclassified).
-    ``redact`` (the bucket name) is replaced by ``<bucket>`` in the error
-    message -- after classification, so ``classify`` sees the raw stderr --
-    because the message can reach committed reports (issue #3890).
-    """
-    try:
-        result = runner(argv, timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        raise BatchError(f"{label} timed out after {timeout_s}s") from exc
-    except OSError as exc:
-        raise BatchError(f"{label} could not be spawned: {exc}") from exc
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip()
-        code = classify(detail) if classify is not None else None
-        if redact:
-            detail = detail.replace(redact, "<bucket>")
-        raise BatchError(
-            f"{label} failed (exit {result.returncode}): {detail}",
-            code=code,
-        )
-    return result
-
-
-#: The fragment of 2am's ``batch-fleet-provision.sh launch`` refusal line
-#: (``fail "no capacity in any of the N pools after K attempt(s) -- this is
-#: the capacity-refusal case, ..."``) that identifies a Spot capacity refusal.
-_CAPACITY_REFUSAL_MARKER = "no capacity in any of the"
-
-#: The fragment of the same script's concurrency-cap refusal (``fail "N
-#: instance(s) already running + K requested exceeds
-#: BATCH_MAX_CONCURRENT_INSTANCES=M"``), checked before any launch record is
-#: opened (issue #2917).
-_CONCURRENCY_CAP_MARKER = "exceeds BATCH_MAX_CONCURRENT_INSTANCES"
-
-#: The fragment of the same script's shared vCPU-budget refusal (``fail "N
-#: vCPU already running + K instance(s) of up to M vCPU exceeds
-#: BATCH_MAX_VCPU=V ... the spot quota is shared with ci-spot"``). Transient
-#: shared-quota exhaustion, so it is classified with the Spot capacity refusal
-#: (issue #4103).
-_VCPU_BUDGET_MARKER = "exceeds BATCH_MAX_VCPU"
-
-#: The refusal codes :func:`submit_launch` waits out under ``capacity_wait_s``.
-_RETRYABLE_LAUNCH_CODES = frozenset(
-    {BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE}
-)
-
-
-def _classify_launch_failure(stderr: str) -> str | None:
-    """:data:`BATCH_NO_CAPACITY_CODE` when a failed ``launch``'s stderr is
-    the provisioner's Spot capacity refusal or its shared vCPU-budget
-    refusal, :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
-    concurrency-cap refusal, else ``None``.
-
-    **Coupling:** this is a text match against 2am's
-    ``infra/aws/batch-fleet-provision.sh`` (``cmd_launch``'s final
-    ``fail "no capacity in any of the ..."``), because that script exits ``1``
-    for *every* refusal -- the diversification floors, the concurrency cap,
-    a missing ``job.json``, an IAM denial, and a capacity shortfall alike --
-    and exposes no distinct exit code. Kept in this one helper so a change on
-    the 2am side is a one-line fix here. Every other launch failure stays
-    unclassified, so it is never mistaken for something worth retrying.
-    """
-    if _CAPACITY_REFUSAL_MARKER in stderr:
-        return BATCH_NO_CAPACITY_CODE
-    if _CONCURRENCY_CAP_MARKER in stderr:
-        return BATCH_CONCURRENCY_CAP_CODE
-    if _VCPU_BUDGET_MARKER in stderr:
-        return BATCH_NO_CAPACITY_CODE
-    return None
-
-
 def _capacity_backoff_s(retry_index: int, jitter: Callable[[], float]) -> float:
     """The jittered, capped delay before capacity re-launch ``retry_index``
     (``0`` = the first re-launch). ``jitter`` returns a float in ``[0, 1)``."""
@@ -1254,6 +1206,10 @@ def submit_job(
         )
 
 
+def _ignore_phase(state: str) -> None:
+    """The ``on_phase`` default: no shard map to tell."""
+
+
 def launch_job(
     config: BatchConfig,
     job_id: str,
@@ -1263,10 +1219,11 @@ def launch_job(
     monotonic: Callable[[], float] | None = None,
     jitter: Callable[[], float] | None = None,
     on_refusal: Callable[[BatchError, int], None] | None = None,
+    on_phase: Callable[[str], None] = _ignore_phase,
 ) -> None:
     """Shell out to 2am's ``batch-fleet-provision.sh launch --job <id>
-    --apply --profile <profile>`` -- exactly one invocation per job, unless
-    ``config.capacity_wait_s`` opts into waiting out a capacity refusal.
+    --apply --profile <profile>``. For a capped job the report-only form must
+    confirm the uploaded limit first. Capacity refusals can retry below.
 
     Shelling out (rather than issuing a native ``CreateFleet``) is the
     recorded decision for this backend: ``launch`` is not a thin API
@@ -1303,27 +1260,28 @@ def launch_job(
     ``on_refusal`` (issue #4018) is called with each refusal being waited out
     and the attempt count, just before the backoff sleep -- how a sharded run
     reports "waiting for capacity" across all its shards.
+    ``on_phase`` records ``launching`` immediately before each paid command
+    and ``launch_refused`` when the fleet confirms a capacity refusal.
     """
     run = runner if runner is not None else _run_subprocess
     sleep = sleep if sleep is not None else time.sleep
     monotonic = monotonic if monotonic is not None else time.monotonic
     jitter = jitter if jitter is not None else random.random
-    argv = [
-        config.provision_script,
-        "launch",
-        "--job",
-        job_id,
-        "--apply",
-        "--profile",
-        config.profile,
-    ]
+    launch = [config.provision_script, "launch", "--job", job_id]
+    options = ["--profile", config.profile]
     if config.region:
-        argv += ["--region", config.region]
+        options += ["--region", config.region]
+    needs_report = config.max_launch_attempts is not None
+    argv = [*launch, "--apply", *options]
     started = monotonic()
     attempts = 0
     while True:
         attempts += 1
         try:
+            if needs_report:
+                _verify_launch_limit(config, [*launch, *options], run)
+                needs_report = False
+            on_phase("launching")
             _run_checked(
                 run,
                 argv,
@@ -1334,7 +1292,10 @@ def launch_job(
             )
             return
         except BatchError as exc:
-            if exc.code not in _RETRYABLE_LAUNCH_CODES or config.capacity_wait_s <= 0:
+            if exc.code not in _RETRYABLE_LAUNCH_CODES:
+                raise
+            on_phase("launch_refused")
+            if config.capacity_wait_s <= 0:
                 raise
             remaining = config.capacity_wait_s - (monotonic() - started)
             if remaining <= 0:
@@ -1430,6 +1391,31 @@ def job_exists(
 
     run = runner if runner is not None else _run_subprocess
     return _job_head(config, job_id, run) is not None
+
+
+def _submitted_job_config(
+    config: BatchConfig,
+    job_id: str,
+    runner: remote_transport.CommandRunner | None = None,
+) -> BatchConfig:
+    """Read the launch limit from the job being collected, including legacy jobs."""
+    uri = f"{job_uri(config, job_id)}/job.json"
+    try:
+        result = _run_checked(
+            runner if runner is not None else _run_subprocess,
+            _aws_argv(config, "s3", "cp", uri, "-"),
+            _BATCH_AWS_TIMEOUT_S,
+            "aws s3 cp (submitted job.json)",
+            redact=config.bucket,
+        )
+        spec = json.loads(result.stdout)
+        if not isinstance(spec, dict):
+            raise ValueError("expected a job object")
+        limit = _resolve_max_launch_attempts(spec)
+    except (BatchError, ValueError, SimError) as exc:
+        # This job still exists. A contract read error must not invite a paid resubmit.
+        raise SimError(f"cannot read launch limit from job {job_id!r}: {exc}") from exc
+    return replace(config, max_launch_attempts=limit)
 
 
 def _advance_interrupted_clock(
@@ -1757,10 +1743,11 @@ def _install_batch_artifacts(
 
 def _batch_job_environment(config: BatchConfig, job_id: str) -> dict[str, Any]:
     """Submit-side identifiers available before the worker reports a status."""
-    environment: dict[str, Any] = {"provider": "aws-batch-fleet", "job_id": job_id}
-    if config.image_profile is not None:
-        environment["image_profile"] = config.image_profile
-    return environment
+    return {
+        "provider": "aws-batch-fleet",
+        "job_id": job_id,
+        **config.launch_environment(),
+    }
 
 
 def _batch_environment(
@@ -2536,6 +2523,7 @@ def _prepare_batch_job_spec(
         corner_count=corner_count,
         timeout_s=timeout_s,
         job_timeout_s=config.job_timeout_s,
+        max_launch_attempts=config.max_launch_attempts,
         request_dir=request_dir,
         version_check=config.runner_version_check,
     )
@@ -2697,8 +2685,8 @@ class _ShardManifest:
 
     def mark(self, index: int, state: str) -> None:
         """Advance shard ``index`` to ``state`` and stamp its timestamp. A
-        field already stamped (a re-attach to a shard the prior run took
-        further) is left as it was, and the state never moves backwards."""
+        field already stamped is preserved. A capacity refusal returns an
+        attempted launch to submitted so it can safely be retried."""
         key = str(index)
         with self._lock:
             entry = self._entries.get(key)
@@ -2709,31 +2697,17 @@ class _ShardManifest:
                 entry = self._entries[key] = dict(prior)
             order = list(self._STATE_FIELDS)
             current = entry.get("state")
+            if state == "launch_refused":
+                if current == "launching":
+                    entry["state"] = "submitted"
+                    self._flush_locked()
+                return
             if current in order and order.index(current) >= order.index(state):
                 return
             entry["state"] = state
             field = self._STATE_FIELDS[state]
             if entry.get(field) is None:
                 entry[field] = datetime.now(timezone.utc).isoformat()
-            self._flush_locked()
-
-    def unlaunch(self, index: int) -> None:
-        """Roll shard ``index`` back from ``launching`` to ``submitted`` after
-        a refused launch (issue #4018): the provisioner creates no instance on
-        a refusal, so the job is exactly "submitted, never launched" and
-        ``--resume`` must launch it rather than poll for a ``status.json``
-        that will never appear."""
-        key = str(index)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                prior = self.prior.get(key)
-                if prior is None:
-                    return
-                entry = self._entries[key] = dict(prior)
-            if entry.get("state") != "launching":
-                return
-            entry["state"] = "submitted"
             self._flush_locked()
 
     def unlaunched(self) -> int:
@@ -2832,28 +2806,6 @@ def _poll_status_interruptibly(
         _signal_handlers_restore(prev_handlers)
 
 
-def _ignore_phase(state: str) -> None:
-    """The ``on_phase`` default: no shard map to tell."""
-
-
-def _launch_noting_refusal(
-    config: BatchConfig,
-    job_id: str,
-    runner: remote_transport.CommandRunner | None,
-    notify: Callable[[str], None],
-    launch_kwargs: dict[str, Any] | None,
-) -> None:
-    """:func:`launch_job`, telling ``notify`` ``"launch_refused"`` when the
-    fleet refused for capacity (issue #4018): such a launch created nothing,
-    so the shard map must show the job as never launched."""
-    try:
-        launch_job(config, job_id, runner=runner, **(launch_kwargs or {}))
-    except BatchError as exc:
-        if exc.code in _RETRYABLE_LAUNCH_CODES:
-            notify("launch_refused")
-        raise
-
-
 def _launch_attached_if_unlaunched(
     config: BatchConfig,
     job_id: str,
@@ -2872,8 +2824,7 @@ def _launch_attached_if_unlaunched(
     if _read_status(config, job_id, run) is not None:
         notify("launched")
         return None
-    notify("launching")
-    _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
+    launch_job(config, job_id, runner=runner, on_phase=notify, **(launch_kwargs or {}))
     launched_at = now()
     notify("launched")
     sys.stderr.write(
@@ -2934,6 +2885,7 @@ def _run_batch_job(
                 "bucket/profile/region, or expired)",
                 code=BATCH_UNKNOWN_JOB_CODE,
             )
+        submitted = _submitted_job_config(config, job_id, runner)
         attach_timestamps: dict[str, str | None] = {
             "client_submitted_at": None,
             "client_launched_at": None,
@@ -2941,8 +2893,10 @@ def _run_batch_job(
             "client_collected_at": None,
         }
         if launch_if_unlaunched:
+            # A paid relaunch must still verify the caller's requested ceiling,
+            # even when the existing job was uploaded by an uncapped legacy client.
             attach_timestamps["client_launched_at"] = _launch_attached_if_unlaunched(
-                config,
+                config if config.max_launch_attempts is not None else submitted,
                 job_id,
                 runner=runner,
                 now=now,
@@ -2950,7 +2904,7 @@ def _run_batch_job(
                 launch_kwargs=launch_kwargs,
             )
         return _poll_and_collect(
-            config=config,
+            config=submitted,
             job_id=job_id,
             corner_points=corner_points,
             keep_artifacts=keep_artifacts,
@@ -2987,8 +2941,7 @@ def _run_batch_job(
     submit_job(config, job_id, spec, runner=runner)
     notify("submitted")
     sim_batch_observer.report_submitted(job_id)
-    notify("launching")
-    _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
+    launch_job(config, job_id, runner=runner, on_phase=notify, **(launch_kwargs or {}))
     timestamps["client_launched_at"] = now()
     notify("launched")
     # Emit the job id before polling so an interrupted client can attach.
@@ -3545,10 +3498,7 @@ class _BatchFleetRun:
             self.watch.phase(index, state)
             if self.manifest is None:
                 return
-            if state == "launch_refused":
-                self.manifest.unlaunch(index)
-            else:
-                self.manifest.mark(index, state)
+            self.manifest.mark(index, state)
             if state == "launched":
                 self.watch.launched(index)
 
@@ -3667,6 +3617,9 @@ class _BatchFleetRun:
                     f"{exc}{self._budget_note(exc)} [{exc.code}]", code=exc.code
                 ) from exc
             self.capacity_refused.discard(index)
+            if exc.code in (LAUNCH_LIMIT_UNSUPPORTED, LAUNCH_LIMIT_EXHAUSTED):
+                # The shard merger exposes exception text in its lost_shard diagnostic.
+                raise BatchError(f"{exc} [{exc.code}]", code=exc.code) from exc
             raise
         finally:
             self.watch.finished(index)
@@ -3865,10 +3818,13 @@ def _run_batch_fleet(
             )
         if fleet.abort.is_set():
             environment = {**(environment or {}), "interrupted": True}
-        if environment is not None and config.max_concurrent_jobs is not None:
+        if environment is not None or config.max_launch_attempts is not None:
             environment = {
-                **environment,
-                "max_concurrent_jobs": config.max_concurrent_jobs,
+                **(environment or {}),
+                **config.launch_environment(
+                    include_concurrency=True,
+                    shards=(environment or {}).get("fleet", []) if resume else None,
+                ),
             }
         environment = _batch_common.resumable(environment, manifest)
         if fleet.unfinished:
@@ -3972,12 +3928,9 @@ def _submit_batch_shards(
             manifest.mark(index, "submitted")
             state = "submitted"
         if state == "submitted":
-            manifest.mark(index, "launching")
-            try:
-                launch_job(config, job_id, runner=runner)
-            except BatchError:
-                manifest.unlaunch(index)
-                raise
+            launch_job(
+                config, job_id, runner=runner, on_phase=partial(manifest.mark, index)
+            )
             manifest.mark(index, "launched")
         elif state == "launching":
             # Outcome unknown: launching again could bill the shard twice.

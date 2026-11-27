@@ -115,6 +115,7 @@ class BatchJobSpec:
     timeout_seconds: int | None = None
     inputs: tuple[BatchJobInput, ...] = ()
     image_profile: str | None = None
+    max_launch_attempts: int | None = None
 
     def to_job_json(self) -> dict[str, Any]:
         """The ``job.json`` document, in ``batch-fleet.md``'s own field
@@ -125,7 +126,13 @@ class BatchJobSpec:
         if self.tool is not None:
             document["tool"] = self.tool
         document["cmd"] = self.cmd
-        for key in ("pdk_variant", "pdk_root", "cores_per_job", "timeout_seconds"):
+        for key in (
+            "pdk_variant",
+            "pdk_root",
+            "cores_per_job",
+            "timeout_seconds",
+            "max_launch_attempts",
+        ):
             value = getattr(self, key)
             if value is not None:
                 document[key] = value

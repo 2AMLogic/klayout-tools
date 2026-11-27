@@ -16,6 +16,7 @@ from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim_batch as sb
 from klayout_tools.cli.sim_cmd import _exit_code_for
 from test_sim_batch import (
+    _CAPACITY_REFUSAL,
     _CLIENT_VERSION,
     _batch_request,
     _FakeRunner,
@@ -79,7 +80,6 @@ def _split_report(tmp_path, monkeypatch, *, shards=2, shard_size=2, refused_inde
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
     _install_fake_batch_transport(monkeypatch, runner=runner)
-    shard_of_job: dict[str, int] = {}
 
     def _capture(argv, timeout_s):
         captured = uploaded_request_of(argv)
@@ -87,7 +87,11 @@ def _split_report(tmp_path, monkeypatch, *, shards=2, shard_size=2, refused_inde
             document, job_id = captured
             points = document["_explicit_points"]
             index = int(points[0]["temperature_c"]) // shard_size
-            shard_of_job[job_id] = index
+            if index == refused_index:
+                runner.queue(
+                    f"launch --job {job_id} --apply",
+                    fake_completed(returncode=75, stderr=_CAPACITY_REFUSAL),
+                )
             worker = json.loads(
                 _sim_report(
                     corner_ids=tuple(
@@ -113,14 +117,6 @@ def _split_report(tmp_path, monkeypatch, *, shards=2, shard_size=2, refused_inde
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
 
-    real_launch = sb.launch_job
-
-    def _refuse_second(config, job_id, *, runner=None):
-        if refused_index is not None and shard_of_job.get(job_id) == refused_index:
-            raise sb.BatchError("refused", code=sb.BATCH_NO_CAPACITY_CODE)
-        return real_launch(config, job_id, runner=runner)
-
-    monkeypatch.setattr(sb, "launch_job", _refuse_second)
     monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
 
     _write_body(tmp_path)
