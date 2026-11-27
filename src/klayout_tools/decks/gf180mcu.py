@@ -332,12 +332,11 @@ are always the real, unmodified DRM values:
   subtractions (``ngate = (comp AND nplus).not(nwell OR dnwell_n) AND
   ((poly2 AND comp).not(res_mk))``, and the ``pgate`` mirror) --
   ``DerivedLayer`` expresses a two-layer boolean only; approximated with the
-  two-layer gate region (``poly2 AND comp``), so
-  *every* transistor gate is measured against both implants. A gate of one
-  channel type drawn within 0.23um of the opposite implant is therefore
-  flagged where the official rule would not look at it -- conservative (a
-  false positive on geometry no ``NP.5a``/``PP.5a`` violation can hide in),
-  never a missed violation.
+  two-layer gate region (``poly2 AND comp``), so *every* transistor gate is
+  measured against both implants. A gate of one channel type drawn within
+  0.23um of the opposite implant is therefore flagged where the official rule
+  would not look at it -- conservative (a false positive on geometry no
+  ``NP.5a``/``PP.5a`` violation can hide in), never a missed violation.
 - ``nplus.enclosing.comp.1``/``pplus.enclosing.comp.1``: the official
   ``NP.5b``/``PP.5b`` exclude butting edges (``nplus.edges.not
   (nplus_butted_edges)``) and are relaxed to as little as 0.02um by the
@@ -732,6 +731,7 @@ DECK: list[DrcRule] = [
         check="enclosing",
         threshold_dbu=70,  # 0.07 um
         # DRM 7.12 Contact, rule "CO.3": "Poly2 overlap of contact" -> 0.07um
+        other_layer_subtract=((108, 5),),  # PDK deck's `contact.not(sramcore)` (#7960)
         scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_provenance("7.12 Contact", "CO.3"),
     ),
