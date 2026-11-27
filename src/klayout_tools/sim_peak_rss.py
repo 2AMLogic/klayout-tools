@@ -1,9 +1,7 @@
 """Best-effort per-unit engine peak RSS for ``klt sim`` (issue #4867).
 
-``RUSAGE_CHILDREN`` only exposes a process-wide *maximum*, so a unit's peak
-is attributable only when it raised that high-water mark. A unit that peaked
-below an earlier one (or ran beside a larger sibling) reports nothing and the
-``peak_rss_bytes`` report field is omitted rather than guessed.
+``RUSAGE_CHILDREN`` exposes a process-wide maximum. A unit reports
+``peak_rss_bytes`` only when it runs in isolation and raises that mark.
 """
 
 from __future__ import annotations
@@ -28,8 +26,10 @@ def children_max_rss_bytes() -> int | None:
 
 def peak_rss_since(before: int | None) -> int | None:
     """This unit's engine peak RSS, or ``None`` when not attributable."""
+    if before is None:
+        return None
     after = children_max_rss_bytes()
-    if before is None or after is None or after <= before:
+    if after is None or after <= before:
         return None
     return after
 
@@ -37,9 +37,9 @@ def peak_rss_since(before: int | None) -> int | None:
 class RunWatch:
     """Wall-clock and peak-RSS baseline taken when a unit's engine launches."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, measure_peak_rss: bool = True) -> None:
         self._started = time.monotonic()
-        self._rss_before = children_max_rss_bytes()
+        self._rss_before = children_max_rss_bytes() if measure_peak_rss else None
         self._peak: int | None = None
 
     def elapsed(self) -> float:

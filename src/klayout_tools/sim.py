@@ -4047,6 +4047,7 @@ def _run_sim_corners(
         ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
             return _BACKENDS[backend](
                 corner_points=shard_points,
+                concurrent_shards=len(dispatch_points) > 1,
                 netlist_path=dispatch_netlist_path,
                 models_lib=models_lib,
                 analysis=analysis,
@@ -5729,6 +5730,7 @@ def _run_local(
     threads_per_worker: int | None = None,
     pdk_root: str | None = None,
     parallel: bool = False,
+    concurrent_shards: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend -- and, since issue #6896, the one shared local
     entry point both local backends bind their corner runner at.
@@ -5749,6 +5751,8 @@ def _run_local(
     tracks the engine version from the last corner that reports one.
     """
     del request  # unused by either local scheduling strategy, see docstring
+    workers = _resolve_max_workers(max_workers) if parallel else 1
+    measure_peak_rss = not concurrent_shards and min(workers, len(corner_points)) <= 1
 
     if probe_abort is not None:
         if parallel:
@@ -5769,6 +5773,7 @@ def _run_local(
     def run_corner(point: CornerPoint) -> tuple[dict[str, Any], str | None]:
         return _run_corner_with_retry(
             point=point,
+            measure_peak_rss=measure_peak_rss,
             netlist_path=netlist_path,
             models_lib=models_lib,
             analysis=analysis,
@@ -5803,7 +5808,7 @@ def _run_local(
         run_corner,
         corner_points=corner_points,
         measurements_spec=measurements_spec,
-        max_workers=max_workers,
+        max_workers=workers,
         deadline=deadline,
         initial_ppid=initial_ppid,
         checkpoint=checkpoint,
@@ -5970,7 +5975,7 @@ def _run_local_corners_pooled(
     *,
     corner_points: list[CornerPoint],
     measurements_spec: list[dict[str, Any]],
-    max_workers: int | None,
+    max_workers: int,
     deadline: float | None,
     initial_ppid: int | None,
     checkpoint: _Checkpoint | None,
@@ -5998,15 +6003,8 @@ def _run_local_corners_pooled(
     as ``run_corner`` reports it (:func:`_run_corner` never raises) and
     does not abort any sibling corner -- each future is independent.
 
-    **Pool size and the host cap.** ``max_workers`` (the request's
-    ``options.max_workers``, or ``--max-workers``) sizes the pool; when it is
-    ``None`` the conservative CPU-derived default from
-    :func:`_default_max_workers` is used instead. Either way the host-level
-    ``$KLT_SIM_MAX_WORKERS`` cap, when set, is an upper bound on the result
-    (issue #2286) -- a request for more workers than the cap is **clamped,
-    not refused**, with a one-line stderr notice per sweep. See
-    :func:`_resolve_max_workers` and docs/cli/sim.md's "Useful on a
-    workstation, harmful on a shared worker" section.
+    ``max_workers`` is the pool size resolved by :func:`_resolve_max_workers`
+    from the request or CPU-derived default and the ``KLT_SIM_MAX_WORKERS`` cap.
 
     ``deadline``/``initial_ppid`` (issue #473): unlike the naive "submit
     everything up front" the pre-#473 implementation used (which lets the
@@ -6022,8 +6020,6 @@ def _run_local_corners_pooled(
     batched at the end -- so a crash mid-sweep loses at most the corners
     still in flight at that moment.
     """
-    resolved_workers = _resolve_max_workers(max_workers)
-
     total = len(corner_points)
     results: list[tuple[dict[str, Any], str | None] | None] = [None] * total
     stop_reason: str | None = None
@@ -6038,14 +6034,14 @@ def _run_local_corners_pooled(
                 stop_reason = "orphaned"
         return stop_reason
 
-    with ThreadPoolExecutor(max_workers=resolved_workers) as pool:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         in_flight: dict[Any, int] = {}
 
         def _fill() -> None:
             nonlocal next_index
             while (
                 next_index < total
-                and len(in_flight) < resolved_workers
+                and len(in_flight) < max_workers
                 and _stopped() is None
             ):
                 point = corner_points[next_index]
@@ -6907,6 +6903,7 @@ def _mc_seed_optional_echo(mc_seed: dict[str, Any]) -> dict[str, Any]:
 def _run_corner(
     *,
     extra_options_card: str | None = None,
+    measure_peak_rss: bool = True,
     point: CornerPoint,
     netlist_path: str,
     models_lib: str | None,
@@ -7001,7 +6998,7 @@ def _run_corner(
 
         diagnostics: list[dict[str, str]] = list(include_diagnostics)
         diagnostics.extend(_par_call_cap_preflight(deck_path, is_xyce))
-        started = sim_peak_rss.RunWatch()
+        started = sim_peak_rss.RunWatch(measure_peak_rss=measure_peak_rss)
         timed_out = False
         engine_aborted = False
         analysis_never_started = False

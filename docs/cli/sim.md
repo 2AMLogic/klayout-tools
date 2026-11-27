@@ -12112,11 +12112,13 @@ version. `klt sim --check <report>` diagnoses exactly this case — every raw
 
 ## Peak memory and timeout progress (issue #4867)
 
-Each unit report gains an optional, additive `peak_rss_bytes` (engine peak
-resident set size). It is best effort, read from the harness's
-`RUSAGE_CHILDREN` high-water mark, so it appears only when this unit raised
-that mark; it is omitted (never `null`) when it cannot be attributed, e.g. a
-unit beside a larger sibling, or a platform without `resource`.
+Each unit report includes `runtime_s`. On platforms with `resource`, a unit
+that runs alone and raises the harness's `RUSAGE_CHILDREN` high-water mark
+also reports `peak_rss_bytes` (engine peak resident set size). Local workers
+and local shards share that mark. When a dispatch can run multiple corners
+at once, every corner omits `peak_rss_bytes` from its checkpoint and final
+report. A single corner or a sweep limited to one corner at a time can still
+report the estimate.
 
 **Simulated-time-reached on timeout is not available.** Measured on
 ngspice 46 in `-b` mode: no periodic progress output is emitted to the log or
