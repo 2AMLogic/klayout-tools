@@ -11,7 +11,7 @@ not a device.
 :func:`resistor_body_region` is a move, not a rewrite. Dependencies are
 imported from their defining modules, never back through
 ``extract_passive_regions.py`` (which re-exports it as
-``_resistor_body_region``), so the import graph stays one-directional.
+``resistor_body_region``), so the import graph stays one-directional.
 """
 
 from __future__ import annotations

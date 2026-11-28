@@ -6,7 +6,7 @@ cell instance (:func:`_collect_abstract_instances`), erases its interior
 geometry so extraction never descends into it
 (:func:`_abstract_cell_mask_layers` / :func:`_erase_abstracted_cell_geometry`),
 resolves each of its declared LEF-macro pins to a real point in the abstracted
-instance's footprint (:func:`_load_abstract_cell_lefs` /
+instance's footprint (:func:`load_abstract_cell_lefs` /
 :func:`_local_pin_candidate_points` / :func:`_resolve_abstract_cell_pins`),
 and wires that black box back into the surrounding extracted netlist as a
 ``kdb.SubCircuit`` (:func:`_wire_abstract_cells`) -- the whole "cell-level
@@ -91,7 +91,7 @@ if TYPE_CHECKING:
 #: standard cell's own already-drawn pin metal, in the top cell, carrying this
 #: same property id. :func:`_def_net_name_probes` below therefore finds it on
 #: exactly the terms it already finds routed metal on.
-_DEF_NET_NAME_PROPERTY_ID = 1
+DEF_NET_NAME_PROPERTY_ID = 1
 
 #: How many independent probe points :func:`_def_net_name_probes` keeps per
 #: DEF net name -- see :func:`_apply_def_net_name_overrides` for why more than
@@ -658,7 +658,7 @@ def _texts_excluding_abstract_cells(
     return texts
 
 
-def _load_abstract_cell_lefs(
+def load_abstract_cell_lefs(
     lef_paths: tuple[str, ...],
 ) -> dict[str, tuple[str, dict[str, list[dict[str, Any]]]]]:
     """Read every ``--abstract-cell-lef`` file into ``{<MACRO name>: (<lef
@@ -1408,7 +1408,7 @@ def _def_net_name_probes(
             if not properties:
                 iterator.next()
                 continue
-            net_name = properties.get(_DEF_NET_NAME_PROPERTY_ID)
+            net_name = properties.get(DEF_NET_NAME_PROPERTY_ID)
             if not isinstance(net_name, str) or not net_name:
                 iterator.next()
                 continue

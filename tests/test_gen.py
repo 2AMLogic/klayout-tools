@@ -4843,7 +4843,7 @@ def test_cap_array_gf180mcu_top_plate_masks_cover_the_whole_plate(
     tmp_path, both_pdk_root
 ):
     """`extract.py` narrows the recognised top plate to `FuseTop` ∩ every
-    `top_plate_requires` mask (`_capacitor_plate_regions`), so a mask that
+    `top_plate_requires` mask (`capacitor_plate_regions`), so a mask that
     only partially covered the plate would silently shrink the extracted
     capacitance. Both masks must therefore be drawn exactly coincident with
     the drawn `FuseTop` plate -- neither smaller (issue #1555)."""

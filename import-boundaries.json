@@ -2187,12 +2187,6 @@
   ],
   "shared_private_permissions": [
     {
-      "consumer": "klayout_tools.pex_merged_pins",
-      "exporter": "klayout_tools.extract_report_canonicalize",
-      "symbol": "_normalized_netlist_sha256",
-      "reason": "Issue #7787: after binding declared ports, merged PEX must recompute the same connectivity digest as the runset extractor from the effective device and net records."
-    },
-    {
       "consumer": "klayout_tools.equiv",
       "exporter": "klayout_tools._yosys_error_messages",
       "symbol": "_yosys_error_message",
@@ -2203,12 +2197,6 @@
       "exporter": "klayout_tools._yosys_error_messages",
       "symbol": "_synthesis_error_message",
       "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); synthesize.py is at its file-size ratchet ceiling, so promote to public when it is next split."
-    },
-    {
-      "consumer": "klayout_tools.cli.pex_text",
-      "exporter": "klayout_tools.cli.extract_text",
-      "symbol": "_print_label_layers",
-      "reason": "`klt pex` prints the extraction leg's `--label-layer` echo with `klt extract`'s own renderer so the two text surfaces cannot drift. Was a grandfathered pex_cmd -> extract_cmd exception (issue #2767); issue #5464 moved the importing code to cli/pex_text.py and issue #5481 moved the renderer into cli/extract_text.py, so this records the same single-symbol dependency against both new homes."
     },
     {
       "consumer": "klayout_tools.lvs_runset_reference",
@@ -2601,12 +2589,6 @@
       "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
     },
     {
-      "consumer": "klayout_tools.lvs_power",
-      "exporter": "klayout_tools.extract_abstract",
-      "symbol": "_load_abstract_cell_lefs",
-      "reason": "Issue #4363: the well-pin exclusion must read LEF pin layers with the exact parser `klt extract` uses for abstract-cell probes; promote to a public name when extract_abstract is next reworked."
-    },
-    {
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_assess_job_ceiling",
@@ -2683,12 +2665,6 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_default_batch_job_timeout_s",
       "reason": "Issue #5238: extract_batch and netlist_batch each wrapped this sim_batch timeout formula; the shared job_timeout_seconds helper now owns that one call so the backends cannot drift. Promote to a public name when sim_batch is next split."
-    },
-    {
-      "consumer": "klayout_tools.pex_multi_top",
-      "exporter": "klayout_tools.extract",
-      "symbol": "_default_output_path",
-      "reason": "Issue #5494: multi-top mode writes the combined `-o` netlist itself (`klt extract` writes one file per `--top` into a staging directory instead), so it resolves `-o`'s default with `klt extract`'s own helper rather than restating the `<layout>` + `.spice` convention and risking drift from the single-top default. Promote to public when extract.py is next split."
     },
     {
       "consumer": "klayout_tools._batch_common",
@@ -2829,24 +2805,6 @@
         "consumer": "klayout_tools.erc_spec",
         "exporter": "klayout_tools._paths",
         "symbol": "_validate_via_entries",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.erc",
-        "exporter": "klayout_tools.extract",
-        "symbol": "_capacitor_plate_regions",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.erc",
-        "exporter": "klayout_tools.extract",
-        "symbol": "_capacitor_top_via_overlap_region",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.erc",
-        "exporter": "klayout_tools.extract",
-        "symbol": "_resistor_body_region",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -3123,12 +3081,6 @@
         "consumer": "klayout_tools.place_and_route",
         "exporter": "klayout_tools._paths",
         "symbol": "_tcl_net_list",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_gds_merge",
-        "exporter": "klayout_tools.extract",
-        "symbol": "_DEF_NET_NAME_PROPERTY_ID",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

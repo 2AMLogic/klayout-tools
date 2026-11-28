@@ -226,7 +226,7 @@ def _canonicalize_extract_report_for_rerun_diff(
     return normalized
 
 
-def _normalized_netlist_sha256(devices: list[Any], nets: list[Any]) -> str:
+def normalized_netlist_sha256(devices: list[Any], nets: list[Any]) -> str:
     """Issue #3407: SHA-256 hex digest of this run's flat ``devices[]`` /
     ``nets[]`` connectivity with KLayout's anonymous-net numbering
     normalized away -- the same ``net_id``/``structural_id`` strip,

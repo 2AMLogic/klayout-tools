@@ -77,7 +77,7 @@ def categorize_master(name: str) -> str:
 def load_lef_sizes(paths: tuple[str, ...], error: type[Exception]) -> dict[str, Any]:
     """``{MACRO name: (width_um, height_um)}`` from LEF files / directories.
     First path wins for a duplicated macro (flag order is precedence), same
-    as ``extract_abstract._load_abstract_cell_lefs``."""
+    as ``extract_abstract.load_abstract_cell_lefs``."""
     sizes: dict[str, tuple[float, float]] = {}
     for path in paths:
         if os.path.isdir(path):

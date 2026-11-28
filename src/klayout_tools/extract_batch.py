@@ -54,7 +54,7 @@ from . import (
     sim_batch,
 )
 from .extract_base import REQUEST_SCHEMA
-from .extract_netlist_target import _default_output_path
+from .extract_netlist_target import default_output_path
 from .extract_spef import ExtractError
 
 #: ``--backend`` > ``$KLT_EXTRACT_BACKEND`` > ``local``. A dedicated variable,
@@ -423,7 +423,7 @@ def run_extract_batch(
     )
     no_netlist = bool(request.get("no_netlist"))
     if output is None and not no_netlist:
-        output = _default_output_path(_abs(request["file"], base_dir))
+        output = default_output_path(_abs(request["file"], base_dir))
     config = _resolve_config(pdk, timeout_s)
     ceiling = _check_ceiling(config, timeout_s)
     job_id = _batch_common.make_job_id("extract")

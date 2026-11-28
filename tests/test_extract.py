@@ -4322,7 +4322,7 @@ def test_exclude_capacitor_top_via_overlap_only_cuts_the_overlapping_area():
 def test_exclude_capacitor_top_via_overlap_is_noop_with_no_top_plate_marker_drawn():
     """Issue #775 regression finding: a deck whose `bottom_plate` is *not*
     clipped to the top plate's own footprint (`bottom_plate_oversize_um ==
-    0`, e.g. sky130's MiM stacks -- `_capacitor_plate_regions`'s
+    0`, e.g. sky130's MiM stacks -- `capacitor_plate_regions`'s
     zero-oversize branch returns the bottom conductor's *entire* drawn
     region, unscoped by whether any top-plate mark exists at all) must not
     exclude anything when this capacitor's `top_plate` marker (`capm`) is
@@ -4371,7 +4371,7 @@ def _make_sky130_mim_layout_with_far_away_routing() -> kdb.Layout:
     `met4.drawing` routing stack that has nothing to do with the capacitor --
     no `capm.drawing` drawn anywhere near it. `bottom_plate_oversize_um == 0`
     for sky130's met3 MiM stack (unlike gf180mcu's virtual-bottom-plate
-    derivation), so `_capacitor_plate_regions`'s zero-oversize branch is the
+    derivation), so `capacitor_plate_regions`'s zero-oversize branch is the
     one under test: before the #1388 fix, its unscoped `bottom_region` (the
     *entire* drawn `met3.drawing`, both islands) makes
     `_exclude_capacitor_top_via_overlap` cut the far-away `via3` too, even
@@ -20386,7 +20386,7 @@ def test_def_net_names_warns_when_no_such_property_exists(tmp_path):
 
 
 def test_def_net_names_ignores_other_property_ids(tmp_path):
-    """Only property `_DEF_NET_NAME_PROPERTY_ID` is read. A GDS annotating
+    """Only property `DEF_NET_NAME_PROPERTY_ID` is read. A GDS annotating
     its shapes under some other id is left completely alone (and still gets
     the "found nothing" warning), so this flag cannot quietly consume an
     unrelated annotation convention."""
@@ -25343,20 +25343,20 @@ def _anon_connectivity(first: int, second: int):
 
 
 def test_normalized_netlist_hash_ignores_anonymous_net_numbering():
-    from klayout_tools.extract import _normalized_netlist_sha256
+    from klayout_tools.extract import normalized_netlist_sha256
 
-    base = _normalized_netlist_sha256(*_anon_connectivity(3, 7))
-    renumbered = _normalized_netlist_sha256(*_anon_connectivity(81, 12))
+    base = normalized_netlist_sha256(*_anon_connectivity(3, 7))
+    renumbered = normalized_netlist_sha256(*_anon_connectivity(81, 12))
     assert base == renumbered
 
 
 def test_normalized_netlist_hash_detects_connectivity_change():
-    from klayout_tools.extract import _normalized_netlist_sha256
+    from klayout_tools.extract import normalized_netlist_sha256
 
     devices, nets = _anon_connectivity(3, 7)
-    base = _normalized_netlist_sha256(devices, nets)
+    base = normalized_netlist_sha256(devices, nets)
     devices[1]["nets"]["G"] = "IN"  # rewire M2's gate off the anonymous net
-    assert _normalized_netlist_sha256(devices, nets) != base
+    assert normalized_netlist_sha256(devices, nets) != base
 
 
 def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
@@ -25459,10 +25459,10 @@ def _ref_rewrite_net_name(value, name_map):
 
 
 def test_normalized_netlist_hash_golden_digest_unchanged():
-    from klayout_tools.extract import _normalized_netlist_sha256
+    from klayout_tools.extract import normalized_netlist_sha256
 
     devices, nets = _digest_fixture()
-    assert _normalized_netlist_sha256(devices, nets) == _DIGEST_FIXTURE_SHA256
+    assert normalized_netlist_sha256(devices, nets) == _DIGEST_FIXTURE_SHA256
 
 
 def test_anonymous_net_name_map_matches_reference():
@@ -25550,7 +25550,7 @@ def test_canonicalize_matches_reference_for_shuffled_reports():
 def test_normalized_netlist_hash_scales_roughly_linearly():
     import time
 
-    from klayout_tools.extract import _normalized_netlist_sha256
+    from klayout_tools.extract import normalized_netlist_sha256
 
     def timed(n_nets: int) -> float:
         devices = [
@@ -25559,7 +25559,7 @@ def test_normalized_netlist_hash_scales_roughly_linearly():
         ]
         nets = [{"name": f"\\${i}", "net_id": i} for i in range(n_nets)]
         start = time.perf_counter()
-        _normalized_netlist_sha256(devices, nets)
+        normalized_netlist_sha256(devices, nets)
         return time.perf_counter() - start
 
     small = min(timed(3000) for _ in range(5))

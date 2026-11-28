@@ -60,7 +60,7 @@ from typing import Any
 
 from . import pex_runset
 from ._provenance import sha256_file
-from .extract import ExtractError, _default_output_path
+from .extract import ExtractError, default_output_path
 from .pex_multi_top_flags import (
     MULTI_TOP_UNSUPPORTED_CODE,
 )
@@ -367,7 +367,7 @@ def extract_every_top(
     # restating the convention, so the combined file lands exactly where a
     # single-top run's would.
     combined_netlist_path = os.path.abspath(
-        output if output is not None else _default_output_path(layout_path)
+        output if output is not None else default_output_path(layout_path)
     )
     staging_dir = os.path.join(_pex_work_dir(artifacts_dir, layout_path), "tops")
     try:

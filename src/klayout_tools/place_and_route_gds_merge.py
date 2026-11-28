@@ -295,7 +295,7 @@ def _stamp_single_pin_def_net_names(
     """
     # Local import, mirroring `_post_route_spef_metrics`'s own -- and the
     # module's `klayout.db` convention -- rather than a module-level one.
-    from .extract import _DEF_NET_NAME_PROPERTY_ID, def_net_instance_pins
+    from .extract import DEF_NET_NAME_PROPERTY_ID, def_net_instance_pins
 
     report: dict[str, Any] = {
         "single_pin_markers": 0,
@@ -313,7 +313,7 @@ def _stamp_single_pin_def_net_names(
     named_by_routing: set[str] = set()
     for layer_index in layout.layer_indexes():
         for shape in top_cell.shapes(layer_index).each():
-            value = shape.property(_DEF_NET_NAME_PROPERTY_ID)
+            value = shape.property(DEF_NET_NAME_PROPERTY_ID)
             if isinstance(value, str) and value:
                 named_by_routing.add(value)
     pending = {
@@ -369,7 +369,7 @@ def _stamp_single_pin_def_net_names(
             if not _box_is_inside_drawn_geometry(kdb, top_cell, layer_index, marker):
                 continue
             shape = top_cell.shapes(layer_index).insert(marker)
-            shape.set_property(_DEF_NET_NAME_PROPERTY_ID, net_name)
+            shape.set_property(DEF_NET_NAME_PROPERTY_ID, net_name)
             stamped = True
             break
         if stamped:

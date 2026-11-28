@@ -185,14 +185,14 @@ from .evidence_canonicalize import rerun_result_for
 
 # The cell-level (black-box + pins) abstraction subsystem lives in its own
 # module (issue #1303, split out of this one at ~8800 lines). `_sanitize_
-# instance_name` and `_DEF_NET_NAME_PROPERTY_ID` are re-exported (`X as X`)
-# because `_DEF_NET_NAME_PROPERTY_ID` is used directly by `_extract_netlist`'s
+# instance_name` and `DEF_NET_NAME_PROPERTY_ID` are re-exported (`X as X`)
+# because `DEF_NET_NAME_PROPERTY_ID` is used directly by `_extract_netlist`'s
 # `--def-net-names` diagnostic, `_sanitize_instance_name` is used directly by
 # the RC-parasitics subsystem (`extract_parasitics.py`, issue #1572, which
 # imports it from `extract_abstract.py` itself rather than through this
 # re-export) -- and the test suite imports `_sanitize_instance_name` from
 # `klayout_tools.extract` by name.
-from .extract_abstract import _DEF_NET_NAME_PROPERTY_ID as _DEF_NET_NAME_PROPERTY_ID
+from .extract_abstract import DEF_NET_NAME_PROPERTY_ID as DEF_NET_NAME_PROPERTY_ID
 from .extract_abstract import (
     _abstract_cell_body_identity_cover,
     _abstract_cell_global_net_ports,
@@ -203,11 +203,11 @@ from .extract_abstract import (
     _connect_abstract_well_tie,
     _def_net_name_probes,
     _erase_abstracted_cell_geometry,
-    _load_abstract_cell_lefs,
     _local_pin_candidate_points,
     _texts_excluding_abstract_cells,
     _wire_abstract_cells,
     lef_layer_probe_roles,
+    load_abstract_cell_lefs,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 from .extract_abstract_poly import connect_terminal_poly, terminal_poly
@@ -287,15 +287,16 @@ from .extract_flavour import (
 from .extract_inductors import connect_inductors, cut_inductor_windings
 from .extract_layer_coverage import capture_layout_coverage
 from .extract_mos_capacitor import _resolve_mos_capacitors
-
-# Moved out (issue #5481) and re-exported, so every existing
-# `from .extract import _resolve_netlist_target` still resolves.
-from .extract_netlist_target import _default_output_path as _default_output_path
 from .extract_netlist_target import _finish_netlist_write as _finish_netlist_write
 from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_target
 from .extract_netlist_target import (
     _validate_no_netlist_flags as _validate_no_netlist_flags,
 )
+
+# Moved out (issue #5481) and re-exported, so every existing
+# `from .extract import _resolve_netlist_target` still resolves -- and
+# `pex_multi_top.py` still resolves `default_output_path` from here (issue #8102).
+from .extract_netlist_target import default_output_path as default_output_path
 from .extract_netlist_write import PIN_TIE_RESISTANCE as PIN_TIE_RESISTANCE
 from .extract_netlist_write import (
     _apply_pin_ties_if_circuit as _apply_pin_ties_if_circuit,
@@ -327,21 +328,21 @@ from .extract_parasitics_block import build_parasitics_report
 from .extract_passive_regions import MOM_FEED_TOKENS as MOM_FEED_TOKENS
 from .extract_passive_regions import (
     _build_mom_capacitor_extractor,
-    _capacitor_plate_regions,
     _capacitor_top_via_exclusions,
     _detect_unclaimed_resistor_markers,
     _diode_terminal_region,
     _exclude_capacitor_top_via_overlap,
     _resolve_resistors,
     _unselected_capacitor_variant_warnings,
+    capacitor_plate_regions,
 )
 from .extract_passive_regions import (
-    _capacitor_top_via_overlap_region as _capacitor_top_via_overlap_region,
+    capacitor_top_via_overlap_region as capacitor_top_via_overlap_region,
 )
-from .extract_passive_regions import _resistor_body_region as _resistor_body_region
 from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
+from .extract_passive_regions import resistor_body_region as resistor_body_region
 from .extract_pdk_resolve import (
     _require_pdk_for_device_models as _require_pdk_for_device_models,
 )
@@ -390,13 +391,13 @@ from .extract_report_canonicalize import (
     _canonicalize_extract_report_for_rerun_diff,  # noqa: F401 (compatibility re-export)
 )
 from .extract_report_canonicalize import (
-    _normalized_netlist_sha256 as _normalized_netlist_sha256,
-)
-from .extract_report_canonicalize import (
     _rewrite_net_name as _rewrite_net_name,
 )
 from .extract_report_canonicalize import (
     _strip_net_id_and_rewrite_names as _strip_net_id_and_rewrite_names,
+)
+from .extract_report_canonicalize import (
+    normalized_netlist_sha256 as normalized_netlist_sha256,
 )
 from .extract_spef import (
     DefNetConnections,
@@ -1397,7 +1398,7 @@ def run_extract(
     ``def_net_names`` (``klt extract --def-net-names``, issue #951, Epic #700
     Phase 3) names each routed net from the **DEF net name** KLayout's LEF/DEF
     reader stored on its geometry as GDS shape property
-    :data:`_DEF_NET_NAME_PROPERTY_ID`, instead of from GDS text labels, for
+    :data:`DEF_NET_NAME_PROPERTY_ID`, instead of from GDS text labels, for
     every net that carries one. On a routed GDS from ``klt place-and-route``
     this replaces KLayout's synthesised ``$<id>`` placeholders and
     pin-label-joined ``A,X`` names with the design's own ``_019_`` /
@@ -3570,7 +3571,7 @@ def extract_netlist_from_layout(
     ``def_net_names`` (issue #951): forwarded to ``_extract_netlist`` --
     ``True`` names routed nets from the DEF net name KLayout's LEF/DEF reader
     left on their geometry as GDS shape property
-    :data:`_DEF_NET_NAME_PROPERTY_ID`, rather than from text labels. Off by
+    :data:`DEF_NET_NAME_PROPERTY_ID`, rather than from text labels. Off by
     default (unchanged behavior).
 
     ``parasitics_top_cell_only`` (issue #1704): forwarded to
@@ -3810,7 +3811,7 @@ def extract_netlist_from_layout(
             )
             _erase_abstracted_cell_geometry(layout, matched_cell_indices, mask_layers)
         if abstract_cell_lef_paths:
-            lef_macros = _load_abstract_cell_lefs(abstract_cell_lef_paths)
+            lef_macros = load_abstract_cell_lefs(abstract_cell_lef_paths)
             # Issue #2658: the LEF layer name -> deck metal level lookup
             # that lets each `PORT` box be probed on its own metal first.
             # Resolved here, beside the LEF read it serves, and only when
@@ -5033,9 +5034,7 @@ def _recognised_capacitor_top_regions(
     """
     regions: dict[str, kdb.Region] = {}
     for capacitor in deck.capacitors:
-        top_region, bottom_region = _capacitor_plate_regions(
-            layout, top_cell, capacitor
-        )
+        top_region, bottom_region = capacitor_plate_regions(layout, top_cell, capacitor)
         if top_region.is_empty() or bottom_region.is_empty():
             continue
         regions[capacitor.name] = top_region
@@ -6223,7 +6222,7 @@ def _extract_netlist(
 
     ``def_net_names`` (issue #951): when ``True``, each routed net is renamed
     to the DEF net name its geometry carries as GDS shape property
-    :data:`_DEF_NET_NAME_PROPERTY_ID`, overriding the text-label-derived name
+    :data:`DEF_NET_NAME_PROPERTY_ID`, overriding the text-label-derived name
     ``extract_netlist()`` assigned. Probe points are collected up front (they
     must be read off raw shapes, before ``_resolve_black_box_regions`` can
     mask the metal regions) and applied straight after ``extract_netlist()``,
@@ -7242,11 +7241,9 @@ def _extract_netlist(
 
         # Plate geometry derivation shared with the top-plate-via/bottom-
         # plate overlap exclusion above (#364) -- see
-        # `_capacitor_plate_regions`'s docstring for why the two must never
+        # `capacitor_plate_regions`'s docstring for why the two must never
         # drift apart on what counts as "this capacitor's bottom plate".
-        top_region, bottom_region = _capacitor_plate_regions(
-            layout, top_cell, capacitor
-        )
+        top_region, bottom_region = capacitor_plate_regions(layout, top_cell, capacitor)
 
         # Dummy-device suppression (issue #295, extended to resistors and
         # bipolars in #462, to diodes in #542, to capacitors here): count and
@@ -7742,11 +7739,11 @@ def _extract_netlist(
             # Loud, not silent: the opt-in found nothing to rename at all,
             # which almost always means this layout did not come from a
             # DEF->GDS merge (no shape carries property
-            # `_DEF_NET_NAME_PROPERTY_ID`), so every net below is still named
+            # `DEF_NET_NAME_PROPERTY_ID`), so every net below is still named
             # the default text-label way.
             warnings.append(
                 "--def-net-names found no DEF net-name shape property "
-                f"({_DEF_NET_NAME_PROPERTY_ID}) on any routed-metal shape in "
+                f"({DEF_NET_NAME_PROPERTY_ID}) on any routed-metal shape in "
                 f"'{top_cell.name}' -- net names are unchanged (this flag "
                 "expects a layout produced by a LEF/DEF -> GDS merge, e.g. "
                 "`klt place-and-route`'s routed GDS)"

@@ -25,7 +25,7 @@ from ._provenance import sha256_file
 from .extract_spef import ExtractError
 
 
-def _default_output_path(path: str) -> str:
+def default_output_path(path: str) -> str:
     """``<file>`` with its extension replaced by ``.spice`` (spike section 2a)."""
     stem, _ext = os.path.splitext(path)
     return f"{stem}.spice"
@@ -41,7 +41,7 @@ def resolve_netlist_target(
     if no_netlist:
         scratch_dir = tempfile.mkdtemp(prefix="klt-extract-")
         return os.path.join(scratch_dir, "extracted.spice"), scratch_dir
-    netlist_path = output if output is not None else _default_output_path(path)
+    netlist_path = output if output is not None else default_output_path(path)
     out_dir = os.path.dirname(os.path.abspath(netlist_path))
     try:
         os.makedirs(out_dir, exist_ok=True)

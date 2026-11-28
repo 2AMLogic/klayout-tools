@@ -47,7 +47,7 @@ def _print_device_models(device_models: dict | None) -> None:
     print(f"device_models: {rendered}")
 
 
-def _print_label_layers(label_layers: dict | None) -> None:
+def print_label_layers(label_layers: dict | None) -> None:
     """One human-readable line for the response's ``label_layers`` echo
     (issue #2656), or nothing when ``--label-layer`` was not given.
 
@@ -149,7 +149,7 @@ def _print_text(report: dict) -> None:
     # Called unconditionally, with the absent/empty test inside the helper, so
     # this line adds no branch to an already long function -- the same shape
     # `_print_substrate_spreading` below already uses.
-    _print_label_layers(report.get("label_layers"))
+    print_label_layers(report.get("label_layers"))
     _print_device_models(report.get("device_models"))
     _print_probes(report.get("probes"))
     print(f"top: {report['top']}")

@@ -148,15 +148,15 @@ def test_normalized_netlist_hash_ignores_structural_id_field(tmp_path):
     `nets[]` entries with `structural_id` leaves
     `netlist_normalized_sha256` byte-identical -- the field is stripped
     alongside `net_id` before the digest is serialized."""
-    from klayout_tools.extract import _normalized_netlist_sha256
+    from klayout_tools.extract import normalized_netlist_sha256
 
     report = _circuit_report()
     legacy = [
         {k: v for k, v in n.items() if k != "structural_id"} for n in report["nets"]
     ]
-    assert _normalized_netlist_sha256(
+    assert normalized_netlist_sha256(
         report["devices"], report["nets"]
-    ) == _normalized_netlist_sha256(report["devices"], legacy)
+    ) == normalized_netlist_sha256(report["devices"], legacy)
 
     # Golden-digest pin across the field's introduction: the annotated
     # `_digest_fixture` (which carries floating nets, non-dict entries and
@@ -167,7 +167,7 @@ def test_normalized_netlist_hash_ignores_structural_id_field(tmp_path):
         if isinstance(entry, dict):
             entry["structural_id"] = "$anon<ignored.by.digest>"
     assert (
-        _normalized_netlist_sha256(fixture_devices, fixture_nets)
+        normalized_netlist_sha256(fixture_devices, fixture_nets)
         == _DIGEST_FIXTURE_SHA256
     )
 

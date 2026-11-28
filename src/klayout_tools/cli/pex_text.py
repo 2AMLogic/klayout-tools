@@ -14,7 +14,7 @@ from ..env_provenance import render_path_field
 
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
 # prints for its own echo, reused rather than copied.
-from .extract_text import _print_label_layers
+from .extract_text import print_label_layers
 
 
 def _print_submitted_text(report: dict) -> None:
@@ -213,7 +213,7 @@ def _print_text(report: dict) -> None:
     # Additive (issues #6559, #6606): only printed for a runset-engine leg.
     _print_runset_engine(extraction)
     # Additive (issue #2686): only printed when --label-layer was given.
-    _print_label_layers(extraction.get("label_layers"))
+    print_label_layers(extraction.get("label_layers"))
     # Additive (issue #976): only printed when --critical-net was given.
     critical_nets = extraction.get("critical_nets")
     if critical_nets:
