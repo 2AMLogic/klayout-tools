@@ -3,7 +3,10 @@
 Each ``measurements[]`` form module (:mod:`klayout_tools.sim_crossings`,
 :mod:`klayout_tools.sim_energy`, ...) declares one form and carries the same
 small primitives around it: a one-key "is this entry declared with my form"
-test, the rawfile path its ``.control`` block writes, the filter-and-index
+test, the is-it-an-object / unknown-key prelude its body validation opens
+with, the single-ended ``"v(node)"`` selector check the rawfile-indexed forms
+share, the rawfile path its ``.control`` block writes, the first-declared-order
+key dedup its deck lines and rawfiles are numbered by, the filter-and-index
 loop that reads those rawfiles back per corner, the ``analysis.kind`` gate
 its context validation opens with, and (for the forms whose responses index
 by name) the duplicate-measurement-name guard. Those are identical modulo
@@ -25,13 +28,63 @@ from typing import Any, TypeVar
 
 from . import sim_raw
 from .sim_errors import SimError
+from .sim_forms import normalize_selector
 
 OutcomeT = TypeVar("OutcomeT")
+KeyT = TypeVar("KeyT")
 
 
 def declares(spec: dict[str, Any], key: str) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``key``."""
     return spec.get(key) is not None
+
+
+def validate_form_object(
+    name: Any,
+    body: Any,
+    *,
+    form: str,
+    allowed_keys: frozenset[str],
+    example: str,
+) -> None:
+    """Refuse a ``spec[form]`` body that is not an object, or that carries
+    keys outside ``allowed_keys`` -- the prelude every per-kind body
+    validation opens with.
+
+    ``form`` is the caller's own form key (``"energy"``, ``"crossings"``,
+    ...), quoted by the first diagnostic and named bare by the second;
+    ``example`` is the form's own minimal body literal, shown verbatim, and
+    the allowed keys are listed sorted, so both messages read exactly as the
+    per-kind module wrote them. Which keys are *required* stays the form's
+    own check.
+    """
+    if not isinstance(body, dict):
+        raise SimError(
+            f"measurement '{name}': '{form}' must be an object, e.g. {example}"
+        )
+    unknown = sorted(set(body) - allowed_keys)
+    if unknown:
+        raise SimError(
+            f"measurement '{name}': unknown {form} key(s) {unknown}; "
+            f"allowed: {sorted(allowed_keys)}"
+        )
+
+
+def require_voltage_selectors(
+    name: Any, body: dict[str, Any], keys: tuple[str, ...], *, form: str
+) -> None:
+    """Refuse any ``body[key]`` of ``keys`` that is not a single-ended
+    ``"v(node)"`` selector -- one node token, no whitespace, comma or
+    parenthesis -- as :func:`klayout_tools.sim_forms.normalize_selector`
+    accepts it. ``keys`` is checked in order, so the first offending key is
+    the one the diagnostic names; ``form`` is the caller's own form key."""
+    for key in keys:
+        if normalize_selector(body.get(key)) is None:
+            raise SimError(
+                f"measurement '{name}': {form}.{key} must be a single-ended "
+                '"v(node)" selector with one node token (no whitespace, '
+                f"comma or parenthesis); got {body.get(key)!r}"
+            )
 
 
 def rawfile_path(corner_dir: str, prefix: str, index: int) -> str:
@@ -61,6 +114,21 @@ def extract_indexed(
         outcomes[position] = extractor(spec, rawfile_path(corner_dir, prefix, index))
         index += 1
     return outcomes
+
+
+def unique_keys(
+    specs: list[dict[str, Any]], key_fn: Callable[[dict[str, Any]], KeyT]
+) -> list[KeyT]:
+    """``key_fn(spec)`` for every distinct value over ``specs``, in
+    first-declared order -- the order a form's deck lines and rawfiles are
+    numbered in, so two entries that differ only in what they *compute* share
+    one rawfile."""
+    keys: list[KeyT] = []
+    for spec in specs:
+        key = key_fn(spec)
+        if key not in keys:
+            keys.append(key)
+    return keys
 
 
 def require_analysis_kind(

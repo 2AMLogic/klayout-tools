@@ -191,20 +191,18 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
 
 
 def validate_tian_spec(name: Any, body: Any) -> None:
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'tian' must be an object, e.g. "
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="tian",
+        allowed_keys=_ALLOWED_KEYS,
+        example=(
             '{"voltage_pass": "inj_v", "current_pass": "inj_i", '
             '"tv": "v(fv)", "ti": "i(vfi)", "metric": "phase_margin_deg"}, or '
             '"series_injection": {"load_node": "b", "source": "vinj"} in '
             "place of tv/ti"
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown tian key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+        ),
+    )
     for key in ("voltage_pass", "current_pass"):
         value = body.get(key)
         if not isinstance(value, str) or not value:

@@ -93,17 +93,13 @@ def _positive_number(value: Any) -> bool:
 
 def validate_noise_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].noise`` object's shape."""
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'noise' must be an object, e.g. "
-            '{"quantity": "inoise", "at_hz": 1000}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown noise key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="noise",
+        allowed_keys=_ALLOWED_KEYS,
+        example='{"quantity": "inoise", "at_hz": 1000}',
+    )
     if body.get("quantity") not in NOISE_QUANTITIES:
         raise SimError(
             f"measurement '{name}': noise.quantity must be one of "

@@ -114,17 +114,13 @@ def _seconds(name: Any, body: dict[str, Any], key: str) -> float | None:
 def validate_step_resolution_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].step_resolution`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'step_resolution' must be an object, e.g. "
-            '{"signal": "v(sw)", "level": 2.5, "window": "10n"}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown step_resolution key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="step_resolution",
+        allowed_keys=_ALLOWED_KEYS,
+        example='{"signal": "v(sw)", "level": 2.5, "window": "10n"}',
+    )
     sim_crossings._validate_signal(name, body.get("signal"))
     sim_crossings._validate_level(name, body.get("level"))
     edge = body.get("edge", "either")

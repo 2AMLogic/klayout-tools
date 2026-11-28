@@ -107,12 +107,9 @@ def _params(spec: dict[str, Any]) -> tuple[str, str, float, float, float]:
 def unique_pairs(measurements_spec: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """Distinct normalized ``(x, y)`` pairs, in first-declared order -- also
     the order their deck lines and rawfiles are numbered in."""
-    pairs: list[tuple[str, str]] = []
-    for spec in slope_band_measurements(measurements_spec):
-        pair = _pair(spec)
-        if pair not in pairs:
-            pairs.append(pair)
-    return pairs
+    return sim_measurement_kind.unique_keys(
+        slope_band_measurements(measurements_spec), _pair
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -133,18 +130,16 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
 
 
 def _validate_keys(name: Any, body: Any) -> None:
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'slope_band' must be an object, e.g. "
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="slope_band",
+        allowed_keys=_ALLOWED_KEYS,
+        example=(
             '{"y": "v(out)", "x": "v(in)", "anchor": 0.5, "min_slope": 1.0, '
             '"max_slope": 2.5, "report": "y_span"}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown slope_band key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+        ),
+    )
     missing = [key for key in _KEYS if key not in body]
     if missing:
         raise SimError(
@@ -156,13 +151,9 @@ def _validate_keys(name: Any, body: Any) -> None:
 
 def validate_slope_band_spec(name: Any, body: Any) -> None:
     _validate_keys(name, body)
-    for key in _SELECTOR_KEYS:
-        if normalize_selector(body.get(key)) is None:
-            raise SimError(
-                f"measurement '{name}': slope_band.{key} must be a "
-                f'single-ended "v(node)" selector with one node token (no '
-                f"whitespace, comma or parenthesis); got {body.get(key)!r}"
-            )
+    sim_measurement_kind.require_voltage_selectors(
+        name, body, _SELECTOR_KEYS, form="slope_band"
+    )
     for key in _NUMBER_KEYS:
         if not is_finite_number(body.get(key)):
             raise SimError(

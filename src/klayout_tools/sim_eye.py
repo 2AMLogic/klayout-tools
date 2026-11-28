@@ -104,17 +104,13 @@ def _seconds(name: Any, body: dict[str, Any], key: str) -> float | None:
 def validate_eye_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].eye`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'eye' must be an object, e.g. "
-            '{"signal": "v(rx)", "ui": "100p", "uis": 64}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown eye key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="eye",
+        allowed_keys=_ALLOWED_KEYS,
+        example='{"signal": "v(rx)", "ui": "100p", "uis": 64}',
+    )
     sim_crossings._validate_signal(name, body.get("signal"))
     ui = _seconds(name, body, "ui") if body.get("ui") is not None else None
     if ui is None or ui <= 0:
