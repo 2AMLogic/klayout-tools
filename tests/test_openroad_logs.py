@@ -47,7 +47,7 @@ def _invoke(tmp_path, monkeypatch, *, exit_code=0):
         ],
         expect_script=script,
     )
-    return engine._run_openroad(
+    return engine.run_openroad(
         str(script),
         str(tmp_path / "metrics.json"),
         error_cls=EngineError,
@@ -97,7 +97,7 @@ def test_non_utf8_process_output_is_retained_without_masking_failure(
             "raise SystemExit(17)",
         ],
     )
-    result = engine._run_openroad(
+    result = engine.run_openroad(
         str(tmp_path / "run.tcl"),
         "metrics",
         error_cls=EngineError,
@@ -122,9 +122,7 @@ def test_launch_failure_has_empty_streams_and_retained_diagnostic(
     with pytest.raises(
         EngineError, match="could not launch openroad: engine missing"
     ) as exc:
-        engine._run_openroad(
-            str(tmp_path / "run.tcl"), "metrics", error_cls=EngineError
-        )
+        engine.run_openroad(str(tmp_path / "run.tcl"), "metrics", error_cls=EngineError)
     records = list(tmp_path.glob("openroad-logs/*/invocation.json"))
     assert len(records) == 1
     record = json.loads(records[0].read_text())
@@ -219,7 +217,7 @@ def test_timeout_keeps_partial_byte_streams_without_adding_timeout(
     monkeypatch.setattr(engine, "Popen", _TimingOutProc)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
     with pytest.raises(EngineError, match="timed out") as exc:
-        engine._run_openroad(
+        engine.run_openroad(
             str(tmp_path / "run.tcl"),
             "metrics",
             error_cls=EngineError,
@@ -250,9 +248,7 @@ def test_launch_and_retention_failure_preserve_primary_diagnosis(tmp_path, monke
     with pytest.raises(
         EngineError, match="could not launch openroad: original missing executable"
     ) as exc:
-        engine._run_openroad(
-            str(tmp_path / "run.tcl"), "metrics", error_cls=EngineError
-        )
+        engine.run_openroad(str(tmp_path / "run.tcl"), "metrics", error_cls=EngineError)
     assert "retention_errors" in str(exc.value)
 
 
@@ -282,7 +278,7 @@ def test_interrupt_retains_available_data_and_remains_an_interrupt(
     monkeypatch.setattr(engine, "Popen", _InterruptedProc)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
     with pytest.raises(KeyboardInterrupt) as exc:
-        engine._run_openroad(
+        engine.run_openroad(
             str(tmp_path / "run.tcl"),
             "metrics",
             error_cls=EngineError,
@@ -324,7 +320,7 @@ def test_transcripts_exist_and_grow_while_process_runs(tmp_path, monkeypatch):
             return None, None
 
     monkeypatch.setattr(engine, "Popen", _LiveProc)
-    result = engine._run_openroad(
+    result = engine.run_openroad(
         str(tmp_path / "run.tcl"),
         "metrics",
         error_cls=EngineError,
@@ -363,7 +359,7 @@ def test_interrupt_keeps_transcript_written_before_it(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "Popen", _FlushedInterruptProc)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
     with pytest.raises(KeyboardInterrupt):
-        engine._run_openroad(
+        engine.run_openroad(
             str(tmp_path / "run.tcl"),
             "metrics",
             error_cls=EngineError,

@@ -54,7 +54,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._layout import clip_box as _clip_box
-from ._layout import load_layout
+from ._layout import load_layout, require_known_cells, validate_cells
 from ._layout import select_top_cells as _select_top_cells_shared
 from ._provenance import build_provenance
 from .env_provenance import repo_relative_path
@@ -175,16 +175,10 @@ def run_ring_check(
     if not layers:
         raise RingCheckError("layer set is empty: at least one layer required")
 
-    selected_cells = _validate_cells(cells)
+    selected_cells = validate_cells(cells, RingCheckError)
 
     layout = load_layout(layout_path, RingCheckError)
-
-    if selected_cells is not None:
-        unknown = [name for name in selected_cells if layout.cell(name) is None]
-        if unknown:
-            raise RingCheckError(
-                "unknown cell(s) in --cells: " + ", ".join(repr(n) for n in unknown)
-            )
+    require_known_cells(layout, selected_cells, RingCheckError)
 
     # Imported lazily (after load_layout, which already paid this cost) for
     # kdb.Region() below -- matching drc.py's ordering.
@@ -254,26 +248,6 @@ def run_ring_check(
         "violations": violations,
         "provenance": build_provenance(input_path=layout_path),
     }
-
-
-def _validate_cells(cells: list[str] | None) -> list[str] | None:
-    """Validate an explicit ``cells`` scope; return it de-duplicated (order
-    preserved) or ``None`` when no scope was requested."""
-    if cells is None:
-        return None
-    if isinstance(cells, str) or not isinstance(cells, (list, tuple)):
-        raise RingCheckError("--cells must be a list of cell names")
-    if not cells:
-        raise RingCheckError("--cells is empty: at least one cell name required")
-    seen: list[str] = []
-    for name in cells:
-        if not isinstance(name, str) or not name.strip():
-            raise RingCheckError(
-                f"malformed cell name in --cells: {name!r} (must be a non-empty string)"
-            )
-        if name not in seen:
-            seen.append(name)
-    return seen
 
 
 def _scoped_region(

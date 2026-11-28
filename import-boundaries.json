@@ -710,6 +710,7 @@
         "klayout_tools.pdk_corner_skew",
         "klayout_tools.pdk_decks",
         "klayout_tools.pdk_descriptor",
+        "klayout_tools._pdk_descriptor_reader",
         "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_model_aliases",
@@ -896,6 +897,7 @@
         "klayout_tools._macros_blackbox",
         "klayout_tools._native",
         "klayout_tools._openroad_engine",
+        "klayout_tools._openroad_io",
         "klayout_tools._openroad_logs",
         "klayout_tools._openroad_mount_hint",
         "klayout_tools._openroad_process",
@@ -2263,12 +2265,6 @@
       "reason": "Issue #5792: reuses the exact behavioural-latch regex place_and_route's netlist pre-flight rejects on, so the synthesize-time warning and the P&R rejection cannot drift; lives in the shared netlist_construct_scan module (place_and_route group) alongside the other two scanner primitives."
     },
     {
-      "consumer": "klayout_tools.characterize_osdi",
-      "exporter": "klayout_tools.sim",
-      "symbol": "_OFFHOST_BACKENDS",
-      "reason": "Issue #4911: characterize forwards runner-resolved OSDI entries only for the same off-host backends klt sim recognises; promote to a public name when sim is next split."
-    },
-    {
       "consumer": "klayout_tools.evidence_lint",
       "exporter": "klayout_tools.sim",
       "symbol": "_grade_corners",
@@ -2563,12 +2559,6 @@
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
-      "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools.sim",
-      "symbol": "_yield_host_default_backend",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
       "consumer": "klayout_tools.signoff_generator_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_classify_collected_report",
@@ -2783,30 +2773,6 @@
       },
       {
         "consumer": "klayout_tools.erc",
-        "exporter": "klayout_tools._devices",
-        "symbol": "_conductor_role_layers",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.erc",
-        "exporter": "klayout_tools._devices",
-        "symbol": "_cut_device_bodies",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.erc",
-        "exporter": "klayout_tools._devices",
-        "symbol": "_device_body_cuts",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.erc",
-        "exporter": "klayout_tools._devices",
-        "symbol": "_validate_devices",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.erc",
         "exporter": "klayout_tools._paths",
         "symbol": "_load_spec_json",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -2851,12 +2817,6 @@
         "consumer": "klayout_tools.extract",
         "exporter": "klayout_tools._paths",
         "symbol": "_load_request_json",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.extract_finfet",
-        "exporter": "klayout_tools.pdk_models",
-        "symbol": "_format_um",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -2969,12 +2929,6 @@
       },
       {
         "consumer": "klayout_tools.mom",
-        "exporter": "klayout_tools._native",
-        "symbol": "_load_native_extension",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.mom",
         "exporter": "klayout_tools._paths",
         "symbol": "_load_spec_json",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -2998,18 +2952,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.netlist_normalize",
-        "exporter": "klayout_tools.pdk_models",
-        "symbol": "_format_um",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.netlist_normalize",
-        "exporter": "klayout_tools.pdk_models",
-        "symbol": "_format_um2",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.op_sanity",
         "exporter": "klayout_tools.sim",
         "symbol": "_SIMULATION_ABORTED_RE",
@@ -3024,12 +2966,6 @@
       {
         "consumer": "klayout_tools.op_sanity",
         "exporter": "klayout_tools.sim",
-        "symbol": "_corner_lib_lines",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
         "symbol": "_expand_corners",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
@@ -3038,24 +2974,6 @@
         "exporter": "klayout_tools.sim",
         "symbol": "_extract_engine_version",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_resolve_netlist_include",
-        "reason": "op-lint follows `.include`s with the same resolver the sweep uses (issue #3101); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_scale_supply_waveforms",
-        "reason": "op-lint rescales `supply_waveforms` rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_supply_alter_lines",
-        "reason": "op-lint emits `alter` lines for supply rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
       },
       {
         "consumer": "klayout_tools.pdk_pcell",
@@ -3073,36 +2991,6 @@
         "consumer": "klayout_tools.pex",
         "exporter": "klayout_tools._paths",
         "symbol": "_resolve_relative",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_OpenRoadResult",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_count_violations",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_openroad_version",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_run_openroad",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_status",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -3130,30 +3018,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.place_and_route_script",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_violation_report_lines",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_count_violations",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_run_openroad",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_status",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.place_and_route_sta",
         "exporter": "klayout_tools._paths",
         "symbol": "_count_spef_nets_annotated",
@@ -3163,42 +3027,6 @@
         "consumer": "klayout_tools.place_and_route_sta",
         "exporter": "klayout_tools._paths",
         "symbol": "_tcl_net_list",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_OpenRoadResult",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_count_violations",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_openroad_version",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_run_openroad",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_status",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_violation_report_lines",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -3217,30 +3045,6 @@
         "consumer": "klayout_tools.post_route_sta",
         "exporter": "klayout_tools._paths",
         "symbol": "_tcl_net_list",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.power",
-        "exporter": "klayout_tools._devices",
-        "symbol": "_conductor_role_layers",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.power",
-        "exporter": "klayout_tools._devices",
-        "symbol": "_cut_device_bodies",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.power",
-        "exporter": "klayout_tools._devices",
-        "symbol": "_device_body_cuts",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.power",
-        "exporter": "klayout_tools._devices",
-        "symbol": "_validate_devices",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -3292,12 +3096,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.sta",
-        "exporter": "klayout_tools._native",
-        "symbol": "_load_native_extension",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.synthesize",
         "exporter": "klayout_tools._paths",
         "symbol": "_load_request_json",
@@ -3316,12 +3114,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.yield_analysis",
-        "exporter": "klayout_tools._native",
-        "symbol": "_load_native_extension",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.yield_campaign",
         "exporter": "klayout_tools._paths",
         "symbol": "_load_request_json",
@@ -3337,12 +3129,6 @@
         "consumer": "klayout_tools.yield_campaign",
         "exporter": "klayout_tools.sim",
         "symbol": "_derive_mc_seed",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.yield_sensitivity",
-        "exporter": "klayout_tools._native",
-        "symbol": "_load_native_extension",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       }
     ],

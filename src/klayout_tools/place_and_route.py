@@ -34,7 +34,6 @@ in the tables above is hand-verified, never guessed.
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
@@ -50,13 +49,14 @@ from . import place_and_route_route_overflow as _route_overflow
 from . import place_and_route_warnings as _pnr_warnings
 from ._dont_use import cell_exclusion_fields
 from ._openroad_engine import (
-    _count_violations,
-    _openroad_version,
-    _OpenRoadResult,
-    _run_openroad,
-    _timing_status,
+    OpenRoadResult,
     container_runtime_hint,
+    count_violations,
+    openroad_version,
+    run_openroad,
+    timing_status,
 )
+from ._openroad_io import format_engine_error, read_metrics, write_script
 from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
@@ -372,9 +372,6 @@ from .place_and_route_script import (
 from .place_and_route_script import (
     _wire_rc_lines as _wire_rc_lines,
 )
-from .place_and_route_script import (
-    _write_script as _write_script,
-)
 
 # The post-route multi-corner sweep + SPEF-annotated STA subsystem (issues
 # #949/#948/#961) lives in `place_and_route_sta.py` (issue #1808 split). The
@@ -534,7 +531,7 @@ _TOP_LEVEL_METRIC_KEYS = (
     # Additive (issue #1865): `"constrained"` / `"unconstrained"` / `null` --
     # whether the slack fields above are measurements at all, or OpenSTA's
     # own unconstrained-design sentinel (`1e+39`) restated. See
-    # `_extract_stage_metrics` and `_timing_status`.
+    # `_extract_stage_metrics` and `timing_status`.
     "timing_status",
 )
 
@@ -1190,7 +1187,9 @@ def _run_single_corner(
             macro_liberty_paths=macro_liberty_paths,
             library=library,
         )
-        _write_script(script_path, lines)
+        write_script(
+            script_path, lines, label="place-and-route", error_cls=PlaceAndRouteError
+        )
 
         # Issue #4411: reuse a committed stage under `--resume`; always drop
         # a stale record before (re)running so a crash mid-stage leaves none.
@@ -1234,7 +1233,7 @@ def _run_single_corner(
         logs_before = len(engine_logs)
         _route_overflow.clear_congestion_report(stage, output_dir, hdl_toplevel)
 
-        completed = _run_openroad(
+        completed = run_openroad(
             script_path,
             metrics_path,
             error_cls=PlaceAndRouteError,
@@ -1264,7 +1263,12 @@ def _run_single_corner(
                 )
 
             actual_threads = observed_threads(completed.stdout, threads)
-            metrics = _read_metrics(metrics_path, stage)
+            metrics = read_metrics(
+                metrics_path,
+                label=f"'{stage}' stage",
+                error_cls=PlaceAndRouteError,
+                object_pairs_hook=route_metrics_object if stage == "route" else dict,
+            )
             clock_roots = clocks.inventory(metrics)
         # Issue #7411: this stage's own Liberty read (every stage script
         # runs one) -- deduped against the stages already run.
@@ -1273,10 +1277,10 @@ def _run_single_corner(
         )
         setup_count, hold_count = (None, None)
         if stage != "floorplan":
-            setup_count = _count_violations(
+            setup_count = count_violations(
                 completed.stdout, _SETUP_VIOLATIONS_BEGIN, _SETUP_VIOLATIONS_END
             )
-            hold_count = _count_violations(
+            hold_count = count_violations(
                 completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
             )
         placement_routability = _placement_routability_after(
@@ -1663,7 +1667,7 @@ def _run_single_corner(
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
 
-    engine_version = _openroad_version()
+    engine_version = openroad_version()
     # Input naming follows the resolved Liberty corner.
     deck_name = f"{cell_library}__{corner}"
     provenance = build_provenance(
@@ -1984,7 +1988,7 @@ def _run_rebuild_corners(
     response: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "engine": request.get("engine", "openroad"),
-        "engine_version": _openroad_version(),
+        "engine_version": openroad_version(),
         "hdl_toplevel": request.get("hdl_toplevel"),
         "status": "failed" if failed else "ok",
         "target_stage": request.get("target_stage", "route"),
@@ -2005,7 +2009,7 @@ def _run_rebuild_corners(
 # --------------------------------------------------------------------------- #
 
 
-def _check_multicycle_error(completed: _OpenRoadResult) -> None:
+def _check_multicycle_error(completed: OpenRoadResult) -> None:
     if completed.returncode and (message := multicycle_request_error(completed.stdout)):
         with completed.diagnostics(_multicycle.MulticycleConstraintError):
             raise _multicycle.MulticycleConstraintError(message)
@@ -2013,22 +2017,19 @@ def _check_multicycle_error(completed: _OpenRoadResult) -> None:
 
 def _engine_error_message(
     stage: str,
-    completed: _OpenRoadResult,
+    completed: OpenRoadResult,
     *,
     pdk_info: dict[str, Any] | None = None,
     pin_constraints: list[dict[str, Any]] | None = None,
     top_ports: list[str] | None = None,
 ) -> str:
     """Build an actionable error message from a failed per-stage OpenROAD
-    run.
-
-    Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
-    -- on either stream, first occurrence -- over a bare ``Error:`` trailer
-    line (just ``<script>.tcl, <line> <code>``, no message text) that
-    reliably follows it on a Tcl-level failure at ``-exit`` (issue #1079).
-    Only when no bracketed diagnostic is present do we fall back to the last
-    bare ``Error:`` line, on either stream (mirrors ``synthesize.py``'s
-    ``_synthesis_error_message``).
+    run: this verb's ``DRT-0305`` pre-check and hint list wrapped around the
+    shared diagnostic scraper
+    :func:`~klayout_tools._openroad_io.format_engine_error`, whose
+    bracket-first, bare-``Error:``-second, three-line-tail-last preference
+    (issue #1079) applies unchanged -- the same preference
+    ``synthesize.py``'s ``_synthesis_error_message`` uses.
 
     ``DRT-0305`` (a constant-tie net reaching TritonRoute) is additionally
     *diagnosed* rather than passed through -- see
@@ -2049,45 +2050,26 @@ def _engine_error_message(
         error_line, hint = diagnosis
         return f"openroad '{stage}' stage failed: {error_line} -- {hint}"
 
-    bracket_lines: list[str] = []
-    bare_error_lines: list[str] = []
-    for stream in (completed.stdout or "", completed.stderr or ""):
-        for line in stream.splitlines():
-            stripped = line.strip()
-            if "[ERROR" in stripped:
-                bracket_lines.append(stripped)
-            elif stripped.startswith("Error:"):
-                bare_error_lines.append(stripped)
-
-    if bracket_lines:
-        message = f"openroad '{stage}' stage failed: {bracket_lines[0]}"
-    elif bare_error_lines:
-        message = f"openroad '{stage}' stage failed: {bare_error_lines[-1]}"
-    else:
-        tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-        tail = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-        message = (
-            f"openroad '{stage}' stage exited with code {completed.returncode}: {tail}"
-        )
-
     # Each recognized-hint helper appends a further `--` clause. Issue
     # #2635: `ORD-2013` is what a hard macro with no `request.macros` entry
     # looks like, and the raw diagnostic says nothing about which request
     # field would have supplied its physical view.
     streams = f"{completed.stdout or ''}\n{completed.stderr or ''}"
-    hints = (
-        mount_namespace_hint(completed, pdk_info),
-        container_runtime_hint(completed),
-        macro_spec.missing_lef_master_hint(streams),
-        slot_shortage_hint(streams, pin_constraints, top_ports),
-        grt_hint(stage, streams, completed.stdout or ""),
+    return format_engine_error(
+        completed,
+        context=f"'{stage}' stage",
+        hints=(
+            mount_namespace_hint(completed, pdk_info),
+            container_runtime_hint(completed),
+            macro_spec.missing_lef_master_hint(streams),
+            slot_shortage_hint(streams, pin_constraints, top_ports),
+            grt_hint(stage, streams, completed.stdout or ""),
+        ),
     )
-    message += "".join(f" -- {hint}" for hint in hints if hint is not None)
-    return message
 
 
 def _constant_tie_diagnosis(
-    completed: _OpenRoadResult,
+    completed: OpenRoadResult,
 ) -> tuple[str, str] | None:
     """``(error_line, hint)`` when a failed run hit ``DRT-0305``, else
     ``None`` (issue #854).
@@ -2154,7 +2136,7 @@ def _count_antenna_violations(stdout: str) -> int | None:
     """Parse the post-repair antenna-*violating-net* count from
     `check_antennas`'s own stdout, isolated between the
     ``_ANTENNA_VIOLATIONS_BEGIN``/``_END`` markers -- same marker-scrape
-    convention as :func:`_count_violations`, but `check_antennas` prints one
+    convention as :func:`count_violations`, but `check_antennas` prints one
     summary count line (``"Found N net violations."``, verified live against
     a real ``openroad/orfs:latest`` run) rather than one line per violation,
     so this parses that count directly instead of counting lines. Returns
@@ -2171,33 +2153,6 @@ def _count_antenna_violations(stdout: str) -> int | None:
         return None
     match = _ANTENNA_VIOLATION_COUNT_RE.search(stdout[start_idx:stop_idx])
     return int(match.group(1)) if match else None
-
-
-def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
-    if not os.path.isfile(metrics_path):
-        raise PlaceAndRouteError(
-            f"openroad exited successfully but did not produce the expected "
-            f"'{stage}' stage metrics file '{metrics_path}'"
-        )
-    try:
-        with open(metrics_path, encoding="utf-8") as handle:
-            data = json.load(
-                handle,
-                object_pairs_hook=route_metrics_object if stage == "route" else dict,
-            )
-    except (OSError, UnicodeDecodeError) as exc:
-        raise PlaceAndRouteError(
-            f"could not read '{stage}' stage metrics '{metrics_path}': {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise PlaceAndRouteError(
-            f"'{stage}' stage metrics '{metrics_path}' is not valid JSON: {exc}"
-        ) from exc
-    if not isinstance(data, dict):
-        raise PlaceAndRouteError(
-            f"'{stage}' stage metrics '{metrics_path}' must contain a JSON object"
-        )
-    return data
 
 
 def _placement_routability_after(
@@ -2354,7 +2309,7 @@ def _extract_stage_metrics(
     # value. Computed over every slack field this stage actually reported
     # (TNS is excluded deliberately: an unconstrained run reports `0` there,
     # which is indistinguishable by value from a genuinely clean one).
-    entry["timing_status"] = _timing_status(
+    entry["timing_status"] = timing_status(
         (
             entry.get("worst_slack_ns"),
             entry.get("nominal_hold_slack_ns"),

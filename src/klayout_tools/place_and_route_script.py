@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 from ._dont_use import effective_patterns
-from ._openroad_engine import _timing_violation_report_lines
+from ._openroad_engine import timing_violation_report_lines
 from ._sta_multicycle import multicycle_lines
 from ._tcl import tcl_literal as _tcl_literal
 from .place_and_route_base import (
@@ -60,16 +60,6 @@ from .place_and_route_unconstrained import (
 # --------------------------------------------------------------------------- #
 # Tcl script generation
 # --------------------------------------------------------------------------- #
-
-
-def _write_script(script_path: str, lines: list[str]) -> None:
-    try:
-        with open(script_path, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
-    except OSError as exc:
-        raise PlaceAndRouteError(
-            f"could not write place-and-route script '{script_path}': {exc}"
-        ) from exc
 
 
 def _design_rule_constraint_lines(
@@ -180,7 +170,7 @@ def _violation_count_lines() -> list[str]:
     re-time).
 
     Delegates the check-family policy to
-    :func:`~klayout_tools._openroad_engine._timing_violation_report_lines`
+    :func:`~klayout_tools._openroad_engine.timing_violation_report_lines`
     (issue #2741): the setup side counts data setup + recovery + clock-gating
     setup and the hold side data hold + removal + clock-gating hold -- the
     same populations ``report_worst_slack_metric``/``report_tns_metric``
@@ -189,7 +179,7 @@ def _violation_count_lines() -> list[str]:
     ``-format end`` row per endpoint per path group), not enumerated paths.
     """
 
-    return _timing_violation_report_lines(
+    return timing_violation_report_lines(
         setup_begin=_SETUP_VIOLATIONS_BEGIN,
         setup_end=_SETUP_VIOLATIONS_END,
         hold_begin=_HOLD_VIOLATIONS_BEGIN,
@@ -215,7 +205,7 @@ def _design_rule_check_lines(
     tool three steps later.
 
     Two separately-delimited ``report_check_types ... -violators`` blocks
-    (rather than one combined call) so :func:`_count_violations` can attribute
+    (rather than one combined call) so :func:`count_violations` can attribute
     a violation to the limit it actually broke -- the same marker convention
     :func:`_violation_count_lines` already uses to split its own
     ``-max_delay`` block from its ``-min_delay`` one, and counted by the same

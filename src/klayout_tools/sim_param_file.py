@@ -1,7 +1,7 @@
 """``models.param_file`` (issue #4759): a SPICE parameter file (e.g. gf180mcu's
 ``libs.tech/ngspice/design.ngspice``) ``.include``d ahead of the ``.lib``
 cards. Split out of ``sim.py`` / ``sim_staging.py`` to keep the file-size
-ratchet; ``sim.py`` re-exports :func:`_corner_lib_lines`.
+ratchet; ``sim.py`` re-exports :func:`corner_lib_lines`.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def param_file_environment(
     }
 
 
-def _corner_lib_lines(point: Any, models_lib: str | None) -> list[str]:
+def corner_lib_lines(point: Any, models_lib: str | None) -> list[str]:
     """The ``.lib`` cards selecting this corner's model sections, in
     declaration order -- the one place every generated deck
     (``_write_corner_deck``, ``_write_xyce_deck``, and

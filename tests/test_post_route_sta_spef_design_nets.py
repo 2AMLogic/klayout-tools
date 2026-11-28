@@ -121,7 +121,7 @@ def test_design_counts_and_missing_sample(tmp_path, nets, spef, counts, missing)
             _listed_stdout([], [], []),
         ]
     )
-    run = sta._OpenRoadResult(returncode=0, stdout=stdout, stderr="", engine_log=None)
+    run = sta.OpenRoadResult(returncode=0, stdout=stdout, stderr="", engine_log=None)
     block = sta._spef_annotation_block(run, spef)
     assert (block["design_nets_annotated"], block["design_nets_total"]) == counts
     assert block["design_nets_missing_sample"] == missing
@@ -232,7 +232,7 @@ def test_discarded_net_count_uses_full_reader_output_and_excludes_instances():
         "[WARNING STA-1648] file.spef line 3, instance gate:A not found.\n"
         "[WARNING STA-1650] file.spef line 4, net mod|bus[2] not found."
     )
-    run = sta._OpenRoadResult(
+    run = sta.OpenRoadResult(
         returncode=0, stdout=stdout, stderr=stderr, engine_log=None
     )
     block = sta._spef_annotation_block(run, ["bus[1]"])

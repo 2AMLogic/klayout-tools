@@ -57,7 +57,7 @@ def test_cli_error_openroad_rejects_truncated_liberty(tmp_path, monkeypatch, cap
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-771-gdeadbeef\n")
         # The real invocation is `openroad -no_init -exit -metrics
-        # <metrics> <script>` (see `_openroad_engine._run_openroad`).
+        # <metrics> <script>` (see `_openroad_engine.run_openroad`).
         assert cmd[:4] == ["openroad", "-no_init", "-exit", "-metrics"]
         script = Path(cmd[5]).read_text(encoding="utf-8")
         read_liberty_lines = [

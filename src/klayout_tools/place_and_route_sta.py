@@ -12,8 +12,8 @@ stage orchestration stays in ``place_and_route.py``. This module owns Tcl
 generation, subprocess invocation and report parsing for these STA passes.
 Caller-supplied paths and corner names use the shared ``tcl_literal`` helper.
 
-Tcl emitters come from the script module. The run-time hooks for engine
-errors and metrics are resolved from the orchestrator when a run needs them.
+Tcl emitters come from the script module, script/metrics I/O from ``_openroad_io``
+(issue #8051); the engine-error hook is resolved from the orchestrator at run time.
 """
 
 from __future__ import annotations
@@ -25,11 +25,12 @@ from urllib.parse import quote
 
 from ._artifact_envelope import ANCHOR_CWD, RepoRoot
 from ._openroad_engine import (
-    _count_violations,
-    _run_openroad,
-    _timing_status,
+    count_violations,
+    run_openroad,
+    timing_status,
     write_sdf_line,
 )
+from ._openroad_io import read_metrics, write_script
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
 from ._sta_multicycle import multicycle_lines
 from ._sta_request_diag import SPEF_SKIP_DRIVER_ONLY
@@ -61,8 +62,15 @@ from .place_and_route_script import (
     _metrics_report_lines,
     _violation_count_lines,
     _wire_rc_lines,
-    _write_script,
 )
+
+
+def _write_stage_script(script: str, lines: list[str]) -> None:
+    write_script(script, lines, label="place-and-route", error_cls=PlaceAndRouteError)
+
+
+def _read_stage_metrics(path: str, stage: str) -> dict[str, Any]:
+    return read_metrics(path, label=f"'{stage}' stage", error_cls=PlaceAndRouteError)
 
 
 def _corner_sweep_script_lines(
@@ -602,11 +610,7 @@ def _post_route_spef_metrics(
     :data:`~klayout_tools.place_and_route._CTS_BUFFER_CELLS` and its call
     sites).
     """
-    from .place_and_route import (
-        _check_multicycle_error,
-        _engine_error_message,
-        _read_metrics,
-    )
+    from .place_and_route import _check_multicycle_error, _engine_error_message
 
     extract_deck = _require_extract_deck_for_cell_library(cell_library)
 
@@ -684,9 +688,9 @@ def _post_route_spef_metrics(
         output_delay_ns=output_delay_ns,
         multicycle=multicycle,
     )
-    _write_script(script_path, lines)
+    _write_stage_script(script_path, lines)
 
-    completed = _run_openroad(
+    completed = run_openroad(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
@@ -712,11 +716,11 @@ def _post_route_spef_metrics(
                 f"success but wrote no SDF file at '{sdf_path}'"
             )
 
-        metrics = _read_metrics(metrics_path, "route_spef_sta")
-    setup_violation_count = _count_violations(
+        metrics = _read_stage_metrics(metrics_path, "route_spef_sta")
+    setup_violation_count = count_violations(
         completed.stdout, _SETUP_VIOLATIONS_BEGIN, _SETUP_VIOLATIONS_END
     )
-    hold_violation_count = _count_violations(
+    hold_violation_count = count_violations(
         completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
     )
     nets_check = _count_spef_nets_annotated(
@@ -765,7 +769,7 @@ def _post_route_spef_metrics(
         # Additive (issue #1865): whether this block's own `worst_slack_ns`
         # is a measurement or OpenSTA's unconstrained sentinel (`1e+39`) --
         # the same field, computed the same way, as the top-level one.
-        "timing_status": _timing_status((worst_slack,)),
+        "timing_status": timing_status((worst_slack,)),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         "nets_annotated": nets_annotated,
@@ -907,11 +911,7 @@ def _run_corner_sweep(
     sweep would undermine the very multi-corner evidence claim they exist
     to support (T1 checklist item 5, ``docs/design-evidence-tiers.md``).
     """
-    from .place_and_route import (
-        _check_multicycle_error,
-        _engine_error_message,
-        _read_metrics,
-    )
+    from .place_and_route import _check_multicycle_error, _engine_error_message
 
     reports = prepare_reports(output_dir, hdl_toplevel)
     if not corners:
@@ -934,9 +934,9 @@ def _run_corner_sweep(
         multicycle=multicycle,
         library=library,
     )
-    _write_script(script_path, lines)
+    _write_stage_script(script_path, lines)
 
-    completed = _run_openroad(
+    completed = run_openroad(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
@@ -951,7 +951,7 @@ def _run_corner_sweep(
                 _engine_error_message("route (corner sweep)", completed)
             )
 
-        metrics = _read_metrics(metrics_path, "route (corner sweep)")
+        metrics = _read_stage_metrics(metrics_path, "route (corner sweep)")
     worst_setup_raw = metrics.get("timing__setup__ws")
     worst_hold_raw = metrics.get("timing__hold__ws")
     worst_setup = round(worst_setup_raw, 5) if worst_setup_raw is not None else None
@@ -970,12 +970,12 @@ def _run_corner_sweep(
     # swept corner loaded, `report_check_types` reports a pin that violates
     # the limit at *any* of them, the same worst-case-across-loaded-corners
     # semantics `report_worst_slack_metric` above already has.
-    max_transition_violations = _count_violations(
+    max_transition_violations = count_violations(
         completed.stdout,
         _MAX_TRANSITION_VIOLATIONS_BEGIN,
         _MAX_TRANSITION_VIOLATIONS_END,
     )
-    max_capacitance_violations = _count_violations(
+    max_capacitance_violations = count_violations(
         completed.stdout,
         _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
         _MAX_CAPACITANCE_VIOLATIONS_END,
@@ -1000,7 +1000,7 @@ def _run_corner_sweep(
                 # Issue #1865: per-corner counterpart of the top-level
                 # `timing_status` -- a corner whose slack pair is OpenSTA's
                 # unconstrained sentinel never looks like a clean corner.
-                "timing_status": _timing_status((worst_setup, worst_hold)),
+                "timing_status": timing_status((worst_setup, worst_hold)),
                 "max_transition_violation_count": max_transition_violations,
                 "max_capacitance_violation_count": max_capacitance_violations,
                 # Issue #2357: this corner's own library-only counterpart.
@@ -1037,10 +1037,10 @@ def _run_corner_sweep(
             multicycle=multicycle,
             library=library,
         )
-        _write_script(corner_script_path, corner_lines)
+        _write_stage_script(corner_script_path, corner_lines)
 
         corner_stage_name = f"route (corner sweep: {corner_name})"
-        corner_completed = _run_openroad(
+        corner_completed = run_openroad(
             corner_script_path,
             corner_metrics_path,
             error_cls=PlaceAndRouteError,
@@ -1055,7 +1055,7 @@ def _run_corner_sweep(
                     _engine_error_message(corner_stage_name, corner_completed)
                 )
 
-            corner_metrics = _read_metrics(corner_metrics_path, corner_stage_name)
+            corner_metrics = _read_stage_metrics(corner_metrics_path, corner_stage_name)
         corner_setup_raw = corner_metrics.get("timing__setup__ws")
         corner_hold_raw = corner_metrics.get("timing__hold__ws")
         # Issue #1866: this corner's own TNS pair, from this same
@@ -1085,14 +1085,14 @@ def _run_corner_sweep(
                     else None
                 ),
                 # Issue #1865: see the single-corner branch above.
-                "timing_status": _timing_status((corner_setup, corner_hold)),
+                "timing_status": timing_status((corner_setup, corner_hold)),
                 # Per-corner Liberty verdicts in docs/cli/place-and-route.md (#1709).
-                "max_transition_violation_count": _count_violations(
+                "max_transition_violation_count": count_violations(
                     corner_completed.stdout,
                     _MAX_TRANSITION_VIOLATIONS_BEGIN,
                     _MAX_TRANSITION_VIOLATIONS_END,
                 ),
-                "max_capacitance_violation_count": _count_violations(
+                "max_capacitance_violation_count": count_violations(
                     corner_completed.stdout,
                     _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
                     _MAX_CAPACITANCE_VIOLATIONS_END,

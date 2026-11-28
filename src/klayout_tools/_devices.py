@@ -61,7 +61,7 @@ def _validate_device_entry(
     error_cls: type[Exception],
 ) -> dict[str, Any]:
     """One ``devices[]`` entry (issue #2183). Split out of
-    :func:`_validate_devices` to keep that function under the repo's C901
+    :func:`validate_devices` to keep that function under the repo's C901
     complexity ratchet."""
     if not isinstance(entry, dict):
         raise error_cls(f"spec '{spec_path}': devices[{index}] must be a JSON object")
@@ -89,7 +89,7 @@ def _validate_device_entry(
     }
 
 
-def _validate_devices(
+def validate_devices(
     spec: dict[str, Any],
     spec_path: str,
     conductor_names: list[str],
@@ -140,11 +140,11 @@ def _validate_devices(
     return entries
 
 
-def _conductor_role_layers(
+def conductor_role_layers(
     stackup: list[dict[str, Any]], vias: list[dict[str, Any]]
 ) -> dict[str, tuple[int, int]]:
     """``stackup``/``vias`` role name -> declared ``(layer, datatype)``, in
-    declaration order -- the map :func:`_device_body_cuts` resolves each
+    declaration order -- the map :func:`device_body_cuts` resolves each
     declared role's own conductor region from, so it can report the area a
     ``devices[]`` entry *actually* subtracted (issue #2226).
 
@@ -185,7 +185,7 @@ def _warn_device_body_missed_role(
     )
 
 
-def _device_body_cuts(
+def device_body_cuts(
     layout: Any,
     top_cell: Any,
     devices: list[dict[str, Any]],
@@ -219,7 +219,7 @@ def _device_body_cuts(
     layer is absent from this layout, drawn on a different datatype, or
     declared ``on`` the wrong role.
 
-    ``role_layers`` (from :func:`_conductor_role_layers`) supplies each
+    ``role_layers`` (from :func:`conductor_role_layers`) supplies each
     declared role's own ``(layer, datatype)`` so that conductor region can
     be resolved here; it is read once per role that a declaration actually
     names. The intersection is computed per declaration against the role's
@@ -262,7 +262,7 @@ def _device_body_cuts(
     return cuts, applied
 
 
-def _cut_device_bodies(region: Any, cut: Any | None) -> Any:
+def cut_device_bodies(region: Any, cut: Any | None) -> Any:
     """``region`` minus the declared device bodies on the same role (issue
     #2183), or ``region`` unchanged when this role declares none."""
     if cut is None:
