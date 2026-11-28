@@ -3,8 +3,9 @@
 ``pdk_cell`` places one of a PDK's *fixed*, pre-drawn GDS cells (bondpad, ESD,
 ...) as-drawn, for any PDK family and without importing a pcell library. It
 generalizes :mod:`klayout_tools.gen_cap_vpp` (same array/pitch/port semantics,
-shared inspector); the cell is read from the resolved PDK at request time and
-never vendored. The PCell lives in :mod:`klayout_tools.gen_pcells.pdk_cell`.
+shared validation, lookup and inspector, issue #8081); the cell is read from the
+resolved PDK at request time and never vendored. The PCell lives in
+:mod:`klayout_tools.gen_pcells.pdk_cell`.
 """
 
 from __future__ import annotations
@@ -14,7 +15,12 @@ import os
 from typing import Any
 
 from .gen_base import GenError
-from .gen_cap_vpp import _cap_vpp_array_describe, _inspect_gds
+from .gen_cap_vpp import (
+    _cap_vpp_array_describe,
+    _lookup_cell,
+    _table_at,
+    _validate_array_params,
+)
 from .gen_spec import _GeneratorSpec
 
 _NAME = "pdk_cell"
@@ -52,55 +58,36 @@ def _gds_path(params: dict[str, Any], pdk_info: dict[str, Any]) -> str:
     )
 
 
-def _cell_table(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, Any]:
-    path = _gds_path(params, pdk_info)
-    return _inspect_gds(path, os.stat(path).st_mtime_ns, "")
-
-
 def _pdk_cell_validate(params: dict[str, Any]) -> None:
     if not params["library"]:
         raise GenError(f"generator '{_NAME}': params.library is required")
     if not params["pdk_cell"]:
         raise GenError(f"generator '{_NAME}': params.pdk_cell is required")
-    if params["num"] < 1:
-        raise GenError(f"generator '{_NAME}': params.num must be >= 1")
-    if params["pitch_um"] < 0:
-        raise GenError(f"generator '{_NAME}': params.pitch_um must be >= 0")
+    _validate_array_params(_NAME, params)
+
+
+def _lookup_in(path: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Lookup in the library GDS at an already-resolved ``path``."""
+    return _lookup_cell(
+        _NAME,
+        _table_at(path, ""),
+        params,
+        scope=f" in library '{params['library']}'",
+    )
 
 
 def _pdk_cell_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
     path = _gds_path(params, pdk_info)
-    _lookup(params, pdk_info)
+    _lookup_in(path, params)
     return {"vpp_gds_path": path}
-
-
-def _lookup(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, Any]:
-    """Return the named cell's info, rejecting unknown names / overlapping pitch."""
-    table = _cell_table(params, pdk_info)
-    entry = table.get(params["pdk_cell"])
-    if entry is None:
-        raise GenError(
-            f"generator '{_NAME}': unknown params.pdk_cell "
-            f"'{params['pdk_cell']}' in library '{params['library']}' -- "
-            f"available: {', '.join(sorted(table))}"
-        )
-    width = entry["bbox_um"][2] - entry["bbox_um"][0]
-    pitch = params["pitch_um"]
-    if params["num"] > 1 and 0 < pitch < width - 1e-9:
-        raise GenError(
-            f"generator '{_NAME}': params.pitch_um ({pitch}um) is smaller than "
-            f"the cell width ({width:g}um) -- instances would overlap; use 0 to "
-            "abut or a pitch >= the cell width"
-        )
-    return entry
 
 
 def _pdk_cell_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    entry = _lookup(params, pdk_info)
+    entry = _lookup_in(_gds_path(params, pdk_info), params)
     return _cap_vpp_array_describe(params, dbu, pdk_info, entry=entry)
 
 

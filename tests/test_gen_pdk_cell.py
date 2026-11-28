@@ -9,7 +9,7 @@ from __future__ import annotations
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import pdk
+from klayout_tools import gen_pdk_cell, pdk
 from klayout_tools.gen import GenError, generate, list_generators
 
 LABELLED = "fake_bondpad"
@@ -88,7 +88,28 @@ def test_cell_without_labels_states_so(pdk_root, tmp_path):
 def test_unknown_cell_lists_available(pdk_root, tmp_path):
     with pytest.raises(GenError) as exc:
         generate(_req(pdk_root, tmp_path, pdk_cell="nope"))
-    assert LABELLED in str(exc.value) and BARE in str(exc.value)
+    assert str(exc.value) == (
+        "generator 'pdk_cell': unknown params.pdk_cell 'nope' in library "
+        f"'sg13g2_io' -- available: {LABELLED}, {BARE}"
+    )
+
+
+def test_layer_params_resolves_gds_path_once(pdk_root, monkeypatch):
+    calls = []
+    real = gen_pdk_cell._gds_path
+
+    def counting(params, pdk_info):
+        calls.append(params["library"])
+        return real(params, pdk_info)
+
+    monkeypatch.setattr(gen_pdk_cell, "_gds_path", counting)
+    pdk_info = pdk.find_pdk(variant="ihp-sg13g2", root=str(pdk_root))
+    params = {"library": "sg13g2_io", "pdk_cell": LABELLED, "num": 2, "pitch_um": 12.0}
+    expected = real(params, pdk_info)
+    assert gen_pdk_cell._pdk_cell_layer_params(pdk_info, params) == {
+        "vpp_gds_path": expected
+    }
+    assert calls == ["sg13g2_io"]
 
 
 def test_unknown_library_lists_available(pdk_root, tmp_path):
