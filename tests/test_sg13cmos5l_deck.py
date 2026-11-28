@@ -1615,7 +1615,7 @@ def test_sg13cmos5l_mom_capacitor_card_drops_params_keyword_and_suffixes_geometr
     keeps `cap_cmomi`/`cap_cmomf` as the trailing subcircuit-name token
     (this device's own real upstream `.subckt` name), and formats `W=`/`L=`
     with the same `U`-suffix style this family's unbound resistor cards
-    already use (`_format_um`'s default `GEOMETRY_STYLE_UNIT_SUFFIX`) --
+    already use (`format_um`'s default `GEOMETRY_STYLE_UNIT_SUFFIX`) --
     `w_um=3.0`/`l_um=8.0` (the golden pair test above) becomes `W=3U
     L=8U`. `devices[].params` itself is untouched -- this is a
     netlist-text-only formatting fix.

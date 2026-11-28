@@ -148,11 +148,11 @@ from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
     DeviceLookup,
     ModelBindingError,
-    _format_um,
-    _format_um2,
     build_device_binding_map,
     build_subckt_to_class_map,
     flavoured_mos_class_name,
+    format_um,
+    format_um2,
     geometry_style_for_family,
     known_device_subckt_names,
     mos_flavour_for_subckt,
@@ -972,7 +972,7 @@ def _convert_mos_card(
     if finger_count == 1 and multiplier == 1:
         return (
             f"{instance} {' '.join(nodes)} {lookup.device_class} "
-            f"L={_format_um(l_um)} W={_format_um(w_um)}"
+            f"L={format_um(l_um)} W={format_um(w_um)}"
         )
     return _expand_mos_fingers(
         instance, nodes, lookup.device_class, l_um, w_um, finger_count, multiplier
@@ -1119,7 +1119,7 @@ def _expand_mos_fingers(
                 parts.append(f"f{i}")
             lines.append(
                 f"{instance}_{'_'.join(parts)} {' '.join(nodes)} {device_class} "
-                f"L={_format_um(l_um)} W={_format_um(w_finger_um)}"
+                f"L={format_um(l_um)} W={format_um(w_finger_um)}"
             )
     return "\n".join(lines)
 
@@ -1177,7 +1177,7 @@ def _convert_geometry_card(
     if resolved is None:
         extra = ""
     else:
-        extra = f" L={_format_um(resolved[0])} W={_format_um(resolved[1])}"
+        extra = f" L={format_um(resolved[0])} W={format_um(resolved[1])}"
     value = "0"
     is_placeholder = True
     if resistor_value is not None and resolved is not None and resolved[1] > 0:
@@ -1243,7 +1243,7 @@ def _convert_capacitor_card(
         l_um, w_um = resolved
         area_um2 = l_um * w_um
         perimeter_um = 2.0 * (l_um + w_um)
-        extra = f" A={_format_um2(area_um2)} P={_format_um(perimeter_um)}"
+        extra = f" A={format_um2(area_um2)} P={format_um(perimeter_um)}"
 
     if multiplier == 1:
         return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
@@ -1318,7 +1318,7 @@ def _convert_bipolar_card(
     area_um2 = lookup.emitter_area_um2
     if area_um2 is not None and area_um2 > 0:
         side_um = math.sqrt(area_um2)
-        extra += f" AE={_format_um2(area_um2)} PE={_format_um(4.0 * side_um)}"
+        extra += f" AE={format_um2(area_um2)} PE={format_um(4.0 * side_um)}"
     if "mult" in params:
         try:
             mult = float(params["mult"])
