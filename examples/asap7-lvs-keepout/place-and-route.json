@@ -1,0 +1,28 @@
+{
+  "engine": "openroad",
+  "netlist": "build/syn/keepout_synth.v",
+  "hdl_toplevel": "keepout",
+  "pdk": {"cell_library": "asap7sc7p5t_rvt", "corner": "TT"},
+  "floorplan": {
+    "method": "utilization",
+    "utilization_pct": 40,
+    "aspect_ratio": 1.0,
+    "core_margin_um": 1.0,
+    "site": "asap7sc7p5t",
+    "tracks": [
+      {"layer": "M1", "x_offset_um": 0.0, "x_pitch_um": 0.036, "y_offset_um": 0.0, "y_pitch_um": 0.036},
+      {"layer": "M2", "x_offset_um": 0.0, "x_pitch_um": 0.036, "y_offset_um": 0.0, "y_pitch_um": 0.036},
+      {"layer": "M3", "x_offset_um": 0.0, "x_pitch_um": 0.036, "y_offset_um": 0.0, "y_pitch_um": 0.036},
+      {"layer": "M4", "x_offset_um": 0.012, "x_pitch_um": 0.048, "y_offset_um": 0.012, "y_pitch_um": 0.048},
+      {"layer": "M5", "x_offset_um": 0.012, "x_pitch_um": 0.048, "y_offset_um": 0.012, "y_pitch_um": 0.048},
+      {"layer": "M6", "x_offset_um": 0.016, "x_pitch_um": 0.064, "y_offset_um": 0.016, "y_pitch_um": 0.064},
+      {"layer": "M7", "x_offset_um": 0.016, "x_pitch_um": 0.064, "y_offset_um": 0.016, "y_pitch_um": 0.064}
+    ]
+  },
+  "io": {"layer_h": "M4", "layer_v": "M5"},
+  "constraints": {"clock_port": "clk", "clock_period_ns": 1.0},
+  "power": {"preset": "asap7sc7p5t"},
+  "output_dbu_um": 0.00025,
+  "seed": 1,
+  "target_stage": "route"
+}
