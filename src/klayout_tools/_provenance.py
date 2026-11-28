@@ -944,7 +944,7 @@ def build_provenance(
         # Report generation uses the build-time record. The checkout fallback
         # spawns git, which is appropriate for an explicit `klt version` call.
         # Editable installs without a record cannot confirm a mismatch.
-        expected_klayout_version = build_identity._recorded_klayout_version_expected()
+        expected_klayout_version = build_identity.recorded_klayout_version_expected()
         mismatch = _klayout_version_mismatch(
             actual_klayout_version, expected_klayout_version
         )

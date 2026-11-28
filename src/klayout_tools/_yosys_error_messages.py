@@ -1,7 +1,7 @@
 """Error-message builders for failed ``yosys`` runs, shared by the verbs.
 
-``equiv.py``'s ``_yosys_error_message`` and ``synthesize.py``'s
-``_synthesis_error_message`` lived in their respective verb modules, each
+``equiv.py``'s ``yosys_error_message`` and ``synthesize.py``'s
+``synthesis_error_message`` lived in their respective verb modules, each
 duplicating the other's structure; issue #1755's WASI-sandbox hint had
 diverged between them precisely because the detection lived twice. They are
 co-located here (with issue #5804's wasm-trap hint) so the hint detection
@@ -62,9 +62,9 @@ def wasm_trap_hint_if_applicable(output: str) -> str:
     return _WASM_TRAP_HINT
 
 
-def _yosys_error_message(stdout: str, stderr: str, returncode: int | None) -> str:
+def yosys_error_message(stdout: str, stderr: str, returncode: int | None) -> str:
     """Build an actionable error message from a failed ``yosys -s`` run --
-    mirrors ``_synthesis_error_message`` below (both live here so their
+    mirrors ``synthesis_error_message`` below (both live here so their
     hint detection cannot diverge -- the issue #1755 lesson): prefers the
     last ``ERROR:`` line Yosys itself printed, falling back to a short tail
     of captured output.
@@ -126,7 +126,7 @@ def _sv_frontend_hint_if_applicable(error_line: str) -> str:
     )
 
 
-def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
+def synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
     """Build an actionable error message from a failed ``yosys -s`` run.
 
     Prefers the last ``ERROR:`` line Yosys itself printed (its own error

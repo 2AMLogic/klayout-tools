@@ -1943,8 +1943,8 @@ def test_wasi_hint_consistent_between_synthesize_and_equiv(tmp_path, monkeypatch
         f"ERROR: Can't open script file `{script}' for reading: "
         "No such file or directory"
     )
-    equiv_msg = equiv_module._yosys_error_message("", error + "\n", 1)
-    synth_msg = synthesize._synthesis_error_message(
+    equiv_msg = equiv_module.yosys_error_message("", error + "\n", 1)
+    synth_msg = synthesize.synthesis_error_message(
         fake_completed(returncode=1, stderr=error + "\n")
     )
     assert equiv_msg.removeprefix("yosys equivalence check failed: ") == (
@@ -7225,7 +7225,7 @@ _SV_PORT_ERROR = (
 
 
 def test_synthesis_error_sv_unpacked_array_port_gets_hint():
-    msg = synthesize._synthesis_error_message(
+    msg = synthesize.synthesis_error_message(
         fake_completed(stdout=_SV_PORT_ERROR, returncode=1)
     )
     assert _SV_PORT_ERROR in msg
@@ -7235,19 +7235,19 @@ def test_synthesis_error_sv_unpacked_array_port_gets_hint():
 
 def test_synthesis_error_plain_v_gets_no_sv_hint():
     line = _SV_PORT_ERROR.replace("t.sv", "t.v")
-    msg = synthesize._synthesis_error_message(fake_completed(stdout=line, returncode=1))
+    msg = synthesize.synthesis_error_message(fake_completed(stdout=line, returncode=1))
     assert msg == f"yosys synthesis failed: {line}"
 
 
 def test_synthesis_error_unrelated_sv_error_unchanged():
     line = "t.sv:3: ERROR: Module `foo' referenced but not defined"
-    msg = synthesize._synthesis_error_message(fake_completed(stderr=line, returncode=1))
+    msg = synthesize.synthesis_error_message(fake_completed(stderr=line, returncode=1))
     assert msg == f"yosys synthesis failed: {line}"
 
 
 def test_synthesis_error_svh_mixed_sources_path_gets_hint():
     line = "/tmp/a b/inc.svh:7: ERROR: syntax error, unexpected '[', expecting ')'"
-    msg = synthesize._synthesis_error_message(fake_completed(stderr=line, returncode=1))
+    msg = synthesize.synthesis_error_message(fake_completed(stderr=line, returncode=1))
     assert "unpacked-array port" in msg
 
 

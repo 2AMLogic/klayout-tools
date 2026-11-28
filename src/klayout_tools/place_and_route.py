@@ -2029,7 +2029,7 @@ def _engine_error_message(
     :func:`~klayout_tools._openroad_io.format_engine_error`, whose
     bracket-first, bare-``Error:``-second, three-line-tail-last preference
     (issue #1079) applies unchanged -- the same preference
-    ``synthesize.py``'s ``_synthesis_error_message`` uses.
+    ``synthesize.py``'s ``synthesis_error_message`` uses.
 
     ``DRT-0305`` (a constant-tie net reaching TritonRoute) is additionally
     *diagnosed* rather than passed through -- see

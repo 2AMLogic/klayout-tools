@@ -23,7 +23,7 @@ def _capture_mismatch_warning(monkeypatch, capsys, reinstall_spec):
 
     monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.12")
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+        build_identity, "recorded_klayout_version_expected", lambda: "0.30.10"
     )
     monkeypatch.setattr(build_identity, "build_version", lambda: "0.9.2")
     monkeypatch.setattr(

@@ -26,7 +26,7 @@ from .equiv import (
     _run_yosys_subprocess,
     _side_prep_lines,
     _write_yosys_log,
-    _yosys_error_message,
+    yosys_error_message,
 )
 from .equiv_errors import EquivError
 from .equiv_replay import (
@@ -1041,7 +1041,7 @@ def _run_sequential(
             # nonzero return here is always a genuine elaboration/build error,
             # never the combinational engine's own scope-rejection shape.
             write_partial_stage_record(record_path, fingerprint, reason="yosys_error")
-            message = _yosys_error_message(
+            message = yosys_error_message(
                 stage1.stdout, stage1.stderr, stage1.returncode
             )
             raise EquivError(message)
@@ -1142,7 +1142,7 @@ def _run_sequential(
         )
 
     if stage2.returncode != 0:
-        message = _yosys_error_message(stage2.stdout, stage2.stderr, stage2.returncode)
+        message = yosys_error_message(stage2.stdout, stage2.stderr, stage2.returncode)
         raise EquivError(message)
 
     status2, diagnostics2 = _classify_sat_result(stage2.stdout)

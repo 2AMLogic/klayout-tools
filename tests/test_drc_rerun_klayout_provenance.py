@@ -142,7 +142,7 @@ def _divergent_host(monkeypatch) -> None:
 
     monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.13")
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.12"
+        build_identity, "recorded_klayout_version_expected", lambda: "0.30.12"
     )
 
 

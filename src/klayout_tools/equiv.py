@@ -81,7 +81,7 @@ from ._verilog_params import (
     validate_defines,
     validate_parameters,
 )
-from ._yosys_error_messages import _yosys_error_message
+from ._yosys_error_messages import yosys_error_message
 from .equiv_errors import EquivError
 from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public here
     CANONICAL_SIM_BACKEND,
@@ -477,7 +477,7 @@ def run_equiv(
     elif run.returncode != 0:
         message = _sequential_error_message(run.stdout, run.stderr)
         if message is None:
-            message = _yosys_error_message(run.stdout, run.stderr, run.returncode)
+            message = yosys_error_message(run.stdout, run.stderr, run.returncode)
         raise EquivError(message)
     else:
         status, diagnostics = _classify_sat_result(run.stdout)
@@ -736,7 +736,7 @@ def _sequential_error_message(stdout: str, stderr: str) -> str | None:
     """Translate the ``select -assert-none`` sequential-cell guard's Yosys
     error into a clear, actionable :class:`EquivError` message -- ``None``
     if neither stream shows that specific failure (the caller falls back to
-    :func:`_yosys_error_message`).
+    :func:`yosys_error_message`).
     """
     combined = f"{stdout}\n{stderr}"
     if "Assertion failed: selection is not empty:" not in combined:

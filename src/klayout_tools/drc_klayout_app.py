@@ -81,7 +81,7 @@ def _warn_binary_mismatch(provenance: dict[str, Any]) -> None:
     if not provenance.get("klayout_version_mismatch"):
         return
     actual = provenance.get("klayout_version")
-    expected = build_identity._recorded_klayout_version_expected()
+    expected = build_identity.recorded_klayout_version_expected()
     _warn.warn(
         f"klt: warning: the standalone KLayout application that ran this "
         f"deck reports version {actual!r}, but this klayout-tools build/"

@@ -26,7 +26,7 @@ def _expect_recorded_klayout(monkeypatch, version):
     from klayout_tools import build_identity
 
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: version
+        build_identity, "recorded_klayout_version_expected", lambda: version
     )
 
 

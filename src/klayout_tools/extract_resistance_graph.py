@@ -17,7 +17,7 @@ The module is live and wired: ``klt extract --resistance-graph`` reaches
 **Model (3.D2 steps 3-7).**
 
 * Each merged Manhattan polygon of a role is cut into a grid of rectangular
-  *pieces* by :func:`klayout_tools.resistor_mesh._decompose_manhattan_polygon`,
+  *pieces* by :func:`klayout_tools.resistor_mesh.decompose_manhattan_polygon`,
   with extra cut lines at every port / landing edge so a port always lies on
   a piece boundary. One node per piece (``"<role>:<k>"``).
 * Two pieces sharing an interface of width ``w`` get an in-plane edge of
@@ -33,7 +33,7 @@ The module is live and wired: ``klt extract --resistance-graph`` reaches
   ideal via and yields an edge of exactly ``0.0``; an absent ``r_cut`` is a
   ``via_resistance_unknown`` diagnostic, never silently ideal. The pieces a
   landing touches are found inside the polygon(s) it lands on via
-  :func:`klayout_tools.resistor_mesh._rails_under_via`.
+  :func:`klayout_tools.resistor_mesh.rails_under_via`.
   A landing end whose role and box equal a declared port's patch reuses that
   port's node instead of adding its own (issue #2983): the port *is* the via
   endpoint, as in the 3.D4 F4/F4v realisation, rather than being joined to a
@@ -64,7 +64,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .ir_solver import solve_ir_drop
-from .resistor_mesh import _decompose_manhattan_polygon, _rails_under_via
+from .resistor_mesh import decompose_manhattan_polygon, rails_under_via
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -232,7 +232,7 @@ def _contact_factor(piece: kdb.Box, patch: kdb.Box) -> float | None:
 
 
 def _scope_region(box: kdb.Box) -> kdb.Region | kdb.Edges | None:
-    """The shape a landing/patch box presents to ``_rails_under_via``: a
+    """The shape a landing/patch box presents to ``rails_under_via``: a
     region when it has area, an edge when it is a zero-width/height line, and
     ``None`` for a point."""
     import klayout.db as kdb
@@ -386,7 +386,7 @@ class _GraphBuilder:
             if bbox.touches(box):
                 extra_x.update((box.left, box.right))
                 extra_y.update((box.bottom, box.top))
-        cells, reason = _decompose_manhattan_polygon(
+        cells, reason = decompose_manhattan_polygon(
             polygon, self.max_cells, sorted(extra_x), sorted(extra_y)
         )
         if cells is None:
@@ -458,7 +458,7 @@ class _GraphBuilder:
         scope = _scope_region(box)
         if scope is None:
             return []
-        hits = _rails_under_via(self.rails[role_name], scope, box)  # type: ignore[arg-type]
+        hits = rails_under_via(self.rails[role_name], scope, box)  # type: ignore[arg-type]
         has_area = box.width() > 0 and box.height() > 0
         out: _Attachment = []
         for poly_index in sorted(h["index"] for h in hits):

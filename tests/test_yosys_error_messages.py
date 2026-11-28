@@ -13,8 +13,8 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import synthesize
 from klayout_tools._yosys_error_messages import (
-    _yosys_error_message,
     wasm_trap_hint_if_applicable,
+    yosys_error_message,
 )
 from klayout_tools.synthesize import SynthesizeError, run_synthesize
 from test_synthesize import _ABC_HELP_WITH_DONT_USE, _setup_success_env
@@ -81,14 +81,14 @@ def test_wasm_trap_hint_if_applicable(output, expect_hint):
 
 
 # --------------------------------------------------------------------------- #
-# equiv's _yosys_error_message (issue #5804)
+# equiv's yosys_error_message (issue #5804)
 # --------------------------------------------------------------------------- #
 
 
 def test_yosys_error_message_wasm_trap_hint():
     """A trap traceback with no yosys ``ERROR:`` line gets the wasm memory
     ceiling hint naming the native-build remedy -- issue #5804."""
-    message = _yosys_error_message("", _WASM_TRAP_TRACEBACK, 1)
+    message = yosys_error_message("", _WASM_TRAP_TRACEBACK, 1)
 
     assert message.startswith("yosys exited with code 1:")
     assert "wasm" in message.lower()
@@ -99,7 +99,7 @@ def test_yosys_error_message_wasm_trap_hint():
 
 def test_yosys_error_message_wasm_trap_on_stdout_hint():
     """The trap signature on stdout (not stderr) is still recognised."""
-    message = _yosys_error_message(_WASM_TRAP_TRACEBACK, "", 1)
+    message = yosys_error_message(_WASM_TRAP_TRACEBACK, "", 1)
 
     assert message.startswith("yosys exited with code 1:")
     assert "4 GiB" in message
@@ -111,7 +111,7 @@ def test_yosys_error_message_error_line_still_wins_over_trap():
     keeps today's ``ERROR:``-line message -- no trap hint appended."""
     stderr = _WASM_TRAP_TRACEBACK + "ERROR: Prove terminated abnormally.\n"
 
-    message = _yosys_error_message("", stderr, 1)
+    message = yosys_error_message("", stderr, 1)
 
     assert message == (
         "yosys equivalence check failed: ERROR: Prove terminated abnormally."
@@ -124,7 +124,7 @@ def test_yosys_error_message_unrelated_tail_unchanged():
     today's tail-of-output message verbatim."""
     stderr = "warning: Dumping selected design.\nsecond line\nthird line\n"
 
-    message = _yosys_error_message("", stderr, 2)
+    message = yosys_error_message("", stderr, 2)
 
     assert message == (
         "yosys exited with code 2: warning: Dumping selected design."
@@ -135,13 +135,13 @@ def test_yosys_error_message_unrelated_tail_unchanged():
 def test_yosys_error_message_empty_output_unchanged():
     """Empty captured output keeps the ``no output captured`` path, and no
     hint is appended (the trap signature cannot be present)."""
-    message = _yosys_error_message("", "", 1)
+    message = yosys_error_message("", "", 1)
 
     assert message == "yosys exited with code 1: no output captured"
 
 
 # --------------------------------------------------------------------------- #
-# synthesize's _synthesis_error_message via run_synthesize (issue #5804)
+# synthesize's synthesis_error_message via run_synthesize (issue #5804)
 # --------------------------------------------------------------------------- #
 
 

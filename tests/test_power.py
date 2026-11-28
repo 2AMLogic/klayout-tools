@@ -3889,13 +3889,13 @@ def test_mesh_helpers_moved_to_resistor_mesh_and_power_reimports_them():
     from klayout_tools import power, resistor_mesh
 
     assert (
-        power._decompose_manhattan_polygon is resistor_mesh._decompose_manhattan_polygon
+        power.decompose_manhattan_polygon is resistor_mesh.decompose_manhattan_polygon
     )
-    assert power._rails_under_via is resistor_mesh._rails_under_via
+    assert power.rails_under_via is resistor_mesh.rails_under_via
 
 
 def test_decompose_manhattan_polygon_extra_cuts_default_to_none():
-    from klayout_tools.resistor_mesh import _decompose_manhattan_polygon
+    from klayout_tools.resistor_mesh import decompose_manhattan_polygon
 
     l_shape = kdb.Polygon(
         [
@@ -3907,15 +3907,15 @@ def test_decompose_manhattan_polygon_extra_cuts_default_to_none():
             kdb.Point(0, 300),
         ]
     )
-    plain, reason = _decompose_manhattan_polygon(l_shape, 4096)
+    plain, reason = decompose_manhattan_polygon(l_shape, 4096)
     assert reason is None and plain is not None
-    same, _ = _decompose_manhattan_polygon(l_shape, 4096, (), ())
+    same, _ = decompose_manhattan_polygon(l_shape, 4096, (), ())
     assert same == plain
     # Cuts outside the polygon's own extent change nothing.
-    outside, _ = _decompose_manhattan_polygon(l_shape, 4096, (-50, 300, 900), (0, 301))
+    outside, _ = decompose_manhattan_polygon(l_shape, 4096, (-50, 300, 900), (0, 301))
     assert outside == plain
 
-    cut, _ = _decompose_manhattan_polygon(l_shape, 4096, (200,), (200,))
+    cut, _ = decompose_manhattan_polygon(l_shape, 4096, (200,), (200,))
     assert cut is not None and len(cut) > len(plain)
     assert sum(box.area() for _, _, box in cut) == l_shape.area()
     assert {box.right for _, _, box in cut} >= {200}
