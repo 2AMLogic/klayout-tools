@@ -1,6 +1,7 @@
 """Issue #6075's zero-delay ``INTERCONNECT`` drops for bit-selected
 *internal* nets: the shared gate-level module lookup
-(:func:`_find_gate_level_module`), the netlist-side pin map
+(:func:`_find_gate_level_module`, from ``functional_verification_sdf_instance``),
+the netlist-side pin map
 (:func:`_collect_sdf_internal_bus_net_pins`), the per-entry predicate
 (:func:`_sdf_interconnect_is_zero_delay_internal_bus_net`), the SDF-text
 drop pass (:func:`_drop_sdf_zero_delay_internal_bus_net_interconnects`),
@@ -23,16 +24,16 @@ back by it, so the dependency stays one-directional.
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from .functional_verification_sdf import (
     _SDF_INTERCONNECT_HEAD_RE,
-    _VERILOG_MODULE_CHUNK_TEMPLATE,
     _drop_sdf_interconnect_entries,
     _read_sdf_text,
     _read_verilog_source_texts,
     _sdf_interconnect_is_zero_delay,
 )
+from .functional_verification_sdf_instance import _find_gate_level_module
+from .functional_verification_sdf_rename import _sdf_divider
 from .functional_verification_sdf_steps import _write_sdf_drop_step
 
 # --------------------------------------------------------------------------- #
@@ -117,52 +118,6 @@ SDF_INTERNAL_BUS_NET_REASONS: dict[str, str] = {
 _SDF_BIT_SELECT_CONN_RE = re.compile(r"^(.+)\[(\d+)\]$")
 
 
-def _find_gate_level_module(
-    source_texts: list[str], hdl_toplevel: str
-) -> dict[str, Any] | None:
-    """The first of ``source_texts`` containing a
-    ``module <hdl_toplevel> ... endmodule`` chunk, parsed into that chunk's
-    module description (``{"name", "ports", "instances", "port_aliases"}``,
-    :func:`klayout_tools.verilog_netlist.parse_gate_level_verilog`'s shape)
-    -- the lookup :func:`_collect_sdf_internal_bus_net_pins` reads (it needs
-    the module's port list as well as its instance list, issue #6075).
-
-    Mirrors
-    :func:`functional_verification_sdf._find_gate_level_instances`'s
-    first-match loop over the same chunk template and parse (that helper
-    returns only the instance list; the port exclusion below needs the
-    ports too). Lives here rather than beside it because the per-file size
-    ratchet lets ``functional_verification_sdf.py`` only shrink.
-
-    Returns ``None`` -- never raises -- whenever the module description
-    cannot be derived: no such module in any source, or a top module outside
-    :func:`klayout_tools.verilog_netlist.parse_gate_level_verilog`'s narrow
-    gate-level grammar (notably an **ANSI-style** module header, which that
-    grammar does not model).
-    """
-    from .verilog_netlist import parse_gate_level_verilog
-
-    chunk_re = re.compile(
-        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(hdl_toplevel)), re.DOTALL
-    )
-    for text in source_texts:
-        chunk_match = chunk_re.search(text)
-        if chunk_match is None:
-            continue
-        try:
-            modules = parse_gate_level_verilog(chunk_match.group(0))
-        except Exception:
-            # Not parseable as gate-level Verilog (a hand-written RTL top, a
-            # construct outside verilog_netlist's narrow grammar) -- no
-            # module description. Never fatal.
-            return None
-        for module in modules:
-            if module["name"] == hdl_toplevel:
-                return module
-        return None
-    return None
-
-
 def _collect_sdf_internal_bus_net_pins(
     source_paths: list[str], hdl_toplevel: str
 ) -> dict[str, str]:
@@ -193,8 +148,12 @@ def _collect_sdf_internal_bus_net_pins(
     territory (a port bit is #2984's source shape, #2285's destination
     shape).
     """
+    from .verilog_netlist import parse_gate_level_verilog
+
     module = _find_gate_level_module(
-        _read_verilog_source_texts(source_paths), hdl_toplevel
+        _read_verilog_source_texts(source_paths),
+        hdl_toplevel,
+        parse_module=parse_gate_level_verilog,
     )
     if module is None:
         return {}
@@ -270,8 +229,7 @@ def _drop_sdf_zero_delay_internal_bus_net_interconnects(
     text = _read_sdf_text(sdf_path)
     if text is None:
         return None
-    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
-    divider = divider_match.group(1) if divider_match else "."
+    divider = _sdf_divider(text)
 
     return _drop_sdf_interconnect_entries(
         text,

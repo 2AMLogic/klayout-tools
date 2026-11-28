@@ -75,16 +75,17 @@ def _sdf_divider(text: str) -> str:
     return match.group(1) if match else "."
 
 
-def _split_sdf_path(token: str, divider: str) -> list[str]:
+def _split_sdf_path(token: str, divider: str, *, unescape: bool = False) -> list[str]:
     """Split an SDF path on every *unescaped* ``divider``, keeping each
-    component's own escapes intact."""
+    component's own escapes intact -- or, with ``unescape``, dropping the
+    backslash of each escape and keeping only the escaped character."""
     parts: list[str] = []
     current: list[str] = []
     index = 0
     while index < len(token):
         char = token[index]
         if char == "\\" and index + 1 < len(token):
-            current.append(token[index : index + 2])
+            current.append(token[index + 1] if unescape else token[index : index + 2])
             index += 2
             continue
         if char == divider:

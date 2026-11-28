@@ -1,4 +1,5 @@
-"""Read SDF time units and retained delay targets, preserving original identifiers."""
+"""Read SDF time units and retained delay targets, preserving original
+identifiers, and the parenthesis matchers every SDF pass shares."""
 
 from __future__ import annotations
 
@@ -160,6 +161,41 @@ def _sdf_clause_end(text: str, open_index: int) -> int | None:
         if depth == 1:
             return close + 1
         depth, previous = depth - 1, close
+
+
+def _sdf_matching_paren(text: str, open_index: int) -> int:
+    """Return the index of the ``)`` that closes the ``(`` at ``open_index``,
+    balancing nested parens -- what ``functional_verification_sdf`` uses
+    throughout instead of a regex, since an SDF ``(DELAY (ABSOLUTE ...))``
+    clause nests arbitrarily and a non-greedy regex would truncate at the
+    first inner ``)``.
+
+    At a ``(`` -- every caller's case -- this is :func:`_sdf_clause_end`,
+    whose ``str.find``/``str.count`` walk is several times faster on a
+    large post-route SDF. Off a ``(`` the two answers differ, so the
+    original character walk is kept for that case.
+    """
+    if open_index < len(text) and text[open_index] == "(":
+        end = _sdf_clause_end(text, open_index)
+        if end is not None:
+            return end - 1
+    else:
+        depth = 0
+        index = open_index
+        while index < len(text):
+            char = text[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index
+            index += 1
+    raise FunctionalVerificationError(
+        "options.sdf: unbalanced parentheses while scanning the SDF file for "
+        "bit-selected top-level-port INTERCONNECT entries (issue #1619) -- "
+        "the file is not well-formed SDF"
+    )
 
 
 def _sdf_cell_target(
