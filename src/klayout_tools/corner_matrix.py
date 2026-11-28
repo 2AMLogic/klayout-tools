@@ -21,7 +21,7 @@ from typing import Any
 
 from . import sim
 from ._jsonnum import is_finite_number
-from ._paths import _load_request_json
+from ._paths import load_request_json
 from .sim_batch_resume import UNRUN_BATCH_CODES
 
 #: The only top-level keys a matrix file may carry. Anything else is refused
@@ -55,7 +55,7 @@ class CornerMatrixError(Exception):
 
 
 def _load_object(path: str, what: str) -> dict[str, Any]:
-    data = _load_request_json(path, CornerMatrixError)
+    data = load_request_json(path, CornerMatrixError)
     if not isinstance(data, dict):
         raise CornerMatrixError(f"{what} must be a JSON object: {path}")
     return data

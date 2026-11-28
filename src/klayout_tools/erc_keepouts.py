@@ -7,7 +7,7 @@ from typing import Any
 
 from ._jsonnum import is_finite_number
 from ._layout import clip_box, region
-from ._paths import _reject_unknown_keys
+from ._paths import reject_unknown_keys
 from .coverage import work_id
 from .erc_spec import ErcError
 
@@ -47,7 +47,7 @@ def parse_keepouts(
         path = f"spec '{spec_path}': {key}"
         if not isinstance(entry, dict):
             raise ErcError(f"{path} must be an object")
-        _reject_unknown_keys(entry, ("box", "roles", "below"), spec_path, key, ErcError)
+        reject_unknown_keys(entry, ("box", "roles", "below"), spec_path, key, ErcError)
         box = _parse_box(entry.get("box"), f"{path}.box")
         below = entry.get("below")
         if below not in stackup:

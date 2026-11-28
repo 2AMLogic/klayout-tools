@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._jsonnum import is_finite_number
-from ._paths import _resolve_relative
+from ._paths import resolve_relative
 from ._request_fields import check_known_fields
 from .gen_compose_base import GenComposeError
 
@@ -100,7 +100,7 @@ def parse_request(request: Any, request_dir: str) -> dict[str, Any]:
 
     layout = _require_object(request.get("layout"), "request.layout")
     _check_keys(layout, ("gds_path", "top_cell"), "request.layout")
-    gds_path = _resolve_relative(
+    gds_path = resolve_relative(
         _require_str(layout, "gds_path", "request.layout"), request_dir
     )
     top_cell = layout.get("top_cell")
@@ -165,5 +165,5 @@ def parse_request(request: Any, request_dir: str) -> dict[str, Any]:
         "layer_role": layer_role,
         "width_um": float(width_um),
         "nets": nets,
-        "output": None if output is None else _resolve_relative(output, request_dir),
+        "output": None if output is None else resolve_relative(output, request_dir),
     }

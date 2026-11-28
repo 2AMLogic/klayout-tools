@@ -138,7 +138,7 @@ _ANTENNA_VIOLATIONS_END = "===KLT_ANTENNA_VIOLATIONS_END==="
 #: Same marker convention as the setup/hold/antenna pairs above, isolating
 #: the ``request.post_route_spef`` net-name-correlation check's own report
 #: (issue #948, extended to two lines by #951) -- see
-#: :func:`_spef_sta_script_lines`/:func:`_count_spef_nets_annotated`. Line 1
+#: :func:`_spef_sta_script_lines`/:func:`count_spef_nets_annotated`. Line 1
 #: is the SPEF-side ``"<annotated> <total>"`` pair (how many of the SPEF's own
 #: net names resolve to a net in the linked design), line 2 the design-side
 #: pair (how many of the *design's* nets the SPEF names at all).

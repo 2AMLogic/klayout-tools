@@ -1,7 +1,7 @@
 """Regressions for `klt` verbs' JSON input loading (issues #5485, #5540).
 
 A family of hand-rolled "open a JSON file, `json.load` it, wrap the failure"
-readers kept drifting from the shared `_paths._load_request_json` by dropping
+readers kept drifting from the shared `_paths.load_request_json` by dropping
 one of its `except` clauses -- usually `UnicodeDecodeError`, which is a
 `ValueError` but neither an `OSError` nor a `json.JSONDecodeError`, so
 `except (OSError, json.JSONDecodeError)` lets it through. A non-UTF-8 input
@@ -35,7 +35,7 @@ from klayout_tools import (
     socket_check,
     tap_distance,
 )
-from klayout_tools._paths import _load_spec_json
+from klayout_tools._paths import load_spec_json
 from klayout_tools.cli import main
 from klayout_tools.cli._parsing import load_json_path_or_inline
 from klayout_tools.cli._request_file import RequestFileError, load_request_file
@@ -180,13 +180,13 @@ def test_yield_sensitivity_still_names_a_missing_samples_file(tmp_path):
 
 
 def test_load_spec_json_non_utf8_raises_the_callers_error(tmp_path):
-    """`klt erc`/`power`/`mom` read their spec through `_load_spec_json` --
+    """`klt erc`/`power`/`mom` read their spec through `load_spec_json` --
     the one shared helper that still opened without `encoding=` and caught
     only `(OSError, json.JSONDecodeError)`."""
     path = tmp_path / "bad.json"
     path.write_bytes(_NON_UTF8)
     with pytest.raises(ValueError, match="could not read spec"):
-        _load_spec_json(str(path), ValueError)
+        load_spec_json(str(path), ValueError)
 
 
 def test_load_spec_json_malformed_json_raises_the_callers_error(tmp_path):
@@ -199,7 +199,7 @@ def test_load_spec_json_malformed_json_raises_the_callers_error(tmp_path):
     path.write_text("{not json")
     for error_cls in (ErcError, MomError, PowerError):
         with pytest.raises(error_cls, match="is not valid JSON"):
-            _load_spec_json(str(path), error_cls)
+            load_spec_json(str(path), error_cls)
 
 
 @pytest.mark.parametrize("verb", ["mom", "power"], ids=["mom", "power"])

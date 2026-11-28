@@ -321,7 +321,7 @@ def runner_resolved_osdi(request: dict[str, Any], request_dir: str) -> dict[int,
     The executing host checks and hashes these entries. Malformed entries
     are left to the callers' own validation.
     """
-    from ._paths import _resolve_relative
+    from ._paths import resolve_relative
 
     raw = (request.get("options") or {}).get("osdi_preload")
     if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
@@ -337,7 +337,7 @@ def runner_resolved_osdi(request: dict[str, Any], request_dir: str) -> dict[int,
         if entry.startswith(_PDK_ROOT_LITERAL_PREFIXES):
             found[index] = "env_var"
         elif "$" not in entry and any(
-            _is_under(os.path.abspath(_resolve_relative(entry, request_dir)), root)
+            _is_under(os.path.abspath(resolve_relative(entry, request_dir)), root)
             for root in roots
         ):
             found[index] = "pdk_root"

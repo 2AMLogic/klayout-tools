@@ -310,7 +310,7 @@ def _derived_request(
     supported everywhere (an ordinary request may declare them), and the
     off-host staging paths rewrite them into job-relative names themselves.
     """
-    from ._paths import _resolve_relative
+    from ._paths import resolve_relative
 
     derived = dict(request)
     spec: dict[str, Any] = {"select_corner_ids": list(ids)}
@@ -339,14 +339,14 @@ def _derived_request(
         # batch (the evidence baseline), instead of staying local.
         derived["backend"] = resolved_backend
     if isinstance(derived.get("netlist"), str):
-        derived["netlist"] = _resolve_relative(derived["netlist"], request_dir)
+        derived["netlist"] = resolve_relative(derived["netlist"], request_dir)
     models = derived.get("models")
     if isinstance(models, dict):
         _absolutize_models(models, request_dir)
     batch = derived.get("batch")
     if isinstance(batch, dict) and isinstance(batch.get("provision_script_path"), str):
         batch = dict(batch)
-        batch["provision_script_path"] = _resolve_relative(
+        batch["provision_script_path"] = resolve_relative(
             batch["provision_script_path"], request_dir
         )
         derived["batch"] = batch
@@ -357,18 +357,18 @@ def _derived_request(
 def _absolutize_models(models: dict[str, Any], request_dir: str) -> None:
     """Rewrite ``models.{lib,param_file,pdk_root}`` absolute in place
     (entries that are absent, empty or not strings are left alone)."""
-    from ._paths import _resolve_relative
+    from ._paths import resolve_relative
 
     for key in ("lib", "param_file", "pdk_root"):
         if isinstance(models.get(key), str) and models[key]:
-            models[key] = _resolve_relative(models[key], request_dir)
+            models[key] = resolve_relative(models[key], request_dir)
 
 
 def _absolute_section_libs(corners: Any, request_dir: str) -> Any:
     """A process bundle's per-section ``lib`` refs, rewritten absolute
     against the original request's directory (unchanged when there are
     none)."""
-    from ._paths import _resolve_relative
+    from ._paths import resolve_relative
 
     if not isinstance(corners, dict) or not isinstance(corners.get("process"), list):
         return corners
@@ -387,7 +387,7 @@ def _absolute_section_libs(corners: Any, request_dir: str) -> Any:
             ):
                 section = {
                     **section,
-                    "lib": _resolve_relative(section["lib"], request_dir),
+                    "lib": resolve_relative(section["lib"], request_dir),
                 }
             sections.append(section)
         process.append({**entry, "sections": sections})

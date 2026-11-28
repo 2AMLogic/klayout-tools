@@ -211,8 +211,8 @@ from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._artifact_envelope import path_envelope as _path_envelope
 from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._jsonnum import is_int
-from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import load_request_json
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from .env_provenance import find_repo_root
 from .env_provenance import repo_relative_path as repo_relative_path
@@ -571,7 +571,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     (``sources``, ``hdl_toplevel``, ``testbench``). Does not require a
     ``schema`` field (user-authored input, never emitted by this tool).
     """
-    request = _load_request_json(request_path, FunctionalVerificationError)
+    request = load_request_json(request_path, FunctionalVerificationError)
     return _validate_request_shape(request, "request file")
 
 

@@ -12,7 +12,7 @@ import posixpath
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
-from ._paths import _resolve_relative
+from ._paths import resolve_relative
 from .sim_errors import SimError
 from .sim_staging import _PDK_ROOT_LITERAL_PREFIXES
 
@@ -99,7 +99,7 @@ def rebase_osdi_preload(request: dict[str, Any], request_dir: str) -> None:
             and entry.strip()
             and not entry.startswith(_PDK_ROOT_LITERAL_PREFIXES)
         ):
-            entries[index] = _resolve_relative(entry, request_dir)
+            entries[index] = resolve_relative(entry, request_dir)
 
 
 def resolve_osdi_preload(
@@ -167,9 +167,7 @@ def resolve_osdi_preload(
             except SimError as exc:
                 raise SimError(f"{field}: {exc}") from exc
         else:
-            path = _resolve_relative(
-                expand_pdk_root_literal(ref, pdk_root), request_dir
-            )
+            path = resolve_relative(expand_pdk_root_literal(ref, pdk_root), request_dir)
         if not os.path.isfile(path):
             raise SimError(f"{field}: osdi_preload file not found: {path}")
         resolved.append(path)

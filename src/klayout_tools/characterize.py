@@ -65,7 +65,7 @@ from typing import Any
 
 from . import liberty_writer
 from ._jsonnum import is_finite_number
-from ._paths import _load_request_json, _resolve_relative
+from ._paths import load_request_json, resolve_relative
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
 from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
@@ -452,7 +452,7 @@ def _characterize_cell(
 
 
 def _load_request(request_path: str) -> dict[str, Any]:
-    data = _load_request_json(request_path, CharacterizeError)
+    data = load_request_json(request_path, CharacterizeError)
     if not isinstance(data, dict):
         raise CharacterizeError(
             f"request '{request_path}' must be a JSON object, not {type(data).__name__}"
@@ -548,7 +548,7 @@ def _resolve_cell_spec(
             f"{where}.netlist is required (a SPICE file defining the "
             "cell's .subckt -- post-extraction where available)"
         )
-    netlist_path = _resolve_relative(netlist, request_dir)
+    netlist_path = resolve_relative(netlist, request_dir)
     if not os.path.isfile(netlist_path):
         raise CharacterizeError(f"cell netlist not found: {netlist_path}")
 
@@ -1404,7 +1404,7 @@ def _rebase_models(models: dict[str, Any], request_dir: str) -> dict[str, Any]:
         return models
     if models.get("pdk") is not None or models.get("pdk_root") is not None:
         return models
-    return {**models, "lib": _resolve_relative(lib, request_dir)}
+    return {**models, "lib": resolve_relative(lib, request_dir)}
 
 
 def _extract_measurements(
@@ -1935,7 +1935,7 @@ def _resolve_outdir(
         raise CharacterizeError("request.output must be an object")
     declared = spec.get("outdir")
     if isinstance(declared, str) and declared.strip():
-        return _resolve_relative(declared, request_dir)
+        return resolve_relative(declared, request_dir)
     return os.path.join(request_dir, DEFAULT_OUTDIR_NAME)
 
 
@@ -1951,7 +1951,7 @@ def _resolve_lib_path(
     else:
         declared = (request.get("output") or {}).get("lib")
         if isinstance(declared, str) and declared.strip():
-            resolved = _resolve_relative(declared, request_dir)
+            resolved = resolve_relative(declared, request_dir)
         else:
             resolved = os.path.join(work_dir, f"{library.name}.lib")
     parent = os.path.dirname(resolved)

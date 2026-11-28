@@ -7,7 +7,7 @@ raising the ceiling was explicitly out of scope for #5530 -- the same split
 move issue #5426 made for `gen_compose_routing.py`.
 
 `klt eval <descriptor> --candidate <candidate>` routes **both** paths
-through `klayout_tools._paths._load_request_json`, so the loader's own
+through `klayout_tools._paths.load_request_json`, so the loader's own
 read-failure and parse-failure messages are the only thing telling the
 caller which of the two files is at fault.
 """

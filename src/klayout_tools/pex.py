@@ -33,7 +33,7 @@ from . import (
     pex_sim_evidence,
 )
 from ._jsonnum import is_finite_number, is_number
-from ._paths import _resolve_relative
+from ._paths import resolve_relative
 from ._provenance import content_hash, sha256_file
 from ._text import read_text as _read_text
 from .coverage import (
@@ -354,7 +354,7 @@ def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
         )
     if matches:
         index, _text, target = matches[0]
-        return index, _resolve_relative(target, body_dir)
+        return index, resolve_relative(target, body_dir)
 
     raise PexError(
         "testbench netlist has no `.include`/`.inc` directive -- klt pex "
@@ -1972,7 +1972,7 @@ def _prepare_dut_swapped_request(
     request = load_request(testbench_path)
     request_dir = os.path.dirname(os.path.abspath(testbench_path))
 
-    schematic_body_path = _resolve_relative(request["netlist"], request_dir)
+    schematic_body_path = resolve_relative(request["netlist"], request_dir)
     body_text = bound_body
     if body_text is None:
         with open(schematic_body_path, encoding="utf-8") as handle:
@@ -1997,7 +1997,7 @@ def _prepare_dut_swapped_request(
         and models.get("pdk_root") is None
     ):
         models = dict(models)
-        models["lib"] = _resolve_relative(models["lib"], request_dir)
+        models["lib"] = resolve_relative(models["lib"], request_dir)
         swapped_request["models"] = models
     swapped_request["netlist"] = swapped_body_path
     if side in ("extracted", "device-only"):
@@ -2806,7 +2806,7 @@ def run_pex(
 
         request = requests[index]
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
-        schematic_body_path = _resolve_relative(request["netlist"], request_dir)
+        schematic_body_path = resolve_relative(request["netlist"], request_dir)
         if not os.path.isfile(schematic_body_path):
             raise PexError(
                 f"testbench '{testbench_path}': netlist not found: "

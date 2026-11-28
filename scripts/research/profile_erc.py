@@ -77,6 +77,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from klayout_tools import erc
+from klayout_tools._paths import load_spec_json
 
 # Top-level helpers run_erc calls directly, outside the candidate walk.
 _REMAINDER_FUNCS = (
@@ -294,7 +295,7 @@ def _attribute_walk(args: argparse.Namespace) -> dict[str, Any]:
     Specs declaring ``devices[]`` (or a ``--deck``) are rejected, since the
     replica does not rebuild device cuts.
     """
-    spec = erc._load_spec_json(args.spec, erc.ErcError)
+    spec = load_spec_json(args.spec, erc.ErcError)
     if spec.get("devices") or args.deck:
         raise SystemExit("--attribute-walk does not support devices[]/--deck")
     stackup = erc._validate_stackup(spec, args.spec)

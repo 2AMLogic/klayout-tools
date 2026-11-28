@@ -1,6 +1,6 @@
 """Request-path resolution with unset-``$VAR`` validation, shared by verbs.
 
-:func:`resolve_request_path` is :func:`klayout_tools._paths._resolve_relative`
+:func:`resolve_request_path` is :func:`klayout_tools._paths.resolve_relative`
 plus a guard: an unset ``$VAR`` / ``${VAR}`` reference raises ``error_cls``
 naming the variable instead of passing the literal text through to a
 misleading "file not found" error (issue #5678).
@@ -12,7 +12,7 @@ import os
 import re
 from collections.abc import Callable, Iterable
 
-from klayout_tools._paths import _resolve_relative
+from klayout_tools._paths import resolve_relative
 
 #: Mirrors ``posixpath.expandvars``'s variable syntax (``$NAME`` / ``${NAME}``).
 _ENV_VAR_REF_RE = re.compile(r"\$(\w+|\{[^}]*\})", re.ASCII)
@@ -44,7 +44,7 @@ def resolve_request_path(
 ) -> str:
     """``path`` anchored at ``base_dir``, with unset-``$VAR`` validation.
 
-    ``$VAR`` / ``~`` are expanded first (the shared ``_resolve_relative``
+    ``$VAR`` / ``~`` are expanded first (the shared ``resolve_relative``
     convention); if any referenced variable is unset, ``error_cls(message)``
     is raised with ``field`` naming the request path, so the failure reads as
     an unexported variable rather than a missing file (issue #5678).
@@ -57,7 +57,7 @@ def resolve_request_path(
             f"{field} '{path}' references unset environment variable "
             f"{names}; export it before running or use a literal path"
         )
-    return _resolve_relative(path, base_dir)
+    return resolve_relative(path, base_dir)
 
 
 def resolve_readable_files(

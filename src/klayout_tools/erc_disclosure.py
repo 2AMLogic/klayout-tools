@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._paths import _reject_unknown_keys
+from ._paths import reject_unknown_keys
 from .coverage import work_id
 from .erc_spec import (
     _TIES_DISCLOSURE_COVERAGE_REASON,
@@ -82,7 +82,7 @@ def validate_floating_gate_allowed(
         where = f"{FLOATING_GATE_ALLOWED_KEY}[{i}]"
         if not isinstance(item, dict):
             raise ErcError(f"spec '{spec_path}': {where} must be a JSON object")
-        _reject_unknown_keys(
+        reject_unknown_keys(
             item, _FLOATING_GATE_ALLOWED_KEYS, spec_path, where, ErcError
         )
         reason = item.get("reason")

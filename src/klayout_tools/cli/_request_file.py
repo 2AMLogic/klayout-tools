@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .._paths import _load_request_json
+from .._paths import load_request_json
 
 
 class RequestFileError(Exception):
@@ -31,10 +31,10 @@ class RequestFileError(Exception):
 def load_request_file(path: str) -> Any:
     """Read and decode a ``klt`` request JSON file.
 
-    Delegates to :func:`klayout_tools._paths._load_request_json` so the CLI
+    Delegates to :func:`klayout_tools._paths.load_request_json` so the CLI
     request reads cannot drift from the library's loader.
 
     Raises :class:`RequestFileError` for every failure mode the read can
     hit; returns whatever :func:`json.load` produced, unvalidated.
     """
-    return _load_request_json(path, RequestFileError)
+    return load_request_json(path, RequestFileError)

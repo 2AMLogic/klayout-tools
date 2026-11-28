@@ -44,10 +44,10 @@ module stays self-contained. Every existing cross-module import between verb
 modules in this repo is of a *public* name (``run_place_and_route``,
 ``PlaceAndRouteError``, ``run_extract``, ...), never a private one.
 ``_run_openroad``, ``_count_violations``, ``_openroad_version``, and (issue
-#1703) the SPEF net-name-correlation Tcl helpers ``_tcl_net_list``/
-``_count_spef_nets_annotated`` are the exceptions: those were byte-identical
+#1703) the SPEF net-name-correlation Tcl helpers ``tcl_net_list``/
+``count_spef_nets_annotated`` are the exceptions: those were byte-identical
 (modulo exception class/docstring length, or -- for
-``_count_spef_nets_annotated`` -- module-local marker constants) between this
+``count_spef_nets_annotated`` -- module-local marker constants) between this
 module and ``place_and_route.py`` with no caller-visible behavioral
 difference worth preserving per-copy, so they were consolidated into the
 shared ``_openroad_engine``/``_paths.py`` internal utility modules both
@@ -278,9 +278,9 @@ from ._openroad_engine import (
 )
 from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import (
-    _count_spef_nets_annotated,
-    _load_request_json,
-    _tcl_net_list,
+    count_spef_nets_annotated,
+    load_request_json,
+    tcl_net_list,
     validate_request_shape,
 )
 from ._power_activity import power_activity_lines as _power_activity_lines
@@ -589,7 +589,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     and rejects unknown fields, unreadable files and malformed JSON. After this
     check, :func:`run_sta` requires exactly one of ``def`` and ``verilog`` (#1825).
     """
-    request = _load_request_json(request_path, PostRouteStaError)
+    request = load_request_json(request_path, PostRouteStaError)
     request = validate_request_shape(
         request,
         "request file",
@@ -1711,7 +1711,7 @@ def _spef_annotation_block(
     stdout = completed.stdout or ""
     stderr = completed.stderr or ""
 
-    nets_check = _count_spef_nets_annotated(
+    nets_check = count_spef_nets_annotated(
         stdout,
         begin=_SPEF_NET_CHECK_BEGIN,
         end=_SPEF_NET_CHECK_END,
@@ -3120,7 +3120,7 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     The SPEF side counts every listed name found in the design. The design
     side skips empty or driver-only internal nets and samples missing names."""
     return [
-        f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
+        f"set klt_spef_nets [list {tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
         "foreach klt_spef_net $klt_spef_nets {",
         "    set klt_spef_have($klt_spef_net) 1",

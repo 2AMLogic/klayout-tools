@@ -35,7 +35,7 @@ import tempfile
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from ._paths import _resolve_relative
+from ._paths import resolve_relative
 from .lvs_base import (
     CATEGORY_DEVICE_PROPERTY,
     CATEGORY_DEVICE_UNMATCHED,
@@ -287,7 +287,7 @@ def _resolve_netgen_binary(options: dict[str, Any], request_dir: str) -> str:
             continue
         candidate = value
         if os.sep in value or (os.altsep and os.altsep in value):
-            candidate = _resolve_relative(value, request_dir)
+            candidate = resolve_relative(value, request_dir)
         resolved = shutil.which(candidate)
         if resolved is None:
             raise LvsError(
@@ -331,7 +331,7 @@ def _resolve_netgen_setup(options: dict[str, Any], request_dir: str) -> str | No
     value = options.get("netgen_setup")
     if value is None:
         return None
-    resolved = _resolve_relative(value, request_dir)
+    resolved = resolve_relative(value, request_dir)
     if not os.path.isfile(resolved):
         raise LvsError(f"options.netgen_setup not found: {resolved}")
     return resolved

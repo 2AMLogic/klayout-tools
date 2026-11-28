@@ -2,11 +2,11 @@
 the ``klt`` verb modules.
 
 Offers: ``resolve_relative`` (anchor a user-supplied path at the request's
-directory), ``_load_request_json`` / ``_load_spec_json`` (read a JSON
-request or spec file), ``validate_request_shape`` / ``load_request_arg``
-(request dispatch and shape checks), ``parse_layer_datatype`` and
-``_validate_via_entries`` (spec parsing), ``_tcl_net_list`` and
-``_count_spef_nets_annotated`` (OpenSTA Tcl helpers), ``resolve_tool_binary``
+directory), ``load_request_json`` / ``load_spec_json`` (read a JSON request or
+spec file), ``validate_request_shape`` / ``load_request_arg`` (request dispatch
+and shape checks), ``parse_layer_datatype``, ``validate_via_entries`` and
+``reject_unknown_keys`` (spec parsing), ``tcl_net_list`` and
+``count_spef_nets_annotated`` (OpenSTA Tcl helpers), ``resolve_tool_binary``
 (``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``).
 
 SPICE line pre-processing (``+`` continuation folding and ``;``/``$`` inline
@@ -32,9 +32,6 @@ def resolve_relative(path: str, base_dir: str) -> str:
     if os.path.isabs(expanded):
         return expanded
     return os.path.join(base_dir, expanded)
-
-
-_resolve_relative = resolve_relative  # Compatibility for existing callers.
 
 
 def resolve_tool_binary(
@@ -72,7 +69,7 @@ def resolve_tool_binary(
     next source: an override the caller believes is in force but is not
     would be worse than not supporting one at all. A value containing a
     path separator is resolved against ``request_dir`` first (via
-    :func:`_resolve_relative`); a bare name is looked up on ``PATH``.
+    :func:`resolve_relative`); a bare name is looked up on ``PATH``.
 
     When nothing resolves (no override given, and no ``fallback_names``
     entry is on ``PATH``): raises ``error_cls`` naming every fallback tried
@@ -93,7 +90,7 @@ def resolve_tool_binary(
             continue
         candidate = value
         if os.sep in value or (os.altsep and os.altsep in value):
-            candidate = _resolve_relative(value, request_dir)
+            candidate = resolve_relative(value, request_dir)
         resolved = shutil.which(candidate)
         if resolved is None:
             raise error_cls(
@@ -119,7 +116,28 @@ def resolve_tool_binary(
     )
 
 
-def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
+def _read_json_file(
+    path: str, *, noun: str, missing: str, error_cls: type[Exception]
+) -> Any:
+    """The checks, UTF-8 ``json.load`` and error wrapping shared by
+    :func:`load_request_json` and :func:`load_spec_json`. ``noun`` names the
+    file in the read/parse messages; ``missing`` prefixes the missing-file one."""
+    if not os.path.exists(path):
+        raise error_cls(f"{missing}: {path}")
+    if os.path.isdir(path):
+        raise error_cls(f"not a file: {path}")
+
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise error_cls(f"could not read {noun} '{path}': {exc}") from exc
+    except ValueError as exc:
+        # json's over-long-int parse error is a plain ValueError (issue #6233).
+        raise error_cls(f"{noun} '{path}' is not valid JSON: {exc}") from exc
+
+
+def load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
     """Read ``request_path`` and decode it as JSON, raising ``error_cls`` for
     every failure mode a ``load_request`` needs to report: missing file, a
     directory instead of a file, an unreadable/undecodable file, or invalid
@@ -130,42 +148,24 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
     present" checks (their exact wording is module-specific, and some
     callers reuse them across stdin/inline sources that never reach here).
     """
-    if not os.path.exists(request_path):
-        raise error_cls(f"file not found: {request_path}")
-    if os.path.isdir(request_path):
-        raise error_cls(f"not a file: {request_path}")
-
-    try:
-        with open(request_path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise error_cls(f"could not read request '{request_path}': {exc}") from exc
-    except ValueError as exc:
-        # json's over-long-int parse error is a plain ValueError (issue #6233).
-        raise error_cls(f"request '{request_path}' is not valid JSON: {exc}") from exc
+    return _read_json_file(
+        request_path, noun="request", missing="file not found", error_cls=error_cls
+    )
 
 
-def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any]:
+def load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any]:
     """Read ``spec_path`` and decode it as a JSON object, raising
     ``error_cls`` for every failure mode ``erc.py``/``power.py``/``mom.py``'s
     ``run_*`` entry points report: missing file, a directory instead of a
     file, an unreadable/undecodable file, invalid JSON, or a non-object.
 
-    Unlike :func:`_load_request_json`, this also enforces "is this a JSON
+    Unlike :func:`load_request_json`, this also enforces "is this a JSON
     object" itself -- all three callers need that exact check, folded in
     here rather than left to each caller.
     """
-    if not os.path.exists(spec_path):
-        raise error_cls(f"spec file not found: {spec_path}")
-    if os.path.isdir(spec_path):
-        raise error_cls(f"not a file: {spec_path}")
-    try:
-        with open(spec_path, encoding="utf-8") as f:
-            spec = json.load(f)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise error_cls(f"could not read spec '{spec_path}': {exc}") from exc
-    except ValueError as exc:
-        raise error_cls(f"spec '{spec_path}' is not valid JSON: {exc}") from exc
+    spec = _read_json_file(
+        spec_path, noun="spec", missing="spec file not found", error_cls=error_cls
+    )
     if not isinstance(spec, dict):
         raise error_cls(f"spec '{spec_path}' must be a JSON object")
     return spec
@@ -174,7 +174,7 @@ def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any
 ANNOTATION_KEY = "_comment"
 
 
-def _reject_unknown_keys(
+def reject_unknown_keys(
     obj: dict[str, Any],
     allowed: Iterable[str],
     spec_path: str,
@@ -240,7 +240,7 @@ def parse_layer_datatype(
 ViaEntry = tuple[int, dict[str, Any], str, tuple[int, int], tuple[str, str]]
 
 
-def _validate_via_entries(
+def validate_via_entries(
     spec: dict[str, Any],
     spec_path: str,
     stackup_names: list[str],
@@ -275,7 +275,7 @@ def _validate_via_entries(
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise error_cls(f"spec '{spec_path}': vias[{i}] must be a JSON object")
-        _reject_unknown_keys(
+        reject_unknown_keys(
             entry,
             ("name", "layer", "between", *extra_allowed_keys),
             spec_path,
@@ -312,7 +312,7 @@ def _validate_via_entries(
     return results
 
 
-def _tcl_net_list(names: Iterable[str]) -> str:
+def tcl_net_list(names: Iterable[str]) -> str:
     """Render ``names`` as a brace-quoted Tcl list body (each name wrapped
     ``{...}``, whitespace-joined) -- the standard Tcl idiom for embedding
     arbitrary literal strings in a generated script without word-splitting
@@ -326,7 +326,7 @@ def _tcl_net_list(names: Iterable[str]) -> str:
     return " ".join("{" + name + "}" for name in names)
 
 
-def _count_spef_nets_annotated(
+def count_spef_nets_annotated(
     stdout: str, *, begin: str, end: str, pattern: re.Pattern[str]
 ) -> tuple[int, int, int, int] | None:
     """``(nets_annotated, nets_total, design_nets_annotated,

@@ -92,7 +92,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from klayout_tools._paths import _resolve_relative  # noqa: E402
+from klayout_tools._paths import resolve_relative  # noqa: E402
 from klayout_tools._provenance import sha256_file  # noqa: E402
 from klayout_tools._vendor import mutation_variants as _mutation_variants  # noqa: E402
 from klayout_tools.eval import EvalError, _load_json_arg, run_eval  # noqa: E402
@@ -890,7 +890,7 @@ def _reference_solution_dependency_files(
 
         netlist = request_doc.get("netlist")
         if isinstance(netlist, str):
-            files.append(Path(_resolve_relative(netlist, request_dir)))
+            files.append(Path(resolve_relative(netlist, request_dir)))
 
         models = request_doc.get("models")
         if isinstance(models, dict):

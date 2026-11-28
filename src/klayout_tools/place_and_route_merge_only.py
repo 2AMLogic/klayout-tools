@@ -41,7 +41,7 @@ import os
 from typing import Any
 
 from . import output_lock
-from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
+from ._paths import load_request_json, reject_unknown_keys, validate_request_shape
 from ._provenance import content_hash
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_cells import _default_variant_shipping
@@ -80,14 +80,14 @@ def _load_merge_request(request_path: str) -> dict[str, Any]:
     the PDK works too, since no stage ever reads the netlist, floorplan or
     seed from here.
     """
-    request = _load_request_json(request_path, PlaceAndRouteError)
+    request = load_request_json(request_path, PlaceAndRouteError)
     request = validate_request_shape(
         request,
         "request file",
         error_cls=PlaceAndRouteError,
         required_fields=("hdl_toplevel", "pdk"),
     )
-    _reject_unknown_keys(
+    reject_unknown_keys(
         request, _ALLOWED_REQUEST_KEYS, request_path, "", PlaceAndRouteError
     )
     _validate_outputs(request, request_path)

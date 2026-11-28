@@ -172,7 +172,7 @@ import os
 from typing import Any
 
 from ._jsonnum import is_number
-from ._paths import _resolve_relative
+from ._paths import resolve_relative
 from .gen import _GENERATOR_SPECS
 from .gen_compose_base import ORIENTATIONS as _ORIENTATIONS
 from .layout_plan_fields import (
@@ -835,7 +835,7 @@ def validate_layout_plan_document(
     rather than requiring the caller to have already built a digest.
 
     ``request_dir`` resolves a relative ``request.netlist.path`` (mirrors
-    ``klt lvs``'s ``load_request_arg``/``_resolve_relative`` convention);
+    ``klt lvs``'s ``load_request_arg``/``resolve_relative`` convention);
     defaults to the current working directory, matching every other
     ``klt``-family request loader's own default.
 
@@ -852,7 +852,7 @@ def validate_layout_plan_document(
         raise LayoutPlanUsageError("request is missing required field: netlist")
 
     netlist_spec = _parse_netlist(request["netlist"])
-    resolved_path = _resolve_relative(netlist_spec["path"], request_dir or os.getcwd())
+    resolved_path = resolve_relative(netlist_spec["path"], request_dir or os.getcwd())
 
     digest = ingest_netlist(netlist_spec, resolved_path)
 

@@ -111,7 +111,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-from ._paths import _load_request_json
+from ._paths import load_request_json
 from .drc import DrcError, drc_exit_code, run_drc
 from .functional_verification import (
     FunctionalVerificationError,
@@ -160,7 +160,7 @@ def _load_json_arg(value: str, label: str) -> tuple[Any, str]:
     resolve against -- the same three forms `klt lvs`'s `request` argument
     accepts (see `docs/cli/eval.md`): a path to a JSON file, `"-"` to read
     from stdin, or an inline JSON value string. The file branch calls
-    `_paths._load_request_json`, so an unreadable or non-UTF-8 file raises
+    `_paths.load_request_json`, so an unreadable or non-UTF-8 file raises
     `EvalError` -- reaching the CLI's error envelope -- instead of escaping as
     a traceback; that loader owns its own file-read wording (issue #5485)."""
     if value == "-":
@@ -171,7 +171,7 @@ def _load_json_arg(value: str, label: str) -> tuple[Any, str]:
         return data, os.getcwd()
 
     if os.path.isfile(value):
-        data = _load_request_json(value, EvalError)
+        data = load_request_json(value, EvalError)
         return data, os.path.dirname(os.path.abspath(value))
 
     if os.path.isdir(value):

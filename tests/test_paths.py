@@ -17,7 +17,7 @@ import pytest
 
 from klayout_tools._layer_spec import parse_layer_spec
 from klayout_tools._paths import (
-    _load_request_json,
+    load_request_json,
     looks_like_request_document,
     parse_layer_datatype,
     parse_layer_datatype_strict,
@@ -87,7 +87,7 @@ def test_looks_like_request_document_unreadable_file_falls_through(
 
 
 # --------------------------------------------------------------------------- #
-# _load_request_json error messages (issue #5530)
+# load_request_json error messages (issue #5530)
 # --------------------------------------------------------------------------- #
 
 
@@ -101,7 +101,7 @@ def test_load_request_json_undecodable_file_names_the_path(tmp_path):
     path = tmp_path / "latin1.json"
     path.write_bytes(b"\xff\xfe{}")
     with pytest.raises(_LoaderError, match=re.escape(str(path))) as excinfo:
-        _load_request_json(str(path), _LoaderError)
+        load_request_json(str(path), _LoaderError)
     assert "could not read request" in str(excinfo.value)
 
 
@@ -109,7 +109,7 @@ def test_load_request_json_malformed_json_names_the_path(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("{not json")
     with pytest.raises(_LoaderError, match=re.escape(str(path))) as excinfo:
-        _load_request_json(str(path), _LoaderError)
+        load_request_json(str(path), _LoaderError)
     assert "is not valid JSON" in str(excinfo.value)
 
 
@@ -120,13 +120,13 @@ def test_load_request_json_path_with_spaces_and_quote_is_readable(tmp_path):
     path.parent.mkdir()
     path.write_text("{not json")
     with pytest.raises(_LoaderError, match=re.escape(str(path))):
-        _load_request_json(str(path), _LoaderError)
+        load_request_json(str(path), _LoaderError)
 
 
 def test_load_request_json_valid_document_round_trips(tmp_path):
     path = tmp_path / "ok.json"
     path.write_text(json.dumps({"hello": "world"}))
-    assert _load_request_json(str(path), _LoaderError) == {"hello": "world"}
+    assert load_request_json(str(path), _LoaderError) == {"hello": "world"}
 
 
 class _SpecError(Exception):

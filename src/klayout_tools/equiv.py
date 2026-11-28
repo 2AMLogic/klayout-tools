@@ -58,8 +58,8 @@ from typing import Any
 
 from ._engine_proc import run_in_group
 from ._jsonnum import is_int, is_number
-from ._paths import _load_request_json, resolve_tool_binary, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import load_request_json, resolve_tool_binary, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
@@ -193,7 +193,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     not require a ``schema`` field, matching ``klt lvs``/``klt sim``'s
     ``load_request`` (user-authored input, never emitted by this tool).
     """
-    request = _load_request_json(request_path, EquivError)
+    request = load_request_json(request_path, EquivError)
     return validate_request_shape(
         request,
         "request file",

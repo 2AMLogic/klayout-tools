@@ -96,7 +96,7 @@ def test_missing_file_is_a_clean_error(tmp_path):
 
 
 def test_malformed_json_is_a_clean_error(tmp_path):
-    # Since issue #5485 routed this through `_paths._load_request_json`, an
+    # Since issue #5485 routed this through `_paths.load_request_json`, an
     # unparseable document is reported as a *parse* failure, distinctly from
     # a *read* failure -- the shared loader's split, which the hand-rolled
     # copy this replaced lumped under one "could not read" message.

@@ -47,8 +47,8 @@ from . import env_provenance
 from ._drc_edge_pair_hull import _edge_pair_hull_points
 from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
-from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import load_request_json
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
@@ -241,7 +241,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     (user-authored input, never emitted by this tool) -- when one *is*
     present, ``cli/drc_cmd.py`` checks it against :data:`REQUEST_SCHEMA`.
     """
-    request = _load_request_json(request_path, DrcError)
+    request = load_request_json(request_path, DrcError)
     return _validate_request_shape(request, "request file")
 
 

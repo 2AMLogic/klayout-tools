@@ -69,7 +69,7 @@ from typing import Any
 
 from . import sim
 from ._jsonnum import is_int
-from ._paths import _load_request_json, _resolve_relative, validate_request_shape
+from ._paths import load_request_json, resolve_relative, validate_request_shape
 from .yield_analysis import YieldError, derive_sample_set, run_yield
 
 #: A campaign spec is a `klt sim` request with a mandatory `monte_carlo`
@@ -124,7 +124,7 @@ class CampaignError(Exception):
 
 
 def _load_spec(spec_path: str) -> dict[str, Any]:
-    data = _load_request_json(spec_path, CampaignError)
+    data = load_request_json(spec_path, CampaignError)
     return validate_request_shape(
         data,
         f"campaign spec '{spec_path}'",
@@ -273,12 +273,12 @@ def _absolutize_paths(request: dict[str, Any], spec_dir: str) -> dict[str, Any]:
     *its own* file's directory, so a spec's relative ``netlist``/``models.lib``
     would silently break the moment it is written out anywhere else. Already-
     absolute paths, and env-var/``~`` paths, are passed through unchanged
-    (:func:`~klayout_tools._paths._resolve_relative` is a no-op for those).
+    (:func:`~klayout_tools._paths.resolve_relative` is a no-op for those).
     """
     request = dict(request)
     netlist = request.get("netlist")
     if isinstance(netlist, str):
-        request["netlist"] = _resolve_relative(netlist, spec_dir)
+        request["netlist"] = resolve_relative(netlist, spec_dir)
 
     models = request.get("models")
     if (
@@ -288,7 +288,7 @@ def _absolutize_paths(request: dict[str, Any], spec_dir: str) -> dict[str, Any]:
     ):
         lib = models.get("lib")
         if isinstance(lib, str):
-            request["models"] = {**models, "lib": _resolve_relative(lib, spec_dir)}
+            request["models"] = {**models, "lib": resolve_relative(lib, spec_dir)}
 
     return request
 

@@ -103,8 +103,8 @@ from . import _spice_number as spice_number
 from . import env_provenance, op_sanity_diagnostics, sim_osdi_pin
 from ._jsonnum import is_finite_number, is_number
 from ._paths import (
-    _load_request_json,
-    _resolve_relative,
+    load_request_json,
+    resolve_relative,
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
@@ -1268,7 +1268,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``analysis`` is optional -- but a supplied ``measurements`` is shape-checked.
     """
     request = validate_request_shape(
-        _load_request_json(request_path, OpSanityError),
+        load_request_json(request_path, OpSanityError),
         "request file",
         error_cls=OpSanityError,
         required_fields=("netlist",),
@@ -1447,7 +1447,7 @@ def run_op_sanity(
     request_dir = os.path.dirname(os.path.abspath(request_path))
     repo_root = env_provenance.find_repo_root(request_dir)
 
-    netlist_path = _resolve_relative(request["netlist"], request_dir)
+    netlist_path = resolve_relative(request["netlist"], request_dir)
     if not os.path.isfile(netlist_path):
         raise OpSanityError(f"netlist not found: {netlist_path}")
     try:

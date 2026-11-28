@@ -190,7 +190,7 @@ from typing import Any
 from . import gen_compose_port_request as _pr
 from ._jsonnum import is_finite_number, is_int
 from ._layout import write_layout
-from ._paths import _load_request_json, _resolve_relative
+from ._paths import load_request_json, resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
 from .decks import ExtractionDeck, get_extraction_deck
 from .gen import (
@@ -358,7 +358,7 @@ def load_generator_report_arg(
     A relative path string resolves against ``request_dir`` (the directory
     holding the request document itself -- defaults to the current working
     directory when omitted, e.g. for a caller with no request file at all),
-    mirroring ``klt lvs``'s ``load_request_arg``/``_resolve_relative``
+    mirroring ``klt lvs``'s ``load_request_arg``/``resolve_relative``
     convention (``lvs.py``) rather than the process's own cwd. An absolute
     path is unaffected by ``request_dir``.
 
@@ -373,11 +373,11 @@ def load_generator_report_arg(
             "blocks[].generator_report must be a JSON object or a path to one"
         )
 
-    resolved = _resolve_relative(value, request_dir or os.getcwd())
+    resolved = resolve_relative(value, request_dir or os.getcwd())
     if not os.path.isfile(resolved):
         raise GenComposeError(f"generator_report file not found: '{resolved}'")
 
-    data = _load_request_json(resolved, GenComposeError)
+    data = load_request_json(resolved, GenComposeError)
 
     if not isinstance(data, dict):
         raise GenComposeError(
@@ -1166,7 +1166,7 @@ def _parse_cell_block(
     # #2935: keep the spelling the request used for the response's
     # `source_path` echo -- the resolved (absolute) value is internal only.
     spelled_gds_path = gds_path
-    gds_path = _resolve_relative(gds_path, request_dir or os.getcwd())
+    gds_path = resolve_relative(gds_path, request_dir or os.getcwd())
 
     ports = _parse_cell_ports(raw_cell.get("ports"), where)
 
@@ -2923,7 +2923,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     ``request_dir`` is the directory a relative ``blocks[].generator_report``
     path string resolves against (mirrors ``klt lvs``'s
-    ``load_request_arg``/``_resolve_relative`` convention, ``lvs.py``) --
+    ``load_request_arg``/``resolve_relative`` convention, ``lvs.py``) --
     normally the request document's own directory, passed in by
     ``cli/gen_compose_cmd.py``. Defaults to the current working directory
     when omitted (``None``), so a direct/library caller with no request file

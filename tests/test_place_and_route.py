@@ -76,9 +76,9 @@ from helpers.place_and_route_merge import (
     _skipped_via_pad_trim,
 )
 from helpers.subprocess_fakes import fake_completed, patch_openroad_run
+from klayout_tools import _paths, place_and_route
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
-from klayout_tools import place_and_route
 from klayout_tools import place_and_route_power_audit as power_audit
 from klayout_tools._openroad_engine import _timing_status
 from klayout_tools.cli import main
@@ -4421,7 +4421,7 @@ def test_def_pin_net_names_none_when_file_missing(tmp_path):
 
 
 def test_tcl_net_list_brace_quotes_each_name():
-    assert place_and_route._tcl_net_list(["A", "B|C", "clk"]) == "{A} {B|C} {clk}"
+    assert _paths.tcl_net_list(["A", "B|C", "clk"]) == "{A} {B|C} {clk}"
 
 
 def test_spef_sta_script_embeds_net_names_unescaped_in_the_generated_tcl():
@@ -4429,7 +4429,7 @@ def test_spef_sta_script_embeds_net_names_unescaped_in_the_generated_tcl():
     the check is only honest if `get_nets` sees the real net's own name, not
     a backslash-mangled one that matches nothing. A prior version of this
     code backslash-escaped `get_nets`'s glob metacharacters; because
-    `_tcl_net_list` brace-quotes each name and Tcl brace-quoting performs no
+    `tcl_net_list` brace-quotes each name and Tcl brace-quoting performs no
     backslash substitution, that escaping reached `get_nets` as literal
     backslash characters and matched nothing -- invisible while #948's
     baseline correlation was 0%, and a live-reproduced bug the moment real
@@ -4521,8 +4521,8 @@ def test_spef_sta_script_writes_sdf_immediately_after_read_spef():
 def _count_spef_nets_annotated(stdout: str):
     """Call the shared, `_paths.py`-hosted implementation (issue #1703) with
     `place_and_route.py`'s own marker constants bound, mirroring how
-    `place_and_route.py` itself calls it."""
-    return place_and_route._count_spef_nets_annotated(
+    `place_and_route_sta.py` itself calls it."""
+    return _paths.count_spef_nets_annotated(
         stdout,
         begin=place_and_route._SPEF_NET_CHECK_BEGIN,
         end=place_and_route._SPEF_NET_CHECK_END,

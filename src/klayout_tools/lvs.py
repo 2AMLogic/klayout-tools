@@ -125,8 +125,8 @@ from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._jsonnum import is_int
-from ._paths import _load_request_json, _resolve_relative
 from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import load_request_json, resolve_relative
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     content_hash,
@@ -527,7 +527,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     Does not require a ``schema`` field, matching ``klt sim``'s
     ``load_request`` (user-authored input, never emitted by this tool).
     """
-    request = _load_request_json(request_path, LvsError)
+    request = load_request_json(request_path, LvsError)
     return _validate_request_shape(request, "request file")
 
 
@@ -2354,7 +2354,7 @@ def _require_path(spec: dict[str, Any], field: str, side: str, request_dir: str)
     value = spec.get(field)
     if value is None:
         raise LvsError(f"request.{side}.{field} is required")
-    resolved = _resolve_relative(value, request_dir)
+    resolved = resolve_relative(value, request_dir)
     if not os.path.isfile(resolved):
         raise LvsError(f"{side} {field} not found: {resolved}")
     return resolved
@@ -2516,7 +2516,7 @@ def _parse_layout_abstract_cells(
         echo["abstract_cell_lef"] = list(lef_given)
     return _LayoutAbstraction(
         patterns=tuple(patterns),
-        lef_paths=tuple(_resolve_relative(path, request_dir) for path in lef_given),
+        lef_paths=tuple(resolve_relative(path, request_dir) for path in lef_given),
         echo=echo,
     )
 
@@ -2809,7 +2809,7 @@ def _resolve_layout(
         raise LvsError("request.layout requires 'file' or 'netlist'")
 
     if has_file:
-        layout_file = _resolve_relative(layout_spec["file"], request_dir)
+        layout_file = resolve_relative(layout_spec["file"], request_dir)
         if not os.path.isfile(layout_file):
             raise LvsError(f"layout file not found: {layout_file}")
         deck_name = layout_spec.get("deck")
@@ -3500,7 +3500,7 @@ def _resolve_reference_pin_order_files(
     ``libs.ref/<library>/...`` convention at all -- a macro's netlist sitting
     beside the design, a hand-written stub for a cell no installed library
     ships. Paths resolve against the request file's directory exactly like
-    ``layout.netlist``/``reference.netlist`` (:func:`_resolve_relative`), and
+    ``layout.netlist``/``reference.netlist`` (:func:`resolve_relative`), and
     a missing file is a clean request error rather than a pin order that
     silently fails to resolve later.
 
@@ -3525,7 +3525,7 @@ def _resolve_reference_pin_order_files(
                 "request.reference.pin_order_files entries must be non-empty "
                 f"path strings; got {entry!r}"
             )
-        resolved = _resolve_relative(entry.strip(), request_dir)
+        resolved = resolve_relative(entry.strip(), request_dir)
         if not os.path.isfile(resolved):
             raise LvsError(f"reference pin_order_files entry not found: {resolved}")
         if resolved not in paths:
@@ -4533,7 +4533,7 @@ def _parse_layout_def_pins(
         )
     from .place_and_route import def_pin_names
 
-    names = def_pin_names(_resolve_relative(raw, request_dir))
+    names = def_pin_names(resolve_relative(raw, request_dir))
     if names is None:
         raise LvsError(
             f"request.layout.def_pins {raw!r} has no parseable DEF `PINS` "

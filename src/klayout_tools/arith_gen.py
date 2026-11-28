@@ -109,7 +109,7 @@ import re
 from typing import Any
 
 from ._jsonnum import is_int
-from ._paths import _load_request_json
+from ._paths import load_request_json
 
 SCHEMA_VERSION = 1
 
@@ -984,7 +984,7 @@ def run_arith_gen(
 
 
 def _load_cell_map(path: str) -> list[list[int]]:
-    document = _load_request_json(path, ArithGenError)
+    document = load_request_json(path, ArithGenError)
 
     if isinstance(document, dict):
         document = document.get("cell_map")
