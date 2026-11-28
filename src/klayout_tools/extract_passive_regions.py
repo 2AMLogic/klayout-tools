@@ -2,14 +2,14 @@
 
 Split out of ``extract.py`` (issue #2419) as a cohesive subsystem: the
 deck-declared resistor / capacitor / diode terminal-region resolution
-(:func:`_resistor_body_region`, :func:`_resolve_resistors`,
-:func:`_capacitor_plate_regions`, :func:`_diode_terminal_region`), the
-capacitor top-plate-via overlap exclusion (:func:`_capacitor_top_via_overlap_region`,
+(:func:`resistor_body_region`, :func:`_resolve_resistors`,
+:func:`capacitor_plate_regions`, :func:`_diode_terminal_region`), the
+capacitor top-plate-via overlap exclusion (:func:`capacitor_top_via_overlap_region`,
 :func:`_capacitor_top_via_exclusions`, :func:`_exclude_capacitor_top_via_overlap`),
 and the MoM (finger) capacitor device class and extractor
 (:data:`MOM_FEED_TOKENS`, :func:`mom_capacitor_device_class`,
 :func:`_build_mom_capacitor_extractor`, and their feed / metal-range helpers).
-:func:`_resistor_body_region` itself (and the split-terminal geometry behind
+:func:`resistor_body_region` itself (and the split-terminal geometry behind
 ``ResistorDevice.anode_marker``) now lives in
 :mod:`klayout_tools.extract_split_terminal`, re-exported here unchanged.
 
@@ -39,8 +39,11 @@ from .extract_base import MOM_FEED_TOKENS as MOM_FEED_TOKENS
 from .extract_base import MOM_FEED_UNMEASURED as MOM_FEED_UNMEASURED
 from .extract_cap_top_plate import capacitor_top_region
 from .extract_spef import ExtractError
-from .extract_split_terminal import resistor_body_region as _resistor_body_region
-from .extract_split_terminal import split_terminal_regions, subtract_dummy
+from .extract_split_terminal import (
+    resistor_body_region,
+    split_terminal_regions,
+    subtract_dummy,
+)
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -167,7 +170,7 @@ def _resolve_resistors(
             )
             split = (scope, anode, cathode)
         else:
-            body = _resistor_body_region(
+            body = resistor_body_region(
                 layout, top_cell, spec, base=base, heads=bases[terminal_layer]
             )
         if body.is_empty():
@@ -245,9 +248,9 @@ def _detect_unclaimed_resistor_markers(
         marker = _region(layout, top_cell, marker_layer).merged()
         if marker.is_empty():
             continue
-        bodies = _resistor_body_region(layout, top_cell, specs[0])
+        bodies = resistor_body_region(layout, top_cell, specs[0])
         for spec in specs[1:]:
-            bodies = bodies + _resistor_body_region(layout, top_cell, spec)
+            bodies = bodies + resistor_body_region(layout, top_cell, spec)
         count = marker.not_interacting(bodies.merged()).count()
         if count == 0:
             continue
@@ -265,7 +268,7 @@ def _detect_unclaimed_resistor_markers(
     return warnings
 
 
-def _capacitor_plate_regions(
+def capacitor_plate_regions(
     layout: kdb.Layout, top_cell: kdb.Cell, capacitor: CapacitorDevice
 ) -> tuple[kdb.Region, kdb.Region]:
     """The recognised ``(top_region, bottom_region)`` pair for one
@@ -328,18 +331,14 @@ def _unselected_capacitor_variant_warnings(
         return []
     recognised = None
     for capacitor in deck.capacitors:
-        top_region, bottom_region = _capacitor_plate_regions(
-            layout, top_cell, capacitor
-        )
+        top_region, bottom_region = capacitor_plate_regions(layout, top_cell, capacitor)
         if not bottom_region.is_empty():
             recognised = top_region if recognised is None else recognised + top_region
     option = deck.capacitor_variants[0].option
     selected = deck.capacitor_variant_selected or deck.capacitor_variants[0].value
     warnings: list[str] = []
     for value, capacitor in unselected:
-        top_region, bottom_region = _capacitor_plate_regions(
-            layout, top_cell, capacitor
-        )
+        top_region, bottom_region = capacitor_plate_regions(layout, top_cell, capacitor)
         if bottom_region.is_empty():
             continue
         unclaimed = top_region.merged()
@@ -382,7 +381,7 @@ def _diode_terminal_region(
     two inputs, so an empty input silently yields no device at all.
 
     ``requires``/``excludes`` then narrow the result the same way
-    :func:`_capacitor_plate_regions` and ``_resolve_resistors`` narrow
+    :func:`capacitor_plate_regions` and ``_resolve_resistors`` narrow
     theirs: every ``requires`` layer must also cover the region, every
     ``excludes`` layer is subtracted. For a substrate-formed terminal this
     is how the deck keeps the substrate side genuinely *outside* every well
@@ -405,7 +404,7 @@ def _diode_terminal_region(
     return region
 
 
-def _capacitor_top_via_overlap_region(
+def capacitor_top_via_overlap_region(
     layout: kdb.Layout, top_cell: kdb.Cell, capacitor: CapacitorDevice
 ) -> kdb.Region:
     """The geometric overlap between one :class:`CapacitorDevice` entry's
@@ -426,7 +425,7 @@ def _capacitor_top_via_overlap_region(
     Empty when ``capacitor.top_plate_via`` is unset, when no shape is drawn
     on that layer anywhere in this layout, or when this capacitor's own
     plates are not drawn (``top_region``/the top-plate-scoped bottom region
-    empty) -- matching :func:`_capacitor_plate_regions`'s own "no PDK marker
+    empty) -- matching :func:`capacitor_plate_regions`'s own "no PDK marker
     drawn" convention.
     """
     import klayout.db as kdb
@@ -436,7 +435,7 @@ def _capacitor_top_via_overlap_region(
     top_via_region = _region(layout, top_cell, capacitor.top_plate_via)
     if top_via_region.is_empty():
         return top_via_region
-    top_region, bottom_region = _capacitor_plate_regions(layout, top_cell, capacitor)
+    top_region, bottom_region = capacitor_plate_regions(layout, top_cell, capacitor)
     # See `_exclude_capacitor_top_via_overlap`'s own docstring (issue #1388)
     # for why `bottom_region` must be narrowed to `interacting(top_region)`
     # before intersecting it with the via footprint.
@@ -495,10 +494,10 @@ def _capacitor_top_via_exclusions(
         via_index = deck.vias.index(capacitor.top_plate_via)
         # For a deck whose `bottom_plate` is *not* clipped to the top
         # plate's own footprint (`bottom_plate_oversize_um == 0`, e.g.
-        # sky130's MiM stacks), `_capacitor_plate_regions`'s zero-oversize
+        # sky130's MiM stacks), `capacitor_plate_regions`'s zero-oversize
         # branch returns the bottom conductor's *entire* drawn region --
         # every shape on that metal layer anywhere in the layout, not just
-        # this capacitor's own plate. `_capacitor_top_via_overlap_region`
+        # this capacitor's own plate. `capacitor_top_via_overlap_region`
         # narrows to `interacting(top_region)` (issue #1388) before
         # intersecting it with the via footprint, keeping only the
         # bottom-plate shape(s) that actually sit under *this* capacitor's
@@ -516,7 +515,7 @@ def _capacitor_top_via_exclusions(
         # via on that layer from the deck's generic `vias[]` connectivity --
         # a false disconnect across the whole design, not the narrow
         # false-short exclusion this function exists to apply.
-        overlap = _capacitor_top_via_overlap_region(layout, top_cell, capacitor)
+        overlap = capacitor_top_via_overlap_region(layout, top_cell, capacitor)
         if overlap.is_empty():
             continue
         exclusions[via_index] = exclusions.get(via_index, kdb.Region()) + overlap
@@ -559,7 +558,7 @@ def _exclude_capacitor_top_via_overlap(
     ``bottom_region`` to ``interacting(top_region)`` before intersecting it
     with the via footprint (issue #1388): for a deck with
     ``bottom_plate_oversize_um == 0`` (e.g. sky130's MiM stacks),
-    :func:`_capacitor_plate_regions` hands back the bottom conductor's
+    :func:`capacitor_plate_regions` hands back the bottom conductor's
     *entire* drawn region on that metal, not just the part under this
     capacitor's own top plate, so without the narrowing a single drawn
     capacitor would exclude every via on the shared via layer chip-wide --

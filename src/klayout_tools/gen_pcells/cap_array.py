@@ -378,7 +378,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # Every extra mask this family's own MiM device class requires
             # over the top plate (issue #1555) -- drawn exactly coincident
             # with the top plate, since `extract.py` intersects them with it
-            # (`_capacitor_plate_regions`) and any shortfall would narrow the
+            # (`capacitor_plate_regions`) and any shortfall would narrow the
             # recognised plate. Empty on sky130/sg13g2, whose curated decks
             # set no `top_plate_requires`; `CAP_MK`/`MIM_L_MK` on gf180mcu.
             top_requires_layers = _top_requires_layers(self)

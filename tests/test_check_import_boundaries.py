@@ -426,7 +426,9 @@ def test_real_tree_passes_with_committed_policy():
 def test_real_policy_covers_known_seeds():
     pol = cib.load_policy(REPO_ROOT / "import-boundaries.json")
     k = "klayout_tools."
-    assert (k + "erc", k + "extract", "_resistor_body_region") in pol.private_exceptions
+    assert ("erc", "extract") in pol.group_edges
+    retired = (k + "erc", k + "extract", "_resistor_body_region")
+    assert retired not in pol.private_exceptions
     g = pol.group_of
     assert g[k + "cli.sta_cmd"] == g[k + "post_route_sta"] != g[k + "stats"]
     assert g[k + "cli.yield_cmd"] == g[k + "yield_analysis"]

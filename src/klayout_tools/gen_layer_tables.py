@@ -77,7 +77,7 @@ SD_PAD_GATE_GAP_MIN_UM = 0.25
 #: `CapacitorDevice.bottom_plate_oversize_um`'s docstring). Sized generously
 #: so the bottom conductor's own edge is never the limiting edge of the
 #: top/bottom overlap area `CapacitorDevice.area_cap_f_um2` derives `C` from
-#: (`extract.py`'s `_capacitor_plate_regions`), and so the top-plate via's
+#: (`extract.py`'s `capacitor_plate_regions`), and so the top-plate via's
 #: own `ENCLOSURE_MARGIN_UM` clearance from the bottom-plate edge is never in
 #: question either.
 CAP_BOTTOM_PLATE_MARGIN_UM = 0.5

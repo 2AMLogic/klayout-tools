@@ -4,7 +4,7 @@ Regression test for issue #2396: ``_abstract_cell_mask_layers`` erases an
 abstracted cell's capacitor ``top_plate`` (sky130's ``capm``) but deliberately
 keeps its routing layers -- including the ``top_plate_via`` (``via3``) that the
 PDK's own DRM requires to overlap the ``met3`` bottom plate. With the top plate
-gone, ``_capacitor_top_via_overlap_region``'s exclusion (issues #364/#1388) went
+gone, ``capacitor_top_via_overlap_region``'s exclusion (issues #364/#1388) went
 empty, so every top-plate via inside the black box fell back into the deck's
 generic ``vias[]`` connectivity and shorted the cap's own top and bottom plates
 -- merging otherwise-distinct *parent* nets.

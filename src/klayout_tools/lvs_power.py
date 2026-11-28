@@ -116,10 +116,10 @@ def _well_layer_lef_pins(lef_paths: tuple[str, ...]) -> frozenset[tuple[str, str
     unreadable path was already reported by the extraction itself)."""
     if not lef_paths:
         return frozenset()
-    from .extract_abstract import _load_abstract_cell_lefs
+    from .extract_abstract import load_abstract_cell_lefs
 
     try:
-        macros = _load_abstract_cell_lefs(tuple(lef_paths))
+        macros = load_abstract_cell_lefs(tuple(lef_paths))
     except ExtractError:
         return frozenset()
     found: set[tuple[str, str]] = set()

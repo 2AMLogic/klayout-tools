@@ -1250,16 +1250,16 @@ def test_generator_heads_only_families_match_deck_topology():
 def test_resistor_body_region_shared_with_erc_agrees_with_extraction(
     tmp_path: Path,
 ):
-    """`_resistor_body_region` (the ERC caller's entry point, no `base`)
+    """`resistor_body_region` (the ERC caller's entry point, no `base`)
     returns the 128/0 body for a PCell-shaped resistor and nothing for a
     head-less one -- the same decision extraction makes."""
-    from klayout_tools.extract import _resistor_body_region
+    from klayout_tools.extract import resistor_body_region
 
     rppd = next(r for r in EXTRACTION_DECK.resistors if r.name == "rppd")
     for kwargs, expect_area in (({}, 6.0), ({"head_b": False}, 0.0)):
         layout = _make_pcell_poly_resistor_layout(_FLAVOUR_MASKS["rppd"], **kwargs)
         top = layout.top_cell()
-        body = _resistor_body_region(layout, top, rppd)
+        body = resistor_body_region(layout, top, rppd)
         assert body.area() * layout.dbu * layout.dbu == pytest.approx(expect_area)
 
 
@@ -1271,7 +1271,7 @@ def test_erc_deck_device_cuts_agree_with_extraction(
     tmp_path: Path, name: str, kwargs: dict
 ):
     """`klt erc --deck sg13g2`'s auto-detected device cuts
-    (`erc._deck_device_cuts`, the shared `_resistor_body_region` caller)
+    (`erc._deck_device_cuts`, the shared `resistor_body_region` caller)
     recognise exactly the PCell-shaped resistors `klt extract` does, and
     the cut never removes the abutting GatPoly heads -- only GatPoly the
     body actually covers (a continuous bar's resistive span)."""

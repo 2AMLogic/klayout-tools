@@ -71,7 +71,7 @@ from . import env_provenance, runset_launch
 from ._provenance import build_provenance
 from .extract_base import SCHEMA_VERSION, _build_metrics, instantiated_device_counts
 from .extract_progress import _staged
-from .extract_report_canonicalize import _normalized_netlist_sha256
+from .extract_report_canonicalize import normalized_netlist_sha256
 
 # Public face: callers import from here; sibling modules are an internal split only.
 from .extract_runset_flags import (
@@ -382,9 +382,7 @@ def run_extract_klayout_runset(
         # of the flat `devices[]`/`nets[]` connectivity -- so two runs of the
         # same layout compare equal despite KLayout's unstable `$N` names.
         "netlist_normalized_sha256": (
-            None
-            if netlist_sha256 is None
-            else _normalized_netlist_sha256(devices, nets)
+            None if netlist_sha256 is None else normalized_netlist_sha256(devices, nets)
         ),
         "status": "extracted",
         "device_count": len(devices),

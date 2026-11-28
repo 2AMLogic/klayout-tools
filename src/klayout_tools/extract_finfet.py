@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING, Any
 
 from .decks.finfet import FinFETExtractionDeck
 from .extract_abstract import (
-    _DEF_NET_NAME_PROPERTY_ID,
+    DEF_NET_NAME_PROPERTY_ID,
     _apply_def_net_name_overrides,
     _def_net_name_probes,
 )
@@ -817,7 +817,7 @@ def _def_net_name_warnings(
     if not probes:
         return [
             "--def-net-names found no DEF net-name shape property "
-            f"({_DEF_NET_NAME_PROPERTY_ID}) on any routed-metal shape in "
+            f"({DEF_NET_NAME_PROPERTY_ID}) on any routed-metal shape in "
             f"'{top_name}' -- net names are unchanged (this flag expects a "
             "layout produced by a LEF/DEF -> GDS merge, e.g. `klt "
             "place-and-route`'s routed GDS)"

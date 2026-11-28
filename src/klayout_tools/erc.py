@@ -121,9 +121,9 @@ from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported fo
 )
 from .evidence_canonicalize import rerun_result_for
 from .extract import (
-    _capacitor_plate_regions,
-    _capacitor_top_via_overlap_region,
-    _resistor_body_region,
+    capacitor_plate_regions,
+    capacitor_top_via_overlap_region,
+    resistor_body_region,
 )
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
@@ -984,7 +984,7 @@ def _deck_device_cuts(
 
     - :class:`~klayout_tools.decks.ResistorDevice` -- conducting-body layer
       is ``body``; region is ``body & marker`` narrowed by ``requires``/
-      ``excludes`` (:func:`~klayout_tools.extract._resistor_body_region`).
+      ``excludes`` (:func:`~klayout_tools.extract.resistor_body_region`).
       For a ``topology="abutting_heads"`` entry (sg13g2's poly resistors,
       issue #2679) the region is instead the narrowed ``marker`` body that
       touches two separate ``body``-layer heads -- the same region ``klt
@@ -996,13 +996,13 @@ def _deck_device_cuts(
       conducting-body layers, each checked separately:
 
       - ``top_plate`` -- region is the recognised top-plate region itself
-        (:func:`~klayout_tools.extract._capacitor_plate_regions`'s first
+        (:func:`~klayout_tools.extract.capacitor_plate_regions`'s first
         return value), narrowed by ``top_plate_requires``/
         ``top_plate_excludes``.
       - ``top_plate_via`` (when the deck declares one) -- region is *only*
         the geometric overlap between that via's own footprint and this
         capacitor's recognised bottom plate
-        (:func:`~klayout_tools.extract._capacitor_top_via_overlap_region`,
+        (:func:`~klayout_tools.extract.capacitor_top_via_overlap_region`,
         issue #364/#1388's own derivation) -- **not** the whole via layer,
         which is typically also this deck's ordinary inter-metal via role
         (e.g. gf180mcu's Via4 both lands a MiM cap's top plate on Metal5
@@ -1103,11 +1103,11 @@ def _deck_device_cuts(
         _record(
             resistor.name,
             resistor.body,
-            _resistor_body_region(layout, top_cell, resistor),
+            resistor_body_region(layout, top_cell, resistor),
         )
 
     for capacitor in deck.capacitors:
-        top_region, _bottom_region = _capacitor_plate_regions(
+        top_region, _bottom_region = capacitor_plate_regions(
             layout, top_cell, capacitor
         )
         _record(capacitor.name, capacitor.top_plate, top_region)
@@ -1115,7 +1115,7 @@ def _deck_device_cuts(
             _record(
                 capacitor.name,
                 capacitor.top_plate_via,
-                _capacitor_top_via_overlap_region(layout, top_cell, capacitor),
+                capacitor_top_via_overlap_region(layout, top_cell, capacitor),
             )
 
     return cuts, applied

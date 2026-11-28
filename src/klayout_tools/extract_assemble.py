@@ -17,7 +17,7 @@ from ._provenance import build_provenance
 from .decks import FinFETExtractionDeck, deck_source_path
 from .extract_base import SCHEMA_VERSION, _build_metrics, instantiated_device_counts
 from .extract_progress import _staged
-from .extract_report_canonicalize import _normalized_netlist_sha256
+from .extract_report_canonicalize import normalized_netlist_sha256
 from .extract_resistance_network import RESISTANCE_NETWORK_MODEL_NOTE
 
 
@@ -103,12 +103,12 @@ def assemble_extract_report(
         # Additive field (issue #3407): `null` exactly when `netlist_sha256`
         # is (`--no-netlist`); otherwise a numbering-independent digest of
         # the flat `devices[]`/`nets[]` connectivity -- see
-        # `_normalized_netlist_sha256`.
+        # `normalized_netlist_sha256`.
         "netlist_normalized_sha256": (
             None
             if netlist_sha256 is None
             else _staged(
-                "netlist_normalized_hash", _normalized_netlist_sha256, devices, nets
+                "netlist_normalized_hash", normalized_netlist_sha256, devices, nets
             )
         ),
         "status": "extracted",

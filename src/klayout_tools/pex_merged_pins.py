@@ -79,7 +79,7 @@ def _record_ports(
     report: dict[str, Any], ports: list[dict[str, Any]], renames: dict[str, str]
 ) -> None:
     """Publish the interface and its effective SPICE names with the merged netlist."""
-    from .extract_report_canonicalize import _normalized_netlist_sha256
+    from .extract_report_canonicalize import normalized_netlist_sha256
 
     positions = {p["runset_cluster_id"]: i for i, p in enumerate(ports)}
     for net in report["nets"]:
@@ -90,7 +90,7 @@ def _record_ports(
     for device in report["devices"]:
         device["nets"] = {k: renames.get(v, v) for k, v in device["nets"].items()}
     report["pin_count"] = len(ports)
-    report["netlist_normalized_sha256"] = _normalized_netlist_sha256(
+    report["netlist_normalized_sha256"] = normalized_netlist_sha256(
         report["devices"], report["nets"]
     )
 

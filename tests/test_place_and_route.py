@@ -9811,14 +9811,14 @@ def _tie_cell_merge_inputs(tmp_path: Path, *, layer_map: bool = True) -> dict:
 def _stamped_def_net_names(gds_path: Path) -> dict[str, tuple[int, int, int, int]]:
     """`{<DEF net name>: <bbox as a dbu 4-tuple>}` for every top-cell shape in
     `gds_path` carrying the DEF net-name shape property `--def-net-names`
-    reads (`extract_abstract._DEF_NET_NAME_PROPERTY_ID`, i.e. `1`)."""
+    reads (`extract_abstract.DEF_NET_NAME_PROPERTY_ID`, i.e. `1`)."""
     layout = kdb.Layout()
     layout.read(str(gds_path))
     top = layout.top_cell()
     stamped: dict[str, tuple[int, int, int, int]] = {}
     for layer_index in layout.layer_indexes():
         for shape in top.shapes(layer_index).each():
-            name = shape.property(extract_module._DEF_NET_NAME_PROPERTY_ID)
+            name = shape.property(extract_module.DEF_NET_NAME_PROPERTY_ID)
             if isinstance(name, str) and name:
                 box = shape.bbox()
                 stamped[name] = (box.left, box.bottom, box.right, box.top)
