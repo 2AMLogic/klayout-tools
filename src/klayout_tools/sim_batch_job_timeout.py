@@ -6,7 +6,7 @@ per-file size ratchet (same shape as :mod:`klayout_tools.sim_batch_warn`).
 ``request.batch.job_timeout_s`` lets the caller state one batch job's wall
 bound directly. Every job shape today is sized from the fully-serial worst
 case (``options.timeout_s x units + 120``,
-:func:`~klayout_tools.sim_batch_contract_jobspec._default_batch_job_timeout_s`)
+:func:`~klayout_tools.sim_batch_contract_jobspec.default_batch_job_timeout_s`)
 -- `job.json`'s ``timeout_seconds``, the pre-submit ceiling assessment and
 the default poll budget all derive from it -- but a job's units run
 *concurrently* on the job instance, so a caller covering per-unit contention
@@ -70,7 +70,7 @@ def resolve_poll_interval_s(batch_spec: dict[str, Any]) -> float:
     non-negative number of seconds (default
     :data:`~klayout_tools.sim_batch_contract.DEFAULT_POLL_INTERVAL_S`),
     else :class:`~klayout_tools.sim.SimError` raised from
-    :func:`~klayout_tools.sim_batch._resolve_batch_config`, i.e. before any
+    :func:`~klayout_tools.sim_batch.resolve_batch_config`, i.e. before any
     S3 write, the same early-refusal discipline as the other ``batch.*``
     resolvers. A ``bool`` is refused even though it is an ``int`` subclass,
     and ``0`` is accepted (a poll-every-loop request). Replaces the bare
@@ -122,7 +122,7 @@ def assess_caller_job_timeout(
 ) -> dict[str, Any]:
     """The ``environment.remote.job_ceiling`` assessment for a request that
     states ``batch.job_timeout_s`` (issue #5544): the same object
-    :func:`~klayout_tools.sim_batch._assess_job_ceiling` returns under the
+    :func:`~klayout_tools.sim_batch.assess_job_ceiling` returns under the
     serial bound, with every field defined by the caller's stated bound.
 
     The stated bound is unit-count-independent, which fixes every field the

@@ -160,7 +160,7 @@ DOC_PROSE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
 #: (issue #3690): the ``remote`` block of an operator-approved generator
 #: execution (issue #3289) -- ``job_id`` (a fresh ``uuid4`` per run),
 #: instance id/type/AZ, ``lifecycle``, ``elapsed_seconds`` and the rest of
-#: :func:`~.sim_batch._batch_environment`. Re-grading submits a *new* job, so
+#: :func:`~.sim_batch.batch_environment`. Re-grading submits a *new* job, so
 #: every one of these differs between any two runs of an unchanged manifest
 #: and a self-``--check`` of an executed report could never match.
 #:

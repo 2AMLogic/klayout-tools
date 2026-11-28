@@ -366,7 +366,7 @@ def _runner_supports_since(version: str, first_dev: int) -> bool | None:
 
 def _deck_preflight_lines() -> str:
     """Shell appended to the runner preflight of a deck-list job (issue
-    #3303; needs ``$rv`` from :func:`_runner_preflight_script`). Unlike the
+    #3303; needs ``$rv`` from :func:`runner_preflight_script`). Unlike the
     version gate this is not relaxed by ``runner_version_check: warn``: a
     runner that cannot read ``decks[]`` fails the job for certain, so the
     job exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with a klt error envelope

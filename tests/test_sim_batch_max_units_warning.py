@@ -58,7 +58,7 @@ def test_plan_job_split_250_units_cap_150_with_3000s_timeout(capsys):
         job_ceiling_check="warn",
         max_units_per_job=150,
     )
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=250, per_unit_timeout_s=3000.0, config=config
     )
     assert assessment["max_units_per_job"] == 1
@@ -74,7 +74,7 @@ def test_over_bound_warning_emitted_once_per_process(capsys, monkeypatch):
         job_ceiling_check="warn",
         max_units_per_job=150,
     )
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=250, per_unit_timeout_s=3000.0, config=config
     )
     for _ in range(3):

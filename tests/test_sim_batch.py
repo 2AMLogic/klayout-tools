@@ -413,7 +413,7 @@ def _bash_n(script):
 def test_runner_preflight_with_required_features_is_valid_bash(features, enforce):
     """Issue #3993: the feature gate's per-feature `if ...; fi` snippets must be
     `;`-separated, or a request using any gated feature fails to parse."""
-    script = sb._runner_preflight_script(
+    script = sb.runner_preflight_script(
         "0.7.1.dev2264+gcba5e957d9ed", enforce=enforce, required_features=features
     )
     proc = _bash_n(script)
@@ -477,7 +477,7 @@ def test_job_cmd_exit_trap_writes_envelope_when_klt_leaves_no_report(tmp_path):
     assert "exited 2" in report["error"]["message"]
     assert "Traceback" in report["error"]["message"]
     assert "Traceback" in (out_dir / "stderr.log").read_text()
-    kind, error = sb._classify_collected_report(report)
+    kind, error = sb.classify_collected_report(report)
     assert kind == "error" and error["code"] == sb.BATCH_JOB_COMMAND_FAILED_CODE
 
 
@@ -1015,13 +1015,13 @@ def test_capacity_wait_defaults_to_zero_and_accepts_a_number(tmp_path):
     script = str(_provision_script(tmp_path))
     base = {"provision_script_path": script, "bucket": FAKE_BUCKET}
 
-    default = sb._resolve_batch_config(
+    default = sb.resolve_batch_config(
         {"batch": dict(base)}, corner_count=1, timeout_s=30.0
     )
     assert default.capacity_wait_s == 0.0
 
     for value, expected in ((0, 0.0), (120, 120.0), (90.5, 90.5)):
-        config = sb._resolve_batch_config(
+        config = sb.resolve_batch_config(
             {"batch": dict(base, capacity_wait_s=value)},
             corner_count=1,
             timeout_s=30.0,
@@ -1340,7 +1340,7 @@ def test_missing_provision_script_raises_before_any_s3_write(tmp_path, monkeypat
 def test_unresolvable_provision_script_path_raises(tmp_path, monkeypatch):
     monkeypatch.delenv(sb.PROVISION_SCRIPT_ENV, raising=False)
     with pytest.raises(sim.SimError, match="provision script not found"):
-        sb._resolve_batch_config(
+        sb.resolve_batch_config(
             {"batch": {"provision_script_path": str(tmp_path / "nope.sh")}},
             corner_count=1,
             timeout_s=30.0,
@@ -1351,7 +1351,7 @@ def test_provision_script_env_var_is_the_second_tier(tmp_path, monkeypatch):
     script = _provision_script(tmp_path)
     monkeypatch.setenv(sb.PROVISION_SCRIPT_ENV, str(script))
     monkeypatch.setenv(sb.BUCKET_ENV, "env-bucket")
-    config = sb._resolve_batch_config({}, corner_count=1, timeout_s=30.0)
+    config = sb.resolve_batch_config({}, corner_count=1, timeout_s=30.0)
     assert config.provision_script == str(script)
     assert config.bucket == "env-bucket"
 
@@ -1371,7 +1371,7 @@ def test_bucket_falls_back_to_2ams_own_fleet_config(tmp_path, monkeypatch):
             'BATCH_INTERPOLATED="${SOMETHING}"\n'
         ),
     )
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         {"batch": {"provision_script_path": str(script)}},
         corner_count=1,
         timeout_s=30.0,
@@ -1386,7 +1386,7 @@ def test_unresolvable_bucket_names_all_three_sources(tmp_path, monkeypatch):
     monkeypatch.delenv(sb.BUCKET_ENV, raising=False)
     script = _provision_script(tmp_path)
     with pytest.raises(sim.SimError) as excinfo:
-        sb._resolve_batch_config(
+        sb.resolve_batch_config(
             {"batch": {"provision_script_path": str(script)}},
             corner_count=1,
             timeout_s=30.0,
@@ -1427,7 +1427,7 @@ def test_unsupported_pdk_is_refused_even_when_the_fleet_is_unconfigured():
     """The PDK is a property of the *request*, not of this host's fleet
     configuration, so it is reported first."""
     with pytest.raises(sim.SimError, match="unsupported PDK 'not-a-pdk'"):
-        sb._resolve_batch_config(
+        sb.resolve_batch_config(
             {"models": {"pdk": "not-a-pdk"}}, corner_count=1, timeout_s=30.0
         )
 
@@ -1454,7 +1454,7 @@ def test_a_variant_reducible_to_a_published_family_is_accepted(
     `sg13g2` (#2573) is the same shape."""
     monkeypatch.delenv(sb.BUCKET_ENV, raising=False)
     script = _provision_script(tmp_path)
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         {
             "models": {"pdk": variant},
             "batch": {"provision_script_path": str(script), "bucket": FAKE_BUCKET},
@@ -1479,7 +1479,7 @@ def _lib_request(tmp_path, **fields):
 def test_absolute_models_lib_is_refused_with_the_pdk_relative_form(tmp_path):
     request = _lib_request(tmp_path, models={"lib": _HOST_LIB})
     with pytest.raises(sim.SimError) as excinfo:
-        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
     assert excinfo.value.code == "models_lib_host_path"
     message = str(excinfo.value)
     assert _HOST_LIB in message
@@ -1490,7 +1490,7 @@ def test_absolute_models_lib_is_refused_with_the_pdk_relative_form(tmp_path):
 def test_absolute_models_lib_outside_a_pdk_has_no_rewrite_hint(tmp_path):
     request = _lib_request(tmp_path, models={"lib": "/opt/custom/models.lib"})
     with pytest.raises(sim.SimError) as excinfo:
-        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
     assert excinfo.value.code == "models_lib_host_path"
     assert "use {" not in str(excinfo.value)
 
@@ -1498,7 +1498,7 @@ def test_absolute_models_lib_outside_a_pdk_has_no_rewrite_hint(tmp_path):
 def test_tilde_models_lib_is_a_host_path(tmp_path):
     request = _lib_request(tmp_path, models={"lib": "~/models.lib"})
     with pytest.raises(sim.SimError, match="host-path model library"):
-        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
 
 
 def test_absolute_per_section_lib_is_refused(tmp_path):
@@ -1512,7 +1512,7 @@ def test_absolute_per_section_lib_is_refused(tmp_path):
         },
     )
     with pytest.raises(sim.SimError) as excinfo:
-        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
     assert excinfo.value.code == "models_lib_host_path"
     assert "corners.process[0].sections[0].lib" in str(excinfo.value)
 
@@ -1523,7 +1523,7 @@ def test_absolute_per_section_lib_is_refused(tmp_path):
 def test_unresolved_pdk_var_is_refused_before_submit(tmp_path, lib):
     request = _lib_request(tmp_path, models={"lib": lib})
     with pytest.raises(sim.SimError) as excinfo:
-        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
     assert excinfo.value.code == "models_lib_pdk_unresolved"
     assert "$PDK" in str(excinfo.value)
     assert "models.pdk" in str(excinfo.value)
@@ -1542,7 +1542,7 @@ def test_unresolved_pdk_var_in_section_lib_is_refused(tmp_path):
         },
     )
     with pytest.raises(sim.SimError) as excinfo:
-        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
     assert excinfo.value.code == "models_lib_pdk_unresolved"
     assert "corners.process[0].sections[0].lib" in str(excinfo.value)
 
@@ -1561,7 +1561,7 @@ def test_unresolved_pdk_var_in_section_lib_is_refused(tmp_path):
 )
 def test_pdk_var_check_leaves_other_forms_alone(tmp_path, extra):
     request = _lib_request(tmp_path, **extra)
-    assert sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0).bucket
+    assert sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0).bucket
 
 
 @pytest.mark.parametrize(
@@ -1574,7 +1574,7 @@ def test_pdk_var_check_leaves_other_forms_alone(tmp_path, extra):
 )
 def test_portable_or_staged_models_lib_is_not_refused(tmp_path, extra):
     request = _lib_request(tmp_path, **extra)
-    assert sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0).bucket
+    assert sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0).bucket
 
 
 def test_a_request_naming_no_pdk_at_all_is_not_refused(tmp_path, monkeypatch):
@@ -1583,9 +1583,9 @@ def test_a_request_naming_no_pdk_at_all_is_not_refused(tmp_path, monkeypatch):
     monkeypatch.delenv(sb.BUCKET_ENV, raising=False)
     script = _provision_script(tmp_path)
     spec = {"batch": {"provision_script_path": str(script), "bucket": FAKE_BUCKET}}
-    assert sb._resolve_batch_config(spec, corner_count=1, timeout_s=30.0).bucket
+    assert sb.resolve_batch_config(spec, corner_count=1, timeout_s=30.0).bucket
     spec_empty_models = {**spec, "models": {}}
-    assert sb._resolve_batch_config(
+    assert sb.resolve_batch_config(
         spec_empty_models, corner_count=1, timeout_s=30.0
     ).bucket
 
@@ -1597,7 +1597,7 @@ def test_remote_and_batch_reject_a_pdk_neither_publishes(tmp_path, unsupported):
     with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
         rl.resolve_ami(unsupported, "us-east-1")
     with pytest.raises(sim.SimError, match=f"unsupported PDK '{unsupported}'") as exc:
-        sb._resolve_batch_config(
+        sb.resolve_batch_config(
             {
                 "models": {"pdk": unsupported},
                 "batch": {
@@ -1634,7 +1634,7 @@ def test_narrowing_batch_published_pdks_narrows_batch_only(tmp_path, monkeypatch
     monkeypatch.setattr(sb, "BATCH_PUBLISHED_PDKS", ("gf180mcu",))
     assert rl.ami_pdk_key("sky130A") == "sky130A"
     with pytest.raises(sim.SimError, match="unsupported PDK 'sky130A'"):
-        sb._resolve_batch_config(
+        sb.resolve_batch_config(
             {
                 "models": {"pdk": "sky130A"},
                 "batch": {
@@ -1657,7 +1657,7 @@ def test_batch_pdk_validation_uses_batch_pdk_key_not_ami_pdk_key(tmp_path, monke
         return real(pdk)
 
     monkeypatch.setattr(sb, "batch_pdk_key", _spy)
-    sb._resolve_batch_config(
+    sb.resolve_batch_config(
         {
             "models": {"pdk": "gf180mcuC"},
             "batch": {
@@ -2494,14 +2494,14 @@ def test_stderr_envelope_read_is_bounded_to_the_tail(tmp_path):
         + "x" * (sb._BATCH_STDERR_TAIL_BYTES + 10)
         + "\n"
     )
-    error, note = sb._read_stderr_envelope(str(tmp_path))
+    error, note = sb.read_stderr_envelope(str(tmp_path))
     assert error is None
     assert "no klt error envelope" in note
 
     (tmp_path / "stderr.log").write_text(
         "x" * (sb._BATCH_STDERR_TAIL_BYTES + 10) + "\n" + _real_emit_error_stderr()
     )
-    error, note = sb._read_stderr_envelope(str(tmp_path))
+    error, note = sb.read_stderr_envelope(str(tmp_path))
     assert error == {"message": _RUNNER_REASON}
     assert note == ""
 
@@ -2892,8 +2892,8 @@ def test_run_batch_reraises_interrupt_as_coded_sim_error(tmp_path, monkeypatch):
         raise sb.BatchClientInterrupted("x", job_id="job-1", signum=15)
 
     monkeypatch.setattr(sb, "_run_batch_job", _boom)
-    monkeypatch.setattr(sb, "_resolve_batch_config", lambda *a, **k: _config(tmp_path))
-    monkeypatch.setattr(sb, "_assess_job_ceiling", lambda **k: {})
+    monkeypatch.setattr(sb, "resolve_batch_config", lambda *a, **k: _config(tmp_path))
+    monkeypatch.setattr(sb, "assess_job_ceiling", lambda **k: {})
     monkeypatch.setattr(sb, "_enforce_job_ceiling", lambda *a, **k: None)
     with pytest.raises(sim.SimError) as excinfo:
         sb._run_batch(
@@ -3899,10 +3899,10 @@ def test_runner_version_check_setting_is_validated_before_any_s3_write(tmp_path)
     request = _batch_request(tmp_path)
     request["batch"]["runner_version_check"] = "ignore"
     with pytest.raises(sim.SimError, match="runner_version_check"):
-        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
     request["batch"]["runner_version_check"] = "warn"
     assert (
-        sb._resolve_batch_config(
+        sb.resolve_batch_config(
             request, corner_count=1, timeout_s=30.0
         ).runner_version_check
         == "warn"
@@ -4006,7 +4006,7 @@ def test_old_runner_is_rejected_before_the_simulation_starts(tmp_path):
     assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
     assert not marker.exists()  # `klt sim` never ran
     envelope = json.loads((out_dir / "report.json").read_text())
-    kind, error = sb._classify_collected_report(envelope)
+    kind, error = sb.classify_collected_report(envelope)
     assert kind == "error"
     assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
     assert "0.4.2" in error["message"] and _CLIENT_VERSION in error["message"]
@@ -4221,7 +4221,7 @@ def test_runner_identity_compares_major_minor(
     (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
         json.dumps({"runner_klt_version": runner, "client_klt_version": client})
     )
-    fields = sb._read_runner_identity(str(tmp_path))
+    fields = sb.read_runner_identity(str(tmp_path))
     assert fields["runner_klt_version"] == runner
     assert fields["client_klt_version"] == client
     assert fields["runner_compatibility"] == status
@@ -4257,7 +4257,7 @@ def test_rendered_0_7_builds_match_a_0_7_0_runner(tmp_path, monkeypatch, facts):
     (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
         json.dumps({"runner_klt_version": "0.7.0", "client_klt_version": client})
     )
-    assert sb._read_runner_identity(str(tmp_path))["runner_compatibility"] == "match"
+    assert sb.read_runner_identity(str(tmp_path))["runner_compatibility"] == "match"
 
 
 def test_rendered_post_tag_dev_build_is_0_7_1_dev_and_matches(tmp_path):
@@ -4299,7 +4299,7 @@ def test_rendered_next_minor_build_mismatches_a_0_7_0_runner(
     (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
         json.dumps({"runner_klt_version": "0.7.0", "client_klt_version": client})
     )
-    fields = sb._read_runner_identity(str(tmp_path))
+    fields = sb.read_runner_identity(str(tmp_path))
     assert fields["runner_compatibility"] == "mismatch"
 
 
@@ -4334,10 +4334,10 @@ def _run_one_batch(tmp_path, monkeypatch, runner, *, units, timeout_s, **batch):
 
 
 def _assess(tmp_path, *, units, timeout_s, **batch):
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         _ceiling_request(tmp_path, **batch), corner_count=units, timeout_s=timeout_s
     )
-    return sb._assess_job_ceiling(
+    return sb.assess_job_ceiling(
         unit_count=units, per_unit_timeout_s=timeout_s, config=config
     )
 
@@ -4492,7 +4492,7 @@ def test_recommended_hosts_keeps_every_shard_within_the_ceiling(
     def _largest_shard_bound(count):
         shards = _shard_corner_points(_corner_points(units), count)
         return max(
-            sb._default_batch_job_timeout_s(len(shard), timeout_s) for shard in shards
+            sb.default_batch_job_timeout_s(len(shard), timeout_s) for shard in shards
         )
 
     assert 1 <= hosts <= units
@@ -4528,7 +4528,7 @@ def test_ceiling_resolution_order_and_provenance(tmp_path, monkeypatch):
     base = {"provision_script_path": str(script), "bucket": FAKE_BUCKET}
 
     def _resolve(**batch):
-        config = sb._resolve_batch_config(
+        config = sb.resolve_batch_config(
             {"batch": dict(base, **batch)}, corner_count=1, timeout_s=30.0
         )
         return config.max_job_seconds, config.max_job_seconds_source
@@ -4566,11 +4566,11 @@ def test_invalid_env_or_fleet_ceiling_names_its_source(tmp_path, monkeypatch, ba
 
     monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
     with pytest.raises(sim.SimError, match="BATCH_MAX_JOB_SECONDS in batch-fleet.env"):
-        sb._resolve_batch_config({"batch": base}, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config({"batch": base}, corner_count=1, timeout_s=30.0)
 
     monkeypatch.setenv(sb.MAX_JOB_SECONDS_ENV, bad)
     with pytest.raises(sim.SimError, match=r"\$KLT_BATCH_MAX_JOB_SECONDS"):
-        sb._resolve_batch_config({"batch": base}, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config({"batch": base}, corner_count=1, timeout_s=30.0)
     assert runner.calls == []
 
 
@@ -5985,13 +5985,13 @@ def test_missing_runner_features_unknown_version_is_not_missing():
 
 def test_environment_carries_the_capability_result(monkeypatch):
     _pin_client_version(monkeypatch, "0.7.1.dev384+gf386aca")
-    fields = sb._read_runner_identity(None, _STEPS_REQUEST)
+    fields = sb.read_runner_identity(None, _STEPS_REQUEST)
     assert fields["runner_request_features"] == {
         "required": ["analysis_steps"],
         "missing": None,
         "status": "unknown",
     }
-    assert "runner_request_features" not in sb._read_runner_identity(None, {})
+    assert "runner_request_features" not in sb.read_runner_identity(None, {})
 
 
 def test_environment_reports_unsupported_feature_on_a_matching_minor(
@@ -5999,7 +5999,7 @@ def test_environment_reports_unsupported_feature_on_a_matching_minor(
 ):
     _pin_client_version(monkeypatch, "0.7.1.dev384+gf386aca")
     (tmp_path / "runner_identity.json").write_text(_identity("0.7.0"))
-    fields = sb._read_runner_identity(str(tmp_path), _STEPS_REQUEST)
+    fields = sb.read_runner_identity(str(tmp_path), _STEPS_REQUEST)
     assert fields["runner_compatibility"] == "match"
     assert fields["runner_request_features"]["status"] == "unsupported"
     assert fields["runner_request_features"]["missing"] == ["analysis_steps"]
@@ -6255,12 +6255,12 @@ def test_prelaunch_enforce_refuses_a_predated_released_field(tmp_path, monkeypat
 def test_post_run_identity_carries_the_diagnostic(tmp_path, monkeypatch):
     _pin_client_version(monkeypatch, "0.7.1.dev384+gf386aca")
     (tmp_path / "runner_identity.json").write_text(_identity("0.5.0"))
-    fields = sb._read_runner_identity(str(tmp_path), _PREDATED_REQUEST)
+    fields = sb.read_runner_identity(str(tmp_path), _PREDATED_REQUEST)
     diagnostic = fields["request_feature_diagnostic"]
     assert diagnostic["source"] == "runner"
     assert diagnostic["runner_klt_version"] == "0.5.0"
     (tmp_path / "runner_identity.json").write_text(_identity("0.7.0"))
-    fields = sb._read_runner_identity(str(tmp_path), _PREDATED_REQUEST)
+    fields = sb.read_runner_identity(str(tmp_path), _PREDATED_REQUEST)
     assert "request_feature_diagnostic" not in fields
 
 
@@ -8011,7 +8011,7 @@ def test_models_pdk_root_local_directory_is_refused(tmp_path):
         tmp_path, models={"pdk": "gf180mcuD", "pdk_root": str(tmp_path)}
     )
     with pytest.raises(sim.SimError) as excinfo:
-        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+        sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
     assert excinfo.value.code == "models_pdk_root_host_path"
 
 

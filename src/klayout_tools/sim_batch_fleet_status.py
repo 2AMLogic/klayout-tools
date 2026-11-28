@@ -110,7 +110,7 @@ def list_fleet_jobs(
 ) -> dict:
     """Use the configured profile and region for a single read-only fleet command."""
     try:
-        config = sim_batch._resolve_batch_config(
+        config = sim_batch.resolve_batch_config(
             request, corner_count=0, timeout_s=0.0, check_runner=False
         )
     except SimError as exc:

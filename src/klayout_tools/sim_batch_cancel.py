@@ -91,7 +91,7 @@ def cancel_job(
         )
     # Resolved at call time so a patched default transport is honoured.
     run = runner if runner is not None else sim_batch._run_subprocess
-    config = sim_batch._resolve_batch_config(
+    config = sim_batch.resolve_batch_config(
         request, corner_count=0, timeout_s=0.0, check_runner=False
     )
     # The provisioner reads the job store from its own fleet config. Its

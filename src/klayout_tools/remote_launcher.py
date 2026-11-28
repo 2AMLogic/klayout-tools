@@ -637,7 +637,7 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
     ``backend`` names the off-host backend in the refusal message and is the
     *only* thing it changes (issue #2523). Both off-host backends run on
     images this same pipeline publishes, so both must accept exactly the same
-    PDK set: ``sim_batch._resolve_batch_config`` calls this with
+    PDK set: ``sim_batch.resolve_batch_config`` calls this with
     ``backend="batch"`` before its first S3 write rather than re-deriving
     :data:`SUPPORTED_PDKS`/:data:`_AMI_PDK_FAMILIES` on its own, so the two
     backends cannot silently disagree about which PDKs are supported.

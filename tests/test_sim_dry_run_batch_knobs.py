@@ -5,7 +5,7 @@ are parsed separately, after the provision script and bucket resolve.
 
 The last tests are a drift guard (issue #6646): they compare the resolver
 calls of ``_validate_batch_request_knobs`` with those of
-``_resolve_batch_config`` so a knob resolver added to submit cannot silently
+``resolve_batch_config`` so a knob resolver added to submit cannot silently
 miss the dry run.
 """
 
@@ -180,13 +180,13 @@ def test_cli_knob_refusal_exits_1_with_the_code(tmp_path, capsys):
 # --- Resolver-parity drift guard (issue #6646) -------------------------------
 #
 # ``_validate_batch_request_knobs`` hand-mirrors the request-only resolvers
-# ``_resolve_batch_config`` calls; drift has happened twice (#5674, #6437). The
+# ``resolve_batch_config`` calls; drift has happened twice (#5674, #6437). The
 # guard reads both function bodies with ``ast`` and compares the names they
 # call. Accepted gap: knobs read inline (``batch_spec.get("bucket")``,
 # ``profile``, ``region``, ``jobs_prefix``) go through no resolver function, so
 # a name-based guard cannot see them.
 
-#: Resolvers ``_resolve_batch_config`` calls that the validator deliberately
+#: Resolvers ``resolve_batch_config`` calls that the validator deliberately
 #: does not. A new resolver must either be mirrored in the validator or be
 #: added here with its reason; an entry that stops matching also fails.
 UNMIRRORED_RESOLVERS = {
@@ -253,7 +253,7 @@ def sample(spec):
 
 
 def test_validator_covers_every_submit_resolver_or_allowlists_it():
-    submit = set(_resolver_calls(sb._resolve_batch_config))
+    submit = set(_resolver_calls(sb.resolve_batch_config))
     validator = set(_resolver_calls(sb._validate_batch_request_knobs))
     # An empty side means the AST read broke, not that nothing drifted.
     assert submit
@@ -261,24 +261,24 @@ def test_validator_covers_every_submit_resolver_or_allowlists_it():
 
     unmirrored = submit - validator
     assert not (unmirrored - set(UNMIRRORED_RESOLVERS)), (
-        f"_resolve_batch_config calls {sorted(unmirrored - set(UNMIRRORED_RESOLVERS))} "
+        f"resolve_batch_config calls {sorted(unmirrored - set(UNMIRRORED_RESOLVERS))} "
         "but _validate_batch_request_knobs does not: mirror it there, in "
         "submit order, or add it to UNMIRRORED_RESOLVERS with a reason"
     )
     assert not (set(UNMIRRORED_RESOLVERS) - unmirrored), (
         f"UNMIRRORED_RESOLVERS lists {sorted(set(UNMIRRORED_RESOLVERS) - unmirrored)}, "
-        "which _resolve_batch_config no longer calls or the validator now "
+        "which resolve_batch_config no longer calls or the validator now "
         "mirrors: drop the stale entry"
     )
 
 
 def test_validator_calls_shared_resolvers_in_submit_order():
-    submit = _resolver_calls(sb._resolve_batch_config)
+    submit = _resolver_calls(sb.resolve_batch_config)
     validator = _resolver_calls(sb._validate_batch_request_knobs)
     shared_in_submit_order = [name for name in submit if name in validator]
     assert validator == shared_in_submit_order, (
         "_validate_batch_request_knobs must call only resolvers "
-        "_resolve_batch_config also calls, in the same relative order, so both "
+        "resolve_batch_config also calls, in the same relative order, so both "
         f"paths report the same first error:\n  submit:    {submit}\n"
         f"  validator: {validator}"
     )

@@ -67,7 +67,7 @@ def plan_slices(
 
 
 def _plan_config(request: dict[str, Any], units: list[dict[str, Any]]) -> Any:
-    return sim_batch._resolve_batch_config(
+    return sim_batch.resolve_batch_config(
         request,
         corner_count=1,
         timeout_s=sim_batch_plan.deck_serial_worst_s(units),
@@ -309,7 +309,7 @@ def attach_split(
         _files, worker = sim_decks.stage_deck_job(sub, request_dir=request_dir)
         units = worker[sim_decks.DECKS_FIELD]
         try:
-            config = sim_batch._resolve_batch_config(
+            config = sim_batch.resolve_batch_config(
                 sub,
                 corner_count=1,
                 timeout_s=sim_batch_plan.deck_serial_worst_s(units),
@@ -451,7 +451,7 @@ def _attach_single_job(
     units = worker_request[sim_decks.DECKS_FIELD]
     serial_worst_s = sim_batch_plan.deck_serial_worst_s(units)
     try:
-        config = sim_batch._resolve_batch_config(
+        config = sim_batch.resolve_batch_config(
             request, corner_count=1, timeout_s=serial_worst_s
         )
         if not sim_batch.job_exists(config, job_id):

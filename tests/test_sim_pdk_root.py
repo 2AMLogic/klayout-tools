@@ -254,7 +254,7 @@ def test_print_pdk_warning_line_without_backend_provenance(capsys):
 
 def test_run_sim_dry_run_batch_refuses_host_models_pdk_root(tmp_path, monkeypatch):
     """`models.pdk_root` naming a directory on the *submitting* host is
-    refused by a real submit (issue #4097) from `_resolve_batch_config`,
+    refused by a real submit (issue #4097) from `resolve_batch_config`,
     which a dry run reaches only through `dry_run_runner_check` -- and that
     swallows this code. So the request used to dry-run clean and die on
     submit."""

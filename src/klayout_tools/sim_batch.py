@@ -157,7 +157,7 @@ from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_batch_worker_engine_build import _compare_engine_builds
 from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
-from .sim_exit_reason import status_exit_code as _status_exit_code
+from .sim_exit_reason import status_exit_code as status_exit_code
 from .sim_pin_settle import _enforce_published_engine_version_pin
 from .sim_remote import (
     _build_remote_request,
@@ -233,14 +233,14 @@ from .sim_batch_contract import (  # noqa: F401
 )
 from .sim_batch_contract_jobspec import (
     _build_batch_job_spec,
-    _default_batch_job_timeout_s,
     _default_batch_poll_timeout_s,
+    default_batch_job_timeout_s,
 )
 from .sim_batch_contract_preflight import (  # noqa: F401
     _job_stderr_capture_prefix,
-    _runner_preflight_script,
     assess_remote_runner_features,
     remote_feature_preflight,
+    runner_preflight_script,
 )
 from .sim_batch_contract_spec import (  # noqa: F401
     _MANDATORY_RUNNER_FEATURES,
@@ -447,7 +447,7 @@ def batch_pdk_key(pdk: str) -> str:
 
 def _validate_batch_pdk(request: dict[str, Any]) -> None:
     """Refuse a ``models.pdk`` the batch fleet has no image for, **before**
-    :func:`_resolve_batch_config`'s caller writes anything to S3 (issue
+    :func:`resolve_batch_config`'s caller writes anything to S3 (issue
     #2523).
 
     The accepted set is :data:`BATCH_PUBLISHED_PDKS`, the PDKs the batch
@@ -628,7 +628,7 @@ def _validate_batch_pdk_variant(
     )
 
 
-def _resolve_batch_config(
+def resolve_batch_config(
     request: dict[str, Any],
     *,
     corner_count: int,
@@ -767,7 +767,7 @@ def dry_run_runner_check(
 
     _validate_batch_request_knobs(request.get("batch") or {})
     try:
-        config = _resolve_batch_config(
+        config = resolve_batch_config(
             request, corner_count=corner_count, timeout_s=timeout_s
         )
     except SimError as exc:
@@ -979,13 +979,13 @@ def _plan_job_split(
     return hosts
 
 
-def _assess_job_ceiling(
+def assess_job_ceiling(
     *, unit_count: int, per_unit_timeout_s: float, config: BatchConfig, hosts: int = 1
 ) -> dict[str, Any]:
     """Deterministic pre-submit runtime-risk assessment of **one** batch job
     against the fleet's whole-job ceiling (issue #2833).
 
-    The bound is :func:`_default_batch_job_timeout_s` -- every unit burning
+    The bound is :func:`default_batch_job_timeout_s` -- every unit burning
     its full ``options.timeout_s`` one after another, plus
     :data:`_BATCH_JOB_OVERHEAD_S`: a conservative *upper bound* derived from
     the request alone, never a runtime estimate (``basis`` says so).
@@ -1013,16 +1013,16 @@ def _assess_job_ceiling(
     units = max(1, unit_count)
     largest = math.ceil(units / max(1, hosts))
     ceiling = config.max_job_seconds
-    bound = _default_batch_job_timeout_s(largest, per_unit_timeout_s)
+    bound = default_batch_job_timeout_s(largest, per_unit_timeout_s)
     if per_unit_timeout_s > 0:
         per_job = max(0, int((ceiling - _BATCH_JOB_OVERHEAD_S) // per_unit_timeout_s))
         # Settle float rounding against the bound function itself, so the
         # recommendation and the comparison can never disagree.
         while per_job > 0 and (
-            _default_batch_job_timeout_s(per_job, per_unit_timeout_s) > ceiling
+            default_batch_job_timeout_s(per_job, per_unit_timeout_s) > ceiling
         ):
             per_job -= 1
-        while _default_batch_job_timeout_s(per_job + 1, per_unit_timeout_s) <= ceiling:
+        while default_batch_job_timeout_s(per_job + 1, per_unit_timeout_s) <= ceiling:
             per_job += 1
     else:
         per_job = units if bound <= ceiling else 0
@@ -1068,7 +1068,7 @@ def _assess_job_ceiling(
 
 
 def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
-    """Act on :func:`_assess_job_ceiling`'s result before any S3 write:
+    """Act on :func:`assess_job_ceiling`'s result before any S3 write:
     under ``"enforce"`` an exceeded ceiling raises
     :data:`BATCH_JOB_CEILING_CODE`; under ``"warn"`` the same message is
     printed to stderr (so a caller piping ``--format json`` to a file still
@@ -1762,7 +1762,7 @@ def _batch_job_environment(config: BatchConfig, job_id: str) -> dict[str, Any]:
     }
 
 
-def _batch_environment(
+def batch_environment(
     config: BatchConfig, job_id: str, status: dict[str, Any]
 ) -> dict[str, Any]:
     """The additive ``environment.remote`` block a batch job reports -- the
@@ -2019,7 +2019,7 @@ def _runner_feature_report(
     return {"required": features, "missing": missing, "status": status}
 
 
-def _read_runner_identity(
+def read_runner_identity(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """The ``environment.remote`` runner-identity fields (issue #2719).
@@ -2114,7 +2114,7 @@ def _read_job_identity(
     worker_environment["ngspice_init"] = runner_ngspice_init(report)
     worker_environment["threads_per_worker"] = runner_threads_per_worker(report)
     return {
-        **_read_runner_identity(local_dir, request),
+        **read_runner_identity(local_dir, request),
         "worker_environment": worker_environment,
         # ``None`` (not ``[]``) when the runner did not report it, so "none
         # staged" and "unknown / older runner" stay distinguishable.
@@ -2232,7 +2232,7 @@ def _job_failure_corners(
     2am's ``reconcile``'s business, not the client's.
 
     ``runner_error`` is the recovered ``error`` object of the job's own klt
-    error envelope (see :func:`_classify_collected_report`); its message is
+    error envelope (see :func:`classify_collected_report`); its message is
     appended to the diagnostic (its ``code``, when present, attached as
     ``runner_code``) so the actionable reason is visible without S3 access.
     ``collection_note`` records why recovery found nothing usable. Neither
@@ -2273,7 +2273,7 @@ def _job_failure_corners(
     return corners
 
 
-def _classify_collected_report(
+def classify_collected_report(
     report: Any,
 ) -> tuple[str, dict[str, Any] | None]:
     """Classify one collected ``report.json`` object.
@@ -2307,7 +2307,7 @@ def _classify_collected_report(
     return "unusable", None
 
 
-def _read_stderr_envelope(local_dir: str) -> tuple[dict[str, Any] | None, str]:
+def read_stderr_envelope(local_dir: str) -> tuple[dict[str, Any] | None, str]:
     """Recover the klt error envelope from the collected stderr file.
 
     ``emit_error`` writes ``json.dump(indent=2)`` plus a newline as the last
@@ -2315,7 +2315,7 @@ def _read_stderr_envelope(local_dir: str) -> tuple[dict[str, Any] | None, str]:
     is the trailing JSON object that starts at column 0. Only the file's
     last :data:`_BATCH_STDERR_TAIL_BYTES` are read, candidates are tried from
     the last ``{`` line backwards, and each is run through
-    :func:`_classify_collected_report`. Returns ``(error, "")`` on success or
+    :func:`classify_collected_report`. Returns ``(error, "")`` on success or
     ``(None, note)`` -- the note never contains raw stderr text."""
     path = os.path.join(local_dir, BATCH_STDERR_FILENAME)
     try:
@@ -2334,7 +2334,7 @@ def _read_stderr_envelope(local_dir: str) -> tuple[dict[str, Any] | None, str]:
             payload, _ = decoder.raw_decode(text, start)
         except ValueError:
             continue
-        kind, error = _classify_collected_report(payload)
+        kind, error = classify_collected_report(payload)
         if kind == "error":
             return error, ""
     return None, f"{BATCH_STDERR_FILENAME} holds no klt error envelope"
@@ -2369,7 +2369,7 @@ def _recover_failed_job_corners(
             report = None
             try:
                 report = read_collected_report(collected)
-                kind, runner_error = _classify_collected_report(report)
+                kind, runner_error = classify_collected_report(report)
                 if kind == "report":
                     note = "collected report is not a klt error envelope"
                 elif kind == "unusable":
@@ -2381,7 +2381,7 @@ def _recover_failed_job_corners(
                 collected, identity.get("worker_environment")
             )
             if runner_error is None:
-                runner_error, stderr_note = _read_stderr_envelope(collected)
+                runner_error, stderr_note = read_stderr_envelope(collected)
                 if runner_error is None:
                     note = (
                         f"{note}; {stderr_note} -- see harness.log under the "
@@ -2404,7 +2404,7 @@ def _recover_failed_job_corners(
         _annotate_unrecovered_preflight_reject(corners, status, identity)
     if (runner_error or {}).get("code") == BATCH_RUNNER_MISMATCH_CODE or (
         runner_error is None
-        and _status_exit_code(status) == _BATCH_PREFLIGHT_REJECT_EXIT
+        and status_exit_code(status) == _BATCH_PREFLIGHT_REJECT_EXIT
     ):
         d = refusal_diagnostic(
             identity, _runner_gate_release, BATCH_RUNNER_MISMATCH_CODE
@@ -2446,7 +2446,7 @@ def _annotate_unrecovered_preflight_reject(
     failure as a version mismatch (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE`
     plus both klt identities). Any other non-zero exit code gets the generic
     :func:`.sim_batch_features.annotate_unrecovered_failure` wording (issue #4217)."""
-    exit_code = _status_exit_code(status)
+    exit_code = status_exit_code(status)
     if exit_code is None or exit_code == 0:
         return
     if exit_code != _BATCH_PREFLIGHT_REJECT_EXIT:
@@ -3057,9 +3057,9 @@ def _poll_and_collect(
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
-    environment = {**_batch_environment(config, job_id, status), **timestamps}
+    environment = {**batch_environment(config, job_id, status), **timestamps}
     if status.get("state") != "done" and (
-        _status_exit_code(status) not in _BATCH_SIM_SUCCESS_EXIT_CODES
+        status_exit_code(status) not in _BATCH_SIM_SUCCESS_EXIT_CODES
     ):
         failed_corners, identity = _recover_failed_job_corners(
             config=config,
@@ -3183,7 +3183,7 @@ def _run_batch(
     unit through the same unrun-corner shape.
 
     Before submitting, the job's conservative bound is checked against the
-    fleet's whole-job ceiling (:func:`_assess_job_ceiling`, issue #2833):
+    fleet's whole-job ceiling (:func:`assess_job_ceiling`, issue #2833):
     ``"enforce"`` refuses an overlong job, the default ``"warn"`` submits
     with a stderr warning, and either way the assessment is reported as
     ``environment.remote.job_ceiling``. The ``hosts > 1`` path
@@ -3204,7 +3204,7 @@ def _run_batch(
     del analysis, models_lib, max_workers  # see docstring
     del deadline, initial_ppid, probe_abort  # not honored
 
-    config = _resolve_batch_config(
+    config = resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     if attach_job_id is not None and attach_job_id.endswith(".json"):
@@ -3320,7 +3320,7 @@ def _run_batch(
 def _feature_diagnostic_field(config: BatchConfig) -> dict[str, Any]:
     """``environment.remote.request_feature_diagnostic`` for the pre-launch
     ``warn`` result (issue #2901); empty when there is none, so a post-run one
-    from :func:`_read_runner_identity` is left alone. ``run_sim`` hoists it to
+    from :func:`read_runner_identity` is left alone. ``run_sim`` hoists it to
     the report's top-level ``diagnostics[]``."""
     if config.feature_diagnostic is None:
         return {}
@@ -3763,7 +3763,7 @@ def _run_batch_fleet(
     refuse_hosts_over_units(hosts, len(corner_points))
 
     if config is None:
-        config = _resolve_batch_config(
+        config = resolve_batch_config(
             request, corner_count=len(corner_points), timeout_s=timeout_s
         )
     manifest = _open_shard_manifest(

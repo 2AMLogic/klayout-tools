@@ -15,10 +15,10 @@ from .sim_batch import (
     BatchConfig,
     _apply_job_split,
     _assess_deck_support,
-    _assess_job_ceiling,
-    _resolve_batch_config,
+    assess_job_ceiling,
     dry_run_runner_check,
     refuse_hosts_over_units,
+    resolve_batch_config,
 )
 
 
@@ -58,7 +58,7 @@ def plan_batch_job(
     with (
         contextlib.redirect_stderr(io.StringIO()) if quiet else contextlib.nullcontext()
     ):
-        job_ceiling = _assess_job_ceiling(
+        job_ceiling = assess_job_ceiling(
             unit_count=unit_count,
             per_unit_timeout_s=timeout_s,
             config=config,
@@ -174,7 +174,7 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
         pdk_root=overrides.get("pdk_root"),
     )
     points = resolved.corner_points
-    config = _resolve_batch_config(
+    config = resolve_batch_config(
         resolved.request,
         corner_count=len(points),
         timeout_s=resolved.timeout_s,
@@ -208,7 +208,7 @@ def _preflight_decks_request(
         allow_worker_form=False,
     )
     serial_worst_s = deck_serial_worst_s(units)
-    config = _resolve_batch_config(
+    config = resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s, check_runner=False
     )
     _assess_deck_support(request, config)

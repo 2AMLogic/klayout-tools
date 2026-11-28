@@ -285,15 +285,15 @@ def _spy_capacity_wait(monkeypatch):
 
         return spy
 
-    monkeypatch.setattr(sba, "_resolve_batch_config", wrap(sba._resolve_batch_config))
-    real_blocking = sb._resolve_batch_config
+    monkeypatch.setattr(sba, "resolve_batch_config", wrap(sba.resolve_batch_config))
+    real_blocking = sb.resolve_batch_config
 
     def blocking_spy(*args, **kwargs):
         config = real_blocking(*args, **kwargs)
         seen.append(config.capacity_wait_s)
         raise _Stop
 
-    monkeypatch.setattr(sb, "_resolve_batch_config", blocking_spy)
+    monkeypatch.setattr(sb, "resolve_batch_config", blocking_spy)
     return seen
 
 

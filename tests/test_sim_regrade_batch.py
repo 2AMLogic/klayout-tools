@@ -67,7 +67,7 @@ def test_worker_preflight_checks_regrade_selection_before_simulation(
     environment = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
     for prefix in (
         sb.remote_feature_preflight(request),
-        sb._runner_preflight_script(
+        sb.runner_preflight_script(
             "0.9.3.dev1", enforce=False, required_features=tuple(features)
         ),
     ):

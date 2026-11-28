@@ -255,7 +255,7 @@ def test_job_json_shape(repo, fake, no_local_xschem, tmp_path):
     assert job["timeout_seconds"] == 45 + int(sim_batch._BATCH_JOB_OVERHEAD_S)
     cmd = job["cmd"]
     assert cmd.startswith(
-        sim_batch._runner_preflight_script(CLIENT_VERSION, enforce=True)
+        sim_batch.runner_preflight_script(CLIENT_VERSION, enforce=True)
     )
     assert (
         'klt netlist design/block.sch -o "$EDA_OUTPUT_DIR/netlist.spice" --block '

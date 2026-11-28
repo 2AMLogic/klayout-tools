@@ -2,7 +2,7 @@
 
 ``request.batch.poll_interval_s`` and ``request.batch.poll_timeout_s`` were
 the last two ``batch`` seconds knobs parsed with a bare ``float()`` in
-``_resolve_batch_config``: a malformed value escaped the ``klt sim`` JSON
+``resolve_batch_config``: a malformed value escaped the ``klt sim`` JSON
 error envelope as an uncaught ``ValueError``/``TypeError`` traceback, and a
 ``bool``/non-finite/negative value was silently accepted. Both now route
 through :func:`~klayout_tools.sim_batch_job_timeout.resolve_poll_interval_s`

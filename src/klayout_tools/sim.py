@@ -216,7 +216,6 @@ from .sim_batch import (
     attach_engine_build_comparison,
     attach_staged_model_comparison,
 )
-from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import (
     SUBMIT_ONLY_UNSUPPORTED_CODE,
     refuse_hosts_over_units,

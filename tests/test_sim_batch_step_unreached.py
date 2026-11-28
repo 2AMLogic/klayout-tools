@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import sim, sim_batch
-from klayout_tools.sim_batch_contract_preflight import _runner_preflight_script
+from klayout_tools.sim_batch_contract_preflight import runner_preflight_script
 
 
 def request_with_policy(policy):
@@ -35,7 +35,7 @@ def test_only_step_scoped_null_uses_the_capability():
 @pytest.mark.skipif(not Path("/bin/bash").is_file(), reason="no system Bash")
 def test_step_preflight_parses_with_system_bash():
     # The system shell can differ from the first Bash on PATH, e.g. macOS 3.2.
-    prefix = _runner_preflight_script(
+    prefix = runner_preflight_script(
         "0.9.3.dev1", required_features=("step_on_unreached",), enforce=False
     )
     check = subprocess.run(
@@ -62,7 +62,7 @@ def test_collector_and_worker_agree_on_step_unreached(
 ):
     request = request_with_policy("null")
     features = tuple(sim_batch._request_features(request))
-    prefix = _runner_preflight_script(
+    prefix = runner_preflight_script(
         "0.9.3.dev4954", required_features=features, enforce=False
     )
     # Model each worker's real CLI grading response to the same replay. The
@@ -87,7 +87,7 @@ def test_collector_and_worker_agree_on_step_unreached(
         capture_output=True,
         text=True,
     )
-    fields = sim_batch._read_runner_identity(str(tmp_path), request)[
+    fields = sim_batch.read_runner_identity(str(tmp_path), request)[
         "runner_request_features"
     ]
     assert fields["status"] == status
@@ -128,7 +128,7 @@ def test_untested_development_manifest_defers_to_worker(tmp_path):
     assert sim_batch._enforce_published_runner_features(request, assessment) is None
     identity = tmp_path / sim_batch.BATCH_RUNNER_IDENTITY_FILENAME
     identity.write_text(json.dumps({"runner_klt_version": version}))
-    fields = sim_batch._read_runner_identity(str(tmp_path), request)
+    fields = sim_batch.read_runner_identity(str(tmp_path), request)
     assert fields["runner_request_features"] == {
         "required": ["analysis_steps", "step_on_unreached"],
         "missing": None,
@@ -140,7 +140,7 @@ def test_installed_grader_accepts_replayed_step_without_a_solver(tmp_path):
     # Run the real CLI in this checkout, using an ambiguous version for the
     # gate. The only selected engine executable is the generated log replay.
     features = tuple(sim_batch._request_features(request_with_policy("null")))
-    prefix = _runner_preflight_script(
+    prefix = runner_preflight_script(
         "0.9.3.dev1", required_features=features, enforce=False
     )
     cmd = (

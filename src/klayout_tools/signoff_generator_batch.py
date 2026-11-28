@@ -466,7 +466,7 @@ def _runner_rejection(collected: str) -> str | None:
     """The runner-version preflight's message when ``report.json`` holds its
     ``batch_runner_*`` rejection envelope, else ``None``."""
     try:
-        kind, error = sim_batch._classify_collected_report(
+        kind, error = sim_batch.classify_collected_report(
             sim_batch.read_collected_report(collected)
         )
     except sim_batch.BatchError:
@@ -503,7 +503,7 @@ def run_approved_generator(
         "not_checked": NOT_CHECKED,
     }
     try:
-        config = sim_batch._resolve_batch_config(
+        config = sim_batch.resolve_batch_config(
             {"models": {"pdk": approval.pdk}},
             corner_count=1,
             timeout_s=approval.timeout_s,
@@ -551,7 +551,7 @@ def run_approved_generator(
             evidence["remote"] = {"job_id": job_id}
             return _fail(FAIL_SUBMIT, f"{exc}", evidence)
 
-        evidence["remote"] = sim_batch._batch_environment(config, job_id, status)
+        evidence["remote"] = sim_batch.batch_environment(config, job_id, status)
         collected = os.path.join(scratch, "outputs")
         try:
             sim_batch.collect_outputs(
@@ -559,10 +559,10 @@ def run_approved_generator(
             )
         except sim_batch.BatchError as exc:
             return _fail(FAIL_COLLECT, f"collecting outputs failed: {exc}", evidence)
-        evidence["remote"].update(sim_batch._read_runner_identity(collected))
+        evidence["remote"].update(sim_batch.read_runner_identity(collected))
 
         state = status.get("state")
-        exit_code = sim_batch._status_exit_code(status)
+        exit_code = sim_batch.status_exit_code(status)
         if state != "done" or exit_code not in (0, None):
             rejection = _runner_rejection(collected)
             if rejection is not None:

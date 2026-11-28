@@ -307,7 +307,7 @@ def test_older_worker_identity_distinguishes_preload_forms(
         json.dumps({"runner_klt_version": "0.9.2"})
     )
     request = {"options": {"osdi_preload": [entry], "stage_model_inputs": stage}}
-    report = sim_batch._read_runner_identity(str(tmp_path), request)[
+    report = sim_batch.read_runner_identity(str(tmp_path), request)[
         "runner_request_features"
     ]
     assert report["missing"] == missing

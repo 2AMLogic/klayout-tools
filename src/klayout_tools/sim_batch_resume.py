@@ -362,7 +362,7 @@ def harvest_resume_shard_map(
     ``checkpoint.json`` -- is what makes ``environment.remote.resumable:
     true`` satisfiable by ``--resume`` alone.
     """
-    config = sim_batch._resolve_batch_config(
+    config = sim_batch.resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     corners, engine_version, environment = harvest_resume_shards(

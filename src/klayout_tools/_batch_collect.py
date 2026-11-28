@@ -40,14 +40,14 @@ def runner_error(collected: str) -> tuple[dict[str, Any] | None, str]:
 
     note = ""
     try:
-        kind, error = sim_batch._classify_collected_report(
+        kind, error = sim_batch.classify_collected_report(
             sim_batch.read_collected_report(collected)
         )
         if kind == "error":
             return error, ""
     except sim_batch.BatchError as exc:
         note = str(exc)
-    error, stderr_note = sim_batch._read_stderr_envelope(collected)
+    error, stderr_note = sim_batch.read_stderr_envelope(collected)
     if error is not None:
         return error, ""
     return None, "; ".join(item for item in (note, stderr_note) if item)
@@ -145,7 +145,7 @@ def read_collected_unit_report(
             code=_batch_common.BATCH_JOB_FAILED_CODE,
             job_id=job_id,
         ) from exc
-    kind, error = sim_batch._classify_collected_report(report)
+    kind, error = sim_batch.classify_collected_report(report)
     if kind == "error" and error is not None:
         raise ctor(
             f"batch job {job_id}: the runner's klt reported: "

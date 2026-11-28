@@ -2028,7 +2028,7 @@ def _run_deck_preflight(tmp_path: Path, version: str):
     klt.chmod(0o755)
     outdir = tmp_path / "eda-out"
     outdir.mkdir(exist_ok=True)
-    script = sb._runner_preflight_script("0.7.1.dev500", enforce=False)
+    script = sb.runner_preflight_script("0.7.1.dev500", enforce=False)
     script += sb._deck_preflight_lines() + "echo reached-klt-sim\n"
     result = subprocess.run(
         ["bash", "-c", script],
@@ -2222,7 +2222,7 @@ class TestDecksRequestFeatureReport:
             (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
                 json.dumps({"runner_klt_version": runner}), encoding="utf-8"
             )
-        return sb._read_runner_identity(str(tmp_path), request)
+        return sb.read_runner_identity(str(tmp_path), request)
 
     def test_old_runner_is_unsupported_though_compatibility_matches(
         self, tmp_path, monkeypatch

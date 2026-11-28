@@ -34,7 +34,7 @@ def _pinned_request(tmp_path: Path, **overrides) -> dict:
 
 
 def _resolve(request: dict):
-    return sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    return sb.resolve_batch_config(request, corner_count=1, timeout_s=30.0)
 
 
 def test_prelaunch_refuses_a_pin_every_published_image_fails(tmp_path, monkeypatch):

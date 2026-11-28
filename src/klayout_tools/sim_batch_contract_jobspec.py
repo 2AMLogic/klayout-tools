@@ -27,7 +27,7 @@ from .sim_batch_contract import (
 )
 from .sim_batch_contract_preflight import (
     _job_stderr_capture_prefix,
-    _runner_preflight_script,
+    runner_preflight_script,
 )
 from .sim_batch_contract_spec import (
     BatchJobInput,
@@ -113,7 +113,7 @@ def _build_batch_job_spec(
     )
     command = (
         _job_stderr_capture_prefix()
-        + _runner_preflight_script(
+        + runner_preflight_script(
             client_version
             if client_version is not None
             else _provenance._klt_version(),
@@ -159,7 +159,7 @@ def _build_batch_job_spec(
             math.ceil(
                 job_timeout_s
                 if job_timeout_s is not None
-                else _default_batch_job_timeout_s(corner_count, timeout_s)
+                else default_batch_job_timeout_s(corner_count, timeout_s)
             )
         ),
         inputs=(
@@ -181,7 +181,7 @@ def _build_batch_job_spec(
     )
 
 
-def _default_batch_job_timeout_s(
+def default_batch_job_timeout_s(
     corner_count: int, per_corner_timeout_s: float
 ) -> float:
     """``job.json``'s ``timeout_seconds``: the fully-serial worst case
@@ -194,7 +194,7 @@ def _default_batch_job_timeout_s(
     fires. The harness clamps it down to its own ``MAX_JOB_SECONDS``, never
     up, so an over-large value here is safe *for the harness* -- but the job
     is then killed at that ceiling, which is what
-    :func:`_assess_job_ceiling` warns about before submission (issue #2833).
+    :func:`assess_job_ceiling` warns about before submission (issue #2833).
     """
     return per_corner_timeout_s * max(1, corner_count) + _BATCH_JOB_OVERHEAD_S
 
@@ -214,6 +214,6 @@ def _default_batch_poll_timeout_s(
     if job_timeout_s is not None:
         return caller_poll_timeout_s(job_timeout_s)
     return (
-        _default_batch_job_timeout_s(corner_count, per_corner_timeout_s)
+        default_batch_job_timeout_s(corner_count, per_corner_timeout_s)
         + _BATCH_PROVISION_SLACK_S
     )

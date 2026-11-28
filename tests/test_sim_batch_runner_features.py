@@ -334,8 +334,8 @@ def test_crossings_preflight_checks_the_worker_parser(
     tmp_path, backend, accepts_selector
 ):
     from klayout_tools.sim_batch_contract_preflight import (
-        _runner_preflight_script,
         remote_feature_preflight,
+        runner_preflight_script,
     )
 
     worker = tmp_path / "klt"
@@ -360,7 +360,7 @@ def test_crossings_preflight_checks_the_worker_parser(
     def preflight(req):
         if backend == "remote":
             return remote_feature_preflight(req)
-        return _runner_preflight_script(
+        return runner_preflight_script(
             "0.9.3", enforce=True, required_features=tuple(sb._request_features(req))
         )
 

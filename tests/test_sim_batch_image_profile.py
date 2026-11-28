@@ -23,7 +23,7 @@ def request_on_fleet(tmp_path, monkeypatch):
 
 
 def resolve(request):
-    return sb._resolve_batch_config(
+    return sb.resolve_batch_config(
         request, corner_count=1, timeout_s=4000, check_runner=False
     )
 
@@ -73,7 +73,7 @@ def test_opt_in_controls_the_uploaded_job_and_ceiling(request_on_fleet):
         7200,
         "fleet_config",
     )
-    assert sb._batch_environment(config, "fixture", {})["image_profile"] == "simlong"
+    assert sb.batch_environment(config, "fixture", {})["image_profile"] == "simlong"
     batch.update(job_ceiling_check="split", job_timeout_s=6000)
     bound, _ = plan_batch_job(resolve(request_on_fleet), unit_count=2, timeout_s=4000)
     assert (bound["image_profile"], bound["job_bound_s"]) == ("simlong", 6000)
@@ -159,7 +159,7 @@ def test_dry_run_exercises_the_selected_fleet_profile(tmp_path, request_on_fleet
 
 def test_other_batch_verbs_keep_their_fleet_ceiling(request_on_fleet):
     request_on_fleet["batch"]["image_profile"] = "simlong"
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         request_on_fleet,
         corner_count=1,
         timeout_s=4000,
@@ -168,4 +168,4 @@ def test_other_batch_verbs_keep_their_fleet_ceiling(request_on_fleet):
     )
     assert config.max_job_seconds == 3600
     assert "image_profile" not in json.loads(uploaded_job(config))
-    assert "image_profile" not in sb._batch_environment(config, "fixture", {})
+    assert "image_profile" not in sb.batch_environment(config, "fixture", {})
