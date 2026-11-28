@@ -80,7 +80,7 @@ from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route
 from klayout_tools import place_and_route_power_audit as power_audit
-from klayout_tools._openroad_engine import _timing_status
+from klayout_tools._openroad_engine import timing_status
 from klayout_tools.cli import main
 from klayout_tools.place_and_route import (
     PlaceAndRouteError,
@@ -2604,7 +2604,7 @@ def _stub_openroad_success(
             # `openroad -version` prints a *bare* version token on its own
             # stdout line -- confirmed live for issue #425's own worked
             # example -- distinct from the `OpenROAD <version>` banner a
-            # script invocation prints; see `_openroad_version`'s own
+            # script invocation prints; see `openroad_version`'s own
             # docstring.
             return fake_completed(stdout=f"{version} \n")
         assert cmd[0] == "openroad"
@@ -3614,7 +3614,7 @@ def test_count_antenna_violations_defensive_when_markers_missing():
     """`_count_antenna_violations` returns `None` (never `0`) when the
     markers are absent from stdout -- keeps a genuinely missing signal
     distinguishable from a confirmed-zero violation count, mirroring
-    `_count_violations`'s own defensive-`0` fallback shape but for a `None`
+    `count_violations`'s own defensive-`0` fallback shape but for a `None`
     sentinel (this field is nullable, unlike the setup/hold counts)."""
     assert place_and_route._count_antenna_violations("no markers here") is None
 
@@ -5969,15 +5969,15 @@ def test_timing_status_helper_classification():
     """Unit coverage of the shared classifier: absence is not a claim
     either way, and *any* sentinel in scope is enough to withhold the
     "constrained" verdict (issue #1865)."""
-    assert _timing_status(()) is None
-    assert _timing_status((None, None)) is None
-    assert _timing_status((-1.5, 0.3)) == "constrained"
-    assert _timing_status((0.0,)) == "constrained"
-    assert _timing_status((_UNCONSTRAINED,)) == "unconstrained"
-    assert _timing_status((-_UNCONSTRAINED,)) == "unconstrained"
+    assert timing_status(()) is None
+    assert timing_status((None, None)) is None
+    assert timing_status((-1.5, 0.3)) == "constrained"
+    assert timing_status((0.0,)) == "constrained"
+    assert timing_status((_UNCONSTRAINED,)) == "unconstrained"
+    assert timing_status((-_UNCONSTRAINED,)) == "unconstrained"
     # Mixed: one real number is not enough to call the whole scope timed.
-    assert _timing_status((-1.5, _UNCONSTRAINED)) == "unconstrained"
-    assert _timing_status((None, _UNCONSTRAINED)) == "unconstrained"
+    assert timing_status((-1.5, _UNCONSTRAINED)) == "unconstrained"
+    assert timing_status((None, _UNCONSTRAINED)) == "unconstrained"
 
 
 # --------------------------------------------------------------------------- #

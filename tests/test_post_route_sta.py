@@ -1102,7 +1102,7 @@ def test_parse_floating_drivers_absent_block_is_none():
 
 
 def _annotation_from(stdout_tail):
-    completed = post_route_sta._OpenRoadResult(
+    completed = post_route_sta.OpenRoadResult(
         returncode=0,
         stdout="\n".join(
             [
@@ -1803,12 +1803,12 @@ _EXPECTED_CHECK_FAMILY_COUNTS = {
 def _captured_counts(
     stdout: str, markers: tuple[str, str, str, str]
 ) -> tuple[int, int]:
-    from klayout_tools._openroad_engine import _count_violations
+    from klayout_tools._openroad_engine import count_violations
 
     setup_begin, setup_end, hold_begin, hold_end = markers
     return (
-        _count_violations(stdout, setup_begin, setup_end),
-        _count_violations(stdout, hold_begin, hold_end),
+        count_violations(stdout, setup_begin, setup_end),
+        count_violations(stdout, hold_begin, hold_end),
     )
 
 
@@ -1824,7 +1824,7 @@ def test_violation_count_lines_request_every_check_family():
     """Both sides ask for the same check families their WNS/TNS metric
     measures: data + recovery + clock-gating setup, and data + removal +
     clock-gating hold -- one `report_check_types` call per side so each stays
-    one marker-delimited block for `_count_violations`."""
+    one marker-delimited block for `count_violations`."""
     assert post_route_sta._violation_count_lines() == [
         f'puts "{post_route_sta._SETUP_VIOLATIONS_BEGIN}"',
         "report_check_types -max_delay -recovery -clock_gating_setup"
@@ -7149,7 +7149,7 @@ def _openroad_write_spef(tmp_path: Path) -> tuple[str, str]:
         )
         + "\n",
     )
-    completed = post_route_sta._run_openroad(
+    completed = post_route_sta.run_openroad(
         script, str(tmp_path / "write_spef.json"), error_cls=PostRouteStaError
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
