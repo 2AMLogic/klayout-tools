@@ -84,6 +84,17 @@ if [[ "$1" == "api" ]]; then
     printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n'
     exit 0
   fi
+  # #15185: the legacy path's verify read — repos/O/R/issues/N/labels?...
+  # The stub convention answers what the --jq filter would produce, so this
+  # serves the state's label names one per line. The URL is logged so tests
+  # can assert the cache-defeating verify= component (#15185).
+  if [[ "$2" =~ ^repos/[^/]+/[^/]+/issues/[0-9]+/labels ]]; then
+    printf '%s\n' "$2" >> "$LOOM_TEST_STUB_DIR/api-labels-read.log"
+    S="$LOOM_TEST_STUB_DIR/label-state"
+    [[ -f "$S" ]] || printf 'loom:review-requested\nloom:reviewing\n' > "$S"
+    cat "$S"
+    exit 0
+  fi
   # A paginated list endpoint with a server-side --jq filter over an empty
   # array produces no output at all.
   printf ''
@@ -97,6 +108,25 @@ fi
 if [[ "$1" == "pr" && "$2" == "edit" ]]; then
   printf '%s\n' "$*" >> "$LOOM_TEST_STUB_DIR/pr-edit.log"
   [[ -f "$LOOM_TEST_STUB_DIR/pr-edit-fail" ]] && { echo "stub gh: pr edit failed" >&2; exit 1; }
+  # #15185: a truthful forge model for the legacy path's read-back verify.
+  # label-state holds the PR's label names; pr edit applies its --add-label /
+  # --remove-label flags to it. pr-edit-lies models the half-applied
+  # transition: the command succeeds but the state does not move.
+  if [[ ! -f "$LOOM_TEST_STUB_DIR/pr-edit-lies" ]]; then
+    S="$LOOM_TEST_STUB_DIR/label-state"
+    [[ -f "$S" ]] || printf 'loom:review-requested\nloom:reviewing\n' > "$S"
+    prev=""
+    for a in "$@"; do
+      if [[ "$prev" == "--add-label" && -n "$a" ]]; then
+        grep -Fxq "$a" "$S" || printf '%s\n' "$a" >> "$S"
+      fi
+      if [[ "$prev" == "--remove-label" && -n "$a" ]]; then
+        grep -Fxv "$a" "$S" > "$S.t" || true
+        mv "$S.t" "$S"
+      fi
+      prev="$a"
+    done
+  fi
   exit 0
 fi
 if [[ "$1" == "issue" && "$2" == "comment" ]]; then
@@ -270,7 +300,7 @@ reset_state() {
     "$STUB_DIR"/ci-stdout "$STUB_DIR"/ci-stderr "$STUB_DIR"/ci-garbage "$STUB_DIR"/ci-absent "$STUB_DIR"/ci-empty "$STUB_DIR"/ci-required \
     "$STUB_DIR"/final-head "$STUB_DIR"/final-head-fail "$STUB_DIR"/final-head-hang "$STUB_DIR"/delete-hang "$STUB_DIR/wait-checks-calls.log" \
     "$STUB_DIR/gate-answer" "$STUB_DIR/reconcile-answer" "$STUB_DIR"/reconcile-answer.* "$STUB_DIR/labels-fail" "$STUB_DIR/lock-fail" "$STUB_DIR/daemon-calls.log" \
-    "$STUB_DIR/lease-state" "$STUB_DIR/lease-calls.log" "$STUB_DIR/old-daemon" "$STUB_DIR/body-answer" "$STUB_DIR/body-check-missing" "$STUB_DIR/body-check-input.txt" "$STUB_DIR/delete-fail" "$STUB_DIR/labels-read-fail" "$STUB_DIR/pr-edit.log" "$STUB_DIR/pr-edit-fail"
+    "$STUB_DIR/lease-state" "$STUB_DIR/lease-calls.log" "$STUB_DIR/old-daemon" "$STUB_DIR/body-answer" "$STUB_DIR/body-check-missing" "$STUB_DIR/body-check-input.txt" "$STUB_DIR/delete-fail" "$STUB_DIR/labels-read-fail" "$STUB_DIR/pr-edit.log" "$STUB_DIR/pr-edit-fail" "$STUB_DIR/label-state" "$STUB_DIR/pr-edit-lies" "$STUB_DIR/label-state.t" "$STUB_DIR/api-labels-read.log"
 }
 
 run_pv() {
@@ -951,6 +981,37 @@ run_pv 332 changes-requested abc1234 --body "please fix"
 assert_eq "8" "$EXIT_CODE" "legacy path label failure -> exit 8"
 assert_eq "332" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "the comment itself was posted"
 assert_contains "$OUTPUT" "Repair: gh pr edit 332 --repo owner/repo --add-label loom:changes-requested" "repair command is printed"
+
+# --- #15185: the legacy path's label edit is verified by a read-back ---------
+
+# A truthful forge: the edit applied, the read-back agrees -> exit 0, and the
+# verifying read carried a cache-defeating verify= component.
+reset_state
+touch "$STUB_DIR/old-daemon"
+run_pv 334 approved abc1234 --body "ok"
+assert_eq "0" "$EXIT_CODE" "legacy approval with a verified transition -> exit 0"
+assert_eq "loom:pr" "$(cat "$STUB_DIR/label-state" 2>/dev/null || true)" "the stub forge holds only the verdict label"
+assert_contains "$OUTPUT" "legacy path" "still the degraded path"
+assert_contains "$(cat "$STUB_DIR/api-labels-read.log" 2>/dev/null || true)" "labels?per_page=100&verify=" "the verifying read cannot be served from a URL-keyed cache (#15185)"
+
+# The #15185 shape: the edit exits 0 but a removal was silently lost — the
+# state still holds loom:review-requested beside the verdict label. The
+# read-back must catch it: exit 8, the still-present label named, the repair
+# command printed.
+reset_state
+touch "$STUB_DIR/old-daemon" "$STUB_DIR/pr-edit-lies"
+run_pv 335 approved abc1234 --body "ok"
+assert_eq "8" "$EXIT_CODE" "half-applied legacy transition -> exit 8"
+assert_eq "335" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "the comment itself was posted"
+assert_contains "$OUTPUT" "loom:review-requested is still present" "the contradicting label is named"
+assert_contains "$OUTPUT" "Repair: gh pr edit 335 --repo owner/repo --add-label loom:pr --remove-label loom:review-requested" "repair command is printed"
+
+# An unreadable label set is an unverified transition, never a pass.
+reset_state
+touch "$STUB_DIR/old-daemon" "$STUB_DIR/labels-read-fail"
+run_pv 336 approved abc1234 --body "ok"
+assert_eq "8" "$EXIT_CODE" "unreadable verify read -> exit 8"
+assert_contains "$OUTPUT" "could not be read back" "the unreadable read-back is named"
 
 # --- Judge lease gate (#13055) ------------------------------------------------
 for case_ in "0 PR_LEASE_STATE=free" "4 PR_LEASE_STATE=held-peer" "5 PR_LEASE_STATE=unknown" "5 garbage-no-state-line" "0 "; do

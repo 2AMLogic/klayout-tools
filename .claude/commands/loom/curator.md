@@ -827,6 +827,19 @@ claims would false-positive constantly on ordinary curation prose. The bar
 is a habit: before stating a fact about code behavior, ask whether you
 traced or ran something to know it, and mark it plainly if you didn't.
 
+### `cargo doc -D warnings` is not a usable criterion for `loom-daemon` (#15675)
+
+> **Never write `RUSTDOCFLAGS="-D warnings" cargo doc` as an acceptance
+> criterion for `loom-daemon`.** That command already fails on `origin/main`
+> (the lib doc carries over a thousand warnings, #14990), so it is red on
+> every branch and the Builder meets an AC no change of theirs can satisfy —
+> #15617, #15652 and #15663 each did. For an issue that touches `loom-daemon`
+> doc comments, write the criterion as **"introduces no new rustdoc warning in
+> the touched files (diff vs `origin/main`)"** and cite
+> `.loom/docs/verification-recipes.md` §7 ("A doc-comment change"), which
+> holds the before/after script. The only exception is an issue whose own
+> scope is zero rustdoc warnings for the crate.
+
 ### Running Measurement / Board-Pipeline Reproductions (worktree-or-restore, #4991)
 
 **The Curator runs in the main checkout, not a fresh worktree** (unlike the

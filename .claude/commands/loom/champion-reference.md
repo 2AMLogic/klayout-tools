@@ -157,17 +157,11 @@ off: Step 4 then skips the classifier and never adds `loom:operator` for an
 out-of-band criterion. Absent, unreadable or non-boolean values keep it on.
 First use case: 2AMLogic/loom-ui, whose live site is where testing happens.
 
-**Handling**: `champion-pr-merge.md` → Step 4 → "Out-of-Band Acceptance-Criteria
-Gate" runs `./.loom/scripts/classify-ac-verification.sh --issue <N> --pr <PR>
---head-sha <head>` for every linked issue before confirming or forcing its close:
-
-- `0` CLEAR (AC list found, all items CI-checkable) / `10` NO-AC (no
-  acceptance-criteria checklist at all) / `11` SATISFIED → close exactly as
-  before. **`10` is the common case and must remain a byte-for-byte no-op.**
-- `12` UNVERIFIED (out-of-band criterion, no marker) / `13` STALE-MARKER (marker
-  names another tree) / `1` ERROR (fails closed) → **hold**: reopen the issue if
-  GitHub already closed it, post a comment quoting the unmet criterion verbatim,
-  and apply `loom:operator`. The merge itself is never reversed.
+Step 4 uses the classifier before unblocking dependents. The daemon applies
+the out-of-band hold on its merge-observation tick. An unverified criterion,
+a stale marker, or a classifier failure keeps the issue out of Champion's
+ready list. The daemon reopens the issue if necessary, posts the unmet
+criterion, and adds `loom:operator`.
 
 **The evidence marker** — the sibling of Edge Case 3's `loom:verdict-sha`:
 
@@ -352,20 +346,10 @@ A passing proposal is never held back with no verdict. Its idempotency classifie
 
 **Scenario**: PR body contains "Closes #123, Closes #456, Fixes #789".
 
-**Handling**: this is exactly `champion-pr-merge.md`'s own Step 4 ("Verify
-Issue Auto-Close") — extract `LINKED_ISSUES` via `forge_pr_close_targets`,
-then for each candidate run the `has-unnegated-closing-ref` cross-check
-**before** closing (#1057: `does not fix #N` reads as a closing keyword to
-GitHub's parser too, so an unguarded `gh issue close` here closes an issue
-the author explicitly said to leave open). Do not re-implement the loop here
-— follow Step 4 in `champion-pr-merge.md` so this edge case and Step 4 cannot
-drift apart into two different close policies.
-
-**Decision**: **Allow merge, verify all linked issues** - standard practice.
-
-**Rationale**: GitHub auto-closes multiple issues, but verify and manually
-close if needed — through the same negation-aware check Step 4 uses, not a
-second, unguarded copy of the close call.
+`champion-pr-merge.md` Step 4 checks each linked issue before unblocking its
+dependents. GitHub can auto-close an issue on “does not fix #N” (#1057). The
+daemon checks whether this merge closed it before reopening it (#8942). An
+affirmative reference to another issue in the same PR applies only to that issue.
 
 ---
 
@@ -578,6 +562,14 @@ in a test name or command. Keep exactly one literal `write-all` pattern as
 the older Champion's fallback. The opt-in requires the native YAML check and
 holds when that check cannot read or classify the file. Custom regexes keep
 their ordinary matching behavior.
+Set `"checkWorkflowSecrets": true` for the same substitution on the two
+secrets entries: an evaluated `${{ secrets.NAME }}` reference (other than the
+built-in `secrets.GITHUB_TOKEN`) or a `secrets: inherit` key holds, while
+literal text — a `deploy_secrets.py` path filter, a `secrets.sh tests` step
+name, a YAML comment naming either — clears (#14915). Keep at least one of
+the literal `secrets\\.(?!GITHUB_TOKEN\\b)` / `secrets:\\s*inherit` patterns
+as the fallback; other regexes are untouched. The vetted CI-workflow check
+uses this classifier for its own list unconditionally.
 Unreadable or empty content, an oversized or removed file, an invalid regex or
 a head SHA that moved fails closed. Whole-line YAML comments are not scanned
 (a comment grants nothing; the 2026-10-20 fixtures say "no id-token: write"

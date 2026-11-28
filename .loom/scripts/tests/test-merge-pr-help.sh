@@ -52,6 +52,21 @@ assert_contains "$HELP_OUTPUT" "--worktree-path" "--help output mentions --workt
 assert_contains "$HELP_OUTPUT" "sentinel guard" "--help explains the sentinel-guard bypass semantics"
 assert_contains "$HELP_OUTPUT" "--worktree-path ../adhoc-wt" "--help shows a --worktree-path example"
 
+_help_option_block() { # <flag> -> that flag's option block, up to the next option
+    awk -v flag="$1" '
+        index($0, "  " flag " ") == 1 { on = 1; print; next }
+        on && /^  --/ { exit }
+        on { print }
+    ' <<<"$HELP_OUTPUT"
+}
+for _flag in --no-cleanup-worktree --no-cleanup-primary; do
+    _block="$(_help_option_block "$_flag")"
+    assert_contains "$_block" "merge-observation pass" \
+        "--help carries the merge-observation caveat in the $_flag option block (#15258)"
+    assert_contains "$_block" "LOOM_PRESERVE_WORKTREE=1" \
+        "--help names LOOM_PRESERVE_WORKTREE=1 as the default-path opt-out in the $_flag option block (#15258)"
+done
+
 # --- Test: -h exits 0 with same usage ---
 echo ""
 echo "Testing merge-pr.sh -h..."

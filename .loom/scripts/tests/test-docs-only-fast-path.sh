@@ -863,5 +863,332 @@ assert_doc_contains "$GUIDE_MD" \
     "guide.md documents the #13760 provenance gate"
 
 echo
+echo "--- WORK_PLAN plan-body region gate (#15220): a changed region needs the machine receipt ---"
+
+# Extract BOTH shipped functions (region helper + gate) from judge.md so this
+# suite exercises the documented code, not a hand copy — the same extraction
+# discipline as the worklog gate above. No column-0 `}` may appear inside
+# either function before its end.
+plan_fn_block() {
+    awk '/^docs_only_fast_path_plan_region\(\) \{/{p=1}
+         /^docs_only_fast_path_plan_check\(\) \{/{q=1}
+         p{print}
+         q && /^\}$/{exit}' "$1"
+}
+PLAN_FN="$(plan_fn_block "$JUDGE_MD")"
+[[ -n "$PLAN_FN" ]] || { echo "FATAL: docs_only_fast_path_plan_check() not found in judge.md"; exit 1; }
+assert_contains "$(printf '%s\n' "$PLAN_FN" | grep -v '^[[:space:]]*#')" "docs_only_fast_path_plan_check() {" \
+    "judge.md ships docs_only_fast_path_plan_check()"
+
+# Stub `gh`: PP_URL is the PR URL (answered for `--json url` and run through
+# the caller's --jq filter with real jq, exactly as gh does); PP_DIFF /
+# PP_DIFF_RC the diff; PP_BASE_SHA / PP_HEAD_SHA the ref SHAs; PP_BODY /
+# PP_BODY_RC the PR body; PP_BASE_FILE / PP_HEAD_FILE (+ PP_BASE_RC /
+# PP_HEAD_RC) the raw contents reads keyed by ?ref=; PP_URL_RC / PP_SHA_RC
+# simulate transport failures. Contents reads are recorded to PP_CALL_LOG so
+# the tests assert a non-WORK_PLAN diff made zero file reads.
+PP_BASE_SHA="${PP_BASE_SHA-basesha}"
+PP_HEAD_SHA="${PP_HEAD_SHA-headsha}"
+PP_CALL_LOG="$(mktemp)"
+gh() {
+    case "$1" in
+        pr)
+            case "$2" in
+                view)
+                    local json='' filter=''
+                    shift 2
+                    while [ $# -gt 0 ]; do
+                        case "$1" in
+                            --json) json="${2-}" ;;
+                            --jq) filter="${2-}" ;;
+                        esac
+                        shift
+                    done
+                    case "$json" in
+                        url)
+                            [ "${PP_URL_RC:-0}" -eq 0 ] || return 1
+                            local url="${PP_URL-https://github.com/owner/mine/pull/1}"
+                            [ -n "$url" ] || return 0
+                            jq -rn --arg url "$url" '{url: $url} | '"${filter:-.}"
+                            return $? ;;
+                        baseRefOid,headRefOid)
+                            [ "${PP_SHA_RC:-0}" -eq 0 ] || return 1
+                            jq -rn --arg b "$PP_BASE_SHA" --arg h "$PP_HEAD_SHA" \
+                                '{baseRefOid: $b, headRefOid: $h} | '"${filter:-.}"
+                            return $? ;;
+                        body)
+                            [ "${PP_BODY_RC:-0}" -eq 0 ] || return 1
+                            jq -rn --arg body "${PP_BODY-}" '{body: $body} | '"${filter:-.}"
+                            return $? ;;
+                        *) echo "Unknown JSON field: \"$json\"" >&2; return 1 ;;
+                    esac ;;
+                diff) printf '%s' "${PP_DIFF:-}"; return "${PP_DIFF_RC:-0}" ;;
+            esac ;;
+        api)
+            local a ref
+            for a in "$@"; do
+                case "$a" in
+                    repos/owner/mine/contents/WORK_PLAN.md?ref=*)
+                        ref="${a#*ref=}"
+                        printf '%s\n' "$a" >> "$PP_CALL_LOG"
+                        case "$ref" in
+                            "$PP_BASE_SHA") printf '%s' "${PP_BASE_FILE-}"; return "${PP_BASE_RC:-0}" ;;
+                            "$PP_HEAD_SHA") printf '%s' "${PP_HEAD_FILE-}"; return "${PP_HEAD_RC:-0}" ;;
+                        esac
+                        return 1 ;;
+                esac
+            done
+            return 1 ;;
+    esac
+    return 1
+}
+eval "$PLAN_FN"
+
+# The same hash the shipped gate (and guide.md's WORK_PLAN_RENDER_HASH)
+# computes: sha256 of the stamp-stripped body plus one trailing newline,
+# first 12 hex.
+pp_plan_hash() { printf '%s\n' "$1" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12; }
+
+# A committed WORK_PLAN.md: header prose, marker pair at column 0, stamp line
+# directly above the body, end marker directly after it (guide.md's
+# splice_plan_body shape), footer outside the region.
+pp_plan_file() { # $1 = stamp line, $2 = region body
+    printf '# Work Plan\n\n<!-- guide:plan-body:start -->\n%s\n%s\n<!-- guide:plan-body:end -->\n\nFooter.\n' "$1" "$2"
+}
+PP_STAMP_BASE='_Generated: 2026-11-23T21:49:26Z (snapshot; compare against live labels)_'
+PP_STAMP_HEAD='_Generated: 2026-11-24T12:00:00Z (snapshot; compare against live labels)_'
+PP_REGION_BASE='## Section A
+
+- **#1**: First
+- **#2**: Second'
+PP_REGION_HEAD='## Section A
+
+- **#1**: First
+- **#2**: Second
+- **#3**: Third'
+PP_BASE_FILE="$(pp_plan_file "$PP_STAMP_BASE" "$PP_REGION_BASE")"
+PP_HEAD_FILE="$(pp_plan_file "$PP_STAMP_HEAD" "$PP_REGION_HEAD")"
+
+PP_PLAN_DIFF='diff --git a/WORK_PLAN.md b/WORK_PLAN.md
+--- a/WORK_PLAN.md
++++ b/WORK_PLAN.md
+@@ -3,3 +3,4 @@'
+PP_WORKLOG_DIFF='diff --git a/WORK_LOG.md b/WORK_LOG.md
+--- a/WORK_LOG.md
++++ b/WORK_LOG.md
+@@ -1,2 +1,5 @@'
+PP_ARCHIVE_DIFF='diff --git a/work_plan/WORK_PLAN_2026-10.md b/work_plan/WORK_PLAN_2026-10.md
+--- /dev/null
++++ b/work_plan/WORK_PLAN_2026-10.md
+@@ -0,0 +1,2 @@'
+PP_NEWFILE_DIFF='diff --git a/WORK_PLAN.md b/WORK_PLAN.md
+new file mode 100644
+--- /dev/null
++++ b/WORK_PLAN.md
+@@ -0,0 +1,3 @@'
+PP_DELFILE_DIFF='diff --git a/WORK_PLAN.md b/WORK_PLAN.md
+deleted file mode 100644
+--- a/WORK_PLAN.md
++++ /dev/null
+@@ -1,3 +0,0 @@'
+
+# Default fixture: the diff touches WORK_PLAN.md and genuinely changes the
+# region, and the PR body carries the machine receipt for exactly that render.
+PP_DIFF="$PP_PLAN_DIFF"
+PP_BODY="### Changes
+
+- **WORK_PLAN check**: written (render-hash $(pp_plan_hash "$PP_REGION_HEAD"), 2026-11-24T12:00:00Z)
+
+Prose below the receipt."
+
+: >"$PP_CALL_LOG"
+out="$(docs_only_fast_path_plan_check 1)"
+assert_eq "ELIGIBLE" "$out" "a genuine 'written' receipt whose hash matches the head region is eligible"
+assert_eq "repos/owner/mine/contents/WORK_PLAN.md?ref=$PP_BASE_SHA
+repos/owner/mine/contents/WORK_PLAN.md?ref=$PP_HEAD_SHA" "$(cat "$PP_CALL_LOG")" \
+    "the gate read base and head WORK_PLAN.md exactly once each"
+
+out="$(PP_DIFF="$PP_WORKLOG_DIFF" docs_only_fast_path_plan_check 1)"
+assert_eq "ELIGIBLE" "$out" "a WORK_LOG-only diff is eligible"
+out="$(PP_DIFF="$PP_ARCHIVE_DIFF" docs_only_fast_path_plan_check 1)"
+assert_eq "ELIGIBLE" "$out" "a monthly work_plan archive diff (no plan-body region) is eligible"
+
+echo
+echo "--- a changed region without the machine receipt is not eligible ---"
+
+PP_NOTRUN_BODY="### Changes
+
+- **WORK_PLAN check**: NOT RUN (render-hash none, 2026-11-24T12:00:00Z)"
+out="$(PP_BODY="$PP_NOTRUN_BODY" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: the PR body's 'WORK_PLAN check:' line is not a machine-rendered 'written' receipt (render-hash <12hex>, <UTC>) — free prose, 'NOT RUN' or 'render-hash none' cannot verify a changed region (#15220)" "$out" \
+    "a 'NOT RUN' line over a changed region is not eligible"
+
+PP_NONE_BODY="### Changes
+
+- **WORK_PLAN check**: written (render-hash none, 2026-11-24T12:00:00Z)"
+out="$(PP_BODY="$PP_NONE_BODY" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: the PR body's 'WORK_PLAN check:' line is not a machine-rendered 'written' receipt (render-hash <12hex>, <UTC>) — free prose, 'NOT RUN' or 'render-hash none' cannot verify a changed region (#15220)" "$out" \
+    "'render-hash none' over a changed region is not eligible"
+
+PP_PROSE_BODY="### Changes
+
+- **WORK_PLAN check**: written by manual edit, not by update_work_plan() (render-hash none, now)"
+out="$(PP_BODY="$PP_PROSE_BODY" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: the PR body's 'WORK_PLAN check:' line is not a machine-rendered 'written' receipt (render-hash <12hex>, <UTC>) — free prose, 'NOT RUN' or 'render-hash none' cannot verify a changed region (#15220)" "$out" \
+    "the incident's free-prose line (hand-written region, prose receipt) is not eligible"
+
+PP_WRONGHASH_BODY="### Changes
+
+- **WORK_PLAN check**: written (render-hash 000000000000, 2026-11-24T12:00:00Z)"
+out="$(PP_BODY="$PP_WRONGHASH_BODY" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_PLAN render-hash mismatch — PR body claims '000000000000', the head region recomputes '$(pp_plan_hash "$PP_REGION_HEAD")' (#15220)" "$out" \
+    "'written' with a wrong hash is not eligible"
+
+out="$(PP_BODY='### Changes
+
+no receipt line at all' docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: PR body carries 0 'WORK_PLAN check:' lines where exactly one is required (#15220)" "$out" \
+    "a changed region with no receipt line is not eligible"
+
+PP_DUP_BODY="### Changes
+
+- **WORK_PLAN check**: written (render-hash $(pp_plan_hash "$PP_REGION_HEAD"), 2026-11-24T12:00:00Z)
+- **WORK_PLAN check**: written (render-hash $(pp_plan_hash "$PP_REGION_HEAD"), 2026-11-24T12:05:00Z)"
+out="$(PP_BODY="$PP_DUP_BODY" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: PR body carries 2 'WORK_PLAN check:' lines where exactly one is required (#15220)" "$out" \
+    "duplicated receipt lines are not eligible (a decoy second line cannot confuse the scan)"
+
+echo
+echo "--- stamp-only and malformed-region edits fail closed ---"
+
+out="$(PP_HEAD_FILE="$(pp_plan_file "$PP_STAMP_HEAD" "$PP_REGION_BASE")" \
+    PP_BODY="### Changes
+
+- **WORK_PLAN check**: written (render-hash $(pp_plan_hash "$PP_REGION_BASE"), 2026-11-24T12:00:00Z)" \
+    docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: stamp-only edit to the WORK_PLAN guide:plan-body region — update_work_plan() records 'current' and never writes one (#15220)" "$out" \
+    "a stamp-only region edit is not eligible even with a 'written' line carrying the unchanged body's hash"
+
+out="$(PP_DIFF="$PP_NEWFILE_DIFF" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_PLAN.md newly created by this PR — the plan-body region cannot be verified (#15220)" "$out" \
+    "a PR that creates WORK_PLAN.md is not eligible"
+
+out="$(PP_DIFF="$PP_DELFILE_DIFF" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_PLAN.md deleted by this PR — the plan-body region cannot be verified (#15220)" "$out" \
+    "a PR that deletes WORK_PLAN.md is not eligible"
+
+PP_MARKERS_NONE='# Work Plan
+
+No plan-body markers in this file at all.'
+out="$(PP_HEAD_FILE="$PP_MARKERS_NONE" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_PLAN.md head has missing, duplicated or unordered guide:plan-body markers (#15220)" "$out" \
+    "a head WORK_PLAN.md without markers is not eligible"
+
+out="$(PP_BASE_FILE="$PP_MARKERS_NONE" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_PLAN.md base has missing, duplicated or unordered guide:plan-body markers (#15220)" "$out" \
+    "a base WORK_PLAN.md without markers fails closed (region provenance unverifiable)"
+
+out="$(PP_HEAD_FILE="# Work Plan
+
+<!-- guide:plan-body:start -->
+$PP_STAMP_HEAD
+$PP_REGION_HEAD
+<!-- guide:plan-body:start -->
+<!-- guide:plan-body:end -->
+" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_PLAN.md head has missing, duplicated or unordered guide:plan-body markers (#15220)" "$out" \
+    "duplicated start markers are not eligible"
+
+out="$(PP_HEAD_FILE="# Work Plan
+
+<!-- guide:plan-body:end -->
+<!-- guide:plan-body:start -->
+" docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: WORK_PLAN.md head has missing, duplicated or unordered guide:plan-body markers (#15220)" "$out" \
+    "unordered markers (end before start) are not eligible"
+
+echo
+echo "--- an unchanged region passes without any receipt ---"
+
+out="$(PP_HEAD_FILE="$(printf '# Work Plan\n\n<!-- guide:plan-body:start -->\n%s\n%s\n<!-- guide:plan-body:end -->\n\nFooter changed.\n' "$PP_STAMP_BASE" "$PP_REGION_BASE")" \
+    PP_BODY='no receipt line' docs_only_fast_path_plan_check 1)"
+assert_eq "ELIGIBLE" "$out" \
+    "a WORK_PLAN.md edit confined to text outside the region is eligible without a receipt"
+
+echo
+echo "--- read failures are ENVIRONMENT, never a passed or waived content check ---"
+
+out="$(PP_BASE_RC=1 docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: WORK_PLAN.md base contents read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check" "$out" \
+    "a failed base contents read is flagged as an environment failure"
+out="$(PP_HEAD_RC=1 docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: WORK_PLAN.md head contents read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check" "$out" \
+    "a failed head contents read is flagged as an environment failure"
+out="$(PP_DIFF_RC=1 docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: PR diff read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check" "$out" \
+    "a failed diff read is flagged as an environment failure"
+out="$(PP_URL_RC=1 docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: base repository read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check" "$out" \
+    "a failed PR URL read is flagged as an environment failure"
+out="$(PP_SHA_RC=1 docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: PR ref-SHA read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check" "$out" \
+    "a failed ref-SHA read is flagged as an environment failure"
+out="$(PP_BODY_RC=1 docs_only_fast_path_plan_check 1)"
+assert_eq "NOT ELIGIBLE: ENVIRONMENT: PR body read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check" "$out" \
+    "a failed PR body read is flagged as an environment failure"
+
+# A non-WORK_PLAN diff never reaches the contents/body reads at all.
+: >"$PP_CALL_LOG"
+out="$(PP_DIFF="$PP_WORKLOG_DIFF" PP_BODY_RC=1 docs_only_fast_path_plan_check 1)"
+assert_eq "ELIGIBLE" "$out" "a WORK_LOG-only diff stays eligible even when the body read would fail"
+[[ -s "$PP_CALL_LOG" ]] && fail "a WORK_LOG-only diff read WORK_PLAN.md contents" || pass "a WORK_LOG-only diff made zero contents reads"
+
+unset -f gh
+
+echo
+echo "--- Doc pins: judge.md and champion-pr-merge.md wire the plan-body gate (#15220) ---"
+
+assert_doc_contains "$JUDGE_MD" \
+    'docs_only_fast_path_plan_check() {' \
+    "judge.md defines docs_only_fast_path_plan_check()"
+assert_doc_contains "$JUDGE_MD" \
+    'docs_only_fast_path_plan_region() {' \
+    "judge.md defines docs_only_fast_path_plan_region()"
+assert_doc_contains "$JUDGE_MD" \
+    'ELIGIBILITY=$(docs_only_fast_path_plan_check "$PR_NUMBER")' \
+    "judge.md folds the plan-body gate into ELIGIBILITY"
+assert_doc_contains "$JUDGE_MD" \
+    "#15220" \
+    "judge.md documents the #15220 plan-body gate"
+assert_doc_contains "$JUDGE_MD" \
+    'guide:plan-body` region carries the machine-rendered `written` receipt' \
+    "judge.md Primary Queue step 4b states the plan-body receipt condition (#15220)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'docs_only_fast_path_plan_check() {' \
+    "champion-pr-merge.md defines docs_only_fast_path_plan_check()"
+assert_doc_contains "$CHAMPION_MD" \
+    'FAST_PATH_RESULT=$(docs_only_fast_path_plan_check "$PR_NUMBER")' \
+    "champion-pr-merge.md folds the plan-body gate into FAST_PATH_RESULT"
+assert_doc_contains "$CHAMPION_MD" \
+    "#15220" \
+    "champion-pr-merge.md documents the #15220 plan-body gate"
+assert_doc_contains "$CHAMPION_MD" \
+    'guide:plan-body` region carries the machine-rendered `written` receipt' \
+    "champion-pr-merge.md fast-path lead-in states the plan-body receipt condition (#15220)"
+
+# The two shipped copies are intentionally identical (comments aside) — the
+# same mirror discipline as the allowlist and closing check above.
+assert_eq "$(plan_fn_block "$JUDGE_MD" | grep -v '^[[:space:]]*#')" \
+          "$(plan_fn_block "$CHAMPION_MD" | grep -v '^[[:space:]]*#')" \
+          "judge.md and champion-pr-merge.md plan-body gate code is identical (comments aside)"
+
+# The judge SKILL copy ships the same gate — both must carry the identical
+# edit (JUDGE_SKILL_MD is the #6725-layout probe from the worklog section
+# above).
+assert_eq "$(plan_fn_block "$JUDGE_MD")" "$(plan_fn_block "$JUDGE_SKILL_MD")" \
+    "judge.md and loom-judge SKILL.md ship a byte-identical plan-body gate (#15220)"
+
+echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 [[ $TESTS_FAILED -eq 0 ]] || exit 1

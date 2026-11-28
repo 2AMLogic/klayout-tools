@@ -48,11 +48,12 @@ cat > "$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 D="$LOOM_TEST_STUB_DIR"
 args=("$@")
-method=GET path="" body="" adds=()
+method=GET path="" body="" jqf="" adds=()
 for ((i = 0; i < ${#args[@]}; i++)); do
   case "${args[i]}" in
     -X) method="${args[i + 1]}" ;;
     -f) [[ "${args[i + 1]}" == labels\[\]=* ]] && adds+=("${args[i + 1]#labels[]=}") ;;
+    --jq) jqf="${args[i + 1]}" ;;
     --body) body="${args[i + 1]}" ;;
     repos/*) path="${args[i]}" ;;
   esac
@@ -68,7 +69,9 @@ if [[ "${1:-}" == "api" ]]; then
       cat "$D/comments.json"; exit 0 ;;
     "GET repos/owner/repo/issues/"*/labels\?*)
       [[ -f "$D/labels-read-fail" ]] && { echo "HTTP 502" >&2; exit 1; }
-      jq -R '{name: .}' < "$D/labels.txt" | jq -s .; exit 0 ;;
+      # Honour a server-side --jq like the real gh (#15185: the legacy
+      # read-back asks for '.[].name').
+      jq -R '{name: .}' < "$D/labels.txt" | jq -s . | if [[ "$jqf" == ".[].name" ]]; then jq -r "$jqf"; else cat; fi; exit 0 ;;
     "POST repos/owner/repo/issues/"*/labels)
       [[ -f "$D/labels-post-fail" || -f "$D/labels-write-fail" ]] && { echo "HTTP 403" >&2; exit 1; }
       for l in "${adds[@]}"; do grep -qxF "$l" "$D/labels.txt" || echo "$l" >> "$D/labels.txt"; done

@@ -20,6 +20,14 @@
 #       `.loom/tokens.shadow-disabled-<ts>/` token-pool copy (21 live `.token`
 #       files) into a resync commit because the exclusion named `.loom/tokens`
 #       and the copy was its sibling.
+#   (3) #15519 -- the allowlist was built from a "has a defaults/ counterpart
+#       today" test, so it dropped two kinds of output the run had just
+#       written into the staging worktree: a TRACKED file the run itself
+#       retired (deleted, so no counterpart -- classified with the strays that
+#       must never be committed, #6613) and `.loom/pricing.json` (on no
+#       managed-surface list at all). Staging exactly what was printed left
+#       them out of the commit, and a run touching only them reported its own
+#       output as OUTSIDE the resync-managed surfaces.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-resync-installed-output-staging.sh
@@ -237,6 +245,232 @@ if git -C "$REPO" diff --quiet -- .loom/install-metadata.json; then
     pass "(#13592) the primary checkout's metadata is byte-identical to HEAD"
 else
     fail "(#13592) the primary checkout's metadata was modified by an --output run"
+fi
+
+# lists_path <path-list> <path> -> succeeds when <path> is one whole
+# space-separated word of <path-list> (a printed `git add -- …` list).
+lists_path() { [[ " $1 " == *" $2 "* ]]; }
+
+# drop_staging_of <repo> <dir> -- drop_staging for a staging worktree that
+# belongs to a repository other than $REPO.
+drop_staging_of() {
+    git -C "$1" worktree remove --force "$2" >/dev/null 2>&1 || rm -rf "$2"
+}
+
+echo ""
+echo "Test group 9: the printed recipe stages this run's own retirement deletions and the rate card (#15519)"
+#
+# The reported shape: a CONSUMER repo (no defaults/ of its own) tracks an old
+# rate card and the two scripts a later release retired; a separate minimal
+# source supplies the new rate card and the retirement entries. Before
+# #15519 the run deleted both scripts and updated the rate card, yet its
+# recipe named none of the three, so staging exactly what it printed left them
+# out of the commit and the next resync reported the same drift again. One
+# retired hook rides along: a retirement maps to its destination by prefix,
+# so a second prefix proves the fix is not specific to .loom/scripts/.
+CONS="$WORKDIR/consumer"
+SRC="$WORKDIR/source"
+mkdir -p "$CONS/.loom/hooks" "$CONS/.loom/scripts/tests" "$CONS/.loom/docs" "$SRC/defaults/scripts"
+git -C "$CONS" init -q -b main
+printf 'OLD CARD\n' > "$CONS/.loom/pricing.json"
+printf 'retired tool\n' > "$CONS/.loom/scripts/generate-agents-md.sh"
+printf 'retired test\n' > "$CONS/.loom/scripts/tests/test-guide-unblock-merged-blocker.sh"
+printf 'retired hook\n' > "$CONS/.loom/hooks/old-hook.sh"
+# Retired names git would C-quote or that a space-joined recipe would split
+# (review of #15530): a space, and a non-ASCII byte.
+printf 'retired doc\n' > "$CONS/.loom/docs/old guide.md"
+printf 'retired doc\n' > "$CONS/.loom/docs/café.md"
+# Two retirements the run must hold back (group 10): a pinned fork, and a
+# path whose installed copy is a symlink.
+printf 'pinned fork\n' > "$CONS/.loom/scripts/pinned-tool.sh"
+ln -s ../pricing.json "$CONS/.loom/scripts/linked-tool.sh"
+printf 'scripts/pinned-tool.sh\n' > "$CONS/.loom/resync-ignore"
+printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "old",\n  "install_date": "2020-01-01",\n  "installed_files": []\n}\n' \
+    > "$CONS/.loom/install-metadata.json"
+git -C "$CONS" add -A >/dev/null 2>&1
+git -C "$CONS" commit -qm "chore: install Loom v0.0.0" >/dev/null 2>&1
+git -C "$SRC" init -q -b main
+printf '{\n  "version": "9.9.9"\n}\n' > "$SRC/package.json"
+printf 'NEW CARD\n' > "$SRC/defaults/pricing.json"
+printf 'shipped\n' > "$SRC/defaults/scripts/shipped.sh"
+printf '%s\n' "scripts/generate-agents-md.sh" "scripts/tests/test-guide-unblock-merged-blocker.sh" \
+    "hooks/old-hook.sh" "docs/old guide.md" "docs/café.md" "scripts/pinned-tool.sh" "scripts/linked-tool.sh" > "$SRC/defaults/.loom-retired.list"
+git -C "$SRC" add -A >/dev/null 2>&1
+git -C "$SRC" commit -qm "source" >/dev/null 2>&1
+STAGING9="$WORKDIR/staging9"
+OUT9="$(cd "$CONS" && bash "$SCRIPT" --source "$SRC" --output "$STAGING9" 2>&1)"
+RC9=$?
+if [[ $RC9 -eq 0 ]]; then
+    pass "(#15519) the run succeeds against a separate --source"
+else
+    fail "(#15519) the run failed (rc=$RC9); out=$OUT9"
+fi
+if [[ ! -e "$STAGING9/.loom/scripts/generate-agents-md.sh" ]] \
+    && [[ ! -e "$STAGING9/.loom/scripts/tests/test-guide-unblock-merged-blocker.sh" ]] \
+    && [[ "$(cat "$STAGING9/.loom/pricing.json" 2>/dev/null)" == "NEW CARD" ]]; then
+    pass "(#15519) the run itself deleted both retired scripts and updated the rate card in the staging worktree"
+else
+    fail "(#15519) the run did not leave the expected changes in the staging worktree; out=$OUT9"
+fi
+if [[ -z "$(git -C "$CONS" status --porcelain)" ]]; then
+    pass "(#6106) the consumer's primary checkout is untouched"
+else
+    fail "(#6106) the consumer's primary checkout was dirtied by an --output run"
+fi
+RECIPE9="$(grep -E '^ *git add -- ' <<<"$OUT9" | head -1)"
+for p in .loom/scripts/generate-agents-md.sh \
+         .loom/scripts/tests/test-guide-unblock-merged-blocker.sh \
+         .loom/hooks/old-hook.sh \
+         .loom/pricing.json; do
+    if lists_path "$RECIPE9" "$p"; then
+        pass "(#15519) the recipe names $p"
+    else
+        fail "(#15519) the recipe does not name $p (recipe='$RECIPE9')"
+    fi
+done
+if ! grep -q "OUTSIDE the resync-managed surfaces" <<<"$OUT9"; then
+    pass "(#15519) a run whose only changes are managed surfaces emits no outside-surfaces warning"
+else
+    fail "(#15519) the run reported its own output as outside the resync-managed surfaces; out=$OUT9"
+fi
+# The operator does exactly what the run printed -- nothing more.
+if [[ -n "$RECIPE9" ]] && ( cd "$STAGING9" && eval "$RECIPE9" ); then
+    pass "(#15519) the printed recipe applies cleanly in the staging worktree"
+else
+    fail "(#15519) the printed recipe could not be applied (recipe='$RECIPE9')"
+fi
+STAGED9="$(git -C "$STAGING9" -c core.quotepath=false diff --cached --name-status | tr '\t' ' ')"
+for expected in "D .loom/scripts/generate-agents-md.sh" \
+                "D .loom/scripts/tests/test-guide-unblock-merged-blocker.sh" \
+                "D .loom/hooks/old-hook.sh" \
+                "D .loom/docs/old guide.md" \
+                "D .loom/docs/café.md" \
+                "M .loom/pricing.json"; do
+    if grep -qxF -- "$expected" <<<"$STAGED9"; then
+        pass "(#15519) applying the recipe stages: $expected"
+    else
+        fail "(#15519) applying the recipe did not stage '$expected' (staged='$STAGED9')"
+    fi
+done
+LEFT9="$(git -C "$STAGING9" diff --name-status)"
+if [[ -z "$LEFT9" ]]; then
+    pass "(#15519) nothing the run changed is left unstaged after applying the recipe"
+else
+    fail "(#15519) the recipe left resync output unstaged (left='$LEFT9')"
+fi
+if cmp -s <(git -C "$STAGING9" show :.loom/pricing.json) "$SRC/defaults/pricing.json"; then
+    pass "(#15519) the staged rate card is byte-identical to the source rate card"
+else
+    fail "(#15519) the staged rate card differs from the source rate card"
+fi
+
+echo ""
+echo "Test group 10: a pinned or symlink-skipped retirement creates no deletion to stage (#15519)"
+# Group 9's source also lists a pinned fork and a symlinked path as retired.
+# The retirement pass honors both guards, so neither file is deleted, neither
+# shows up as a Git change, and the recipe names neither.
+if [[ -f "$STAGING9/.loom/scripts/pinned-tool.sh" && -L "$STAGING9/.loom/scripts/linked-tool.sh" ]]; then
+    pass "(#15519) both held retired files are still on disk in the staging worktree"
+else
+    fail "(#15519) a pinned or symlinked retirement was deleted (out=$OUT9)"
+fi
+if grep -qF "skipped   scripts/pinned-tool.sh (pinned in .loom/resync-ignore)" <<<"$OUT9" \
+    && grep -qF "skipped   scripts/linked-tool.sh (symlink -> " <<<"$OUT9"; then
+    pass "(#15519) the run reported both as skipped, not removed"
+else
+    fail "(#15519) the run did not report both held retirements as skipped; out=$OUT9"
+fi
+if ! lists_path "$RECIPE9" .loom/scripts/pinned-tool.sh \
+    && ! lists_path "$RECIPE9" .loom/scripts/linked-tool.sh; then
+    pass "(#15519) the recipe names neither held retirement"
+else
+    fail "(#15519) the recipe names a retirement the run never applied (recipe='$RECIPE9')"
+fi
+if [[ -z "$(git -C "$STAGING9" status --porcelain -- .loom/scripts/pinned-tool.sh .loom/scripts/linked-tool.sh)" ]]; then
+    pass "(#15519) Git sees no change at either path -- there is no deletion to stage"
+else
+    fail "(#15519) Git reports a change at a path the retirement pass skipped"
+fi
+drop_staging_of "$CONS" "$STAGING9"
+
+echo ""
+echo "Test group 11: only a deletion THIS run made reaches the list; a stray and an older deletion stay out (#15519, #6613)"
+#
+# The same classifier feeds the loom-source-repo hint ("would be: git add
+# -- …"), and there dirt the run did NOT make can already be on disk. The
+# #6613 rule keeps a pure-copy-surface path with no defaults/ counterpart
+# out of the list because it is a stray, not shipped payload. Recognizing this
+# run's own retirements (group 9) must not let those strays in: the
+# distinction is whether the retirement pass deleted the path just now.
+DOG="$WORKDIR/dogfood"
+mkdir -p "$DOG/defaults/hooks" "$DOG/defaults/scripts" "$DOG/.loom/hooks" "$DOG/.loom/scripts"
+git -C "$DOG" init -q -b main
+printf 'A\n' > "$DOG/defaults/hooks/guard.sh"
+printf 'OLD\n' > "$DOG/.loom/hooks/guard.sh"
+# Tracked installed payload: one script the run retires below ...
+printf 'retired\n' > "$DOG/.loom/scripts/old-tool.sh"
+# ... and one that is neither shipped nor retired.
+printf 'gone\n' > "$DOG/.loom/scripts/deleted-before-run.sh"
+printf 'scripts/old-tool.sh\n' > "$DOG/defaults/.loom-retired.list"
+printf '{\n  "version": "9.9.9"\n}\n' > "$DOG/package.json"
+printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "old",\n  "install_date": "2020-01-01",\n  "installed_files": []\n}\n' \
+    > "$DOG/.loom/install-metadata.json"
+git -C "$DOG" add -A >/dev/null 2>&1
+git -C "$DOG" commit -qm "chore: install Loom v0.0.0" >/dev/null 2>&1
+# Dirt the run did not make: a tracked script deleted before the run, and an
+# untracked stray. Neither has a defaults/ counterpart or a retirement entry.
+rm "$DOG/.loom/scripts/deleted-before-run.sh"
+printf 'stray\n' > "$DOG/.loom/scripts/stray.sh"
+OUT11="$(cd "$DOG" && bash "$SCRIPT" 2>&1)"
+RC11=$?
+if [[ $RC11 -eq 0 ]] && [[ ! -e "$DOG/.loom/scripts/old-tool.sh" ]]; then
+    pass "(#15519) the run succeeds and retires the listed script"
+else
+    fail "(#15519) the run did not retire the listed script (rc=$RC11); out=$OUT11"
+fi
+HINT11="$(grep -o 'would be: git add -- [^)]*' <<<"$OUT11" | head -1)"
+if [[ -n "$HINT11" ]]; then
+    pass "(#15519) the hint prints its path list (no non-resync dirt present)"
+else
+    fail "(#15519) the hint printed no path list; out=$OUT11"
+fi
+if lists_path "$HINT11" .loom/scripts/old-tool.sh; then
+    pass "(#15519) the list names the deletion the run just made"
+else
+    fail "(#15519) the list omits the deletion the run just made (list='$HINT11')"
+fi
+for p in .loom/scripts/stray.sh .loom/scripts/deleted-before-run.sh; do
+    if ! lists_path "$HINT11" "$p"; then
+        pass "(#6613) the list leaves $p out"
+    else
+        fail "(#6613) the list swept in $p, which the run did not touch (list='$HINT11')"
+    fi
+done
+if grep -q "no defaults/ counterpart today" <<<"$OUT11" \
+    && grep -qF "    .loom/scripts/stray.sh" <<<"$OUT11" \
+    && grep -qF "    .loom/scripts/deleted-before-run.sh" <<<"$OUT11"; then
+    pass "(#6613) both are still reported as excluded, with the reason"
+else
+    fail "(#6613) the stray and the older deletion were not reported as excluded; out=$OUT11"
+fi
+# Staging exactly that list must take the new deletion and nothing of theirs.
+LIST11="${HINT11#would be: git add -- }"
+read -r -a PATHS11 <<<"$LIST11"
+if [[ "${#PATHS11[@]}" -gt 0 ]]; then
+    git -C "$DOG" add -- "${PATHS11[@]}" >/dev/null 2>&1
+fi
+STAGED11="$(git -C "$DOG" diff --cached --name-status | tr '\t' ' ')"
+if grep -qxF "D .loom/scripts/old-tool.sh" <<<"$STAGED11" \
+    && ! grep -qE 'stray\.sh|deleted-before-run\.sh' <<<"$STAGED11"; then
+    pass "(#15519) staging exactly that list takes the new deletion, and neither of the others"
+else
+    fail "(#15519) staging the list staged the wrong set (staged='$STAGED11')"
+fi
+if [[ "$(git -C "$DOG" status --porcelain -- .loom/scripts/stray.sh)" == "?? .loom/scripts/stray.sh" ]] \
+    && [[ "$(git -C "$DOG" diff --name-status -- .loom/scripts/deleted-before-run.sh | tr '\t' ' ')" == "D .loom/scripts/deleted-before-run.sh" ]]; then
+    pass "(#6613) the stray is still untracked and the older deletion still unstaged"
+else
+    fail "(#6613) staging the list consumed the stray or the older deletion"
 fi
 
 # --- summary -----------------------------------------------------------------

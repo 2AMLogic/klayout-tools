@@ -342,50 +342,15 @@ run_classify "## Acceptance Criteria
 - [ ] confirm the export lands on the _next run_ of the nightly job"
 assert_eq "12" "$CAP_RC" "_next run_ underscore emphasis is a boundary (#14004)"
 
-# -------- Test 23: the shipped hold notice never embeds a live marker (#13900) --------
-echo "Test 23: the Champion hold notice renders without a live-matchable marker"
-# Sourcing re-runs the subject's own TTY-colour block (same caveat as Test 20).
-_NC_SAVE23="$NC"
-# shellcheck source=/dev/null
-source "$CLASSIFY_SCRIPT"
-NC="$_NC_SAVE23"
-# Installed (.loom/scripts -> ../../.claude) vs. source (defaults/scripts ->
-# ../.claude) layouts differ in depth; probe both (#6725).
-if [[ -d "$SCRIPTS_DIR/../../.claude/commands/loom" ]]; then
-    CHAMPION_MD="$SCRIPTS_DIR/../../.claude/commands/loom/champion-pr-merge.md"
-else
-    CHAMPION_MD="$SCRIPTS_DIR/../.claude/commands/loom/champion-pr-merge.md"
-fi
-if [[ ! -f "$CHAMPION_MD" ]]; then
-    echo -e "${RED}FATAL${NC}: champion-pr-merge.md not found at $CHAMPION_MD" >&2
-    exit 1
-fi
-# Lift the shipped hold_issue_on_unverified_ac block (extract-and-execute,
-# #7979), anchored to the DEFINITION line -- the function name also appears in
-# an earlier fence's call site. Render it the way the template would
-# interpolate $head_sha at post time.
-T23_FENCE="$(awk '
-    /^```bash$/ { in_fence = 1; capturing = 0; next }
-    in_fence && /^```$/ { if (capturing) exit; in_fence = 0; next }
-    in_fence && !capturing && index($0, "hold_issue_on_unverified_ac() {") { capturing = 1 }
-    in_fence && capturing { print }
-' "$CHAMPION_MD")"
-T23_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-T23_RENDERED_FENCE="${T23_FENCE//'$head_sha'/$T23_SHA}"
-T23_IN_FENCE="$(_extract_ac_verified_shas "$T23_RENDERED_FENCE")"
-assert_eq "" "$T23_IN_FENCE" "the rendered hold_issue_on_unverified_ac block contains no live-matchable loom:ac-verified marker"
-# The notice body alone, as the whole evidence corpus, must NOT satisfy the
-# gate for the held head -- this is the self-satisfying-hold regression.
-T23_NOTICE="$(printf '%s\n' "$T23_FENCE" \
-    | sed -n '/--body "\$marker/,$p' \
-    | sed '1s/^.*--body "\$marker//' | sed '$s/"$//')"
-T23_RENDERED="${T23_NOTICE//'$head_sha'/$T23_SHA}"
-run_classify "## Acceptance Criteria
-
-- [ ] confirm the nightly export lands on the next real run" "$T23_RENDERED" "$T23_SHA"
-assert_eq "12" "$CAP_RC" "a corpus of only the rendered hold notice -> exit 12 (not 11)"
-assert_contains "$T23_SHA" "$T23_RENDERED" "the notice still names the exact head SHA to use"
-assert_contains "sha=<head>" "$T23_NOTICE" "the notice still shows the marker shape"
+# -------- Test 23 retired (#14905) --------
+# It lifted Champion's `hold_issue_on_unverified_ac` block out of
+# champion-pr-merge.md and proved the rendered notice carried no live
+# `loom:ac-verified` marker (#13900). That block moved to the daemon's
+# merge-observation pass; the same assertion now runs against the notice it
+# actually posts: `the_hold_notice_never_embeds_a_live_ac_verified_marker` in
+# loom-daemon/src/claim_reconciliation/pass_loop/merge_observation_tests.rs.
+# The classifier-side anchoring of the marker (hex SHA only, full comment form)
+# stays covered by this file's marker tests above.
 
 # -------- Summary --------
 echo ""

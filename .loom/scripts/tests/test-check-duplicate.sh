@@ -1457,6 +1457,71 @@ echo "$EMPTY_SEARCH" > "$STUB_DIR/search-issues.json"
 run_cds --title "Alpha Bravo Charlie Delta"
 assert_eq "0" "$(search_calls)" "(cw8) No --include-merged-prs -> no search request"
 
+echo "Testing candidate delivery under temp-file and pipe failures (#15561)..."
+reset_state
+# Valid JSON padded beyond both Bash's here-string cutoff and a pipe buffer.
+write_large_pool() {
+    printf '[{"number":%d,"title":"Alpha Bravo","body":""}%*s]\n' "$1" 262144 ''
+}
+write_large_pool 801 > "$STUB_DIR/issues-open.json"
+write_large_pool 901 > "$STUB_DIR/prs-merged.json"
+write_large_pool 902 > "$STUB_DIR/issues-closed.json"
+scan_args=(--title "Alpha Bravo" --include-merged-prs --closed-window-days 0)
+
+# Only the child loses temp storage. Limit regular-file writes too, since
+# Bash can fall back to /tmp when TMPDIR is unusable.
+cat > "$STUB_DIR/limit-temp" <<'EOF'
+trap '' XFSZ
+ulimit -f 8
+EOF
+for format in text json; do
+    args=("${scan_args[@]}")
+    [[ "$format" == json ]] && args+=(--json)
+    run_cds "${args[@]}"
+    assert_eq "1" "$RC" "writable scratch, $format: confirmed matches"
+    expected="$OUT"
+    TMPDIR=/dev/null BASH_ENV="$STUB_DIR/limit-temp" run_cds "${args[@]}"
+    assert_eq "1" "$RC" "unusable scratch, $format: confirmed matches"
+    assert_eq "$expected" "$OUT" "unusable scratch, $format: same results as writable scratch"
+    if [[ "$format" == text ]]; then
+        assert_contains "$OUT" "#801: Alpha Bravo" "open issue found"
+        assert_contains "$OUT" "PR #901: Alpha Bravo" "merged PR found"
+        assert_contains "$OUT" "Closed #902: Alpha Bravo" "closed issue found by recency fallback"
+    else
+        assert_eq "[801,901,902]" "$(echo "$OUT" | jq -c '[.matches[].number]')" "JSON lists all three matches"
+        assert_eq "false" "$(echo "$OUT" | jq -r '.search_incomplete')" "JSON reports complete coverage"
+    fi
+done
+
+# Close stdin before reading the selected pool. The normal scanner statuses
+# (1 for an open match, 0 for merged PRs) cannot vouch for a broken transfer.
+export REAL_SCAN_BIN="$LOOM_DAEMON_SELF_BIN"
+cat > "$STUB_DIR/short-reader" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == duplicate-scan && "$2" == --pool && "$3" == "$DROP_POOL" ]]; then
+    exec 0<&-
+    [[ "$DROP_POOL" == open-issues ]] && exit 1
+    echo 'PR #999: Unconfirmed (similarity: 100%)'
+    exit 0
+fi
+exec "$REAL_SCAN_BIN" "$@"
+STUB
+chmod +x "$STUB_DIR/short-reader"
+DROP_POOL=open-issues LOOM_DAEMON_SELF_BIN="$STUB_DIR/short-reader" run_cds --title "Alpha Bravo"
+assert_eq "2" "$RC" "open-only input failure is inconclusive"
+assert_contains "$ERR" "Could not deliver the open-issues candidates" "stderr identifies the transfer failure"
+DROP_POOL=merged-prs LOOM_DAEMON_SELF_BIN="$STUB_DIR/short-reader" run_cds "${scan_args[@]}"
+assert_eq "1" "$RC" "other pools still confirm a match"
+assert_contains "$OUT" "SEARCH_INCOMPLETE: merged PRs" "text names the failed pool"
+assert_not_contains "$OUT" "GraphQL rate-limited" "local failure is not attributed to the forge"
+assert_contains "$OUT" "Closed #902: Alpha Bravo" "text retains the confirmed match"
+DROP_POOL=merged-prs LOOM_DAEMON_SELF_BIN="$STUB_DIR/short-reader" run_cds "${scan_args[@]}" --json
+assert_eq "1" "$RC" "JSON retains the mixed-result verdict"
+assert_eq "true" "$(echo "$OUT" | jq -r '.search_incomplete')" "JSON reports partial coverage"
+assert_eq "[801,902]" "$(echo "$OUT" | jq -c '[.matches[].number]')" "JSON retains only confirmed matches"
+run_cds --title "Unrelated Zebra"
+assert_eq "0" "$RC" "complete large pool without a match returns 0"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"

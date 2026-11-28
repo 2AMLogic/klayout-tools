@@ -1602,6 +1602,23 @@ run_guard 287
 assert_eq "12" "$RC" "(v7) loom:pr keeps the strict marker rule"
 assert_eq "" "$(cat "$STUB_DIR/timeline-calls.log" 2>/dev/null)" "(v7) timeline not even read for an approval"
 
+# (v8) the #14470 incident, verbatim — the fixture that pins this script's
+# step 4b to the daemon pass's twin (`loom-daemon/src/claim_reconciliation/
+# verdict_send_back.rs` and its `verdict_send_back_tests.rs`, #15068): a bot
+# verdict marker names 3efb454a, the head is bcf2c895 and has not moved since
+# 2026-11-19, and an operator's hand-applied changes-requested label (no
+# marker — a human does not go through post-verdict.sh) lands a day later.
+# Both implementations must answer FRESH with nothing written; a change to
+# either side's conditions must be mirrored in the other's suite.
+reset_state
+pr_json 295 "bcf2c895d92b25e1a286ae31b98542f5835a0bba" "loom:changes-requested"
+{ echo "["; verdict_comment "2026-11-20T09:00:00Z" "3efb454aff553b10483684e2bf4ffdf5a8628a02" "changes-requested"; echo "]"; } > "$STUB_DIR/comments-295.json"
+printf '[%s]' '{"event":"committed","sha":"bcf2c895d92b25e1a286ae31b98542f5835a0bba","committed_date":"2026-11-19T01:07:00Z"},{"event":"labeled","label":{"name":"loom:changes-requested"},"actor":{"login":"rjwalters"},"created_at":"2026-11-21T00:43:32Z"}' > "$STUB_DIR/timeline-295.json"
+echo write > "$STUB_DIR/perm-rjwalters"
+run_guard 295 --clear
+assert_eq "0/FRESH/0" "$RC/$(get_field "$OUT" DECISION)/$(get_field "$OUT" CLEARED)" "(v8) the #14470 shape: an operator's hand-applied rejection at an unmoved head is FRESH"
+assert_eq "" "$WRITES$COMMENTS_POSTED$DAEMON" "(v8) nothing cleared or written"
+
 # --- (w) a prepared commit pushed after the verdict (#14516) ----------------
 # The Doctor commits the correction locally BEFORE Judge's verdict, then
 # fast-forwards the branch AFTER it. The timeline lists the `committed` entry by

@@ -27,6 +27,10 @@
 #      the root-resolution decision recorded in epic #4081 (canonical repo
 #      root via `git rev-parse --git-common-dir`, mirroring the #3938
 #      spawn-claude.sh precedent).
+#   7. loom-start.sh's malformed-tier guard (#15461): a tier holding TWO
+#      top-level JSON values is rejected with the path-specific error even
+#      when another tier supplies terminals, while a missing, empty,
+#      whitespace-only or `{}` tier still lets startup proceed.
 #
 # IMPORTANT: these are #!/usr/bin/env bash scripts. Run this file (and any
 # individual assertion) via `bash`, never sourced from an interactive zsh
@@ -58,6 +62,29 @@ new_workspace() {
     dir=$(mktemp -d)
     mkdir -p "$dir/.loom"
     echo "$dir"
+}
+
+# add_project_terminal <workspace> -> the workspace's ONLY source of
+# terminals: one uniquely named terminal in the project tier.
+add_project_terminal() {
+    mkdir -p "$1/.loom-project"
+    cat > "$1/.loom-project/project.json" <<'JSON'
+{"terminals": [{"id": "cfgtier-fallback-t1", "name": "Builder", "roleConfig": {"roleFile": "builder.md"}}]}
+JSON
+}
+
+# run_start_dry_run <workspace> -> START_STATUS / START_OUT (stdout) /
+# START_ERR (stderr) for `loom-start.sh --dry-run` run inside <workspace>.
+# The private-defaults tier is disabled (LOOM_CONFIG_DEFAULTS_FILE=) so the
+# workspace's own tiers are the only input, whatever the host has installed
+# under ~/.local/share/loom/config/defaults.json.
+run_start_dry_run() {
+    local ws="$1"
+    set +e
+    START_OUT=$(cd "$ws" && LOOM_CONFIG_DEFAULTS_FILE='' "$LOOM_START_SH" --dry-run 2>"$ws/.start-stderr.log")
+    START_STATUS=$?
+    set -e
+    START_ERR=$(cat "$ws/.start-stderr.log")
 }
 
 # --- Test 1: loom-status.sh --json picks up terminals from the project tier alone ---
@@ -151,7 +178,7 @@ rm -rf "$ws"
 # when the real blocker is a missing unrelated dependency.
 if ! command -v tmux >/dev/null 2>&1 || ! command -v claude >/dev/null 2>&1; then
     echo ""
-    echo "tmux and/or claude not found on PATH -- skipping loom-start.sh tests (5-7)"
+    echo "tmux and/or claude not found on PATH -- skipping loom-start.sh tests (5-10)"
 else
     # --- Test 5: loom-start.sh malformed tier JSON -> loud non-zero failure ---
     echo ""
@@ -217,16 +244,103 @@ JSON
         fail "loom-start.sh --dry-run did not list the project-tier terminal: $out"
     fi
     rm -rf "$ws"
+
+    # --- Test 8: a missing, empty, whitespace-only or `{}` legacy tier is not
+    #     "malformed" -- startup proceeds from the project tier (#15461) ---
+    echo ""
+    echo "Test 8: loom-start.sh --dry-run starts from the project tier when the legacy tier is missing, empty, whitespace-only or {}"
+    for variant in missing zero-byte whitespace-only empty-object; do
+        ws=$(new_workspace)
+        add_project_terminal "$ws"
+        legacy="$ws/.loom/config.json"
+        case "$variant" in
+            missing) ;;
+            zero-byte) : > "$legacy" ;;
+            whitespace-only) printf '  \n\t\n' > "$legacy" ;;
+            empty-object) printf '{}\n' > "$legacy" ;;
+        esac
+        run_start_dry_run "$ws"
+        if [[ "$START_STATUS" -eq 0 ]]; then
+            pass "loom-start.sh --dry-run exits 0 when the legacy tier is $variant and the project tier supplies terminals"
+        else
+            fail "loom-start.sh --dry-run exited $START_STATUS when the legacy tier is $variant: $START_ERR"
+        fi
+        if grep -q "cfgtier-fallback-t1" <<<"$START_OUT"; then
+            pass "loom-start.sh --dry-run lists the project-tier terminal when the legacy tier is $variant"
+        else
+            fail "loom-start.sh --dry-run did not list the project-tier terminal when the legacy tier is $variant: $START_OUT"
+        fi
+        rm -rf "$ws"
+    done
+
+    # --- Test 9: a tier holding TWO top-level JSON values is malformed too
+    #     (#15461). `jq empty` accepted it -- each value parses on its own --
+    #     so startup silently merged both objects; it must fail like a syntax
+    #     error, naming the offending path, even when another tier supplies
+    #     terminals. ---
+    echo ""
+    echo "Test 9: loom-start.sh fails loudly, naming the tier path, on two top-level JSON values as well as on a syntax error"
+    for variant in two-objects syntax-error; do
+        ws=$(new_workspace)
+        add_project_terminal "$ws"
+        legacy="$ws/.loom/config.json"
+        case "$variant" in
+            two-objects) printf '{}\n{}\n' > "$legacy" ;;
+            syntax-error) printf '{ "terminals": [ invalid json' > "$legacy" ;;
+        esac
+        run_start_dry_run "$ws"
+        if [[ "$START_STATUS" -eq 1 ]]; then
+            pass "loom-start.sh exits 1 when the legacy tier is $variant even though the project tier supplies terminals"
+        else
+            fail "loom-start.sh exited $START_STATUS when the legacy tier is $variant: $START_OUT$START_ERR"
+        fi
+        if grep -qF "Invalid JSON in $legacy" <<<"$START_ERR"; then
+            pass "loom-start.sh names the offending tier path on stderr when the legacy tier is $variant"
+        else
+            fail "loom-start.sh did not report 'Invalid JSON in $legacy' when the legacy tier is $variant: $START_ERR"
+        fi
+        if grep -q "cfgtier-fallback-t1" <<<"$START_OUT$START_ERR"; then
+            fail "loom-start.sh listed the project-tier terminal when the legacy tier is $variant: $START_OUT"
+        else
+            pass "loom-start.sh stops before listing a terminal when the legacy tier is $variant"
+        fi
+        rm -rf "$ws"
+    done
+
+    # --- Test 10: the guard rejects malformed tiers only -- a valid (blank)
+    #     legacy tier with no terminals anywhere still reports the existing
+    #     no-terminals error, not a malformed-tier one ---
+    echo ""
+    echo "Test 10: loom-start.sh reports the no-terminals error, not a malformed-tier one, for a blank legacy tier with no terminals anywhere"
+    ws=$(new_workspace)
+    printf '  \n' > "$ws/.loom/config.json"
+    run_start_dry_run "$ws"
+    if [[ "$START_STATUS" -eq 1 ]]; then
+        pass "loom-start.sh exits 1 with a blank legacy tier and no terminals anywhere"
+    else
+        fail "loom-start.sh exited $START_STATUS with no terminals anywhere (blank legacy tier): $START_OUT"
+    fi
+    if grep -qi "terminals" <<<"$START_ERR"; then
+        pass "loom-start.sh error names terminals for a blank legacy tier with no terminals anywhere"
+    else
+        fail "loom-start.sh error message unexpected: $START_ERR"
+    fi
+    if grep -q "Invalid JSON" <<<"$START_ERR"; then
+        fail "loom-start.sh misreported a blank legacy tier as malformed: $START_ERR"
+    else
+        pass "loom-start.sh does not call a blank legacy tier malformed"
+    fi
+    rm -rf "$ws"
 fi
 
-# --- Test 8: forge-helpers.sh resolves from the CANONICAL repo root, never
+# --- Test 11: forge-helpers.sh resolves from the CANONICAL repo root, never
 #     the worktree's own (possibly divergent) checkout, per the #4081
 #     decision record (git rev-parse --git-common-dir, mirroring the #3938
 #     spawn-claude.sh precedent). ---
 echo ""
-echo "Test 8: forge_detect / _load_gitea_config resolve from canonical repo root inside a worktree"
+echo "Test 11: forge_detect / _load_gitea_config resolve from canonical repo root inside a worktree"
 if ! command -v git >/dev/null 2>&1; then
-    echo "git not found on PATH -- skipping Test 8"
+    echo "git not found on PATH -- skipping Test 11"
 else
     main_repo=$(mktemp -d)
     git init -q -b main "$main_repo"

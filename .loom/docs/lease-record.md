@@ -26,6 +26,7 @@ documented here.
 
 - [What a lease record is](#what-a-lease-record-is)
 - [Who writes one (every claim path — #6320, #8193, #9453)](#who-writes-one-every-claim-path--6320-8193-9453)
+- [Builder leases on a Gitea checkout (#14941)](#builder-leases-on-a-gitea-checkout-14941)
 - [When it is written](#when-it-is-written)
 - [What this phase explicitly does not do](#what-this-phase-explicitly-does-not-do)
 - [Renewer ownership, completion and request budget (Issue #10229)](#renewer-ownership-completion-and-request-budget-issue-10229)
@@ -198,6 +199,17 @@ pid — exactly what `--watch-pid` wants
 any one marker admits the publish; `--force` semantics are unchanged, and a
 blank marker still refuses.
 
+**Who exports it in a native launch (#15455).** `loom-daemon spawn-worker`
+sets `LOOM_AGENT_SESSION_PID` for every native harness to the launch pid — the
+same value it already exported as `LOOM_NATIVE_WORKER_PID` — overwriting
+anything a caller inherited. That pid owns the session for the launch's whole
+lifetime: on the Unix `exec` path it is the harness's own pid, and under an
+egress proxy it is the launcher supervising the harness. A tool shell's
+`${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}` therefore resolves to the
+session's owner, never to the tool's own short-lived parent, so a self-claim's
+renewer outlives the tool call that published the lease instead of dying on
+its first wake and letting the lease age out.
+
 **Call-site parity and observable outcome (#10570).** `worktree.sh`'s
 `_wt_lease_claim` uses the same `${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}`
 chain as the CLAUDE.md recipe; it previously omitted `LOOM_AGENT_SESSION_PID`
@@ -278,6 +290,32 @@ Renewal is shared: both writers' records are kept fresh by
 `--host`/`--sweep-id` so renewal targets its own record exactly rather than
 "newest wins" — otherwise a peer's later lease comment would be the one it
 kept alive while its own expired.
+
+## Builder leases on a Gitea checkout (#14941)
+
+The same record, the same first-line marker and the same expiry, peer, yield and
+trust rules apply on a Gitea checkout; only the transport differs, and `gh` is
+never run:
+
+- **Publish** (`sweep-lease-publish.sh`) lists the issue's comments through
+  `gitea_api` (`forge-helpers.sh`; Gitea's paths are the GitHub-shaped
+  `repos/{o}/{r}/issues/{n}/comments`) and posts the one comment through the
+  shared `loom-daemon forge comment` writer (#14940), which vets the write and
+  carries the approved connection. Exit codes are unchanged: `4` for a fresh peer
+  or a yielded identity, `2` when the POST is denied or fails.
+- **Renew** (`sweep-lease-renew.sh`) lists, reads the issue state and `PATCH`es
+  `repos/{o}/{r}/issues/comments/{id}` the same way. A non-2xx PATCH is a failed
+  renewal (exit 1). Gitea's comment list has no `per_page`/`since` window, so a
+  Gitea renewer always reads the full listing instead of the cached-lease window.
+- **Trust.** Gitea reports no `author_association`, so a record counts only when
+  its author is the identity this host's Gitea credential acts as
+  (`GET /user`, passed to `forge trusted-comments --self-login`), or is listed in
+  `forge.trustedCommenters` / the fleet admin roster. A fleet whose hosts use
+  *different* Gitea accounts must list the others in `forge.trustedCommenters`,
+  or each host will read a peer's lease as prose.
+- **Not covered here:** `sweep-lease-fence.sh`, the daemon's own reclamation and
+  dispatch-time readers, and PR-phase leases still read through `gh` (#14938,
+  #14939).
 
 ## When it is written
 

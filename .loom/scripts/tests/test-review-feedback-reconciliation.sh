@@ -174,6 +174,26 @@ case "$endpoint" in
       cat "$FIX/graphql-threads.json"
       exit 0
     fi
+    # pullRequest.comments (#15025's comment-verdict fallback): same cursor
+    # pagination contract as the reviews fixtures below.
+    if [[ "$gql_query" == *"comments(first"* ]]; then
+      if [[ -z "$gql_cursor" ]]; then
+        [[ -f "$FIX/graphql-comments-page-1.json" ]] || exit 1
+        cat "$FIX/graphql-comments-page-1.json"
+        exit 0
+      fi
+      for page in "$FIX"/graphql-comments-page-*.json; do
+        [[ -f "$page" ]] || continue
+        [[ "$page" =~ -page-([0-9]+)\.json$ ]] || continue
+        if [[ "$gql_cursor" == "$(jq -r '.data.repository.pullRequest.comments.pageInfo.endCursor // empty' "$page")" ]]; then
+          next="${page%-page-*}-page-$((BASH_REMATCH[1] + 1)).json"
+          [[ -f "$next" ]] || exit 1
+          cat "$next"
+          exit 0
+        fi
+      done
+      exit 1
+    fi
     if [[ "$gql_query" == *"reviews(first"* ]]; then
       # Cursor pagination: no cursor serves page 1; a cursor equal to page
       # N's endCursor serves page N+1 — a missing follower page exits 1, the
@@ -304,6 +324,7 @@ reset_fixtures() {
   rm -f "$FIX_DIR"/reviews-page-*.json "$FIX_DIR"/inline-page-*.json \
     "$FIX_DIR"/comments-page-*.json \
     "$FIX_DIR/graphql-threads.json" "$FIX_DIR"/graphql-reviews-page-*.json \
+    "$FIX_DIR"/graphql-comments-page-*.json \
     "$FIX_DIR"/fail-* "$FIX_DIR"/hang-* \
     "$FIX_DIR/last-pr.txt" "$FIX_DIR/last-body.txt"
   # Default: no inline threads at all (GraphQL answers with an empty node list).
@@ -759,6 +780,113 @@ reset_fixtures
 touch "$FIX_DIR/fail-trust"
 run_gate --number 12465 --head-sha "$HEAD_SHA"
 assert_eq "12" "$GATE_RC" "trusted-comments unavailable -> exit 12 (UNKNOWN), never clean"
+
+# --- T11b: REST comment-verdict read shed, GraphQL fallback serving (#15025) --
+# The second single-transport read on the approval path: a failed REST read of
+# issues/<n>/comments retries through GraphQL pullRequest.comments. The fixture
+# is the GraphQL shape; the helper maps it onto the REST shape the trust filter
+# and the verdict jq consume.
+echo ""
+echo "T11b: REST comment read shed, GraphQL fallback serving (#15025)"
+gql_comment() { # databaseId login typename assoc sha kind
+  printf '{"databaseId":%s,"author":{"login":"%s","__typename":"%s"},"authorAssociation":"%s","body":"**Judge**\\n<!-- loom:verdict-sha sha=%s verdict=%s -->","createdAt":"2026-11-23T03:00:00Z"}' "$1" "$2" "$3" "$4" "$5" "$6"
+}
+gql_comments_page() { # hasNext endCursor nodes...
+  local has="$1" cur="$2"
+  shift 2
+  local nodes
+  nodes=$(IFS=,; printf '%s' "$*")
+  printf '{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":%s,"endCursor":"%s"},"nodes":[%s]}}}}}\n' "$has" "$cur" "$nodes"
+}
+
+# A blocking verdict served ONLY by GraphQL is still found (the fallback fed the gate).
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+gql_comments_page false C1 "$(gql_comment 9101 judge User MEMBER "$HEAD_SHA" changes-requested)" \
+  > "$FIX_DIR/graphql-comments-page-1.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "10" "$GATE_RC" "REST comments shed + GraphQL serving -> the current-head verdict still BLOCKS (exit 10), not UNKNOWN"
+assert_contains "$GATE_OUT" "REVIEW_BLOCKING_IDS=\"9101\"" "the GraphQL databaseId is reported as the comment id"
+
+# Cursor-paginated: a verdict on GraphQL page 2 is found.
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+gql_comments_page true C1 "$(gql_comment 9102 judge User MEMBER "$OLD_SHA" approved)" \
+  > "$FIX_DIR/graphql-comments-page-1.json"
+gql_comments_page false C2 "$(gql_comment 9103 judge User MEMBER "$OLD_SHA" changes-requested)" \
+  > "$FIX_DIR/graphql-comments-page-2.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "11" "$GATE_RC" "a verdict on GraphQL comment page 2 is found (exit 11)"
+
+# A complete, genuinely EMPTY GraphQL list is clean — not UNKNOWN.
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+gql_comments_page false C1 > "$FIX_DIR/graphql-comments-page-1.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "0" "$GATE_RC" "REST shed + complete zero-comment GraphQL read -> CLEAR"
+
+# An untrusted (NONE-association) author's marker is still ignored via the fallback.
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+gql_comments_page false C1 "$(gql_comment 9104 mallory User NONE "$HEAD_SHA" changes-requested)" \
+  > "$FIX_DIR/graphql-comments-page-1.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "0" "$GATE_RC" "untrusted-author marker is ignored on the GraphQL path too"
+
+# A deleted (null) author maps to an author no rule trusts; it must not crash the read.
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+gql_comments_page false C1 \
+  '{"databaseId":9105,"author":null,"authorAssociation":"NONE","body":"<!-- loom:verdict-sha sha='"$HEAD_SHA"' verdict=changes-requested -->","createdAt":"2026-11-23T03:00:00Z"}' \
+  > "$FIX_DIR/graphql-comments-page-1.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "0" "$GATE_RC" "a null-author comment is read without error and trusted by nobody"
+
+# Fail closed: both transports failing, a truncated page chain, a missing
+# pageInfo, and a GraphQL errors payload are all UNKNOWN.
+reset_fixtures
+touch "$FIX_DIR/fail-comments" "$FIX_DIR/fail-graphql"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "12" "$GATE_RC" "both comment transports failing -> exit 12 (UNKNOWN)"
+
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+gql_comments_page true C1 "$(gql_comment 9106 judge User MEMBER "$OLD_SHA" approved)" \
+  > "$FIX_DIR/graphql-comments-page-1.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "12" "$GATE_RC" "a follower page that never arrives -> exit 12 (truncated read never CLEAR)"
+
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+printf '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[]}}}}}\n' > "$FIX_DIR/graphql-comments-page-1.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "12" "$GATE_RC" "a comments page lacking pageInfo -> exit 12"
+
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+printf '{"errors":[{"message":"boom"}],"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' \
+  > "$FIX_DIR/graphql-comments-page-1.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "12" "$GATE_RC" "a GraphQL errors payload -> exit 12"
+
+# Healthy REST: the fallback is never consulted (a poisoned GraphQL fixture must not matter).
+reset_fixtures
+printf '[%s]\n' "$(cr_comment 9107 judge MEMBER "$HEAD_SHA")" > "$FIX_DIR/comments-page-1.json"
+printf '{"errors":[{"message":"must not be read"}]}\n' > "$FIX_DIR/graphql-comments-page-1.json"
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+assert_eq "10" "$GATE_RC" "healthy REST read is used as-is; the GraphQL fallback is not consulted"
+assert_contains "$GATE_OUT" "REVIEW_BLOCKING_IDS=\"9107\"" "the REST comment id is reported"
+
+# A REST timeout (124) is never retried over GraphQL: the timeout token holds
+# even when a serving GraphQL fixture exists.
+reset_fixtures
+touch "$FIX_DIR/hang-comments"
+gql_comments_page false C1 > "$FIX_DIR/graphql-comments-page-1.json"
+export LOOM_FORGE_REVIEW_READ_TIMEOUT=1
+run_gate --number 15025 --head-sha "$HEAD_SHA"
+unset LOOM_FORGE_REVIEW_READ_TIMEOUT
+assert_eq "12" "$GATE_RC" "hung REST comment read stays UNKNOWN even with GraphQL serving"
+assert_contains "$GATE_OUT" "REVIEW_FEEDBACK_TIMED_OUT=1" "a timeout is not retried through the fallback (#13927)"
 
 # --- T12: a hung gh read is wall-clock bounded (#13927) ----------------------
 # The wedge this issue was filed on: under multi-sweep host load a fraction of

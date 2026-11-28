@@ -83,7 +83,7 @@ fi
 extract_fn() { awk -v re="^$1\\\\(\\\\) \\\\{" '$0 ~ re {f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD"; }
 
 RPB_BODY="$(extract_fn render_plan_body)"
-HELPERS_BODY="$(extract_fn open_pr_linkage_rows; extract_fn open_pr_annotation)"
+HELPERS_BODY="$(awk -f "$SCRIPT_DIR/lib/guide-plan-helpers.awk" "$GUIDE_MD")" || exit 1
 UWP_BODY="$(extract_fn update_work_plan)"
 VPP_BODY="$(extract_fn verify_plan_provenance)"
 
@@ -93,13 +93,6 @@ if [[ -z "$RPB_BODY" ]]; then
     exit 1
 fi
 pass "render_plan_body() body extracted from $GUIDE_MD"
-
-if [[ -z "$HELPERS_BODY" ]]; then
-    fail "could not extract open_pr_linkage_rows()/open_pr_annotation() from guide.md"
-    echo -e "${RED}FATAL${NC}: cannot continue without the linkage helpers"
-    exit 1
-fi
-pass "open_pr_linkage_rows()/open_pr_annotation() bodies extracted"
 
 # ---------------------------------------------------------------------------
 # Test 1: STRUCTURE — one broadened inventory fetch, everything derived.
@@ -403,6 +396,9 @@ if grep -qF 'excluding held (`loom:blocked`/`loom:operator`/`loom:frozen`), `loo
 else
     fail "Ready blurb does not name the open-PR admission subtraction: '$BLURB_LINE'"
 fi
+
+assert_contains "$APPROVED_BODY" '- **#8005**: Held approved partial PR for #7103 *(held)*' \
+    "the held partial PR retains its hold marker in Approved"
 
 if grep -q -- '- \*\*#8001\*\*: Fix for #7101 — closes #7101' <<<"$APPROVED_BODY"; then
     pass "PR #8001 bullet keeps its '— closes #7101' annotation (unchanged #13928 behavior)"

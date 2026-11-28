@@ -34,6 +34,9 @@
 #      creation (the same contract as the merged suite's Test 3).
 #   6. --json mode reports the refusal as one JSON document on stdout, with no
 #      human text mixed in.
+#   7. The check itself could not run (`worktree-closed-pr-branch` exits 2,
+#      e.g. a `loom-tools` wrapper whose mode will not resolve, #15650) ->
+#      NOT a refusal: only exit 1 refuses, so the branch is reused as in 5.
 #
 # Follows the merged suite's throwaway-bare-origin harness and its fake-forge
 # binary pattern; that suite must keep passing unmodified (verified separately).
@@ -380,6 +383,69 @@ else
 fi
 cleanup_repo "$REPO"
 rm -f "$JSON_OUT" "$JSON_ERR"
+
+# --- Test 7: the check itself could not run -> not a refusal (#15650) ---
+#
+# Exit 1 is the one code worktree.sh refuses on, and it means exactly one
+# thing: the tip is a closed-unmerged PR's head. Every other exit is "could
+# not check" and must proceed like the forge outage in Test 5. The case that
+# exposed the gap: a `loom-tools` wrapper whose mode or fleet route will not
+# resolve exits 2 with the complaint on stderr and writes nothing to fd 3.
+# Read as a refusal, a host misconfiguration became "worktree.sh refused"
+# with no refusal document on the channel the script reports from.
+#
+# The daemon this suite pins never exits 2 here (its forge probe folds every
+# failure into "undecidable"), so a wrapper stands in for that one call:
+# `--help` and every other subcommand still reach the pinned binary, and
+# only the real closed-PR call answers 2. FAKE_GH_MODE=closed, so the guard
+# WOULD have refused had it run — reusing the branch here proves it did not.
+echo ""
+echo "Test 7: the closed-PR check could not run (exit 2) -> worktree.sh proceeds, it does not refuse"
+REPO=$(setup_repo closedrepo7)
+FAKE_BIN=$(install_fake_gh "$REPO")
+WRAP_BIN="$(dirname "$REPO")/wrapbin"
+mkdir -p "$WRAP_BIN"
+cat > "$WRAP_BIN/wrap-daemon" << EOF
+#!/bin/bash
+if [[ "\${1:-}" == "worktree-closed-pr-branch" && "\${2:-}" != "--help" ]]; then
+    echo "loom-tools: mode is unset. Set it to one of: fleet, local-daemon, session" >&2
+    exit 2
+fi
+LOOM_DAEMON_SELF_BIN="$LOOM_DAEMON_SELF_BIN" exec "$LOOM_DAEMON_SELF_BIN" "\$@"
+EOF
+chmod +x "$WRAP_BIN/wrap-daemon"
+OUT_LOG="/tmp/wtclosed-could-not-run.$$"
+RC=0
+(
+    cd "$REPO"
+    PATH="$FAKE_BIN:$PATH" FAKE_GH_MODE=closed LOOM_DAEMON_SELF_BIN="$WRAP_BIN/wrap-daemon" ./.loom/scripts/worktree.sh "$ISSUE" >"$OUT_LOG" 2>&1
+) || RC=$?
+if [[ "$RC" -eq 0 ]]; then
+    pass "worktree.sh proceeds when the closed-PR check could not run (only exit 1 refuses)"
+else
+    fail "worktree.sh exited $RC - exit 2 from worktree-closed-pr-branch was read as a refusal"
+    cat "$OUT_LOG"
+fi
+if [[ -f "$REPO/.loom/worktrees/issue-$ISSUE/rejected.txt" ]]; then
+    pass "the worktree was created and the branch reused, as on a forge outage (Test 5)"
+else
+    fail "no worktree reusing the branch - the check that could not run blocked worktree creation"
+    cat "$OUT_LOG"
+fi
+if grep -q 'mode is unset' "$OUT_LOG"; then
+    pass "the check's own complaint reached the operator on stderr"
+else
+    fail "the complaint is missing from the output (see $OUT_LOG)"
+    cat "$OUT_LOG"
+fi
+if ! grep -qi "CLOSED WITHOUT MERGING" "$OUT_LOG"; then
+    pass "no refusal was reported - the check did not run, so it refused nothing"
+else
+    fail "a refusal message was emitted although the check could not run"
+    cat "$OUT_LOG"
+fi
+cleanup_repo "$REPO"
+rm -f "$OUT_LOG"
 
 # --- Summary ---
 echo ""

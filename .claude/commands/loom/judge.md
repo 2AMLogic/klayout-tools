@@ -201,18 +201,19 @@ own discipline:
 
 **Never run `gh pr checkout <N>` in the orchestrator's main worktree.** Doing so switches the orchestrator's `HEAD` to the PR branch and can leave behind untracked files from the PR when you switch back — see issue #3358 for a concrete incident. This applies to every checkout call site in this document: fallback-queue evaluation, DIRTY-PR automated-rebase attempts, trivial-fix commits, and any ad-hoc `gh pr checkout` you run while reviewing.
 
-Pick the right path before any `gh pr checkout` mutation:
+Run [Before Running `gh pr checkout`](#before-running-gh-pr-checkout) for every PR.
+Only a verified same-repository issue branch can reuse its existing builder
+worktree. For all other verified heads, use `./.loom/scripts/pr-worktree.sh <PR_NUMBER>`.
 
-- **An existing builder worktree** (`.loom/worktrees/issue-N`, left behind by an active `/loom:sweep` that already ran Builder) — reuse it directly, no checkout needed (see "Worktree-Aware Code Access" below).
-- **No builder worktree (any PR shape)** — use the supported review helper:
-  ```bash
-  ./.loom/scripts/pr-worktree.sh <PR_NUMBER>
-  cd .loom/worktrees/pr-<PR_NUMBER>
-  # pr-worktree.sh already ran `gh pr checkout` inside the worktree
-  ```
-  **Honor its result.** Exit `0`: ready, reusing `pr-<N>` if present. Non-zero: stop. On a branch collision, reuse the named builder `issue-N` holder after "Verify the Worktree Matches the PR" below; otherwise stop/report or use `git merge-tree`/`gh pr diff` read-only review. If the **primary clone** holds the branch (an attended author left it checked out), the helper itself creates `pr-<N>` **detached** at the PR head sha, says so, and exits `0`: that detached worktree is sanctioned for review (no `git archive` export). Record `reviewed at detached worktree <sha>` in the verdict, and never commit or push from it. **Never** invent a `judge-*`/`review-*` directory or another naming scheme, run raw `git worktree add`, or use bare `gh pr checkout` to bypass failure.
+**Honor the helper result.** Exit `0` means `pr-<N>` is ready. A nonzero exit
+ends selection. On a collision, keep the named holder untouched and use
+`git merge-tree` or `gh pr diff` for read-only evidence if needed. If the
+primary clone holds the PR branch, the helper creates a detached `pr-<N>` at
+the PR head. Use it for review, record its SHA in the verdict, and leave it
+unmodified. **Never** invent a `judge-*` or `review-*` directory or use
+raw `git worktree add` or bare `gh pr checkout` to continue after a refusal.
 
-`pr-worktree.sh` writes a `.loom-managed` sentinel; `merge-pr.sh` auto-cleans it on merge. Every "no worktree exists" branch in this document routes through it, mirroring `doctor.md`.
+The helper writes a `.loom-managed` sentinel for merge cleanup.
 
 ## Issues Are Suggestions — Close or Rescope With Rationale (Role Autonomy)
 
@@ -447,8 +448,8 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
    fi
    ```
 4. **Understand context** (first capture `REVIEW_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)`, before reading anything — and for each linked issue `N` the hash of the body you read: `ISSUE_HASH_N=$(printf %s "$(gh api repos/<owner>/<repo>/issues/N --jq .body)" | sha256sum | cut -d' ' -f1)` (a hash that keeps jq's trailing newline is accepted too, as is the raw body's own hash with or without that newline); see "Stale-Read Gate" under Verdict SHA Marker): Read PR description and linked issues, and run the "Spec Reconciliation" step below on each `Closes`/`Fixes`/`Resolves`/`Part of`/`Contributes to` reference (current body + trusted comments, not the PR's account of them)
-4b. **Check docs-only fast-path eligibility** (see "Docs-Only Fast Path (WORK_LOG / WORK_PLAN / README, #6134)" below) — if the changed-file list is an exact match against the fast-path allowlist **and the PR has no closing-issue reference** (Step 3 below, #14182 — both conditions are required, and a failed closing-reference read counts as a reference) **and every WORK_LOG record the diff adds verifies against the base repository** (Step 4 below, #13760 — number, kind and title; a failed diff or target read is not eligible), skip steps 5-7b and the "Evaluation Focus Areas" review entirely; go straight to CI Status Check (step 8), the formal-review reconciliation gate (step 8b — **not** skipped: a docs-only diff can still carry an unresolved formal review, #7647) and the fast-path approval write. Otherwise continue normally.
-5. **Check out code**: Use the existing builder worktree, else `./.loom/scripts/pr-worktree.sh <number>` — never a bare `gh pr checkout` in the main checkout (see "PR Branch Isolation" and Worktree-Aware Code Access below). Capture `REVIEW_HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')` here — step 11's recheck compares against it, and your verdict marker records it.
+4b. **Check docs-only fast-path eligibility** (see "Docs-Only Fast Path (WORK_LOG / WORK_PLAN / README, #6134)" below) — if the changed-file list is an exact match against the fast-path allowlist **and the PR has no closing-issue reference** (Step 3 below, #14182 — both conditions are required, and a failed closing-reference read counts as a reference) **and every WORK_LOG record the diff adds verifies against the base repository** (Step 4 below, #13760 — number, kind and title; a failed diff or target read is not eligible) **and any change to WORK_PLAN.md's `guide:plan-body` region carries the machine-rendered `written` receipt with a matching render-hash** (Step 5 below, #15220 — a stamp-only region edit, free prose in place of the receipt line, or a missing/mismatched hash is not eligible), skip steps 5-7b and the "Evaluation Focus Areas" review entirely; go straight to CI Status Check (step 8), the formal-review reconciliation gate (step 8b — **not** skipped: a docs-only diff can still carry an unresolved formal review, #7647) and the fast-path approval write. Otherwise continue normally.
+5. **Check out code**: Run the verified worktree selection in [Worktree-Aware Code Access](#worktree-aware-code-access). Capture `REVIEW_HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')` here — step 11's recheck compares against it, and your verdict marker records it.
 6. **Rebase check**: Verify PR has no merge conflicts with main (see Rebase Check section below)
 7. **Targeted checks only**: read the diff and trust the green CI from step 2b. At most run scoped tests for a specific doubt (Scoped Test Execution below); never the full suite or `buildGate.command`. If the *environment* cannot run a command you need for a verdict, see "Environment Gap: Cannot Verify Here" below
 7b. **Execute test plan**: Parse PR description for "## Test Plan" section.
@@ -991,26 +992,53 @@ a human response or cannot advance, continue to the next candidate.
 
 ### Before Running `gh pr checkout`
 
-Always check for an existing worktree first. If none exists, route through
-`pr-worktree.sh` — never a bare `gh pr checkout` in the current directory (see
-"CRITICAL: PR Branch Isolation" above):
+Run the selection below in Bash from the primary checkout. Set `PR_NUMBER`
+to the PR number and `PR_REPO` to the checkout's origin repository
+(`OWNER/REPO`, or `HOST/OWNER/REPO` on GitHub Enterprise). Use the same
+repository for subsequent Forge reads. A failed read, invalid head ref or
+repository identity, or cross-repository flag that contradicts that identity
+stops selection before any worktree or checkout action.
+
+On a verified same-repository issue branch, reuse an existing worktree and
+verify it below. For other verified heads and when the issue checkout is
+absent, enter the dedicated PR worktree only after the helper succeeds.
 
 ```bash
-# Extract issue number from PR (via branch name or body)
-ISSUE_NUM=$(gh pr view <number> --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
-
-# Check if builder worktree exists
-if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
-    echo "Builder worktree exists - using it directly"
-    cd ".loom/worktrees/issue-${ISSUE_NUM}"
-    # Verify it actually reflects this PR before evaluating anything in it —
-    # see "Verify the Worktree Matches the PR Before Using It" below.
-else
-    # No builder worktree — self-cleaning worktree via pr-worktree.sh, not a
-    # bare checkout in the current directory
-    # On a non-zero exit the cd is skipped: reuse the named holder or stop
-    ./.loom/scripts/pr-worktree.sh <number> && cd ".loom/worktrees/pr-<number>"
+# PR worktree selection
+unset WORKTREE_PR WORKTREE_ABS ISSUE_NUM
+[[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || exit 1
+[[ "$PR_REPO" =~ ^([[:alnum:].-]+/)?[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || exit 1
+BASE_OWNER="${PR_REPO%/*}"
+BASE_REPO="${BASE_OWNER##*/}/${PR_REPO##*/}"
+PR_HEAD=$(gh pr view "$PR_NUMBER" --repo "$PR_REPO" \
+  --json isCrossRepository,headRefName,headRepository) || exit 1
+PR_BRANCH=$(jq -ers --arg base "$BASE_REPO" '
+  select(length == 1) | .[0]
+  | select((.isCrossRepository | type) == "boolean")
+  | . as $pr
+  | .headRepository.nameWithOwner | strings
+  | select(test("^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,99}/[a-zA-Z0-9_.][a-zA-Z0-9_.-]{0,99}\\z"))
+  | select((split("/")[1]) as $repo | $repo != "." and $repo != "..")
+  | select(((ascii_downcase) != ($base | ascii_downcase)) == $pr.isCrossRepository)
+  | $pr.headRefName | strings | select(test("[[:cntrl:]]") | not)
+' <<<"$PR_HEAD") || exit 1
+git check-ref-format "refs/heads/$PR_BRANCH" || exit 1
+source ./.loom/scripts/lib/worktree-root.sh || exit 1
+WORKTREE_ROOT_DIR=$(loom_worktree_root "$(pwd -P)") || exit 1
+if jq -e '.isCrossRepository == false' <<<"$PR_HEAD" >/dev/null &&
+   [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]]; then
+    ISSUE_NUM="${BASH_REMATCH[1]}"
 fi
+
+if [[ -n "${ISSUE_NUM:-}" && -d "$WORKTREE_ROOT_DIR/issue-$ISSUE_NUM" ]]; then
+    cd "$WORKTREE_ROOT_DIR/issue-$ISSUE_NUM" || exit 1
+else
+    GH_REPO="$PR_REPO" ./.loom/scripts/pr-worktree.sh "$PR_NUMBER" || exit 1
+    cd "$WORKTREE_ROOT_DIR/pr-$PR_NUMBER" || exit 1
+fi
+WORKTREE_ABS=$(pwd -P) || exit 1
+WORKTREE_PR="$PR_NUMBER"
+# End PR worktree selection
 ```
 
 ### Verify the Worktree Matches the PR Before Using It (#6257)
@@ -1084,6 +1112,18 @@ Proceed with reviewing once the final checks pass. The recovery uses the fetched
 commit object that matches both forge reads and sets tracking only after a
 successful fast-forward. The `+` refreshes only the named remote-tracking ref when its
 cache is stale. The local branch advances by fast-forward after verification.
+
+For a dirty worktree, the refusal is the disposition: the snapshot (when one was
+taken) preserved the WIP as a patch under
+`<worktree-root>/.snapshots/issue-<N>-<UTC-timestamp>.patch`. Post a PR comment
+ending with `<!-- loom:judge-note -->` (#13222 — an unmarked note trips the
+Stale-Read Gate if you approve after read-only review); when a snapshot exists,
+name only the relative `.snapshots/issue-<N>-<UTC-timestamp>.patch` under the
+managed worktree root, keeping the absolute path (the helper's `patchPath`
+output carries the workstation username and directory layout) and the patch
+contents local, never pasted into the PR. Then fall back to read-only
+review (`gh pr diff` / `git merge-tree`) per "PR Branch Isolation", or park the
+PR per "Environment Gap: Cannot Verify Here".
 
 For a fork or a nonstandard head, use the existing `pr-worktree.sh` route and
 check the exact head and clean state there. The named `origin` recovery
@@ -1198,16 +1238,15 @@ of writing if your claim is lost or another Judge's verdict already landed.
 PR_NUMBER=<number>
 MERGE_STATE=$(gh pr view $PR_NUMBER --json mergeStateStatus --jq '.mergeStateStatus')
 
-if [ "$MERGE_STATE" = "DIRTY" ]; then
-    # Checkout PR branch (worktree-aware — see "PR Branch Isolation")
-    ISSUE_NUM=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
-    if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
-        cd ".loom/worktrees/issue-${ISSUE_NUM}"
-    else
-        ./.loom/scripts/pr-worktree.sh $PR_NUMBER
-        cd ".loom/worktrees/pr-${PR_NUMBER}"
-    fi
+```
 
+If the merge state is `DIRTY`, run the verified selection in
+[Worktree-Aware Code Access](#worktree-aware-code-access). Only after success,
+continue in the selected worktree:
+
+```bash
+if [ "$MERGE_STATE" = "DIRTY" ]; then
+    [[ "${WORKTREE_PR:-}" == "$PR_NUMBER" && "$(pwd -P)" == "${WORKTREE_ABS:-}" ]] || exit 1
     GATE_OK=true
     # Detached HEAD: skip the update, fall back to change request (below)
     BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null) || GATE_OK=false
@@ -1991,21 +2030,195 @@ if [ "$ELIGIBILITY" = "ELIGIBLE" ]; then
 fi
 ```
 
+**Step 5: Verify a WORK_PLAN plan-body region change carries the machine
+receipt (#15220).** The file list, the closing-reference check and the record
+gate above verify *what* the diff contains; this check verifies *how* the
+`WORK_PLAN.md` `guide:plan-body` region changed. #14204 makes the
+`WORK_PLAN check:` PR-body line machine-recorded — but only once Guide's
+`update_work_plan()` actually runs, and a tick observed in the wild skipped
+the function, hand-wrote the region with scripted substitutions, and put free
+prose where the receipt line belongs. On such a tick nothing mechanical stands
+behind the line, so the reviewing side re-derives it: a diff that changes the
+region must carry exactly one `- **WORK_PLAN check**: written (render-hash
+<12hex>, <UTC>)` line whose hash is the first 12 hex of the sha256 of the
+head region's stamp-stripped body — the same normalization
+`WORK_PLAN_RENDER_HASH` hashes — and a **stamp-only** region edit is never
+eligible (`update_work_plan()` records `current` and never writes one, so a
+`written` line over an unchanged body is a hand-made claim). A diff that does
+not change the region passes untouched — including WORK_LOG-only/README-only
+diffs, edits confined to text outside the markers, and the monthly
+`work_plan/WORK_PLAN_YYYY-MM.md` archives, which carry no plan-body region.
+Everything else fails closed.
+
+```bash
+# #15220: the plan-body region gate. docs_only_fast_path_plan_region reads a
+# file's content on stdin and prints the lines strictly between the
+# exactly-once, in-order `guide:plan-body` marker pair; it exits non-zero when
+# the markers are missing, duplicated or unordered on that side (fail closed).
+docs_only_fast_path_plan_region() {
+  awk '/^<!-- guide:plan-body:start -->$/ { if (s) exit 1; s = NR; next }
+       /^<!-- guide:plan-body:end -->$/   { if (!s || e) exit 1; e = NR; next }
+       s && !e { print }
+       END { if (!s || !e) exit 1 }'
+}
+
+# #15220: verify the WORK_PLAN.md plan-body region a docs-only diff changes.
+# Echoes "ELIGIBLE" when the diff does not touch WORK_PLAN.md, does not change
+# the region between the markers, or changes it behind the #14204 machine
+# receipt: exactly one `- **WORK_PLAN check**: written (render-hash <12hex>,
+# <UTC>)` line in the PR body whose hash equals the first 12 hex of the sha256
+# of the head region's stamp-stripped body. A stamp-only region edit, free
+# prose in place of the receipt, a wrong/absent hash, a WORK_PLAN.md newly
+# created or deleted by the PR, missing/duplicated/unordered markers on either
+# side, or more than one `WORK_PLAN check:` line echo "NOT ELIGIBLE: <reason>"
+# — the caller takes the normal review flow and reports the reason. A failed
+# read echoes "NOT ELIGIBLE: ENVIRONMENT: …" instead: an environment failure
+# is never a passed or waived content check. Base and head WORK_PLAN.md are
+# read from the forge at the PR's baseRefOid/headRefOid (no local checkout);
+# the base repository is derived from the PR's own URL exactly as the worklog
+# check does (#15005); creation/deletion is classified from the diff itself,
+# so a contents 404 can never be read as a content verdict.
+docs_only_fast_path_plan_check() {
+  # $1 = PR number.
+  local pr="$1" out repo raw l in_plan=0 touched=0 created=0 deleted=0
+  local shas base_sha head_sha base_file head_file body
+  local base_region head_region base_body head_body head_hash hash
+  local -a receipt_lines=()
+  local receipt_re='^- \*\*WORK_PLAN check\*\*: written \(render-hash ([0-9a-f]{12}), [0-9TZ:-]+\)$'
+  if ! out=$(gh pr view "$pr" --json url --jq '.url | capture("^https://[^/]+/(?<r>[^/]+/[^/]+)/pull/[0-9]+/?$").r' 2>/dev/null) || [ -z "$out" ]; then
+    echo "NOT ELIGIBLE: ENVIRONMENT: base repository read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check"
+    return 0
+  fi
+  repo="$out"
+  if ! raw=$(gh pr diff --repo "$repo" "$pr" 2>/dev/null); then
+    echo "NOT ELIGIBLE: ENVIRONMENT: PR diff read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check"
+    return 0
+  fi
+  # Exact root-file scoping, same header discipline as the worklog check: the
+  # monthly work_plan/WORK_PLAN_YYYY-MM.md archives are not the live file, and
+  # a non-WORK_PLAN hunk can neither trigger this gate nor produce a refusal.
+  while IFS= read -r l; do
+    case "$l" in
+      'diff --git '*)
+        case "$l" in
+          *' b/WORK_PLAN.md') in_plan=1; touched=1 ;;
+          *) in_plan=0 ;;
+        esac
+        continue ;;
+    esac
+    [ "$in_plan" = 1 ] || continue
+    case "$l" in
+      'new file mode'*) created=1 ;;
+      'deleted file mode'*) deleted=1 ;;
+    esac
+  done < <(printf '%s\n' "$raw")
+  if [ "$touched" -eq 0 ]; then
+    echo "ELIGIBLE"
+    return 0
+  fi
+  if [ "$created" -eq 1 ]; then
+    echo "NOT ELIGIBLE: WORK_PLAN.md newly created by this PR — the plan-body region cannot be verified (#15220)"
+    return 0
+  fi
+  if [ "$deleted" -eq 1 ]; then
+    echo "NOT ELIGIBLE: WORK_PLAN.md deleted by this PR — the plan-body region cannot be verified (#15220)"
+    return 0
+  fi
+  if ! shas=$(gh pr view "$pr" --json baseRefOid,headRefOid --jq '"\(.baseRefOid)\t\(.headRefOid)"' 2>/dev/null) || [ -z "$shas" ]; then
+    echo "NOT ELIGIBLE: ENVIRONMENT: PR ref-SHA read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check"
+    return 0
+  fi
+  base_sha="${shas%%$'\t'*}"
+  head_sha="${shas##*$'\t'}"
+  if [ -z "$base_sha" ] || [ -z "$head_sha" ]; then
+    echo "NOT ELIGIBLE: ENVIRONMENT: PR ref-SHA read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check"
+    return 0
+  fi
+  if ! body=$(gh pr view "$pr" --json body --jq '.body' 2>/dev/null); then
+    echo "NOT ELIGIBLE: ENVIRONMENT: PR body read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check"
+    return 0
+  fi
+  if ! base_file=$(gh api -H "Accept: application/vnd.github.raw" "repos/$repo/contents/WORK_PLAN.md?ref=$base_sha" 2>/dev/null); then
+    echo "NOT ELIGIBLE: ENVIRONMENT: WORK_PLAN.md base contents read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check"
+    return 0
+  fi
+  if ! head_file=$(gh api -H "Accept: application/vnd.github.raw" "repos/$repo/contents/WORK_PLAN.md?ref=$head_sha" 2>/dev/null); then
+    echo "NOT ELIGIBLE: ENVIRONMENT: WORK_PLAN.md head contents read failed (gh error, not a PR-content verdict) — take the normal review flow; do NOT treat this as a passed or waived #15220 content check"
+    return 0
+  fi
+  if ! base_region=$(printf '%s\n' "$base_file" | docs_only_fast_path_plan_region); then
+    echo "NOT ELIGIBLE: WORK_PLAN.md base has missing, duplicated or unordered guide:plan-body markers (#15220)"
+    return 0
+  fi
+  if ! head_region=$(printf '%s\n' "$head_file" | docs_only_fast_path_plan_region); then
+    echo "NOT ELIGIBLE: WORK_PLAN.md head has missing, duplicated or unordered guide:plan-body markers (#15220)"
+    return 0
+  fi
+  # Raw regions equal → the diff did not change the region (an edit outside
+  # the markers); pass without touching the receipt.
+  if [ "$base_region" = "$head_region" ]; then
+    echo "ELIGIBLE"
+    return 0
+  fi
+  # strip_plan_stamp's exact shape (guide.md #13909): drop line 1 when it is
+  # the generated-at stamp. The $() captures above already normalized trailing
+  # newlines on both sides, the same normalization WORK_PLAN_RENDER_HASH's
+  # input gets.
+  base_body="$(printf '%s\n' "$base_region" | sed -e '1{/^_Generated: .* (snapshot; compare against live labels)_$/d;}')"
+  head_body="$(printf '%s\n' "$head_region" | sed -e '1{/^_Generated: .* (snapshot; compare against live labels)_$/d;}')"
+  if [ "$base_body" = "$head_body" ]; then
+    echo "NOT ELIGIBLE: stamp-only edit to the WORK_PLAN guide:plan-body region — update_work_plan() records 'current' and never writes one (#15220)"
+    return 0
+  fi
+  # The hash the receipt must carry: sha256 of the head region's
+  # stamp-stripped body plus one trailing newline, first 12 hex — the same
+  # computation as guide.md's WORK_PLAN_RENDER_HASH (sha256sum on Linux,
+  # shasum on macOS).
+  head_hash="$(printf '%s\n' "$head_body" | { sha256sum 2>/dev/null || shasum -a 256; } 2>/dev/null | cut -c1-12)"
+  while IFS= read -r l; do
+    receipt_lines+=("$l")
+  done < <(printf '%s\n' "$body" | grep -E '^- \*\*WORK_PLAN check\*\*: ' || true)
+  if [ "${#receipt_lines[@]}" -ne 1 ]; then
+    echo "NOT ELIGIBLE: PR body carries ${#receipt_lines[@]} 'WORK_PLAN check:' lines where exactly one is required (#15220)"
+    return 0
+  fi
+  if ! [[ "${receipt_lines[0]}" =~ $receipt_re ]]; then
+    echo "NOT ELIGIBLE: the PR body's 'WORK_PLAN check:' line is not a machine-rendered 'written' receipt (render-hash <12hex>, <UTC>) — free prose, 'NOT RUN' or 'render-hash none' cannot verify a changed region (#15220)"
+    return 0
+  fi
+  hash="${BASH_REMATCH[1]}"
+  if [ "$hash" != "$head_hash" ]; then
+    echo "NOT ELIGIBLE: WORK_PLAN render-hash mismatch — PR body claims '$hash', the head region recomputes '$head_hash' (#15220)"
+    return 0
+  fi
+  echo "ELIGIBLE"
+}
+
+if [ "$ELIGIBILITY" = "ELIGIBLE" ]; then
+  ELIGIBILITY=$(docs_only_fast_path_plan_check "$PR_NUMBER")
+fi
+```
+
 If `$ELIGIBILITY` is anything other than the literal string `ELIGIBLE`
 (including an empty diff, a diff that mixes an allowlisted file with
 anything else — a source file, a nested README, `.github/workflows/*.yml`,
 `.loom/config.json`, or any other path — a PR whose body carries a closing
-reference such as `Closes #N`, a PR whose closing-reference read failed, or
-a PR whose new WORK_LOG records failed the base-repository verification:
+reference such as `Closes #N`, a PR whose closing-reference read failed, a
+PR whose new WORK_LOG records failed the base-repository verification:
 missing number, wrong kind, wrong state (an unmerged PR or an open issue),
-title mismatch, foreign repository identity, or
-an unreadable diff/target read) — **do not use this fast path.** Report the
+title mismatch, foreign repository identity, or an unreadable diff/target
+read, or a PR whose `WORK_PLAN.md` `guide:plan-body` region changed without
+the machine-rendered `written` receipt: a stamp-only edit, free prose in
+place of the `WORK_PLAN check:` line, a wrong or missing render-hash, a
+region the PR created or deleted, malformed markers, an unreadable
+contents/body read, or a duplicated receipt line (#15220)) — **do not use
+this fast path.** Report the
 `NOT ELIGIBLE` reason verbatim in the verdict comment, and proceed with the
 normal Primary Queue steps 5-11 (checkout, quality checks, test plan
 execution, full code evaluation). A refusal prefixed
 `NOT ELIGIBLE: ENVIRONMENT:` means a `gh` read failed and the check could not
-run — an environment failure, never a passed or waived #13760 content check;
-report it as such and still take the normal flow.
+run — an environment failure, never a passed or waived #13760/#15220 content
+check; report it as such and still take the normal flow.
 
 ### Fast-Path Evaluation Process
 
@@ -2289,18 +2502,11 @@ This reduces unnecessary round-trips where a one-line fix creates a full change 
 
 ### How to Fix Trivial Issues
 
-**Step 1: Check out the PR branch (worktree-aware)**
+**Step 1: Select the PR worktree**
 
-```bash
-# Use existing worktree if available (see "PR Branch Isolation" and
-# "Worktree-Aware Code Access")
-ISSUE_NUM=$(gh pr view <number> --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
-if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
-    cd ".loom/worktrees/issue-${ISSUE_NUM}"
-else
-    ./.loom/scripts/pr-worktree.sh <number> && cd ".loom/worktrees/pr-<number>"
-fi
-```
+Run [Worktree-Aware Code Access](#worktree-aware-code-access) and its
+verification. Continue in that worktree only after success. If it is detached,
+stop before making any fix.
 
 **Step 2: Make the fix**
 
@@ -2682,7 +2888,7 @@ Applies only when **your environment** cannot run a command you need to reach a 
 
 Declining to approve is not enough: left alone the PR stays `loom:review-requested` and waits silently for an attended session. Route it:
 
-1. **Comment** on the PR naming the missing tool or failing command and the observed error, quoted verbatim (e.g. `tests/test_sim_batch.py`: "no Python executable"; `ruff`: "Exec format error"; `post-verdict.sh` exit 5).
+1. **Comment** on the PR naming the missing tool or failing command and the observed error, quoted verbatim (e.g. `tests/test_sim_batch.py`: "no Python executable"; `ruff`: "Exec format error"; `post-verdict.sh` exit 5), ending the note with `<!-- loom:judge-note -->` (#13222).
 2. **Park** it: `loom-daemon park-record apply --pr <N> --reason "<missing tool>" --by judge` (body park record plus `loom:blocked`; `pr-queue` drops parked PRs, so it leaves the Judge queue). Use `--dry-run` first if unsure.
 3. **Release** `loom:reviewing` and the PR lease as on any stand-down (`loom-daemon lease pr release <n> --role judge --watch-pid …`).
 
@@ -2914,10 +3120,13 @@ done
 # Find PRs ready for evaluation (green badges) — cached; see "Cached Forge Reads"
 loom-daemon pr-queue --role judge
 
-# Check out the PR (worktree-aware — see "PR Branch Isolation" above; this is
-# a simplified illustration, not a bare checkout in the current directory)
-./.loom/scripts/pr-worktree.sh 42
-cd .loom/worktrees/pr-42
+```
+
+Run [Worktree-Aware Code Access](#worktree-aware-code-access) for PR 42.
+Continue below only after it verifies and enters the selected worktree.
+
+```bash
+[[ "${WORKTREE_PR:-}" == 42 && "$(pwd -P)" == "${WORKTREE_ABS:-}" ]] || exit 1
 REVIEW_HEAD_SHA=$(gh pr view 42 --json headRefOid --jq '.headRefOid')
 
 # Run checks

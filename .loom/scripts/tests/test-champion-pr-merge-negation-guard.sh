@@ -1,83 +1,89 @@
 #!/usr/bin/env bash
-# test-champion-pr-merge-negation-guard.sh - Regression coverage for issue #1057.
-#
-# #1057 (example-org/tool-repo): PR #1051's body said "**does not fix #909** --
-# ... #909 is left open for its owner to close or subsume". GitHub's
-# closingIssuesReferences parser (and the Gitea regex fallback in
-# forge_pr_close_targets) is not negation-aware, so #909 was closed against the
-# author's stated intent, and champion-pr-merge.md's Step 4 ("Verify Issue
-# Auto-Close") would `gh issue close` every candidate with no re-check.
-# THE FIX: `loom-daemon merge-pr-refs has-unnegated-closing-ref --issue N` (text
-# on stdin), a TRI-STATE predicate: exit 0 = an unnegated closing reference
-# exists, 1 = every reference found is negated, 3 = no textual reference at all
-# (a Development-sidebar link, `Fixes owner/repo#N`, `Closes: #N` -- forms the
-# regex cannot see). 1 vs 3 matters: a two-state version conflated "never
-# mentioned" with "disclaimed" and wrongly reopened issues closed through an
-# unseen channel. Step 4 runs it per LINKED_ISSUES candidate over the PR body
-# plus the merge commit message, BEFORE `gh issue close`; only exit 1 may reopen.
-# #8942: that reopen fired on `state = CLOSED` alone, so an issue closed BEFORE
-# this merge (by an earlier PR, or by hand) was reopened and the reopen blamed
-# on a merge that never touched it. It is now gated on `loom-daemon merge-pr
-# closed-by-merge`: exit 0 = this merge closed it, 1 = it did not, anything
-# else (an older daemon's clap 2 included) = no answer and no reopen.
-# Rust unit tests cover both predicates (merge_pr/{refs,closed_by_merge}/tests.rs);
-# this suite pins the WIRING, so an edit cannot silently drop a check or the gate.
-# Hermetic: greps the shipped doc. No forge, no network, no tokens.
-
+# Champion's read-only post-merge check (#1057, #14905). The daemon tests
+# negated_only_references_reopen_what_this_merge_closed and
+# an_open_negated_only_issue_stays_open cover the reopen and its #8942 gate.
 set -uo pipefail
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$TEST_DIR/../../.." && pwd)"
+DOC="$REPO_ROOT/.claude/commands/loom/champion-pr-merge.md"
+[[ -f "$DOC" ]] || DOC="$REPO_ROOT/defaults/.claude/commands/loom/champion-pr-merge.md"
+source "$TEST_DIR/lib/assert.sh"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+cd "$fixture" || exit 1
+git init -q || exit 1
+mkdir -p .loom/scripts/lib
+awk '/^### Step 4:/{section=1} section && /^```bash$/{code=1;next}
+     code && /^```$/{exit} code{print}' "$DOC" >step4
+awk '/^    if .*BLOCKER_REPO.*LINKED_ISSUES/{code=1} code{print} code && /^    fi$/{exit}' "$DOC" >linked_blocker_check
 
-# Installed path first (consumer repos, and Loom's own dogfooded checkout),
-# falling back to the defaults/ source tree. See issue #6194 / #6241.
-if [[ -d "$REPO_ROOT/.claude/commands/loom" ]]; then
-    ROLE_DIR="$REPO_ROOT/.claude/commands/loom"
-else
-    ROLE_DIR="$REPO_ROOT/defaults/.claude/commands/loom"
-fi
-DOC="$ROLE_DIR/champion-pr-merge.md"
+# Fixture the IO boundary. Every target looks CLOSED before the daemon tick.
+cat >.loom/scripts/lib/forge-helpers.sh <<'STUB'
+forge_detect() { FORGE_TYPE="$fixture_forge"; }
+forge_pr_close_targets() { printf '%s\n' 3 33 44 55; }
+forge_get_repo_nwo() { echo owner/repo; }
+forge_get_pr() { echo '{"head":{"sha":"abc1234"},"body":"Closes #33","merged":true,"merge_commit_sha":"def5678"}'; }
+forge_get_issue_state() { echo CLOSED; }
+STUB
 
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
-
-# Local assert_doc_contains kept: fixed $DOC/$CHAMPION_MD target, so (needle, msg) not (file, needle, msg).
-assert_doc_contains() {
-    local needle="$1" msg="$2"
-    if grep -qF -- "$needle" "$DOC"; then
-        pass "$msg"
+gitea_api() {
+    [[ "$*" = 'GET repos/owner/repo/git/commits/def5678' ]] || return 1
+    echo '{"commit":{"message":"does not fix #3"}}'
+}
+gh() {
+    if [[ "$*" = 'api repos/owner/repo/commits/def5678' ]]; then
+        [[ "$commit_readable" = yes ]] || return 1
+        echo '{"commit":{"message":"does not fix #3"}}'
     else
-        fail "$msg (missing literal in $DOC: $needle)"
+        echo "$*" >>unexpected-writes
+        return 1
     fi
 }
+loom-daemon() {
+    case "$*" in
+        'config get champion.outOfBandAcGate --json') echo '{"found":true,"value":false}' ;;
+        'merge-pr-refs has-unnegated-closing-ref --issue '*)
+            [[ "$(cat)" = $'Closes #33\ndoes not fix #3' ]] || return 2
+            case "$4" in
+                3) return 1 ;;   # negated in the squash commit
+                33) return 0 ;;  # explicit in the PR body
+                44) return 3 ;;  # sidebar-only link
+                *) return 2 ;;   # unavailable predicate
+            esac ;;
+        *) echo "$*" >>unexpected-writes; return 1 ;;
+    esac
+}
 
-echo "test-champion-pr-merge-negation-guard.sh (#1057): champion-pr-merge.md Step 4 wiring"
+run_step4() (
+    source ./step4 77
+    echo "ready=${READY_TO_UNBLOCK:?expected ready issues}"
+)
+export fixture_forge=github
+commit_readable=yes
+assert_eq 'ready= 33 44' "$(run_step4)" "Step 4 admits explicit and sidebar links and skips negated or indeterminate targets"
+commit_readable=no
+if run_step4 >/dev/null; then fail "an unreadable merge message authorized unblocking"
+else pass "an unreadable merge message defers unblocking"; fi
+fixture_forge=gitea
+assert_eq 'ready= 33 44' "$(run_step4)" "Gitea classifies the merge message from its own forge"
+[[ ! -e unexpected-writes ]] && pass "Champion only reads" || fail "unexpected forge or daemon action"
 
-assert_doc_contains "loom-daemon merge-pr-refs has-unnegated-closing-ref --issue \"\$issue\"" \
-    "Step 4 runs the negation predicate per linked issue"
-assert_doc_contains 'if [ $? -eq 1 ] && [ -n "$NEG_SRC" ]; then' \
-    "only exit 1 (and only with source text in hand) counts as negated -- an older daemon's exit 2 falls through"
-assert_doc_contains "gh issue reopen" \
-    "Step 4 reopens an issue GitHub's own parser closed on a negated-only reference"
-assert_doc_contains ".commit.message" \
-    "Step 4 cross-checks the squash merge commit message, not just the PR body"
-assert_doc_contains "#1057" "Step 4's negation cross-check cites issue #1057"
-assert_doc_contains 'merge-pr closed-by-merge --issue "$issue" --pr "$PR_NUMBER"' "Step 4 asks the daemon whether THIS merge closed the issue (#8942)"
-assert_doc_contains '0) gh issue reopen "$issue"' "only the gate's exit 0 reaches the reopen"
-assert_doc_contains '*) echo "Issue #$issue: ' "an unanswered gate (older daemon included) logs a line naming the issue"
-if grep -qE '= *"?CLOSED"? *\] *&& *gh issue reopen' "$DOC"; then fail "a 'state = CLOSED && gh issue reopen' one-liner is back (#8942)"
-else pass "no reopen fires on state = CLOSED alone"; fi
+# A scan triggered by #33 still checks its co-blockers, including repository.
+export LINKED_ISSUES=$'3\n33\n44\n55'
+READY_TO_UNBLOCK=" 33 44"
+export THIS_REPO=owner/repo
+check_blocker() {
+    # The sourced Champion guard reads BLOCKER_REPO and BLOCKER_NUM.
+    # shellcheck disable=SC2034
+    local BLOCKER_REPO="$1" BLOCKER_NUM ALL_RESOLVED=true
+    # shellcheck disable=SC2034
+    for BLOCKER_NUM in "${@:2}"; do source ./linked_blocker_check; done
+    echo "$ALL_RESOLVED"
+}
+assert_eq false "$(check_blocker OWNER/repo 33 3)" "a disclaimed co-blocker keeps the dependent blocked"
+assert_eq true "$(check_blocker owner/repo 33 44)" "two ready targets pass the linked-issue check"
+assert_eq true "$(check_blocker other/repo 3)" "a foreign issue with the same number uses its own state"
 
-# Order, by line number: negation predicate -> gate -> reopen -> close.
-NEGATION_LINE=$(grep -n "has-unnegated-closing-ref" "$DOC" | tail -1 | cut -d: -f1)
-GATE_LINE=$(grep -n "closed-by-merge --issue" "$DOC" | tail -1 | cut -d: -f1)
-REOPEN_LINE=$(grep -n 'gh issue reopen "\$issue"' "$DOC" | head -1 | cut -d: -f1)
-CLOSE_LINE=$(grep -n 'gh issue close "\$issue"' "$DOC" | tail -1 | cut -d: -f1)
-if [[ "${NEGATION_LINE:-0}" -gt 0 && "$NEGATION_LINE" -lt "${GATE_LINE:-0}" && "$GATE_LINE" -lt "${REOPEN_LINE:-0}" && "$REOPEN_LINE" -lt "${CLOSE_LINE:-0}" ]]; then
-    pass "negation cross-check, then the closed-by-merge gate, then the reopen, all BEFORE gh issue close"
-else
-    fail "Step 4 order broken (negation=$NEGATION_LINE gate=$GATE_LINE reopen=$REOPEN_LINE close=$CLOSE_LINE)"
-fi
-
-echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 [[ $TESTS_FAILED -eq 0 ]]

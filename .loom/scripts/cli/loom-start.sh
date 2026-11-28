@@ -180,7 +180,8 @@ _loom_start_config_tiers() {
 #      general contract, but NOT here. A typo'd config must still fail loudly
 #      (non-zero, explicit message) rather than silently degrading to "no
 #      terminals configured" -- so every EXISTING tier file is validated as
-#      parseable JSON before the merge is trusted.
+#      parseable JSON before the merge is trusted. A file holding several
+#      top-level values counts as malformed too (#15461).
 #   2. NO TERMINALS ANYWHERE: retargeted from "the legacy .loom/config.json
 #      file exists" to "the resolved config has a non-empty `terminals`
 #      array" -- absence of the legacy file no longer implies absence of
@@ -193,7 +194,11 @@ _loom_start_config_tiers() {
 check_config() {
     local tier_path
     while IFS= read -r tier_path; do
-        if [[ -f "$tier_path" ]] && ! jq empty "$tier_path" 2>/dev/null; then
+        # Slurped, the file is an array of its top-level JSON values: zero or
+        # one is fine (a blank tier contributes nothing, like the resolver's
+        # `{}`), several is malformed, and a parse error fails jq itself.
+        # `jq empty` could not tell these apart -- it ran once per value.
+        if [[ -f "$tier_path" ]] && ! jq -e -s 'length <= 1' "$tier_path" >/dev/null 2>&1; then
             echo -e "${RED}Error: Invalid JSON in $tier_path${NC}" >&2
             exit 1
         fi

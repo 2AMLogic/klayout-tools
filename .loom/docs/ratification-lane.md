@@ -5,7 +5,8 @@ The daemon-side lane that gives a ratification PR two independent key reviews
 Champion hold that consumes the result is in [`ratification-hold.md`](ratification-hold.md).
 
 Code: `loom-daemon/src/role_runner/ratification_lane.rs` (selection, markers,
-tick) and `ratification_dispatch.rs` (the two sessions).
+tick), `ratification_dispatch.rs` (the two sessions) and
+`ratification_attempts.rs` (the attempt bound).
 
 ## Config
 
@@ -44,16 +45,78 @@ them. Selection also honors `champion.ratificationPaths` / `ratificationPhrases`
    spec/decision file declaring ratification-by-merge counts, not only status
    flips. A candidate file that cannot be read is not selected (logged). A PR
    whose current head already carries both markers is skipped. The head SHA is captured here.
-3. Only the keys still missing a current-head marker are dispatched (#14797),
+3. Only the keys still missing a current-head marker, and neither capped nor
+   backed off ([Attempt bound](#attempt-bound-15315)), are dispatched (#14797),
    `ratification-ee` and `ratification-market`, in that order when both are
-   missing. Each prompt is its pinned instructions plus the PR reference and
-   nothing else.
+   missing. Each prompt is, in order: the pinned instructions, the PR
+   reference, for a market review of a public repo the public-sources-only
+   line, and last **Loom's lane output contract** (#15315) — one line saying
+   that Loom posts the final message (so no comment and no
+   `scripts/ratify-key.sh`), that the review starts at the key's review
+   heading, that the template's angle-bracket parts are placeholders, and the
+   key's verdict words, generated from the same list the parser accepts. The
+   contract names the heading in prose and never contains the heading or a
+   verdict line itself. Before parsing, every verbatim copy of the prompt in
+   the session output is cut out (the **echo trim**), so a review written
+   before or after an echoed prompt still parses and the template inside the
+   echo never does; an output that is only the echo has no heading.
 4. For each attempted key whose session ends in success **and** whose output
    parses as that key's review (below) the daemon posts one comment. A key
    that failed closed, whose session did not succeed, or whose output carries
    no verdict posts nothing and the reason is logged; the other key is
-   unaffected. A withheld key posts no marker, so that key is retried at the
-   same head on a later tick.
+   unaffected. A withheld key posts no marker, so it is still missing on a
+   later tick; whether it is dispatched again at the same head is the
+   attempt bound's decision, below.
+
+### Attempt bound (#15315)
+
+Without a bound a key that can never yield a parseable review at a head — or
+a host fault that refuses every launch — is re-dispatched every step tick on
+every host. Selection does not change; the bound sits between selection and
+dispatch, and posts nothing to the PR.
+
+- **Counted attempts.** A session that ran and left no usable review —
+  `output_missing`, `verdict_invalid` or `verdict_placeholder`, or an
+  `invocation_failed` session that launched and failed with a class the PR
+  may have caused (`timeout-ceiling`, an `exit-<n>`, `runtime-fatal`,
+  `model-refusal`, `killed-by-signal`, unclassified) — is one counted attempt
+  for its `(repo, PR, head, key)`. At most **3** are
+  dispatched in any trailing **24 h**. At the cap the key is **capped**: not
+  dispatched until the oldest of its last three attempts is 24 h old, or at
+  once when the PR gets a new head (attempts are recorded per head).
+- **The ledger.** Counted attempts are recorded per host and workspace in
+  `.loom/state/ratification-lane/attempts.json` (`{repo, pr, head_sha, key,
+  class, at}` per attempt, `at` being when its session ended; written
+  atomically as soon as a PR's sessions have recorded an attempt, so a
+  daemon that exits mid-pass keeps them; `.loom/state/` is never tracked). Each pass drops attempts older than the window and attempts for
+  a PR the forge's open-PR listing no longer shows at that head (closed, or
+  pushed). A PR whose files or comments could not be read this pass is still
+  listed, so it keeps its attempts, and an empty listing (which may be a
+  failed read) forgets nothing. It is an efficiency guard, not a gate, and it fails open: an
+  unreadable or corrupt ledger counts as empty (logged once), and a failed
+  save keeps the attempts in daemon memory, so this host still stops at the
+  cap. A ledger written under other parse rules counts nothing. Each host
+  keeps its own ledger, so the fleet-wide bound is three per host per day.
+  There is no clear command: the window expires on its own, and deleting
+  the file is the manual reset.
+- **Not counted: backoffs.** A failure the PR did not cause never counts. It
+  delays the next try by **15 minutes** in daemon memory (reset on restart):
+  - a pinned-instruction read that failed (for example `deferred: reader
+    budget low`): that pin, for every workspace on the host;
+  - a launch refused before its CLI ran (`pre_launch_failed`), a launched
+    session that failed with an account, pool, credential or host class
+    (`account-pool-exhausted`, `account-exhausted:*`, `no-usable-account`,
+    `session-limit`, `credential-expired`, `runtime-timeout`,
+    `sandbox-unavailable`, `cwd-deleted`, the daemon's own `launch-failed`
+    and `wait-failed`, or a launch-refusal class such as
+    `preflight-no-cli-start`), or one the role timeout stopped on a saturated
+    host: that key, for the repo;
+  - a marker post the forge refused (`post_failed`): that PR, head and key
+    only.
+
+  A version roll stopping a session is neither counted nor backed off.
+- `ratification-lane status` prints each key's counted attempts and, when
+  capped, the release time ([below](#reading-the-markers-ratification-lane-status)).
 
 ### Missing-key retry (#14797)
 
@@ -84,22 +147,31 @@ selects both keys as missing.
 
 The existing `ratification_lane.tick` span reports one final outcome per
 attempted key. Each entry below is a count at
-`loom.ratification.<ee|market>.<outcome>`. All twelve fields are present,
+`loom.ratification.<ee|market>.<outcome>`. All fourteen fields are present,
 including zeroes. Review content and diagnostic details stay off the span.
 
 | Outcome | When it is counted |
 |---|---|
 | `posted` | The marker was posted for a valid verdict, including a negative review. |
-| `pre_launch_failed` | An instruction pin failed or the runner reported a known pre-launch refusal. |
+| `pre_launch_failed` | An instruction pin failed, the runner reported a known pre-launch refusal, or the launcher refused before the CLI ran (for example exit 78 with `# LOOM_LAUNCH_REJECTED` and no CLI-start marker). |
 | `invocation_failed` | An invocation did not succeed, including interruption or failure with an unknown launch stage. |
 | `output_missing` | The invocation succeeded without captured output. |
 | `verdict_invalid` | The captured output did not parse as a review for that key. |
+| `verdict_placeholder` | The review's heading or verdict line is still the instruction template's placeholder (`<…>` or a `a \| b` list): the template was copied, not filled. |
 | `post_failed` | The review parsed and the forge did not accept the marker post. |
 
 The two `posted` fields sum to `loom.ratification.posted`. The other
-ten sum to `loom.ratification.withheld`. A trusted marker for the current
+twelve sum to `loom.ratification.withheld`. A trusted marker for the current
 head skips that key, and an unreadable candidate counts once in
 `loom.ratification.unreadable`. Neither case adds a key outcome.
+
+Two header counts report the [attempt bound](#attempt-bound-15315), and are
+not key outcomes either: `loom.ratification.capped` counts missing keys not
+dispatched because they reached the cap, and `loom.ratification.deferred`
+missing keys not dispatched because of a backoff. A tick whose candidates
+were all readable but had every missing key capped or deferred has reason
+`held` (`selected` counts those candidates; `ran` does not). An unreadable
+PR still makes the tick `degraded`, and any dispatch makes it `ran`.
 
 ### Check retained counts after rollout
 
@@ -116,11 +188,12 @@ collector route if any are missing.
 WITH
   ['ee', 'market'] AS review_keys,
   ['posted', 'pre_launch_failed', 'invocation_failed', 'output_missing',
-   'verdict_invalid', 'post_failed'] AS outcomes,
+   'verdict_invalid', 'verdict_placeholder', 'post_failed'] AS outcomes,
   arrayConcat(
     ['loom.ratification.posted', 'loom.ratification.withheld'],
     arrayFlatten(arrayMap(k -> arrayMap(o -> concat('loom.ratification.', k, '.', o),
-                                        outcomes), review_keys))
+                                        outcomes), review_keys)),
+    ['loom.ratification.capped', 'loom.ratification.deferred']
   ) AS fields,
   per_tick AS (
     SELECT argMax(attributes_string, timestamp) AS attrs
@@ -139,8 +212,8 @@ WITH
   )
 SELECT count() AS ticks,
        countIf(NOT complete) AS incomplete_ticks,
-       countIf(complete AND (n[1] != n[3] + n[9]
-         OR n[2] != arraySum(arraySlice(n, 3)) - n[3] - n[9])) AS unreconciled_ticks,
+       countIf(complete AND (n[1] != n[3] + n[10]
+         OR n[2] != arraySum(arraySlice(n, 3, 14)) - n[3] - n[10])) AS unreconciled_ticks,
        mapFromArrays(fields,
          arrayResize(sumForEach(arrayMap(x -> if(complete, x, toUInt64(0)), n)),
                      length(fields), toUInt64(0))) AS totals
@@ -169,10 +242,31 @@ wrapper tail.
 A marker is posted only when the review also carries an `**Overall verdict:**`
 line whose first token is one of the key's verdicts: `approve` /
 `request-changes` for `ee`; `competitive` / `adequate-for-catalog` /
-`uncompetitive` / `escalate` for `market`. Anything else — the reviewer
-declined, authored the PR or reported a disclosure problem (all no verdict),
-no heading, an unknown token, or two different tokens — posts no marker and
-is logged as withheld. The text is at most 4000 characters — the head is
+`uncompetitive` / `escalate` for `market`. The label may also be written
+`**Overall verdict**:`, in any letter case, or unbolded (`Overall verdict:`)
+at the start of a line; beside a bold verdict line, an unbolded one whose
+first word is not a verdict word is a sentence and is not read. The first
+word after the label decides. That word is normalized before it is compared
+(#15315): trailing `.` `;` `:` `!` are dropped, one balanced wrapping of
+`**`, `__`, `` ` ``, `*` or `_` is removed (repeatedly, and only around a
+non-empty word), and ASCII case is folded — so `**approve**.`,
+`` `Competitive` `` and `APPROVE;` all read as their token. The verdict's
+first clause must not name a second allowed token: after a bare word the
+clause ends at the next comma, sentence punctuation, parenthesis or dash
+(`approve — no request-changes needed` reads as `approve`), but after a word
+that carried one of those marks it runs to the first comma or the end of the
+line, so normalization never hides a second verdict behind the mark it
+dropped (`approve. request-changes` is withheld). Text after the first comma
+is the "one sentence why" and is not read for a verdict. Still withheld: a
+placeholder heading (its title starts with `<`) or verdict in the template's
+shapes — a leading `<`, a `<a|b>` list anywhere on the line, or a `|` beside
+a verdict word (`approve | request-changes`), counted as
+`verdict_placeholder`; a comparison (`Vth < 0.4 V`) or a magnitude (`|S11|`)
+in the reasoning is not one — a first clause naming two allowed tokens
+(`approve or request-changes`), a `?` or any other unknown word, unbalanced
+emphasis, and two lines that normalize to different tokens. Anything else — the
+reviewer declined, authored the PR or reported a disclosure problem (all no
+verdict), or no heading — also posts no marker and is logged as withheld. The text is at most 4000 characters — the head is
 kept on truncation, so the heading and verdict line survive — with an
 explicit notice when cut; its `<!--` and `-->` are escaped, so it cannot
 form or alter a marker.
@@ -199,6 +293,25 @@ posts, edits, minimises or deletes anything, and it never releases a hold —
 the human retains the ratification decision. If the PR head or the comment
 history cannot be read (including a torn later page or a malformed record),
 it reports the error and exits non-zero rather than guessing.
+
+After the key rows it prints this host's [attempt bound](#attempt-bound-15315)
+for that head, read from the workspace's ledger with the same rule the lane
+applies:
+
+```
+Attempts on this host (/path/to/repo/.loom/state/ratification-lane/attempts.json):
+  ee: CAPPED until 2026-11-23T10:00:00Z — 3/3 counted withheld at this head in the last 24h
+    2026-11-22T10:00:00Z verdict_placeholder
+    2026-11-22T11:00:00Z verdict_invalid
+    2026-11-22T12:00:00Z verdict_invalid
+  market: 0/3 counted withheld at this head in the last 24h
+  (launch refusals and host failures are not counted; see loom.ratification.<key>.pre_launch_failed. Delete the file to reset.)
+```
+
+A capped key is dispatched again at the printed time, or at once on a new
+head. An unreadable ledger is reported on that block (the lane treats it as
+empty) and does not make the command fail. Backoffs live in daemon memory
+and are not shown. Run it on the host whose lane you are asking about.
 
 ### Which marker is effective
 

@@ -63,8 +63,25 @@ rm -rf "$EMPTY_DIR"
 assert_eq on "$out" "loom-daemon absent -> gate on"
 
 echo "--- Doc pins ---"
-grep -q 'AC_RC=10' "$CHAMPION_MD" && pass "Step 4 skips the classifier when the switch is off" \
-    || fail "Step 4 skips the classifier when the switch is off"
+# Classifier results now feed READY_TO_UNBLOCK. Exercise the switch around the
+# shipped classifier call; this test's stub records even a discarded result.
+awk '/^  if ac_gate_enabled; then/{run=1} run{print} run && /^  fi$/{exit}' \
+    "$CHAMPION_MD" >"$STUB_DIR/gate-block"
+mkdir -p "$STUB_DIR/.loom/scripts"
+cat >"$STUB_DIR/.loom/scripts/classify-ac-verification.sh" <<'STUB'
+#!/usr/bin/env bash
+touch classified
+exit 10
+STUB
+chmod +x "$STUB_DIR/.loom/scripts/classify-ac-verification.sh"
+for setting in on off; do
+    (cd "$STUB_DIR" || exit 1
+     ac_gate_enabled() { [[ "$setting" = on ]]; }
+     PR_NUMBER=5 HEAD_SHA=1234567 issue=3 source ./gate-block)
+    if [[ -f "$STUB_DIR/classified" ]]; then actual=on; else actual=off; fi
+    assert_eq "$setting" "$actual" "Step 4 classifier invocation with AC gate $setting"
+    rm -f "$STUB_DIR/classified"
+done
 for f in "$CHAMPION_MD" "$CHAMPION_REF_MD" "$LABEL_MD"; do
     if grep -q 'champion.outOfBandAcGate' "$f" && grep -q 'loom-ui' "$f"; then
         pass "$(basename "$f") documents the key and names loom-ui"

@@ -750,14 +750,16 @@ run_sut --issue 603
 assert_eq "0" "$RC" "(w4) >64 KiB comments with no APPROVED verdict -> exit 0"
 assert_eq "OK" "$(get_field "$OUT" DECISION)" "(w4) DECISION=OK unchanged for the healthy no-match case"
 
-# (w5) mktemp itself fails (TMPDIR points at a nonexistent directory): an
-#      explicit environment error, exit 1 with an ERROR diagnostic -- not an
-#      opaque redirect failure later, and not any DECISION.
+# (w5) Force the scratch-file allocation to fail regardless of how the host's
+#      mktemp handles TMPDIR. Only this invocation sees the failing stub.
 reset_state
-TMPDIR="$STUB_DIR/no-such-tmpdir" run_sut --issue 604
+mkdir "$STUB_DIR/w5-bin"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$STUB_DIR/w5-bin/mktemp"
+chmod +x "$STUB_DIR/w5-bin/mktemp"
+PATH="$STUB_DIR/w5-bin:$PATH" run_sut --issue 604
 assert_eq "1" "$RC" "(w5) mktemp failure -> exit 1"
-assert_contains "$ERR" "ERROR" "(w5) stderr names the mktemp failure"
-assert_eq "" "$(get_field "$OUT" DECISION)" "(w5) no DECISION is emitted"
+assert_contains "$ERR" "ERROR: mktemp failed" "(w5) stderr names the mktemp failure"
+assert_eq "" "$OUT" "(w5) no DECISION is emitted"
 
 echo
 echo "--- Doc pins: champion-issue-promo.md ships the reordered write-then-verify Step 3b and the Pass 0c reconciliation loop (#6862) ---"

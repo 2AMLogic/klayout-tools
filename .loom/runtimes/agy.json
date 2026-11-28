@@ -1,0 +1,22 @@
+{
+  "runtime": "agy",
+  "tier": 3,
+  "tierLabel": "generic passthrough (unverified)",
+  "capabilities": {
+    "mcp": "no",
+    "subagents": "no",
+    "hooks": "no",
+    "skills": "no",
+    "worktreeIsolation": "no",
+    "loomControl": "no"
+  },
+  "credentialPool": "gemini",
+  "credentialEnv": "GEMINI_API_KEY",
+  "model": "gemini-4-neon",
+  "note": "Tier-3 generic passthrough adapter for Google's Antigravity CLI (`agy`), the second route of the Gemini pilot (2AMLogic/2am docs/llm-policy.md rule 6; issue #14945). worktreeIsolation and loomControl are declared 'no' EXPLICITLY: Builder and Doctor (both requirements) and Judge (loomControl) are refused by the same check-runtime-capabilities.sh mechanism that keeps every other tier-3 runtime out of worktree-mutating roles. That check is capability admission only: a role that declares no runtimeRequirements (Curator, Guide and Auditor among them) is admitted with `role '<role>' declares no runtimeRequirements` and the manifest's capabilities are never read. Admission is not completion. The pilot is verification-only: its one task is a one-shot read-only prompt (read a disposable workspace fixture, return the value in the response) or a fixture check, through an explicit `LOOM_RUNTIME=agy .loom/scripts/spawn-worker.sh -p \"<prompt>\"`, because Curator, Guide and Auditor each finish by executing a command (`loom-daemon curation-complete`, `gh`, `./.loom/scripts/create-issue.sh`) and the pinned policy denies `command(*)` and `mcp(*)` with `mcp` declared 'no'. Do not name agy in `runtimes.preference`, `runtimes.rolePreference` or `runtimes.roleDraw`. Unlike every other tier-3 runtime this manifest declares a credential pool: `credentialPool: gemini` + `credentialEnv: GEMINI_API_KEY` make `loom-daemon spawn-worker` draw the key from the gemini API-key account pool IN THE WORKER PROCESS and hand it to the child environment only — the pool is MANDATORY (a missing, unreadable, disabled, exhausted or at-cap pool refuses the launch at 78 even when an ambient GEMINI_API_KEY or cached Google login exists), because the account's maxConcurrent cap is the pilot's spend control and is shared with OpenCode's quick-flash profile through the same `gemini` namespace. An ambient GEMINI_API_KEY never reaches the child: the pool's selection replaces it. `model` is the pilot's default (the 2026-11-22 canary's `gemini-4-neon`, agy 1.5.14); LOOM_MODEL overrides it (env > manifest) and is passed to the CLI exactly once via launch.modelFlag. Effort is deliberately not mapped: the canary could not tell which effort level a bare model name selects, and `agy models` lists -low/medium/high/xhigh variants an operator can pass through explicitly. The `--settings <isolated>/settings.json` + `--sandbox` argv come from spawn-agy.sh, not from launch.extraArgs, because the settings path is per-launch (a fresh isolated HOME that also defeats agy's cached-login path). That settings file IS the permission policy (#15474): the default execution mode, `toolPermission: request-review`, and explicit rules that hold in every mode — the workspace readable, `write_file(*)`, `command(*)` and `mcp(*)` denied — written to the `--settings` path and to the CLI's documented default settings location under the same isolated HOME. `--sandbox` is terminal containment only, never the permission policy, and the auto-approve flag is never passed. spawn-agy.sh defaults `AGY_CLI_DISABLE_AUTO_UPDATE=true` (a non-empty operator-exported value wins) and refuses at 78, before the CLI runs, any argument — in LOOM_GENERIC_EXTRA_ARGS or in the worker's own argv — that would replace or contradict the policy; compatible extra arguments follow it. Rule enforcement is recorded, not assumed: on build 1.5.18-6386224290725888 a guarded read_file returned its fixture value and edit_file, write_file and run_command were each refused with `Matches user-configured deny rule` (#15474); MCP enforcement was not exercised. That result covers the recorded adapter, loom-daemon and host configuration only — treat any other build or configuration as write-capable. See defaults/docs/runtime-adapters.md's agy section for the recorded verification and its scope, the pins, the update-control evidence and the live-verification tracking issue.",
+  "launch": {
+    "cliBin": "agy",
+    "promptFlag": "-p",
+    "modelFlag": "--model"
+  }
+}

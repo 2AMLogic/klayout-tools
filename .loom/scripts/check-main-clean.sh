@@ -230,6 +230,38 @@ LOOM_OWNED_PREFIXES=(
     # so filtering it cannot mask contamination. Independent of the .gitignore
     # fix, which only reaches a consumer repo after a resync.
     ".loom-local/"
+    # Operator stop requests (#15545). `signal.sh stop` writes
+    # `.loom/signals/stop-<name>`; the daemon only tests it exists
+    # (`check_stop_signals` in agent_session/spawn.rs). It is operator-written,
+    # so it is not in DAEMON_RUNTIME_PATTERNS, but in a consumer repo whose
+    # managed .gitignore block predates the `.loom/signals/` rule it surfaces as
+    # `?? .loom/signals/`: exit 3 naming the operator's stop as builder
+    # contamination, and `--quarantine` stashes it, silently consuming the stop
+    # request. The trailing slash matches the directory git reports and any
+    # child path, and not a lookalike such as `.loom/signals-old/`.
+    ".loom/signals/"
+    # Daemon-written token-pool runtime files (#15479): the per-repo health
+    # cache and its sibling lock (#5014), and the ranking the refresh tick
+    # rewrites every cycle (#14584). The daemon writes them into every
+    # workspace now, while their ignore rules only reach a consumer repo's
+    # managed block after a resync — until then each is `?? <path>`: exit 3
+    # naming the daemon's own file as builder contamination, and eligible for
+    # `--quarantine`. Same two-defence reasoning as `.loom-local/` above
+    # (#8075). The lock is an empty `mkdir` directory, which `git status` never
+    # reports; it is listed so the three travel together. Machine-checked
+    # against DAEMON_RUNTIME_PATTERNS in loom-daemon/src/init/post_init.rs: a
+    # daemon-written path added there must be added here too.
+    ".loom/account-health.json"
+    ".loom/account-health.lock"
+    ".loom/account-ranking.codex"
+    # The other two daemon-written entries of the audit (#15488), both
+    # directories: `.loom/claims/` (`loom-daemon claim` writes
+    # `issue-<N>.lock/claim.json`) and `.loom/metrics/` (`validate-phase`'s
+    # recovery path writes `recovery-events.json`). Same stale-block hazard
+    # as the three above; listed with their trailing `/` so the subtree
+    # match in is_loom_owned covers every file either writer produces.
+    ".loom/claims/"
+    ".loom/metrics/"
 )
 
 # ---- Loom-owned stash producers (#5185) ----------------------------------

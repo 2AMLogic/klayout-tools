@@ -1,0 +1,5 @@
+# Synthetic reduction of a workflow the YAML reader cannot parse (#14915):
+# the structural secrets classifier must report it as indeterminate (exit 2),
+# never as clear. Champion holds the PR (fail closed).
+name: broken
+jobs: [

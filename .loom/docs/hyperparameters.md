@@ -3,8 +3,8 @@
 **Issue #9683.** One typed, validated surface for Loom's operational
 tunables — the knobs that govern dispatch cadence, concurrency, lease
 lifetimes, and review-debt backoff — with run-level provenance (a digest
-stamped onto every telemetry span) and a programmatic override vector for
-external optimizers (CMA-ES, Bayesian search).
+stamped onto every telemetry span) and per-field provenance of which
+config tier supplied each value.
 
 Implementation: `loom-daemon/src/hyperparams.rs`. Consumers overlay their
 legacy config readers (`work_finder/config.rs`, `work_finder/build_backoff.rs`,
@@ -139,8 +139,8 @@ The `champion` values enter the run digest. Champion's shell snippets read
 the `LOOM_CHAMPION_*` env vars directly, so the resolver honours them at the
 top tier (provenance `env`) with the shell's own parse: a non-negative
 integer wins (`0` included, unclamped), empty/non-integer falls through. The
-daemon does not yet export block/vector values into role sessions (follow-up
-on #10753): until it does, a config/vector value is digested but only the env
+daemon does not yet export block values into role sessions (follow-up
+on #10753): until it does, a config value is digested but only the env
 var changes Champion's behaviour.
 
 ### Role-runner knobs (`autonomous.roleRunner.*`)
@@ -172,16 +172,15 @@ semantics, is in [`daemon-reference.md`](daemon-reference.md) (search for
 
 ```
 single-knob env var                      (one-off operator override, one run)
-  > $LOOM_HYPERPARAMS vector             (JSON, programmatic — optimizer loops)
   > "hyperparameters" config block       (committed, validated, canonical)
   > legacy autonomous.* config key       (still honored; block wins where both set)
   > built-in default                     (the constant each knob used before)
 ```
 
-`$LOOM_HYPERPARAMS` is a JSON object whose keys may be nested
-(`{"dispatch":{"maxConcurrent":6}}`) or flat dotted
-(`{"dispatch.maxConcurrent":6}`). It requires no file edit, so an optimizer
-loop can tune a whole run with one env export.
+> **The optimizer’s JSON environment vector is retired (#11107).** The daemon
+> and `loom-daemon hyperparams` log one warning when they ignore the retired
+> setting. Use the `hyperparameters` config block or a single-knob environment
+> variable.
 
 Notes:
 
@@ -199,15 +198,14 @@ Notes:
 
 `hyperparams::startup_init` runs once at daemon startup (before any span
 exists) and **aborts startup** when the hyperparameters surface — the
-committed block and/or the env vector — has:
+committed block — has:
 
 - an unknown group or unknown key inside a known group (typo catcher),
 - a wrongly-typed value, or a value outside its documented range,
 - a crossed `rework` pair (`buildBackoffLow >= buildBackoffHigh`).
 
 The error names every offending dotted path, so an optimizer that samples an
-invalid vector learns exactly which coordinate was rejected. An unparseable
-`$LOOM_HYPERPARAMS` is likewise fatal at startup.
+invalid config learns exactly which coordinate was rejected.
 
 Legacy `autonomous.*` values are **never** gated by this — those keys keep
 their own documented soft-fallback semantics (e.g. a crossed legacy backoff
@@ -223,8 +221,7 @@ canonical JSON — in a process global. The trace provenance stamper
 **`loom.hyperparams.digest`** on every `loom.*` span, alongside
 `loom.daemon.revision` and `loom.prompts.digest` (policy:
 [trace-identity](trace-identity.md)). A run's telemetry is therefore
-reproducible from the exact hyperparameter vector it ran under: re-set the
-same `$LOOM_HYPERPARAMS` (or config block), get the same digest.
+reproducible from the exact hyperparameter vector it ran under.
 
 A single-step run that names a prompt modifier (`LOOM_PROMPT_MODIFIER`, #15017) has
 its name folded into the digest as a trailing `promptModifier` member, so runs that
@@ -244,36 +241,16 @@ $ loom-daemon hyperparams --validate   # run the startup gate without a daemon
 ```
 
 `sources` reports, per field, which tier supplied it
-(`env | env-vector | config | legacy | default`; `env` is champion-only) —
-the first thing to check when an injected vector "didn't take".
+(`env | config | legacy | default`; `env` is champion-only) —
+the first thing to check when a value "didn't take".
 
 `--validate` runs the same strict gate daemon startup enforces (unknown
-keys, types, ranges, crossed backoff pair, unparseable vector) against a
+keys, types, ranges, crossed backoff pair) against a
 workspace **without booting one** — a config lint for a proposed
-`.loom/config.json` edit or `$LOOM_HYPERPARAMS` vector. Exit 0 and
+`.loom/config.json` edit. Exit 0 and
 `hyperparams: OK` when valid; non-zero naming every offending path
 otherwise. Combine with `--json` for a machine-readable violations array
 (#9768).
-
-## Optimizer recipe (CMA-ES)
-
-```bash
-# 1. Baseline
-digest=$(loom-daemon hyperparams --json | jq -r .digest)
-
-# 2. Sample a candidate vector and run the fleet under it
-export LOOM_HYPERPARAMS='{"dispatch.maxConcurrent": 5, "rework.buildBackoffHigh": 55}'
-restart-daemon                        # startup validates; invalid samples fail fast
-
-# 3. Confirm the injection took
-loom-daemon hyperparams --json | jq '.sources["dispatch.maxConcurrent"]'  # env-vector
-
-# 4. Attribute outcomes by digest: every span of the run carries
-#    loom.hyperparams.digest — group cycle-time / token-efficiency metrics on it.
-```
-
-Invalid samples abort startup with the offending path named — treat a
-non-booting daemon as an infeasible point, not a crash.
 
 ## Merge-queue mode: enablement prerequisites and rollback
 

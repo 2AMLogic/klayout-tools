@@ -89,6 +89,7 @@ echo ""
 echo "Test 4: render_plan_body() renders one section per priority level"
 
 RPB_BODY="$(awk '/^render_plan_body\(\) \{/{flag=1} flag{print} /^\}/{if(flag){exit}}' "$GUIDE_MD")"
+HELPERS_BODY="$(awk -f "$SCRIPT_DIR/lib/guide-plan-helpers.awk" "$GUIDE_MD")" || exit 1
 if [[ -z "$RPB_BODY" ]]; then
     fail "could not extract render_plan_body() from guide.md"
 elif ! command -v jq >/dev/null 2>&1; then
@@ -122,7 +123,7 @@ STUB
     printf '%s' '[{"number":9001,"title":"Very important issue"}]' \
         > "$FIX/issue-loom_very-important.json"
 
-    RENDER="$(LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+    RENDER="$(LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
     SECTION="$(awk '/^## Important$/{f=1;next} f && /^## /{exit} f' <<<"$RENDER")"
     if grep -q '^- \*\*#4765\*\*: Important issue A$' <<<"$SECTION" && grep -q '^- \*\*#8191\*\*: Important issue B$' <<<"$SECTION"; then
         pass "the Important section lists every loom:important issue"

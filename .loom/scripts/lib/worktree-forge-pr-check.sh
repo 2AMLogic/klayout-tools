@@ -426,7 +426,7 @@ _worktree_resolve_origin_branch_reuse() {
     # is `contract`-category and its growth has no override, see
     # `.loom/docs/shell-language-policy.md`).
     local branch="$1" issue_number="$2" json_output="$3" base_display="$4" base_ref="$5" default_branch="$6"
-    local origin_fetch_result origin_fetch_output
+    local origin_fetch_result origin_fetch_output closed_pr_rc=0
     # #9106: $branch reaches `git fetch` as a bare operand. worktree.sh derives
     # it from the issue number or an explicit --branch argument, but this lib is
     # sourced rather than exec'd, so it validates its own input instead of
@@ -487,7 +487,13 @@ _worktree_resolve_origin_branch_reuse() {
             # separately, by the one implementation of it:
             # `loom-daemon worktree-closed-pr-branch` (exit 1 = refuse, having
             # already printed its own message; 0 = proceed and reuse, which is
-            # also what EVERY undecidable probe returns). The `--help` probe
+            # also what EVERY undecidable probe returns). Only 1 refuses:
+            # any other exit is "could not check" and proceeds like the forge
+            # outage above — notably 2, which a `loom-tools` wrapper answers
+            # when its mode or fleet route will not resolve (#15650; a host
+            # misconfiguration is not a fact about the branch, and its
+            # complaint is already on stderr). A bare `|| exit 1` read that as
+            # a refusal with no refusal document on fd 3. The `--help` probe
             # ahead of it skips the guard on a daemon predating the
             # subcommand — degrading to the pre-#9083 reuse rather than
             # emitting clap usage text — the same shape
@@ -496,7 +502,7 @@ _worktree_resolve_origin_branch_reuse() {
             # `contract`-category and the portable-shell ratchet gives its
             # growth no override; the whole decision lives in
             # `loom-daemon/src/worktree_cli/closed_pr_branch.rs`.
-            [[ -z "${_WT_DAEMON_BIN:-}" ]] || ! "$_WT_DAEMON_BIN" worktree-closed-pr-branch --help >/dev/null 2>&1 || "$_WT_DAEMON_BIN" worktree-closed-pr-branch --branch "$branch" --issue "$issue_number" --base-display "$base_display" --repo-root "${WORKTREE_REPO_ROOT:-$PWD}" --json-output "$json_output" >&3 || exit 1
+            [[ -z "${_WT_DAEMON_BIN:-}" ]] || ! "$_WT_DAEMON_BIN" worktree-closed-pr-branch --help >/dev/null 2>&1 || { "$_WT_DAEMON_BIN" worktree-closed-pr-branch --branch "$branch" --issue "$issue_number" --base-display "$base_display" --repo-root "${WORKTREE_REPO_ROOT:-$PWD}" --json-output "$json_output" >&3 || closed_pr_rc=$?; [[ "$closed_pr_rc" -ne 1 ]] || exit 1; }
             _WT_REUSE_REMOTE_BRANCH=true
         fi
     else

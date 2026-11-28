@@ -604,6 +604,87 @@ output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$STUB_DIR
 assert_contains "stub-claude got token=caller-supplied" "$output" \
     "explicit CLAUDE_CODE_OAUTH_TOKEN is preserved"
 
+# Test: a seat-stored session resume pins its account (issue #14981). The
+# daemon exports LOOM_RESUME_ACCOUNT; spawn-claude.sh must hand it to
+# `tokens select --pin-account` (an exported LOOM_TOKEN_NAME would be
+# overwritten by the eval of the selection output) and must fail closed,
+# never run the resume in another account.
+PIN_WS="$(mktemp -d)"
+mkdir -p "$PIN_WS/.loom/tokens" "$PIN_WS/cfg"
+echo -n "fake-token-alpha" > "$PIN_WS/.loom/tokens/alpha.token"
+echo -n "fake-token-beta" > "$PIN_WS/.loom/tokens/beta.token"
+_pin_hits=0
+for _i in 1 2 3 4 5 6; do
+    output=$(LOOM_WORKSPACE="$PIN_WS" LOOM_SHARED_TOKENS_DIR="" LOOM_RESUME_ACCOUNT=beta \
+        LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$STUB_DIR:$PATH" \
+        "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+    [[ "$output" == *"stub-claude got token=fake-token-beta"* ]] && _pin_hits=$((_pin_hits + 1))
+done
+assert_eq "6" "$_pin_hits" \
+    "LOOM_RESUME_ACCOUNT=beta selects beta on every draw, never alpha (#14981)"
+
+output=$(LOOM_WORKSPACE="$PIN_WS" LOOM_SHARED_TOKENS_DIR="" LOOM_RESUME_ACCOUNT=gone \
+    LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$STUB_DIR:$PATH" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1; echo "exit=$?")
+assert_contains "exit=78" "$output" \
+    "a pinned account that is missing fails the launch with EX_CONFIG (#14981)"
+assert_not_contains "stub-claude got token" "$output" \
+    "a pinned account that is missing does not fall back to another account (#14981)"
+
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) beta 401 unauthorized" > "$PIN_WS/.loom/tokens/.bad_tokens"
+output=$(LOOM_WORKSPACE="$PIN_WS" LOOM_SHARED_TOKENS_DIR="" LOOM_RESUME_ACCOUNT=beta \
+    LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$STUB_DIR:$PATH" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1; echo "exit=$?")
+assert_contains "exit=78" "$output" \
+    "a pinned account that is bad-marked fails the launch with EX_CONFIG (#14981)"
+assert_not_contains "stub-claude got token" "$output" \
+    "a pinned account that is bad-marked does not fall back to another account (#14981)"
+rm -f "$PIN_WS/.loom/tokens/.bad_tokens"
+
+# A caller-supplied credential skips selection, so the pin cannot be honoured
+# unless it already names that account.
+output=$(LOOM_WORKSPACE="$PIN_WS" LOOM_SHARED_TOKENS_DIR="" LOOM_RESUME_ACCOUNT=beta \
+    LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$STUB_DIR:$PATH" \
+    CLAUDE_CODE_OAUTH_TOKEN="caller-supplied" LOOM_TOKEN_NAME=alpha \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1; echo "exit=$?")
+assert_contains "exit=78" "$output" \
+    "a pin is refused when a caller-supplied credential runs another account (#14981)"
+
+# The recorded session store must be the one this launch uses.
+output=$(LOOM_WORKSPACE="$PIN_WS" LOOM_SHARED_TOKENS_DIR="" LOOM_RESUME_ACCOUNT=beta \
+    LOOM_RESUME_SESSION_STORE="$PIN_WS/elsewhere" CLAUDE_CONFIG_DIR="$PIN_WS/cfg" \
+    LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$STUB_DIR:$PATH" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1; echo "exit=$?")
+assert_contains "exit=78" "$output" \
+    "a pinned session store that is not this launch's config dir is refused (#14981)"
+output=$(LOOM_WORKSPACE="$PIN_WS" LOOM_SHARED_TOKENS_DIR="" LOOM_RESUME_ACCOUNT=beta \
+    LOOM_RESUME_SESSION_STORE="$PIN_WS/cfg/" CLAUDE_CONFIG_DIR="$PIN_WS/cfg" \
+    LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$STUB_DIR:$PATH" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "stub-claude got token=fake-token-beta" "$output" \
+    "a pinned session store that matches this launch's config dir proceeds (#14981)"
+
+# A daemon whose `tokens select` predates --pin-account would silently draw
+# another account: refuse instead of degrading like --auto-unpin does.
+OLD_BIN_DIR="$(mktemp -d)"
+cat > "$OLD_BIN_DIR/loom-daemon" <<'OLDBIN'
+#!/usr/bin/env bash
+case "$*" in
+    "tokens select --help") echo "Usage: loom-daemon tokens select [--auto-unpin] [--model M]" ;;
+    "--version") echo "loom-daemon 0.0.0-old" ;;
+    *) echo "old daemon must not select: $*" >&2; exit 99 ;;
+esac
+OLDBIN
+chmod +x "$OLD_BIN_DIR/loom-daemon"
+output=$(LOOM_WORKSPACE="$PIN_WS" LOOM_SHARED_TOKENS_DIR="" LOOM_RESUME_ACCOUNT=beta \
+    LOOM_DAEMON_BIN="$OLD_BIN_DIR/loom-daemon" PATH="$STUB_DIR:$PATH" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1; echo "exit=$?")
+assert_contains "needs a loom-daemon whose 'tokens select' supports --pin-account" "$output" \
+    "a daemon without --pin-account fails a pinned resume closed (#14981)"
+assert_contains "exit=78" "$output" \
+    "a daemon without --pin-account exits EX_CONFIG on a pinned resume (#14981)"
+rm -rf "$PIN_WS" "$OLD_BIN_DIR"
+
 # Test: missing tokens dir → exit 78 with helpful message.
 # LOOM_SHARED_TOKENS_DIR="" disables the #3938 shared-pool fallback so this
 # case deterministically hard-fails regardless of the host's ~/.loom/tokens.

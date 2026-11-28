@@ -684,6 +684,20 @@ a later pass to sort out.
 
 ### Unblocking Logic
 
+For the **issue dependency check** (#15528), run `parse_dependencies "$body"`
+even when working by hand. It reads ordinary declarations such as
+`Depends on #962` and unchecked dependency boxes. For park records it uses
+`loom-daemon park-record parse`. Pass only the printed dependencies to
+`resolve_dep_states`. Proceed through the remaining gates only when the resolver
+reports all dependencies resolved and `deps_fully_resolved` confirms every ref.
+
+If `parse_dependencies` prints nothing, skip the dependency-based label edit
+and “Unblocked” comment for that issue. On #8698, a checked box and two park
+reasons cited closed issue #8674, but neither park declared it as a blocker.
+Never fill an empty result from a checked box, `reason="..."` or other prose.
+Continue the PR evidence check, awaiting-revision conversion and due transient
+park release under their own rules below.
+
 Permanent block (#8742): `<!-- loom:permanent-block -->` (own line; quoted prose
 doesn't count) counts from a trusted comment, or the body **only if its author is trusted** (`--with-body`). Champion
 and `check_and_unblock_prs` check the same. Removing `loom:blocked` ⇒ audit comment.
@@ -950,12 +964,13 @@ convert_awaiting_revision_parks() {
 ### Example Unblocking Flow
 
 ```bash
-# 1. Issue #963 has loom:blocked, body contains "Depends on #962"
-gh issue view 963 --json labels,body
+# 1. Blocked issue #963 has an ordinary dependency declaration, "Depends on #962".
+body=$(gh issue view 963 --json body --jq .body)
+deps=$(parse_dependencies "$body")  # deps is 962
 
-# 2. Check if #962 is closed
-gh issue view 962 --json state
-# → state: CLOSED ✓
+# 2. The dependency check in check_and_unblock verifies that all parsed refs resolved.
+resolve_dep_states "$deps"
+# → true on line 1, #962 on line 2
 
 # 3. Superseding-block gate (#4634): any linked PR still open and blocked?
 has_superseding_block 963
@@ -999,7 +1014,8 @@ pr_state=$(gh pr view "$pr_number" --json state,mergedAt --jq '.state')
 
 ### When NOT to Unblock
 
-- If no parseable dependencies found → Skip (may need manual review)
+- If `parse_dependencies` prints nothing for an issue, skip only its
+  dependency-based unblock (#15528). Continue the other sweep checks above.
 - If any dependency is still OPEN → Keep blocked
 - **If a linked implementation PR is still OPEN with `loom:changes-requested`,
   `loom:blocked`, or `loom:operator` → Keep blocked, even if every
@@ -2503,6 +2519,44 @@ open_pr_annotation() {
       end'
 }
 
+# #15325: the hold suffix an Approved / Operator Attention PR row carries.
+# Reads ONE PR object (needs `.labels` and `.body`) on stdin. Empty output when
+# the PR carries neither `loom:operator` nor `loom:blocked` — an unheld row is
+# byte-identical to what it always was, and a park record on an unheld PR is
+# stale and ignored. A held PR gets ` *(held)*`, or ` *(held: <reason>)*` when
+# `loom-daemon park-record parse --json` (the daemon parser, which already
+# ignores markers demoted to code spans, #13895) yields a live record: the LAST
+# record's `reason`, else ` blocked by #N` from its blocker. The reason is PR
+# body free text, so it is flattened to one line, stripped of Markdown/HTML
+# metacharacters and capped at 160 characters. Nothing is inferred from the
+# title or other prose, and any parse failure degrades to bare ` *(held)*`.
+# No clock reads: output depends on the PR object alone (#6993).
+# Called by BOTH render_plan_body() and verify_plan_provenance() — one
+# definition, so the gate cannot drift from the render (#14785 pattern).
+approved_hold_suffix() {
+  local pr recs out
+  pr="$(cat)"
+  printf '%s' "$pr" | jq -e 'any(.labels[]?.name; . == "loom:operator" or . == "loom:blocked")' >/dev/null 2>&1 || return 0
+  recs="$(printf '%s' "$pr" | jq -r '.body // ""' | loom-daemon park-record parse --json 2>/dev/null)" || recs=""
+  [ -n "$recs" ] || recs='{}'
+  out="$(printf '%s' "$recs" | jq -r '
+    def clean: tostring
+      | gsub("[\\r\\n\\t]+"; " ") | gsub("`"; "\u0027") | gsub("\\|"; "/") | gsub("_"; "-")
+      | gsub("[*<>\\[\\]\\\\]"; "") | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "");
+    (.records // [] | last // {}) as $r
+    | (($r.reason // "") | if type == "string" then clean else "" end) as $why
+    | (if ($r.blocker | type) == "number" and $r.blocker > 0
+       then "blocked by "
+            + (if ($r.blocker_repo | type) == "string" and ($r.blocker_repo | test("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"))
+               then $r.blocker_repo else "" end)
+            + "#" + ($r.blocker | tostring)
+       else "" end) as $blk
+    | (if $why != "" then $why else $blk end)
+    | if length > 160 then .[0:159] + "…" else . end
+    | if . == "" then " *(held)*" else " *(held: " + (sub(" $"; "")) + ")*" end' 2>/dev/null)" || out=""
+  printf '%s' "${out:- *(held)*}"
+}
+
 # Render the plan body EXACTLY as it will be written between the markers —
 # headings, blurbs, blank lines and all. `render_plan_body` is the single
 # source of truth for that region's shape.
@@ -2630,9 +2684,33 @@ render_plan_body() {
   # below. Derived from $approved_json alone (no new forge query, the #6457
   # discipline); a PR with empty closingIssuesReferences renders exactly as
   # before. `held` bullets stay unchanged.
+  #
+  # #15325: a held approval (`loom:operator`/`loom:blocked`) is not queued for
+  # Champion auto-merge, so its row — under Approved AND Operator Attention —
+  # carries approved_hold_suffix() (` *(held)*` / ` *(held: <reason>)*`, the
+  # reason from the PR's live park record). The suffixes are computed once per
+  # held PR into `hold_sfx_json` ({"<number>": "<suffix>"}; unheld PRs have no
+  # entry, so their rows are unchanged) and both lists below stay jq pipelines
+  # over the one `$approved_json`. verify_plan_provenance() calls the same helper.
+  local hold_sfx_json='{}' hp_json hp_sfx
+  while IFS= read -r hp_json; do
+    [ -n "$hp_json" ] || continue
+    hp_sfx="$(approved_hold_suffix <<<"$hp_json")"
+    hold_sfx_json="$(jq -c --arg n "$(jq -r '.number' <<<"$hp_json")" --arg s "$hp_sfx" '. + {($n): $s}' <<<"$hold_sfx_json")"
+  done <<<"$(printf '%s' "$approved_json" | jq -c '.[] | select([(.labels // [])[].name] | index("loom:operator") or index("loom:blocked"))')"
   approved=$(printf '%s' "$approved_json" | \
-    jq -r '.[] | ([(.closingIssuesReferences // [])[].number] | sort) as $closes | "- **#\(.number)**: \(.title)" + (if ($closes | length) > 0 then " — closes " + ($closes | map("#" + tostring) | join(", ")) else "" end)')
+    jq -r --argjson sfx "$hold_sfx_json" '.[] | ([(.closingIssuesReferences // [])[].number] | sort) as $closes | "- **#\(.number)**: \(.title)" + (if ($closes | length) > 0 then " — closes " + ($closes | map("#" + tostring) | join(", ")) else "" end) + ($sfx[(.number | tostring)] // "")')
   held=$(printf '%s' "$approved_json" | jq -r '.[] | select([(.labels // [])[].name] | index("loom:operator") or index("loom:blocked")) | "- **#\(.number)**: \(.title)"')
+  # #15325: the held rows keep the plain jq derivation above (a standalone,
+  # self-contained filter); each row then gains the same suffix its Approved
+  # row carries, looked up by PR number in `hold_sfx_json`.
+  local held_row held_n held_out=""
+  while IFS= read -r held_row; do
+    [ -n "$held_row" ] || continue
+    held_n="${held_row#- **#}"; held_n="${held_n%%\**}"
+    held_out+="${held_row}$(jq -r --arg n "$held_n" '.[$n] // ""' <<<"$hold_sfx_json")"$'\n'
+  done <<<"$held"
+  held="${held_out%$'\n'}"
   # #14785: the linked-issue set now comes from the full inventory via
   # open_pr_linkage_rows() — the same closes-graph ∪ #6216-phrase ∪
   # exact-branch union the native OPEN_PR admission leg uses — instead of
@@ -2703,7 +2781,7 @@ render_plan_body() {
       ((any(.labels[]?.name; . == "loom:building") | not) or any(.labels[]?.name; . as $n | $op | index($n))))] | length')
 
   section "Operator Attention: Merge-Risk-Hold Pileup" \
-    "Judge-approved PRs under a hold (\`loom:blocked\` or \`loom:operator\`) — only a human merge decision is missing." \
+    "Judge-approved PRs under a hold (\`loom:blocked\` or \`loom:operator\`) — a human merge decision, or the prerequisite shown, is missing." \
     "$held"
   echo
   section "Very Important" "\`loom:very-important\` (one counts per workspace); every stage takes these first." "$vimp"
@@ -2720,7 +2798,7 @@ render_plan_body() {
   echo
   section "PRs Awaiting Review" "PRs waiting on Judge (\`loom:review-requested\`)." "$review"
   echo
-  section "Approved (Awaiting Merge)" "PRs that passed review and are queued for Champion auto-merge (\`loom:pr\`)." "$approved"
+  section "Approved (Awaiting Merge)" "PRs that passed review (\`loom:pr\`); unmarked PRs are queued for Champion auto-merge, PRs marked \`*(held …)*\` are not (the hold decides)." "$approved"
   echo
   section "Proposed" "Issues carrying \`loom:curated\`." "$curated"
   echo
@@ -2946,7 +3024,8 @@ update_work_plan() {
 # unrelated titles. Zero bullets passes; a failed lookup fails closed.
 #
 # SUFFIX LOCKSTEP: Approved rows append ` — closes #A, #B` for the PR's
-# sorted closing refs. "Issues with Open PRs (Not Dispatchable)" rows
+# sorted closing refs, then the approved_hold_suffix() hold marker (#15325;
+# Operator Attention rows are title + that marker alone). "Issues with Open PRs (Not Dispatchable)" rows
 # (#14785) append the open_pr_annotation() suffix, verified against a fresh
 # inventory read through the SAME helper the render used. Other sections may
 # append one section tag (` *(curated)*` / ` *(architect)*` / ` *(hermit)*`)
@@ -2954,12 +3033,13 @@ update_work_plan() {
 # can be title text.
 # Keep these rules paired with the render in test-guide-work-plan-provenance.sh.
 verify_plan_provenance() {
-  local body="$1" line num rest got tag ok bad=0 approved=0 openpr=0 approved_json="" openpr_inv="" ann refs
+  local body="$1" line num rest got tag ok bad=0 approved=0 openpr=0 opatt=0 approved_json="" openpr_inv="" ann refs hsfx
   while IFS= read -r line; do
     case "$line" in
-      '## Approved (Awaiting Merge)') approved=1; openpr=0; continue ;;
-      '## Issues with Open PRs (Not Dispatchable)') openpr=1; approved=0; continue ;;
-      '## '*) approved=0; openpr=0; continue ;;
+      '## Approved (Awaiting Merge)') approved=1; openpr=0; opatt=0; continue ;;
+      '## Issues with Open PRs (Not Dispatchable)') openpr=1; approved=0; opatt=0; continue ;;
+      '## Operator Attention: Merge-Risk-Hold Pileup') opatt=1; approved=0; openpr=0; continue ;;
+      '## '*) approved=0; openpr=0; opatt=0; continue ;;
     esac
     num="${line#- **#}"; num="${num%%\**}"
     rest="${line#*\*\*: }"
@@ -2986,11 +3066,12 @@ verify_plan_provenance() {
       fi
       continue
     fi
-    if [ "$approved" -eq 1 ]; then
-      # Fetch once on the first Approved row, even a plain one: omitting
-      # every ref must fail just as changing a single number does.
+    if [ "$approved" -eq 1 ] || [ "$opatt" -eq 1 ]; then
+      # Fetch once on the first Approved / Operator Attention row, even a
+      # plain one: omitting every ref must fail just as changing a single
+      # number does. `body` rides along for approved_hold_suffix() (#15325).
       if [ -z "$approved_json" ]; then
-        approved_json=$("$GH_READ" pr list --label "loom:pr" --state open --limit 200 --json number,labels,closingIssuesReferences \
+        approved_json=$("$GH_READ" pr list --label "loom:pr" --state open --limit 200 --json number,labels,body,closingIssuesReferences \
           --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)]') || return 1
       fi
       # jq 1.6 exits 0 on zero-byte or whitespace-only input without consuming
@@ -3003,8 +3084,18 @@ verify_plan_provenance() {
         | arrays | select(all(.[]; .number | type == "number")) | map(.number) | sort | map("#" + tostring) | join(", ")' <<<"$approved_json") || {
         echo "provenance: cannot verify closing refs of #$num in $GUIDE_REPO" >&2; return 1
       }
-      if [ "$rest" != "$got${refs:+ — closes $refs}" ]; then
-        echo "provenance: #$num Approved title or closing refs differ from $GUIDE_REPO" >&2; bad=1
+      # #15325: the hold suffix is re-derived through the SAME helper the
+      # render used, from the fresh PR object (labels + body), so a tampered
+      # or dropped ` *(held…)*` fails like a wrong closes list does. The
+      # Operator Attention section carries the suffix but never the closes
+      # list (held rows stay `title` + suffix).
+      hsfx="$(jq -c --argjson n "$num" '.[] | select(.number == $n)' <<<"$approved_json" | approved_hold_suffix)" || return 1
+      if [ "$opatt" -eq 1 ]; then
+        if [ -z "$hsfx" ] || [ "$rest" != "$got$hsfx" ]; then
+          echo "provenance: #$num Operator Attention row does not match a held approval in $GUIDE_REPO" >&2; bad=1
+        fi
+      elif [ "$rest" != "$got${refs:+ — closes $refs}$hsfx" ]; then
+        echo "provenance: #$num Approved title, closing refs or hold suffix differ from $GUIDE_REPO" >&2; bad=1
       fi
       continue
     fi

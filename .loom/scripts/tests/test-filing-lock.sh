@@ -460,6 +460,135 @@ assert_eq "$GOT" "" "the captain release stays silent"
 rm -rf "$CAP_DIR"
 
 echo ""
+echo "=== atomic mkdir backend avoids uutils coreutils TOCTOU (#15265) ==="
+
+# Ubuntu 26.04 ships uutils coreutils 0.10.0 as /usr/bin/mkdir, which checks
+# path.exists() then returns Ok(()) on EEXIST when path.is_dir() even without
+# -p (breaking mkdir locking under concurrency). Simulate that exact broken
+# uutils mkdir on PATH and verify filing-lock bypasses it: first via gnumkdir
+# when available, and via python3/perl direct mkdir(2) when gnumkdir is absent.
+REAL_MKDIR="$(command -v gnumkdir 2>/dev/null || command -v mkdir)"
+
+# Helper: build a fake PATH bin dir with a simulated broken uutils mkdir that
+# exits 0 even when the target directory already exists (the non-atomic bug),
+# while forwarding `mkdir -p` to the real binary for store setup.
+REAL_BASH="$(command -v bash)"
+make_uutils_stub() {
+    local bindir="$1" marker="$2"
+    cat > "$bindir/mkdir" <<EOF
+#!$REAL_BASH
+if [[ "\${1:-}" == "--version" ]]; then
+    echo "mkdir (uutils coreutils) 0.10.0"
+    exit 0
+fi
+if [[ "\${1:-}" == "-p" ]]; then
+    exec "$REAL_MKDIR" "\$@"
+fi
+echo "called:\$*" >> "$marker"
+# Buggy uutils behavior: ignore EEXIST on an existing directory and exit 0.
+"$REAL_MKDIR" "\$@" 2>/dev/null || [[ -d "\${!#}" ]]
+EOF
+    chmod +x "$bindir/mkdir"
+}
+
+# Case 1: uutils mkdir on PATH + gnumkdir present -> uses gnumkdir, never the
+# broken uutils mkdir, and rejects a contended acquire with rc 75 (DEFER).
+DIR="$(new_store)"
+(
+    FAKE_BIN="$(mktemp -d "$TMPROOT/fake-gnu.XXXXXX")"
+    UUTILS_LOG="$FAKE_BIN/uutils-called.log"
+    GNU_LOG="$FAKE_BIN/gnu-called.log"
+    make_uutils_stub "$FAKE_BIN" "$UUTILS_LOG"
+    cat > "$FAKE_BIN/gnumkdir" <<EOF
+#!/usr/bin/env bash
+echo "called:\$*" >> "$GNU_LOG"
+exec "$REAL_MKDIR" "\$@"
+EOF
+    chmod +x "$FAKE_BIN/gnumkdir"
+
+    export PATH="$FAKE_BIN:$PATH"
+    export LOOM_FILING_LOCK_DIR="$DIR"
+    export LOOM_FILING_LOCK_WAIT_SECS=1
+
+    loom_filing_lock_acquire "first" >/dev/null 2>&1 || exit 1
+    [[ ! -e "$UUTILS_LOG" ]] || { echo "broken uutils mkdir was called: $(cat "$UUTILS_LOG")" >&2; exit 1; }
+    [[ -s "$GNU_LOG" ]] || { echo "gnumkdir was NOT called" >&2; exit 1; }
+
+    # A second contender (without LOOM_FILING_LOCK_HELD) must see EEXIST and defer (75).
+    RC2=0
+    (
+        unset LOOM_FILING_LOCK_HELD
+        loom_filing_lock_acquire "second" >/dev/null 2>&1
+    ) || RC2=$?
+    loom_filing_lock_release >/dev/null 2>&1
+    [[ "$RC2" -eq "$LOOM_FILING_LOCK_DEFER_RC" ]] || { echo "contender rc=$RC2, want 75" >&2; exit 1; }
+    exit 0
+) && CASE_RC=0 || CASE_RC=$?
+assert_true "$CASE_RC" "uutils mkdir on PATH is bypassed in favor of gnumkdir (#15265)"
+
+# Case 2: uutils mkdir on PATH + NO gnumkdir -> falls back to direct mkdir(2)
+# via python3 or perl and still rejects a contended acquire with rc 75 (DEFER).
+DIR="$(new_store)"
+(
+    FAKE_BIN="$(mktemp -d "$TMPROOT/fake-fallback.XXXXXX")"
+    UUTILS_LOG="$FAKE_BIN/uutils-called.log"
+    make_uutils_stub "$FAKE_BIN" "$UUTILS_LOG"
+    # Populate a clean PATH without gnumkdir (in case the host has /usr/bin/gnumkdir,
+    # e.g. Ubuntu 26.04), symlinking only the standard utilities filing-lock needs.
+    for tool in cat date stat sed rm rmdir tr hostname sleep python3 perl; do
+        tpath="$(command -v "$tool" 2>/dev/null || true)"
+        [[ -n "$tpath" ]] && ln -s "$tpath" "$FAKE_BIN/$tool"
+    done
+
+    export PATH="$FAKE_BIN"
+    export LOOM_FILING_LOCK_DIR="$DIR"
+    export LOOM_FILING_LOCK_WAIT_SECS=1
+
+    loom_filing_lock_acquire "first" >/dev/null 2>&1 || exit 1
+    [[ ! -e "$UUTILS_LOG" ]] || { echo "broken uutils mkdir was called: $(cat "$UUTILS_LOG")" >&2; exit 1; }
+
+    RC2=0
+    (
+        unset LOOM_FILING_LOCK_HELD
+        loom_filing_lock_acquire "second" >/dev/null 2>&1
+    ) || RC2=$?
+    loom_filing_lock_release >/dev/null 2>&1
+    [[ "$RC2" -eq "$LOOM_FILING_LOCK_DEFER_RC" ]] || { echo "contender rc=$RC2, want 75" >&2; exit 1; }
+    exit 0
+) && CASE_RC=0 || CASE_RC=$?
+assert_true "$CASE_RC" "uutils mkdir without gnumkdir falls back to direct mkdir(2) syscall (#15265)"
+
+# Case 3: shell-function mkdir() override (test seam from #15122) still wins
+# even when gnumkdir is on PATH.
+DIR="$(new_store)"
+(
+    FAKE_BIN="$(mktemp -d "$TMPROOT/fake-fn-seam.XXXXXX")"
+    GNU_LOG="$FAKE_BIN/gnu-called.log"
+    cat > "$FAKE_BIN/gnumkdir" <<EOF
+#!/usr/bin/env bash
+echo "called:\$*" >> "$GNU_LOG"
+exec "$REAL_MKDIR" "\$@"
+EOF
+    chmod +x "$FAKE_BIN/gnumkdir"
+    export PATH="$FAKE_BIN:$PATH"
+    export LOOM_FILING_LOCK_DIR="$DIR"
+
+    FN_CALLED=0
+    mkdir() {
+        if [[ "${!#}" == "$DIR/holder" ]]; then
+            FN_CALLED=1
+        fi
+        "$REAL_MKDIR" "$@"
+    }
+    loom_filing_lock_acquire "seam" >/dev/null 2>&1 || exit 1
+    loom_filing_lock_release >/dev/null 2>&1
+    [[ "$FN_CALLED" -eq 1 ]] || { echo "shell-function mkdir was bypassed" >&2; exit 1; }
+    [[ ! -e "$GNU_LOG" ]] || { echo "gnumkdir ran instead of shell-function mkdir" >&2; exit 1; }
+    exit 0
+) && CASE_RC=0 || CASE_RC=$?
+assert_true "$CASE_RC" "shell-function mkdir override retains precedence over gnumkdir (#15265)"
+
+echo ""
 echo "==============================================="
 echo "  Tests run:    $TESTS_RUN"
 echo -e "  ${GREEN}Passed:${NC}       $TESTS_PASSED"

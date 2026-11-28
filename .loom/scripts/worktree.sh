@@ -117,6 +117,16 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-forge-pr-chec
 # the call site's own `|| true` swallows the resulting 127.
 # shellcheck source=lib/locate-daemon-bin.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/locate-daemon-bin.sh" 2>/dev/null || true
+# Atomic mkdir for the no-daemon lock fallback (#15287): plain `mkdir` is not
+# mutual exclusion on uutils coreutils (Ubuntu 26.04 CI runners).
+# Defensive like the daemon-bin source above: a partially-resynced .loom/ with no
+# lib/atomic-mkdir.sh degrades to plain mkdir (today's behaviour), never breaks
+# worktree creation.
+# shellcheck source=lib/atomic-mkdir.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/atomic-mkdir.sh" 2>/dev/null || true
+if ! declare -F loom_atomic_mkdir >/dev/null; then
+    loom_atomic_mkdir() { mkdir "$1" 2>/dev/null; }
+fi
 
 # Colors for output
 RED='\033[0;31m'
@@ -312,7 +322,7 @@ acquire_worktree_lock() {
     local stale_retry_done=0
 
     while true; do
-        if mkdir "$lock" 2>/dev/null; then
+        if loom_atomic_mkdir "$lock"; then
             # Lock acquired; record owner metadata for debugging plus a
             # one-shot token so release can verify it still owns this lock
             # (issue #6014 — see "Ownership verification" above).

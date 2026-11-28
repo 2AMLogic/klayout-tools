@@ -29,7 +29,8 @@
 # build`/`test` or the build gate.
 #
 # The protocol is `mkdir` (POSIX-atomic, and available on stock macOS unlike
-# `flock`), matching the token-pool lock and the per-issue claim lock. The slot
+# `flock`; issued through lib/atomic-mkdir.sh so uutils coreutils on Ubuntu
+# 26.04 cannot double-grant, #15287), matching the token-pool lock and the per-issue claim lock. The slot
 # directory is MACHINE-WIDE — ~/.loom/locks/build-slot — deliberately not a
 # repo's .loom/locks: cores are one machine-level resource shared by every
 # workspace and every worktree on the host.
@@ -54,6 +55,12 @@
 #   LOOM_BUILD_SLOT_STALE_SECS  default 3600  age at which a slot is reaped
 #   LOOM_BUILD_SLOT_DIR         default ~/.loom/locks/build-slot
 #   LOOM_BUILD_SLOT_HELD        re-entrancy sentinel (set by the holder)
+
+# Atomic single-directory creation (#15287): plain `mkdir` is not mutual
+# exclusion on uutils coreutils (Ubuntu 26.04, 21/100 two-racer double-wins), and
+# every concurrent sweep contends for this slot.
+# shellcheck source=./atomic-mkdir.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/atomic-mkdir.sh"
 
 # Resolved lock dir currently held by this shell (empty = none).
 LOOM_BUILD_SLOT_PATH="${LOOM_BUILD_SLOT_PATH:-}"
@@ -127,14 +134,14 @@ _loom_build_slot_try_round() {
         # it and still falls through to err=1 (degrade open, never a spin).
         vanished=0
         while :; do
-            if mkdir "$path" 2>/dev/null; then
+            if loom_atomic_mkdir "$path"; then
                 printf '%s\n' "$path"
                 return 0
             fi
             if [[ -d "$path" ]]; then
                 if (( $(_loom_build_slot_age_secs "$path") > stale )); then
                     rmdir "$path" 2>/dev/null || true
-                    if mkdir "$path" 2>/dev/null; then
+                    if loom_atomic_mkdir "$path"; then
                         printf '%s\n' "$path"
                         return 0
                     fi

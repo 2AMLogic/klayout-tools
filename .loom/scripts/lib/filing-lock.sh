@@ -107,6 +107,11 @@
 #                                   production filers never set it. Semantics are
 #                                   unchanged either way.
 
+# Atomic single-directory creation (#15265, shared since #15287): plain `mkdir`
+# is not mutual exclusion on uutils coreutils (Ubuntu 26.04).
+# shellcheck source=./atomic-mkdir.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/atomic-mkdir.sh"
+
 # Resolved lock dir currently held by this shell (empty = none).
 LOOM_FILING_LOCK_PATH="${LOOM_FILING_LOCK_PATH:-}"
 
@@ -314,12 +319,13 @@ loom_filing_lock_acquire() {
     fi
 
     local holder="$store/holder"
-    local start now blocker logged_wait=0 vanished=0
+    local start now blocker logged_wait=0 vanished=0 mkdir_backend
+    mkdir_backend="$(loom_atomic_mkdir_backend)"
     start="$(date +%s)"
     while :; do
         local mkdir_rc=0
-        mkdir "$holder" 2>/dev/null || mkdir_rc=$?
-        _loom_filing_lock_diag "mkdir rc=${mkdir_rc}" "$holder"
+        loom_atomic_mkdir_with "$mkdir_backend" "$holder" || mkdir_rc=$?
+        _loom_filing_lock_diag "mkdir rc=${mkdir_rc} backend=${mkdir_backend}" "$holder"
         if [[ "$mkdir_rc" -eq 0 ]]; then
             printf '{"host":"%s","pid":%s,"label":"%s","acquired_at":%s}\n' \
                 "$self_host" "$$" "$label" "$(date +%s)" > "$holder/owner.json" 2>/dev/null || true

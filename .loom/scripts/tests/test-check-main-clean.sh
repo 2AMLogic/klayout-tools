@@ -43,6 +43,13 @@
 #     tree whose only untracked path is that overlay reports clean and survives
 #     `--quarantine` untouched, even in a repo whose .gitignore predates the fix
 #     (#8075)
+#   - the daemon-written token-pool runtime files (.loom/account-ranking.codex,
+#     .loom/account-health.json, .loom/account-health.lock) are Loom-owned the
+#     same way: a stale .gitignore does not make them contamination, and
+#     `--quarantine` leaves them in place (#15479)
+#   - the daemon-written runtime directories (.loom/claims/, .loom/metrics/)
+#     are Loom-owned by subtree the same way, while a lookalike sibling such
+#     as .loom/claims-old/ is still flagged (#15488)
 #
 # Usage:
 #   ./.loom/scripts/tests/test-check-main-clean.sh
@@ -1143,6 +1150,237 @@ else
     fail "expected 3 naming only leaked_module.py, got rc=$RC; out=$out"
 fi
 rm -rf "$REPO"
+
+# ========================================================================
+# Daemon-written runtime files: owned despite a stale managed block (#15479)
+# ========================================================================
+# The token pool writes .loom/account-ranking.codex (every ranking-refresh
+# cycle) and .loom/account-health.json into every workspace. A consumer repo
+# whose installed loom-managed .gitignore block predates the rules for them
+# shows each as `?? <path>`: untracked dirt that made this backstop exit 3
+# naming the daemon's file as builder contamination, and that `--quarantine`
+# then moved into the stash stack. The internal LOOM_OWNED_PREFIXES filter must
+# exclude them regardless of the consumer's .gitignore currency, exactly as it
+# does for `.loom-local/` above (#8075).
+#
+# The loop covers .loom/account-health.lock too. The daemon's lock is an empty
+# `mkdir` directory, which `git status --porcelain` never reports, so that
+# entry is defensive; the file-shaped fixture is what exercises the filter.
+
+echo "Test 46: daemon-written account-* runtime files are Loom-owned (#15479)"
+for RUNTIME_FILE in .loom/account-ranking.codex .loom/account-health.json .loom/account-health.lock; do
+    # make_repo_stale_gitignore's .gitignore ignores ONLY .loom/worktrees/, so
+    # the fixture is a consumer repo that has not re-synced the fixed block.
+    REPO=$(make_repo_stale_gitignore)
+    SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-15479.txt"
+    ( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 ); RC=$?
+    if [[ "$RC" -ne 0 ]]; then fail "Test 46 setup: --snapshot expected 0, got $RC"; fi
+
+    # The daemon writes the file AFTER the baseline snapshot — new dirt as far
+    # as the baseline is concerned, which is the dangerous case.
+    echo '{}' > "$REPO/$RUNTIME_FILE"
+
+    # Sanity: git really does see it as untracked dirt in this fixture.
+    RAW_STATUS=$(git -C "$REPO" status --porcelain)
+    if ! grep -qF "?? $RUNTIME_FILE" <<<"$RAW_STATUS"; then
+        fail "Test 46 setup: expected an untracked $RUNTIME_FILE in a stale-gitignore repo"
+    fi
+
+    # No `issue=` field in the label: nothing here may reach the forge, even
+    # if the file is wrongly quarantined.
+    out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine \
+           --label "run=RUNID-15479" 2>&1 ); RC=$?
+    STASH_COUNT=$(git -C "$REPO" stash list | wc -l | tr -d ' ')
+    if [[ "$RC" -eq 0 ]] \
+       && [[ -f "$REPO/$RUNTIME_FILE" ]] \
+       && [[ "$STASH_COUNT" -eq 0 ]] \
+       && ! grep -qF "$RUNTIME_FILE" <<<"$out"; then
+        pass "--quarantine reports clean and leaves $RUNTIME_FILE in place"
+    else
+        fail "$RUNTIME_FILE: expected rc=0, file intact, no stash; got rc=$RC exists=$([[ -f "$REPO/$RUNTIME_FILE" ]] && echo y || echo n) stashes=$STASH_COUNT out=$out"
+    fi
+
+    # Put the file back if the step above quarantined it, so plain detection
+    # (no baseline, no quarantine) is judged on its own.
+    [[ -f "$REPO/$RUNTIME_FILE" ]] || echo '{}' > "$REPO/$RUNTIME_FILE"
+    ( cd "$REPO" && "$SCRIPT" >/dev/null 2>&1 ); RC=$?
+    if [[ "$RC" -eq 0 && -f "$REPO/$RUNTIME_FILE" ]]; then
+        pass "plain detection treats $RUNTIME_FILE as Loom-owned (exit 0)"
+    else
+        fail "$RUNTIME_FILE: expected 0 from plain detection with the file still present, got rc=$RC exists=$([[ -f "$REPO/$RUNTIME_FILE" ]] && echo y || echo n)"
+    fi
+    rm -rf "${REPO:?}"
+done
+
+# ========================================================================
+# Daemon-written runtime directories: owned despite a stale managed block (#15488)
+# ========================================================================
+# #15479 covered the account-* files. Tracing the rest of EPHEMERAL_PATTERNS
+# (#15488) found two more daemon-written entries, both directories:
+# `loom-daemon claim` writes `.loom/claims/issue-<N>.lock/claim.json`, and
+# `validate-phase`'s recovery path writes `.loom/metrics/recovery-events.json`.
+# Each is listed with its trailing slash, so the filter matches the whole
+# subtree. A sibling that merely extends the directory's name
+# (`.loom/claims-old/`) is not Loom state and must stay visible as
+# contamination.
+
+echo "Test 47: daemon-written .loom/claims/ and .loom/metrics/ are Loom-owned (#15488)"
+REPO=$(make_repo_stale_gitignore)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-15488.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -ne 0 ]]; then fail "Test 47 setup: --snapshot expected 0, got $RC"; fi
+
+# git reports an untracked directory under its own name (`?? .loom/claims/`),
+# so that is the line the filter has to match: the entry with its slash.
+CLAIMS_DIR=".loom/claims/"
+METRICS_DIR=".loom/metrics/"
+CLAIM_FILE="${CLAIMS_DIR}issue-1.lock/claim.json"
+METRICS_FILE="${METRICS_DIR}recovery-events.json"
+# The daemon writes both AFTER the baseline snapshot — new dirt as far as the
+# baseline is concerned, which is the dangerous case.
+mkdir -p "$REPO/.loom/claims/issue-1.lock" "$REPO/.loom/metrics"
+echo '{"issue":1,"agent_id":"builder-1"}' > "$REPO/$CLAIM_FILE"
+echo '[{"issue":1,"recovery_type":"add_label"}]' > "$REPO/$METRICS_FILE"
+CLAIM_CONTENT=$(cat "$REPO/$CLAIM_FILE")
+METRICS_CONTENT=$(cat "$REPO/$METRICS_FILE")
+
+# Sanity: git really does see both as untracked dirt in this fixture.
+RAW_STATUS=$(git -C "$REPO" status --porcelain)
+for RUNTIME_DIR in "$CLAIMS_DIR" "$METRICS_DIR"; do
+    if ! grep -qF "?? $RUNTIME_DIR" <<<"$RAW_STATUS"; then
+        fail "Test 47 setup: expected an untracked $RUNTIME_DIR in a stale-gitignore repo"
+    fi
+done
+
+# No `issue=` field in the label: nothing here may reach the forge, even
+# if the files are wrongly quarantined.
+out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine \
+       --label "run=RUNID-15488" 2>&1 ); RC=$?
+STASH_COUNT=$(git -C "$REPO" stash list | wc -l | tr -d ' ')
+if [[ "$RC" -eq 0 ]] \
+   && [[ "$(cat "$REPO/$CLAIM_FILE" 2>/dev/null)" == "$CLAIM_CONTENT" ]] \
+   && [[ "$(cat "$REPO/$METRICS_FILE" 2>/dev/null)" == "$METRICS_CONTENT" ]] \
+   && [[ "$STASH_COUNT" -eq 0 ]] \
+   && ! grep -qF "$CLAIMS_DIR" <<<"$out" \
+   && ! grep -qF "$METRICS_DIR" <<<"$out"; then
+    pass "--quarantine reports clean and leaves both daemon-written directories in place"
+else
+    fail "expected rc=0, both files intact, no stash; got rc=$RC stashes=$STASH_COUNT out=$out"
+fi
+
+# Put the files back if the step above quarantined them, so plain detection
+# (no baseline, no quarantine) is judged on its own.
+mkdir -p "$REPO/.loom/claims/issue-1.lock" "$REPO/.loom/metrics"
+[[ -f "$REPO/$CLAIM_FILE" ]] || printf '%s\n' "$CLAIM_CONTENT" > "$REPO/$CLAIM_FILE"
+[[ -f "$REPO/$METRICS_FILE" ]] || printf '%s\n' "$METRICS_CONTENT" > "$REPO/$METRICS_FILE"
+( cd "$REPO" && "$SCRIPT" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -eq 0 && -f "$REPO/$CLAIM_FILE" && -f "$REPO/$METRICS_FILE" ]]; then
+    pass "plain detection treats .loom/claims/ and .loom/metrics/ as Loom-owned (exit 0)"
+else
+    fail "expected 0 from plain detection with both files still present, got rc=$RC"
+fi
+
+# ...and a sibling that merely extends a directory's name is still caught,
+# naming only itself.
+mkdir -p "$REPO/.loom/claims-old"
+echo '{}' > "$REPO/.loom/claims-old/stray.json"
+out=$( cd "$REPO" && "$SCRIPT" 2>&1 ); RC=$?
+if [[ "$RC" -eq 3 ]] \
+   && grep -qF '.loom/claims-old/' <<<"$out" \
+   && ! grep -qF "$CLAIMS_DIR" <<<"$out" \
+   && ! grep -qF "$METRICS_DIR" <<<"$out"; then
+    pass "a stray under .loom/claims-old/ is flagged; the owned directories are not"
+else
+    fail "expected 3 naming only .loom/claims-old/, got rc=$RC; out=$out"
+fi
+rm -rf "${REPO:?}"
+
+# ========================================================================
+# Operator stop requests: owned despite a stale managed block (#15545)
+# ========================================================================
+# `signal.sh stop` writes .loom/signals/stop-<name> and the daemon's
+# check_stop_signals only tests that it exists. It is operator-written, so it is
+# not in DAEMON_RUNTIME_PATTERNS, yet in a consumer repo whose managed
+# .gitignore block predates the `.loom/signals/` rule it showed as
+# `?? .loom/signals/`: exit 3 naming the stop as builder contamination, and
+# `--quarantine` stashed it, so the operator's stop was silently consumed
+# instead of honoured. The real signal.sh drives the write and the check.
+
+SIGNAL_SH="$(dirname "$SCRIPT")/signal.sh"
+
+echo "Test 15545: operator stop request is Loom-owned (stale .gitignore)"
+REPO=$(make_repo_stale_gitignore)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-15545.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -ne 0 ]]; then fail "Test 15545 setup: --snapshot expected 0, got $RC"; fi
+
+# The operator's stop lands AFTER the baseline: new dirt, the dangerous case.
+( cd "$REPO" && "$SIGNAL_SH" stop terminal-1 >/dev/null 2>&1 )
+STOP_FILE="$REPO/.loom/signals/stop-terminal-1"
+STOP_CONTENT=$(cat "$STOP_FILE" 2>/dev/null || true)
+
+# Sanity: git sees the directory as untracked dirt and the stop is active.
+if ! grep -qF '?? .loom/signals/' <<<"$(git -C "$REPO" status --porcelain)"; then
+    fail "Test 15545 setup: expected an untracked .loom/signals/ in a stale-gitignore repo"
+fi
+if ! ( cd "$REPO" && "$SIGNAL_SH" check terminal-1 >/dev/null 2>&1 ); then
+    fail "Test 15545 setup: signal.sh check expected 0 after stop"
+fi
+
+# No `issue=` field in the label: nothing here may reach the forge.
+out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine \
+       --label "run=RUNID-15545" 2>&1 ); RC=$?
+STASH_COUNT=$(git -C "$REPO" stash list | wc -l | tr -d ' ')
+if [[ "$RC" -eq 0 ]] \
+   && [[ -f "$STOP_FILE" ]] \
+   && [[ "$(cat "$STOP_FILE")" == "$STOP_CONTENT" ]] \
+   && [[ "$STASH_COUNT" -eq 0 ]] \
+   && ( cd "$REPO" && "$SIGNAL_SH" check terminal-1 >/dev/null 2>&1 ) \
+   && ! grep -qF '.loom/signals' <<<"$out"; then
+    pass "--quarantine reports clean and leaves the stop request active"
+else
+    fail "expected rc=0, stop intact and active, no stash; got rc=$RC exists=$([[ -f "$STOP_FILE" ]] && echo y || echo n) stashes=$STASH_COUNT out=$out"
+fi
+
+# Plain detection (no baseline, no quarantine) must agree.
+[[ -f "$STOP_FILE" ]] || ( cd "$REPO" && "$SIGNAL_SH" stop terminal-1 >/dev/null 2>&1 )
+( cd "$REPO" && "$SCRIPT" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -eq 0 && -f "$STOP_FILE" ]]; then
+    pass "plain detection treats .loom/signals/ as Loom-owned (exit 0)"
+else
+    fail "expected 0 from plain detection with the stop still present, got rc=$RC"
+fi
+
+# A lookalike sibling is real dirt: only it is reported, only it is stashed.
+mkdir -p "$REPO/.loom/signals-old"
+echo "stray" > "$REPO/.loom/signals-old/stray"
+out=$( cd "$REPO" && "$SCRIPT" 2>&1 ); RC=$?
+if [[ "$RC" -eq 3 ]] \
+   && grep -qF '.loom/signals-old' <<<"$out" \
+   && ! grep -qE '\.loom/signals/|stop-terminal-1' <<<"$out"; then
+    pass "a .loom/signals-old/ stray is flagged (exit 3), the stop is not"
+else
+    fail "expected 3 naming only .loom/signals-old, got rc=$RC; out=$out"
+fi
+
+out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine \
+       --label "run=RUNID-15545" 2>&1 ); RC=$?
+STASH_COUNT=$(git -C "$REPO" stash list | wc -l | tr -d ' ')
+STASH_FILES=$( for r in 'stash@{0}' 'stash@{0}^2' 'stash@{0}^3'; do
+    git -C "$REPO" ls-tree -r --name-only "$r" 2>/dev/null || true
+done )
+if [[ "$RC" -eq 4 ]] \
+   && [[ "$STASH_COUNT" -eq 1 ]] \
+   && grep -qF '.loom/signals-old/stray' <<<"$STASH_FILES" \
+   && ! grep -qF 'stop-terminal-1' <<<"$STASH_FILES" \
+   && [[ -f "$STOP_FILE" ]] \
+   && [[ "$(cat "$STOP_FILE")" == "$STOP_CONTENT" ]] \
+   && ( cd "$REPO" && "$SIGNAL_SH" check terminal-1 >/dev/null 2>&1 ); then
+    pass "quarantine exits 4, stashes only the stray, stop request still readable"
+else
+    fail "expected rc=4 with only the stray stashed; got rc=$RC stashes=$STASH_COUNT stash_files=$STASH_FILES out=$out"
+fi
+rm -rf "${REPO:?}"
 
 # -------- Test: --quarantine never stashes a cargo target tree (#11075) --------
 echo "Test 11075: --quarantine excludes CACHEDIR.TAG trees from refs/stash"

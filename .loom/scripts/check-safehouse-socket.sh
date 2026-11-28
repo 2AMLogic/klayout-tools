@@ -156,7 +156,7 @@ for _root in "${ROOTS[@]}"; do
                 echo "check-safehouse-socket: $_root -- OK (socket resolved: $_socket)"
                 ;;
             unreachable_no_socket)
-                echo "check-safehouse-socket: $_root -- DRIFT: safehouse.enabled is true but no socket resolves (safehouse.socket / \$LOOM_SAFEHOUSE_SOCKET / \$SAFEHOUSED_SOCKET) -- no safehouse narration will be recorded from this repo; the public fleet pulse is fed exclusively from safehouse narration (issue #5523)." >&2
+                echo "check-safehouse-socket: $_root -- DRIFT: safehouse.enabled is true but no socket resolves (safehouse.socket / \$LOOM_SAFEHOUSE_SOCKET / \$SAFEHOUSED_SOCKET) -- no merged-PR report will reach the fleet room from this repo (issue #5523)." >&2
                 ;;
             unreachable_missing_file)
                 echo "check-safehouse-socket: $_root -- DRIFT: safehouse.enabled is true, socket resolved to '$_socket', but nothing exists there yet -- is safehoused running? (issue #5523)" >&2

@@ -1068,10 +1068,10 @@ if [[ -f "$_spawn_claude_src" ]]; then
     _warn_line="$(grep -A0 'SAFEHOUSE DRIFT' "$_spawn_claude_src" || true)"
     assert_contains "SAFEHOUSE DRIFT" "$_warn_line" \
         "spawn-claude.sh's unresolved-socket warning is visually loud (#5523)"
-    assert_contains "no safehouse narration" "$_warn_line" \
-        "spawn-claude.sh's warning names the narration consequence, not just the mechanism (#5523)"
-    assert_contains "public fleet pulse" "$_warn_line" \
-        "spawn-claude.sh's warning names the downstream public-pulse consequence (#5523)"
+    assert_contains "no safehouse MCP tools" "$_warn_line" \
+        "spawn-claude.sh's warning names the consequence, not just the mechanism (#5523)"
+    assert_contains "merged-PR report will not reach the fleet room" "$_warn_line" \
+        "spawn-claude.sh's warning names the downstream fleet-room consequence (#5523, #13946)"
     assert_contains "check-safehouse-socket.sh" "$_warn_line" \
         "spawn-claude.sh's warning points at the standalone drift check (#5523)"
 else

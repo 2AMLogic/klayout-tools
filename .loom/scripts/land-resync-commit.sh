@@ -297,13 +297,18 @@ fi
 # allowlist and is unaffected either way. `.github/labels.yml` (#11033) is
 # co-owned the same way and accepted for the same reason: resync refreshes its
 # Loom-managed label block, and a stranded block keeps declaring retired labels.
+#
+# #15519: `.loom/pricing.json` (the single-file rate card, #8177) was missing
+# from BOTH lists at once, so the parity test had nothing to disagree about,
+# while every resync that changed the rate card was refused here as
+# "non-resync dirt".
 is_resync_surface_path() {
     case "$1" in
         .loom/hooks/* | .loom/scripts/* | .loom/roles/* | .loom/docs/* | \
             .loom/bin/* | .loom/runtimes/* | .agents/skills/* | \
             .claude/commands/loom/* | .claude/agents/* | .claude/README.md | .claude/biome.jsonc | \
             .github/CONFIGURATION.md | .github/labels.yml | .loom/biome.jsonc | .loom/CLAUDE.md | \
-            .loom/install-metadata.json | .gitattributes | .gitignore)
+            .loom/install-metadata.json | .gitattributes | .gitignore | .loom/pricing.json)
             return 0
             ;;
         *)

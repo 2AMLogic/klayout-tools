@@ -16,6 +16,14 @@
 # script when you want pure token rotation in front of either `claude` or
 # the wrapper.
 #
+# Persistent seats (#14371): once an account has been adopted with
+# `accounts session start NAME --provider claude`, the host selects once
+# using the usual ranking, allowlist and bad-account rules. The selected
+# name determines the transport: an adopted account enters its own seat,
+# an unadopted account uses the configured host or ephemeral transport.
+# An unavailable adopted seat refuses the step. The container never rotates
+# accounts. LOOM_CLAUDE_SEAT_ROOT defaults to ~/.loom/claude-seats.
+#
 # Behavior on missing tokens:
 #   Token selection resolves the effective pool (issue #3938) to the shared
 #   machine-level pool at `~/.loom/tokens/` (override `LOOM_SHARED_TOKENS_DIR`;
@@ -709,7 +717,7 @@ if [[ -z "${LOOM_SPAWN_CONTAINERIZED:-}" ]]; then
     esac
 fi
 
-if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
+_prepare_ephemeral() {
     if ! command -v docker >/dev/null 2>&1; then
         log_error "spawn-claude: containerized dispatch is enabled (runtimes.containment.enabled / LOOM_SWEEP_CONTAINERIZED) but 'docker' is not on PATH."
         log_error "Install docker, or disable containment (LOOM_SWEEP_CONTAINERIZED=0, or runtimes.containment.enabled=false in .loom/config.json)."
@@ -934,15 +942,22 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
         "$_containment_image"
         "${WORKSPACE}/.loom/scripts/spawn-claude.sh" "$@")
     [[ "$_CONTAINMENT_CRED_PROXY" == "1" ]] || exec ${SLEEP_INHIBIT_WRAP[@]+"${SLEEP_INHIBIT_WRAP[@]}"} "${_containment_docker[@]}"
-else
-    # Bare-metal dispatch marker (issue #7430): symmetric counterpart to the
-    # container marker above, so a status/health reader can distinguish "this
-    # sweep ran bare-metal" from "this sweep predates the marker" — the
-    # recursed containerized invocation (LOOM_SPAWN_CONTAINERIZED=1 already
-    # set) falls into this branch too and correctly logs itself as running
-    # bare-metal *relative to itself*, which is accurate: from here on,
-    # inside the container, this process's own view of the world is
-    # unremarkable bare-metal dispatch.
+}
+
+# An adopted account is selected on the host before choosing a transport.
+# Keep the original argv for the in-container adapter; it resolves model,
+# resume, wrapper and MCP settings in the container's own filesystem.
+_spawn_args=("$@")
+_seat_root="${LOOM_CLAUDE_SEAT_ROOT-${HOME:-}/.loom/claude-seats}"
+_has_seats=false
+if [[ -z "${LOOM_SPAWN_CONTAINERIZED:-}" && -n "$_seat_root" ]]; then
+    for _marker in "$_seat_root"/*/.session-managed.json "$_seat_root"/.*/.session-managed.json; do
+        if [[ -f "$_marker" ]]; then _has_seats=true; break; fi
+    done
+fi
+if [[ "$CONTAINMENT_ENABLED" == "1" && "$_has_seats" == false ]]; then
+    _prepare_ephemeral "$@"
+elif [[ "$_has_seats" == false && -z "${LOOM_CLAUDE_SEAT_ACTIVE:-}" ]]; then
     echo "# LOOM_DISPATCH_MODE mode=bare-metal" >&2
 fi
 
@@ -1210,6 +1225,21 @@ if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; th
     # shellcheck disable=SC2206,SC2207
     _select_args+=($(loom_daemon_model_select_flag "$_daemon_bin" "$_resolved_model"))
 
+    # Resume account pin (issue #14981): a Claude session resumed from a
+    # persistent seat only works in the account whose config dir holds the
+    # transcript. The daemon exports LOOM_RESUME_ACCOUNT for such a resume;
+    # it must reach `tokens select` as an explicit --pin-account, because an
+    # exported LOOM_TOKEN_NAME is overwritten by the `eval` below. NOT
+    # capability-degraded like --auto-unpin / --model: a binary that predates
+    # the flag would silently draw another account, so refuse instead.
+    if [[ -n "${LOOM_RESUME_ACCOUNT:-}" ]]; then
+        if ! "$_daemon_bin" tokens select --help 2>&1 | grep -q -- '--pin-account'; then
+            log_error "spawn-claude: resuming in account '$LOOM_RESUME_ACCOUNT' needs a loom-daemon whose 'tokens select' supports --pin-account (#14981); $_daemon_bin does not."
+            exit 78  # EX_CONFIG
+        fi
+        _select_args+=(--pin-account "$LOOM_RESUME_ACCOUNT")
+    fi
+
     # Prompt-cache affinity key (issue #8146): the account that last ran this
     # (repo, role) is the one holding a warm prompt cache for it — a 65% full
     # prefix-hit rate on same-account ticks vs 1.4% on cross-account ones.
@@ -1259,6 +1289,53 @@ if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; th
     log_info "spawn-claude: using OAuth account '${LOOM_TOKEN_NAME:-unknown}' (mode=${LOOM_TOKEN_MODE:-unknown})"
     echo "# LOOM_ACCOUNT name=${LOOM_TOKEN_NAME:-unknown}" >&2
     unset LOOM_TOKEN_MODE
+fi
+
+# --- Resume pin enforcement (issue #14981) ---
+# Whatever chose the account (the pinned `tokens select` above, or a caller-set
+# CLAUDE_CODE_OAUTH_TOKEN / LOOM_SPAWN_NO_EXPORT that skipped selection), a
+# resume must land in the pinned account and its recorded session store, or it
+# dies with "no conversation found". Fail closed; the daemon then re-dispatches
+# the step fresh.
+if [[ -n "${LOOM_RESUME_ACCOUNT:-}" && "${LOOM_TOKEN_NAME:-}" != "$LOOM_RESUME_ACCOUNT" ]]; then
+    log_error "spawn-claude: resume pinned to account '$LOOM_RESUME_ACCOUNT' but this launch runs as '${LOOM_TOKEN_NAME:-unknown}'; refusing (#14981)."
+    exit 78
+fi
+if [[ -n "${LOOM_RESUME_SESSION_STORE:-}" ]]; then
+    if [[ "$_has_seats" == true && -n "${LOOM_TOKEN_NAME:-}" && -f "$_seat_root/$LOOM_TOKEN_NAME/.session-managed.json" ]]; then
+        _resume_store_here="$_seat_root/$LOOM_TOKEN_NAME/home"
+    else
+        _resume_store_here="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}"
+    fi
+    if [[ "${_resume_store_here%/}" != "${LOOM_RESUME_SESSION_STORE%/}" ]]; then
+        log_error "spawn-claude: resume pinned to session store '$LOOM_RESUME_SESSION_STORE' but this launch uses '$_resume_store_here'; refusing (#14981)."
+        exit 78
+    fi
+    unset _resume_store_here
+fi
+
+if [[ "$_has_seats" == true ]]; then
+    if [[ -n "${LOOM_TOKEN_NAME:-}" && -f "$_seat_root/$LOOM_TOKEN_NAME/.session-managed.json" ]]; then
+        case "${LOOM_SWEEP_CREDENTIAL_PROXY:-$(_containment_cfg claudeCredentialProxy)}" in
+            1|true|yes) log_error "Claude seats require process-environment OAuth; refusing a credential-proxied dispatch"; exit 78 ;;
+        esac
+        # requires-daemon: session-exec optional   #14371 — only an adopted seat uses `session-exec claude-seat`, and only a daemon with that verb can adopt one. It is probed with --help first; a missing verb refuses the step (exit 78) with a named error, never a silent fallback.
+        _seat_bin="$(loom_resolve_self_daemon_bin)"
+        if [[ -z "$_seat_bin" ]] || ! "$_seat_bin" session-exec claude-seat --help >/dev/null 2>&1; then
+            log_error "The selected Claude seat requires an updated loom-daemon with session-exec claude-seat"
+            exit 78
+        fi
+        exec ${SLEEP_INHIBIT_WRAP[@]+"${SLEEP_INHIBIT_WRAP[@]}"} "$_seat_bin" session-exec claude-seat \
+            --workspace "$WORKSPACE" -- ${_spawn_args[@]+"${_spawn_args[@]}"}
+    fi
+    # A retry inside an unadopted account's host/ephemeral wrapper must
+    # also return to host dispatch before it can switch to an adopted seat.
+    export LOOM_CLAUDE_HOST_SELECTS_ACCOUNT=1
+    if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
+        _prepare_ephemeral ${_spawn_args[@]+"${_spawn_args[@]}"}
+    else
+        echo "# LOOM_DISPATCH_MODE mode=bare-metal" >&2
+    fi
 fi
 
 # --- Print-mode background-task wait ceiling (issue #3943) ---
@@ -1395,7 +1472,7 @@ fi
 # read here, but a nested spawn-codex.sh would write the parent's handle through
 # it. The proxied host half keeps
 # them: its in-container copy receives them by name and drops them itself.
-[[ "$_CONTAINMENT_CRED_PROXY" == "1" ]] || unset LOOM_AGENT_SCOPE_UNIT LOOM_RESUME_SESSION_ID LOOM_RESUME_PROMPT LOOM_RESUME_HANDLE_FILE
+[[ "$_CONTAINMENT_CRED_PROXY" == "1" ]] || unset LOOM_AGENT_SCOPE_UNIT LOOM_RESUME_SESSION_ID LOOM_RESUME_PROMPT LOOM_RESUME_HANDLE_FILE LOOM_RESUME_ACCOUNT LOOM_RESUME_SESSION_STORE
 
 # --- Optional safehouse MCP server injection (issue #3999) ---
 # When the `safehouse` config block is enabled and a socket + launch command
@@ -1467,7 +1544,7 @@ if [[ "$_CONTAINMENT_CRED_PROXY" != "1" && -f "$_mcp_config_lib" ]]; then
             # stale. Name that consequence here, and point at the standalone,
             # on-demand check (independent of a daemon restart) that answers
             # "is this drifted?" without reading any sweep log.
-            log_warn "spawn-claude: SAFEHOUSE DRIFT — safehouse.enabled is true but no socket resolves (safehouse.socket / \$LOOM_SAFEHOUSE_SOCKET / \$SAFEHOUSED_SOCKET); no safehouse narration will be recorded for this sweep — the public fleet pulse is fed exclusively from safehouse narration, so this host's activity will not appear there until the socket resolves. Run '.loom/scripts/check-safehouse-socket.sh' to check every managed repo on this host without reading sweep logs. Skipping safehouse MCP injection (loom MCP unaffected)."
+            log_warn "spawn-claude: SAFEHOUSE DRIFT — safehouse.enabled is true but no socket resolves (safehouse.socket / \$LOOM_SAFEHOUSE_SOCKET / \$SAFEHOUSED_SOCKET); no safehouse MCP tools are injected for this sweep, and this host's merged-PR report will not reach the fleet room until the socket resolves. Run '.loom/scripts/check-safehouse-socket.sh' to check every managed repo on this host without reading sweep logs. Skipping safehouse MCP injection (loom MCP unaffected)."
         elif ! command -v "$_sh_command" >/dev/null 2>&1; then
             log_warn "spawn-claude: safehouse launch command '$_sh_command' not found in PATH; skipping safehouse MCP injection (loom MCP unaffected)."
         else
