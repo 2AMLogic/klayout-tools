@@ -57,7 +57,7 @@ from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
 from .ngspice_build import engine_version as _ngspice_engine_version
 from .pdk import PdkNotFoundError, find_pdk
-from .sim import CornerPoint, SimError, _expand_corners, _resolve_models_lib
+from .sim import CornerPoint, SimError, _resolve_models_lib, expand_corners
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -384,7 +384,7 @@ def _parse_corner_set(request: dict[str, Any]) -> tuple[list[dict[str, Any]], in
         "temperature_c": corner_set.get("temperature_c"),
     }
     try:
-        points = _expand_corners(axes_spec, exclude_spec)
+        points = expand_corners(axes_spec, exclude_spec)
     except SimError as exc:
         raise SizeError(str(exc)) from exc
     if not points:
@@ -423,7 +423,7 @@ def _reject_per_section_libs(points: list[CornerPoint]) -> None:
     absent from ``models_lib``, and silently mis-modelling the sizing run
     otherwise.
 
-    Because ``_expand_corners`` is shared with ``klt sim``, this refusal is
+    Because ``expand_corners`` is shared with ``klt sim``, this refusal is
     what preserves the property the shape had *before* #2522 taught the shared
     parser to accept it at all: an unsupported request fails loudly.
     """
@@ -439,7 +439,7 @@ def _reject_per_section_libs(points: list[CornerPoint]) -> None:
 
 def _resolve_sizing_index(points: list[dict[str, Any]], sizing_spec: Any) -> int:
     """Resolve ``corners.sizing`` to an index into ``points``. Defaults to
-    the first declared point on each axis (index 0 -- :func:`_expand_corners`
+    the first declared point on each axis (index 0 -- :func:`expand_corners`
     expands process (outer) x temperature (inner), in declaration order, so
     the first expanded point already *is* "first point on each axis")."""
     if sizing_spec is None:

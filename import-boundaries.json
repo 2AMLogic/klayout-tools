@@ -2331,12 +2331,6 @@
       "reason": "Issue #5540: load_generator_report_arg's hand-rolled read omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
     },
     {
-      "consumer": "klayout_tools.corner_matrix",
-      "exporter": "klayout_tools.sim",
-      "symbol": "_expand_corners",
-      "reason": "Issue #4045: the checker's whole contract is that its grid ids match what `klt sim` expands; reusing the private expander guarantees that. Make it public or move it to a shared module when sim is next split."
-    },
-    {
       "consumer": "klayout_tools.place_and_route_portable",
       "exporter": "klayout_tools.env_provenance",
       "symbol": "_absolute_paths_in",
@@ -2978,12 +2972,6 @@
       {
         "consumer": "klayout_tools.op_sanity",
         "exporter": "klayout_tools.sim",
-        "symbol": "_expand_corners",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
         "symbol": "_extract_engine_version",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
@@ -3129,12 +3117,6 @@
         "consumer": "klayout_tools.size",
         "exporter": "klayout_tools._paths",
         "symbol": "_load_request_json",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.size",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_expand_corners",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

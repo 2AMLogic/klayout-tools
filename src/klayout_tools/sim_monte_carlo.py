@@ -290,9 +290,9 @@ def _expand_monte_carlo(
     points, returning ``(sampled_points, monte_carlo_info)``.
 
     All backends consume this same list of sample points. Order is deterministic
-    (outer: original corner order from :func:`_expand_corners`; inner:
+    (outer: original corner order from :func:`expand_corners`; inner:
     ``sample_index`` ``0..n-1``), matching the odometer-style determinism
-    :func:`_expand_corners` already guarantees for the PVT axes.
+    :func:`expand_corners` already guarantees for the PVT axes.
 
     **Seed contract.** Each sample derives two independent seed components
     from ``mc_spec["seed"]`` via :func:`_derive_mc_seed` -- ``process_seed``

@@ -28,7 +28,7 @@ def _write(path, data):
 
 
 def _ids(axes, exclude=()):
-    return [p.corner_id for p in sim._expand_corners(axes, list(exclude))]
+    return [p.corner_id for p in sim.expand_corners(axes, list(exclude))]
 
 
 def _report(ids, overrides=None):
@@ -123,7 +123,7 @@ def test_request_duplicate_tuple(tmp_path, matrix):
 
 def test_matrix_duplicate_tuple(tmp_path):
     # The matrix side of issue #5870: expected_tuples() routes through
-    # sim._expand_corners, which refuses duplicate corner_ids, so a
+    # sim.expand_corners, which refuses duplicate corner_ids, so a
     # duplicate-resolving matrix is rejected before any diffing happens
     # (the old "matrix expands to duplicate tuple(s)" branch was unreachable).
     matrix = _write(tmp_path / "matrix.json", {**AXES, "process": ["tt", "ss", "tt"]})

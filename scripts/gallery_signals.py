@@ -133,7 +133,7 @@ GF180_DEVICE_SUBSTITUTION = {"nfet_05v0": "nmos_6p0", "pfet_05v0": "pmos_6p0"}
 
 #: The nominal-PVT temperature every cell's nominal corner is measured at
 #: (also `klt sim`'s own default when a request declares no temperature
-#: axis -- see `_expand_corners` in `src/klayout_tools/sim.py`).
+#: axis -- see `expand_corners` in `src/klayout_tools/sim.py`).
 NOMINAL_TEMPERATURE_C = 27
 
 #: Fractional supply spread around each family's nominal rail.

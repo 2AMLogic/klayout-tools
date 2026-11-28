@@ -9,7 +9,7 @@ from test_sim import _boom, _scaled_request_doc, _write_request
 
 
 def test_units_supply_waveforms_expand_per_unit():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {
             "units": [
                 {"supply_v": {"vdd": 1.62}},
@@ -25,7 +25,7 @@ def test_units_supply_waveforms_expand_per_unit():
 
 
 def test_units_without_supply_waveforms_unchanged():
-    (point,) = sim._expand_corners({"units": [{"supply_v": {"vdd": 1.8}}]}, [])
+    (point,) = sim.expand_corners({"units": [{"supply_v": {"vdd": 1.8}}]}, [])
     assert point.supply_waveforms == ()
 
 
@@ -40,7 +40,7 @@ def test_units_without_supply_waveforms_unchanged():
 )
 def test_units_supply_waveforms_validation(wf, match):
     with pytest.raises(sim.SimError, match=match):
-        sim._expand_corners(
+        sim.expand_corners(
             {
                 "units": [
                     {"supply_v": {"vdd": 1.8, "vref": 0.5}},
@@ -155,7 +155,7 @@ def test_supply_waveforms_each_mc_sample_retains_base_corner_rail():
     """Point-level check (#7069): every sample carries its base corner's
     waveform tuple and that corner's own rail voltage, for two requested
     waveform voltages."""
-    bases = sim._expand_corners(
+    bases = sim.expand_corners(
         {
             "supply_v": {"vsup": [3.3, 3.45], "vchop": [2.5, 3.0]},
             "supply_waveforms": ["vchop"],

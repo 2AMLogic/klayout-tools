@@ -168,7 +168,7 @@ def test_dry_run_refuses_more_hosts_than_units(tmp_path, capsys, batch_set):
 @pytest.mark.parametrize("completed", [2, 3])
 def test_resume_dry_run_plans_only_outstanding_units(tmp_path, monkeypatch, completed):
     path = _sharded(tmp_path, 3, job_ceiling_check="enforce")
-    points = sim._expand_corners(CORNERS, [])
+    points = sim.expand_corners(CORNERS, [])
     reused = {point.corner_id: {} for point in points[:completed]}
     monkeypatch.setattr(
         sim, "_open_resume_checkpoint", lambda *a, **kw: (reused, None, None)

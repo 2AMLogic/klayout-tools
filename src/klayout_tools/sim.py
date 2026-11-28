@@ -293,8 +293,8 @@ from .sim_corner_rules import (  # noqa: F401 -- retain the runner's selector im
 from .sim_corner_variants import _parse_variants as _parse_variants
 from .sim_corners import (
     _corner_points_from_wire,
-    _expand_corners,
     _normalize_nodeset_values,
+    expand_corners,
 )
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
@@ -2840,7 +2840,7 @@ def _prepare_sim_request(
     sweep_started = time.monotonic()
     deadline = sweep_started + budget_s if budget_s is not None else None
 
-    corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
+    corner_points = expand_corners(corners_spec, request.get("exclude") or [])
 
     monte_carlo_spec = request.get("monte_carlo")
     sim_derive.validate_grid(measurements_spec, corner_points, request)

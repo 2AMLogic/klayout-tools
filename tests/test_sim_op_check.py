@@ -121,7 +121,7 @@ def test_deck_lines_and_forced_save():
         "print __klt_opc_0",
     ]
     lines = sim._corner_deck_control_lines(
-        point=sim._expand_corners({}, [])[0],
+        point=sim.expand_corners({}, [])[0],
         analysis=analysis,
         measurements_spec=[],
         raw_path=None,

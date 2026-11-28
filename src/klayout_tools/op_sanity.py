@@ -116,13 +116,13 @@ from .sim import (
     CornerPoint,
     SimError,
     _classify_diagnostics,
-    _expand_corners,
     _extract_engine_version,
     _needs_models_lib,
     _resolve_corner_section_libs,
     _resolve_models_lib,
     _resolve_param_file,
     corner_lib_lines,
+    expand_corners,
     resolve_netlist_include,
     scale_supply_waveforms,
     supply_alter_lines,
@@ -1470,7 +1470,7 @@ def run_op_sanity(
 
     corners_spec = request.get("corners") or {}
     try:
-        points = _expand_corners(corners_spec, request.get("exclude") or [])
+        points = expand_corners(corners_spec, request.get("exclude") or [])
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
     if not points:

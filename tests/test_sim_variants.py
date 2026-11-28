@@ -18,13 +18,13 @@ def _variants():
 
 
 def test_no_variants_is_unchanged():
-    points = sim._expand_corners({"process": ["tt"], "temperature_c": [27]}, [])
+    points = sim.expand_corners({"process": ["tt"], "temperature_c": [27]}, [])
     assert [p.corner_id for p in points] == ["tt/novdd/27C"]
     assert points[0].variant is None
 
 
 def test_variants_cross_axes_with_unique_ids():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {"process": ["tt", "ss"], "variants": _variants(), "temperature_c": [27, 85]},
         [],
     )
@@ -77,7 +77,7 @@ def test_variants_cannot_combine_with_units():
     with pytest.raises(
         sim.SimError, match="corners.units cannot be combined with corners.variants"
     ):
-        sim._expand_corners(spec, [])
+        sim.expand_corners(spec, [])
 
 
 def test_duplicate_and_empty_rejected():
@@ -94,7 +94,7 @@ def test_duplicate_and_empty_rejected():
 
 
 def test_variant_overrides_matching_supply_v_key():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {
             "supply_v": {"va": [1.2, 1.5], "vc": [5.0, 6.0]},
             "variants": [{"name": "t", "sources": {"va": 0.9}}],
@@ -114,7 +114,7 @@ def test_variant_override_collapsing_two_rungs_to_one_id_is_refused():
     # both -- so the expansion refuses the grid instead of silently
     # returning the twin points it used to.
     with pytest.raises(sim.SimError, match="point 1 duplicates point 0"):
-        sim._expand_corners(
+        sim.expand_corners(
             {
                 "supply_v": {"va": [1.2, 1.5], "vc": [5.0, 5.0]},
                 "variants": [{"name": "t", "sources": {"va": 0.9}}],
@@ -124,12 +124,12 @@ def test_variant_override_collapsing_two_rungs_to_one_id_is_refused():
 
 
 def test_exclude_matches_on_variant():
-    points = sim._expand_corners({"variants": _variants()}, [{"variant": "high"}])
+    points = sim.expand_corners({"variants": _variants()}, [{"variant": "high"}])
     assert [p.variant for p in points] == ["low"]
 
 
 def test_wire_round_trip_with_and_without_variant():
-    points = sim._expand_corners({"variants": _variants()}, [])
+    points = sim.expand_corners({"variants": _variants()}, [])
     wire = json.loads(json.dumps(sim._corner_points_to_wire(points)))
     restored = sim._corner_points_from_wire(wire)
     assert [p.corner_id for p in restored] == [p.corner_id for p in points]
@@ -142,7 +142,7 @@ def test_wire_round_trip_with_and_without_variant():
 
 
 def test_alter_lines_are_per_variant():
-    points = sim._expand_corners({"variants": _variants()}, [])
+    points = sim.expand_corners({"variants": _variants()}, [])
     kwargs = dict(
         analysis={"kind": "op", "args": ""},
         measurements_spec=[],
@@ -155,7 +155,7 @@ def test_alter_lines_are_per_variant():
 
 
 def test_monte_carlo_samples_keep_variant_ids_distinct():
-    points = sim._expand_corners({"variants": _variants()}, [])
+    points = sim.expand_corners({"variants": _variants()}, [])
     sampled, _ = sim._expand_monte_carlo(
         points, {"n": 2, "seed": 1, "vary": "mismatch"}
     )

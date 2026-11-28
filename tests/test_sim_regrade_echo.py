@@ -12,7 +12,7 @@ from klayout_tools.sim_regrade import (
 
 @pytest.fixture
 def points():
-    return sim._expand_corners({"temperature_c": [27, 80]}, [])
+    return sim.expand_corners({"temperature_c": [27, 80]}, [])
 
 
 @pytest.mark.parametrize("extra", [False, True])

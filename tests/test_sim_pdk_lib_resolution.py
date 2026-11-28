@@ -70,7 +70,7 @@ def test_resolve_corner_section_libs_joins_relative_refs_against_flat_pdk_varian
     cap = lib_dir / "cap.lib"
     cap.write_text(".lib cap_tt\n.endl cap_tt\n")
 
-    (point,) = sim._expand_corners(
+    (point,) = sim.expand_corners(
         {
             "process": [
                 {

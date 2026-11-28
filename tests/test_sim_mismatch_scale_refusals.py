@@ -16,7 +16,7 @@ from klayout_tools import sim
 
 
 def _resolve(scale, corner, sections=("mos_tt_mismatch",), pdk="ihp-sg13g2"):
-    points = sim._expand_corners({"process": list(sections)}, [])
+    points = sim.expand_corners({"process": list(sections)}, [])
     return sim._resolve_mismatch_scale(
         {"mismatch_scale": scale},
         pdk,

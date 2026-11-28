@@ -218,7 +218,7 @@ def test_run_sim_resume_reports_scope_from_batch_dispatch(
             if "_explicit_points" in request:
                 points = sim._corner_points_from_wire(request["_explicit_points"])
             else:
-                points = sim._expand_corners(request["corners"], [])
+                points = sim.expand_corners(request["corners"], [])
             runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report([point.corner_id for point in points])
             }

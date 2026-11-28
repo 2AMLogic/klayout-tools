@@ -9,7 +9,7 @@ which matrix counts as "full" and any ``subset_reason`` policy; ``klt`` owns
 only the mechanical diff of declared tuples against observed tuples. The
 check reports, it does not judge.
 
-Expected tuples are expanded by ``klt sim``'s own ``_expand_corners`` (axes
+Expected tuples are expanded by ``klt sim``'s own ``expand_corners`` (axes
 plus ``exclude[]`` matching) and identified by its ``CornerPoint.corner_id``,
 so the matrix and a request can never disagree about what a tuple is called.
 """
@@ -73,7 +73,7 @@ def expected_tuples(matrix: dict[str, Any]) -> list[str]:
         raise CornerMatrixError("matrix.exclude must be a list of objects")
     axes = {key: matrix[key] for key in _AXIS_KEYS if key in matrix}
     try:
-        points = sim._expand_corners(axes, exclude)
+        points = sim.expand_corners(axes, exclude)
     except sim.SimError as exc:
         raise CornerMatrixError(f"matrix is not a valid corner grid: {exc}") from exc
     return [point.corner_id for point in points]
@@ -82,7 +82,7 @@ def expected_tuples(matrix: dict[str, Any]) -> list[str]:
 def request_tuples(request: dict[str, Any]) -> list[str]:
     """The ``corner_id`` list a ``klt sim`` request would dispatch."""
     try:
-        points = sim._expand_corners(
+        points = sim.expand_corners(
             request.get("corners") or {}, request.get("exclude") or []
         )
     except sim.SimError as exc:

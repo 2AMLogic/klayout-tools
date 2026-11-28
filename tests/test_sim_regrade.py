@@ -179,7 +179,7 @@ def test_unknown_selection_id_is_refused_before_dispatch(tmp_path, monkeypatch):
 def test_worker_refuses_inconsistent_explicit_selection(tmp_path, indices):
     path = _request(tmp_path)
     request = json.loads(path.read_text())
-    points = sim._expand_corners(request.pop("corners"), [])
+    points = sim.expand_corners(request.pop("corners"), [])
     request["_regrade"] = {"select_corner_ids": [p.corner_id for p in points]}
     request["_explicit_points"] = sim._corner_points_to_wire(
         [points[i] for i in indices]
@@ -194,7 +194,7 @@ def test_split_jobs_keep_their_share_of_the_selected_ids(tmp_path):
 
     path = _request(tmp_path, corners={"temperature_c": [0, 27, 80]})
     request = json.loads(path.read_text())
-    points = sim._expand_corners(request["corners"], [])
+    points = sim.expand_corners(request["corners"], [])
     selected = [points[2], points[0]]
     ids = [p.corner_id for p in selected]
     request["_regrade"] = {"select_corner_ids": ids, "tmax": "25p"}

@@ -26,7 +26,7 @@ def _parse_variants(raw: Any) -> list[tuple[str | None, dict[str, float]]]:
     pairs with every source value resolved to a number.
 
     ``None`` (axis absent) yields the single nameless, source-less entry so
-    :func:`_expand_corners` is byte-identical to its pre-variant behaviour.
+    :func:`expand_corners` is byte-identical to its pre-variant behaviour.
     Each variant's ``sources`` map a voltage-source name to a number or to an
     arithmetic expression of the *other* sources in the same variant; the
     resolved numbers are applied with ``alter`` exactly like ``supply_v`` and
