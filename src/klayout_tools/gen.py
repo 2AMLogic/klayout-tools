@@ -55,7 +55,7 @@ import math
 import os
 from typing import TYPE_CHECKING, Any
 
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._layout import new_canonical_layout, write_layout
 from ._provenance import build_provenance
 from .gen_asap7_tap import ASAP7_SPECS
@@ -3466,7 +3466,7 @@ def _coerce_param(generator: str, name: str, value: Any, ptype: int) -> Any:
 
     Decl = kdb.PCellParameterDeclaration
     if ptype == Decl.TypeDouble:
-        if not is_number(value):
+        if not is_finite_number(value):
             raise GenError(f"generator '{generator}': params.{name} must be a number")
         return float(value)
     if ptype == Decl.TypeInt:
