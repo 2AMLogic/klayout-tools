@@ -461,7 +461,7 @@ from .sim_measurement_results import (
     NOT_REACHED_DIAGNOSTIC_CODE as NOT_REACHED_DIAGNOSTIC_CODE,
 )
 from .sim_measurement_results import _corner_measurement_results, expand_request
-from .sim_param_file import _corner_lib_lines as _corner_lib_lines
+from .sim_param_file import corner_lib_lines as corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import _measurement_diagnostic_hints as _measurement_diagnostic_hints
 from .sim_plot import render_waveform_svg as render_waveform_svg
@@ -5536,7 +5536,7 @@ def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
             decl.voltage_specs[word] = " ".join(lowered.split()[3:])
 
 
-def _resolve_netlist_include(reference: str, base_dir: str) -> str | None:
+def resolve_netlist_include(reference: str, base_dir: str) -> str | None:
     path = os.path.expanduser(reference.strip().strip("\"'"))
     if not os.path.isabs(path):
         path = os.path.join(base_dir, path)
@@ -5566,7 +5566,7 @@ def _included_declarations(
     ]
     while pending:
         reference, base_dir = pending.pop()
-        path = _resolve_netlist_include(reference, base_dir)
+        path = resolve_netlist_include(reference, base_dir)
         if path is None:
             return None
         real = os.path.realpath(path)
@@ -5826,7 +5826,7 @@ def _validate_param_targets(
             )
 
 
-def _scale_supply_waveforms(
+def scale_supply_waveforms(
     run_netlist_path: str, original_path: str, corner_dir: str, point: CornerPoint
 ) -> tuple[str, dict[str, Any]]:
     """Write the corner's netlist copy with each ``point.supply_waveforms``
@@ -6288,7 +6288,7 @@ def _run_corner(
         run_netlist_path, include_diagnostics = _expand_netlist_includes(
             netlist_path, corner_dir, pdk_root
         )
-        run_netlist_path, supply_waveform_report = _scale_supply_waveforms(
+        run_netlist_path, supply_waveform_report = scale_supply_waveforms(
             run_netlist_path, netlist_path, corner_dir, point
         )
         command, log_path, raw_path, deck_path = _prepare_corner_run(
@@ -7276,8 +7276,8 @@ def _write_corner_deck(
     # The corner's `.lib` cards: one per section for a multi-section bundle
     # (e.g. gf180mcu's per-device-family cards, each optionally against its
     # own library file -- issue #2522), a single card for a bare-string
-    # process corner, none without a process axis. See `_corner_lib_lines`.
-    lines.extend(_corner_lib_lines(point, models_lib))
+    # process corner, none without a process axis. See `corner_lib_lines`.
+    lines.extend(corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     # Issues #3942/#5486: the sigma scale -- one `.param` card for a switch
     # family, one per scanned sigma for sg13g2. Must come after the `.lib`
@@ -7375,7 +7375,7 @@ def _save_control_lines(
     return ["save all"]
 
 
-def _supply_alter_lines(point: CornerPoint) -> list[str]:
+def supply_alter_lines(point: CornerPoint) -> list[str]:
     """One ``alter`` per swept supply rail, skipping the sources rescaled in
     the corner's netlist copy instead (issue #2902)."""
     return [
@@ -7513,7 +7513,7 @@ def _corner_deck_control_lines(
             force=sim_op_check.is_declared(analysis),
         )
     )
-    prefix.extend(_supply_alter_lines(point))
+    prefix.extend(supply_alter_lines(point))
     lines.extend(prefix)
     if sim_steps.is_steps_analysis(analysis):
         # Issue #3103: a `reset: true` step re-emits this same prefix after
@@ -7652,7 +7652,7 @@ def _write_xyce_deck(
     # Same `.lib` cards as the ngspice deck, from the same helper (multi-
     # section bundles and issue #2522's per-section libraries included) --
     # the oracle must read the same models as the run it cross-validates.
-    lines.extend(_corner_lib_lines(point, models_lib))
+    lines.extend(corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     # Xyce's documented circuit-wide device-temperature control; `.temp`
     # would be a silent no-op (see this docstring's list).
