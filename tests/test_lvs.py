@@ -17969,12 +17969,12 @@ def test_run_lvs_gate_level_verilog_reference_populates_provenance_pdk(tmp_path)
     }
     report = run_lvs(json.dumps(request))
 
-    assert report["provenance"]["pdk"] == {
-        "name": "myvariant",
-        "source": report["provenance"]["pdk"]["source"],
-        "version": None,
-    }
-    assert report["provenance"]["pdk"]["source"] is not None
+    pdk_block = report["provenance"]["pdk"]
+    assert set(pdk_block) == {"name", "source", "version", "install", "store_layout"}
+    assert (pdk_block["name"], pdk_block["version"]) == ("myvariant", None)
+    assert pdk_block["source"] is not None
+    # Issue #8007: install evidence is always reported, `null` when unknown.
+    assert (pdk_block["install"], pdk_block["store_layout"]) == (None, "flat")
 
 
 def test_run_lvs_plain_spice_reference_leaves_provenance_pdk_null(tmp_path):

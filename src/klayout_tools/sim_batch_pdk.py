@@ -6,7 +6,8 @@ import os
 import re
 from typing import Any
 
-from .pdk_store import client_pdk_stamp
+from .pdk_store import STORE_LAYOUTS, client_pdk_stamp, install_facts
+from .sim_batch_contract_worker import _bounded_str
 from .sim_errors import SimError, request_options
 
 PDK_EXPECT_FIELD = "pdk_expect"
@@ -74,6 +75,26 @@ def observed_stamp(value: Any, request: dict[str, Any] | None) -> Any:
             return None
         return value.lower()
     return value
+
+
+def bounded_store_evidence(capture: dict[str, Any]) -> dict[str, Any]:
+    """The worker's own install evidence (issue #8007), re-validated and
+    bounded: ``{"install": {sha256, version, via, synced} | None,
+    "store_layout": manager_family | legacy_manager | flat | None}``. Each is
+    ``None`` -- unknown -- when the capture carries no usable value: an older
+    worker's capture has neither field, and an object with no valid fact is
+    no evidence."""
+    install = capture.get("install")
+    facts = install_facts(install) if isinstance(install, dict) else None
+    layout = capture.get("store_layout")
+    return {
+        "install": {key: _bounded_str(value) for key, value in facts.items()}
+        if facts
+        else None,
+        "store_layout": layout
+        if isinstance(layout, str) and layout in STORE_LAYOUTS
+        else None,
+    }
 
 
 def decks_execute_declared_inputs(request: dict[str, Any] | None) -> bool:

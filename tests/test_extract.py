@@ -4831,14 +4831,14 @@ def test_optional_pdk_resolution_is_reported(tmp_path, tmp_path_factory):
     }
     assert str(external_pdk_root) not in json.dumps(report)
 
-    # The shared provenance block mirrors the resolved PDK (name/source/
-    # version), independent of extract's own richer `pdk` echo above.
-    assert report["provenance"]["pdk"] == {
-        "name": "sky130A",
-        "source": report["provenance"]["pdk"]["source"],
-        "version": None,
-    }
-    assert report["provenance"]["pdk"]["source"] is not None
+    # The shared provenance block mirrors the resolved PDK (name/source/version,
+    # plus its install evidence, issue #8007), independent of the `pdk` echo above.
+    pdk_block = report["provenance"]["pdk"]
+    assert set(pdk_block) == {"name", "source", "version", "install", "store_layout"}
+    assert (pdk_block["name"], pdk_block["version"]) == ("sky130A", None)
+    assert pdk_block["source"] is not None
+    # Issue #8007: install evidence is always reported, `null` when unknown.
+    assert (pdk_block["install"], pdk_block["store_layout"]) == (None, "flat")
 
 
 def test_extraction_does_not_require_pdk_resolution(tmp_path):
