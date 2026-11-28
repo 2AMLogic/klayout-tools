@@ -45,7 +45,7 @@ def resolve_osdi_preload(
     from .characterize import CharacterizeError
 
     skip: dict[int, str] = {}
-    if (backend or request.get("backend")) in sim._OFFHOST_BACKENDS:
+    if (backend or request.get("backend")) in sim.OFFHOST_BACKENDS:
         skip = sim_staging.runner_resolved_osdi(
             {"models": request.get("models"), "options": spec}, request_dir
         )

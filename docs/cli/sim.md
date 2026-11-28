@@ -2305,7 +2305,7 @@ an incremental report).
 
 ### Both off-host backends validate `models.pdk` up front
 
-`remote` and `batch` (`sim._OFFHOST_BACKENDS`) each validate against the set
+`remote` and `batch` (`sim.OFFHOST_BACKENDS`) each validate against the set
 of PDKs *their* image publishes, and both refuse an unsupported one **before
 spending anything** — `remote` before its `run-instances` call, `batch`
 before its first S3 write

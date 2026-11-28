@@ -299,8 +299,8 @@ from .sim_corners import (
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
 from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
-    _OFFHOST_BACKENDS,
     NODESET_UNSUPPORTED_WORKER_CODE,
+    OFFHOST_BACKENDS,
     OPTIONS_UNSUPPORTED_WORKER_CODE,
     PARAMS_UNSUPPORTED_WORKER_CODE,
     SUPPLY_PRECISION_UNSUPPORTED_WORKER_CODE,
@@ -745,7 +745,7 @@ SUPPORTED_BACKENDS = ("local", "local-parallel", "remote", "batch")
 #: workers) sets ``KLT_SIM_BACKEND=batch`` in its daemon environment so every
 #: sweep's ``klt sim`` goes to the Spot batch fleet without editing ~20
 #: repos' request files. It is a *preference*, not a requirement -- see
-#: :func:`resolve_backend` and ``_yield_host_default_backend`` for the cases
+#: :func:`resolve_backend` and ``yield_host_default_backend`` for the cases
 #: where it steps aside to ``local``.
 BACKEND_ENV = "KLT_SIM_BACKEND"
 
@@ -756,7 +756,7 @@ def resolve_backend(backend: str | None, request: dict[str, Any]) -> tuple[str, 
 
     ``from_host_default`` is ``True`` only when the value came from the
     environment -- the one source that may later be overridden back to
-    ``local`` by :func:`_yield_host_default_backend`. An explicit flag or
+    ``local`` by :func:`yield_host_default_backend`. An explicit flag or
     request field is never second-guessed. The name is not validated here;
     the caller's :data:`SUPPORTED_BACKENDS` check names the bad value.
     """
@@ -784,7 +784,7 @@ def _backend_source(backend: str | None, request: dict[str, Any]) -> str:
     return "default"
 
 
-def _yield_host_default_backend(
+def yield_host_default_backend(
     backend: str, from_host_default: bool, *, reason_ok: bool
 ) -> str:
     """Step an env-sourced off-host default back to ``local`` when
@@ -793,7 +793,7 @@ def _yield_host_default_backend(
     checkpoint, a single-unit probe that would spend minutes waiting on a
     Spot instance to answer one corner). A no-op for an explicit choice.
     """
-    if from_host_default and backend in _OFFHOST_BACKENDS and not reason_ok:
+    if from_host_default and backend in OFFHOST_BACKENDS and not reason_ok:
         return "local"
     return backend
 
@@ -1194,7 +1194,7 @@ def _check_local_osdi_abi(
     newer than v0.3 and the local ngspice is older than 44 (issue #4438).
     Fails open on every unknown (unreadable module, unparseable version); the
     per-corner ``osdi_abi_mismatch`` log classifier stays as the backstop."""
-    if not osdi_preload or engine != "ngspice" or backend in _OFFHOST_BACKENDS:
+    if not osdi_preload or engine != "ngspice" or backend in OFFHOST_BACKENDS:
         return
     found: str | None = None
     probed = False
@@ -1226,7 +1226,7 @@ def apply_engine_host(
     ``engine_build`` (#5566) honest -- off-host ``"worker"`` makes both the
     worker's, moving the submitter's to the matching ``client_*`` key. Batch
     adds ``models_lib_comparison`` (#5321) and the sharded roll-ups (#5522)."""
-    if backend not in _OFFHOST_BACKENDS:
+    if backend not in OFFHOST_BACKENDS:
         environment["engine_host"] = "local"
         return
     environment["engine_host"] = "worker"
@@ -2202,7 +2202,7 @@ def _dispatch_command_request(
             f"unsupported backend '{resolved_backend}'{source} "
             f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
         )
-    resolved_backend = _yield_host_default_backend(
+    resolved_backend = yield_host_default_backend(
         resolved_backend,
         from_host_default,
         reason_ok=len(request.get(sim_commands.COMMANDS_FIELD) or ()) > 1,
@@ -2264,7 +2264,7 @@ def _dispatch_deck_request(
     # enforces it), so the host-default's ngspice-only condition holds. A
     # single deck is one unit: like a one-corner request it stays local
     # under a host default rather than waiting on a Spot instance.
-    resolved_backend = _yield_host_default_backend(
+    resolved_backend = yield_host_default_backend(
         resolved_backend,
         from_host_default,
         reason_ok=len(request.get(sim_decks.DECKS_FIELD) or ()) > 1,
@@ -2317,7 +2317,7 @@ def _dispatch_deck_request(
     # -- they run on ngspice just like corners. Local backends are probed
     # before anything runs; off-host ones are checked against the report below.
     engine_version_pin = _validate_engine_version_pin(request)
-    if engine_version_pin is not None and resolved_backend not in _OFFHOST_BACKENDS:
+    if engine_version_pin is not None and resolved_backend not in OFFHOST_BACKENDS:
         check_local_engine_version_pin(
             engine_version_pin,
             resolved_backend,
@@ -2385,7 +2385,7 @@ def _with_forwarded_budget(
     the caller's dict) or the off-host worker never sees it. On-host backends
     consume ``budget_s`` directly and get ``request`` back unchanged.
     """
-    if backend not in _OFFHOST_BACKENDS:
+    if backend not in OFFHOST_BACKENDS:
         return request
     return {**request, "options": {**options, "wall_clock_budget_s": budget_s}}
 
@@ -2525,7 +2525,7 @@ def _prepare_sim_request(
         )
     # Off-host workers use ngspice. Keep a valid Xyce request local when
     # the host default selects an off-host backend.
-    backend = _yield_host_default_backend(
+    backend = yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=engine == "ngspice"
     )
 
@@ -2652,12 +2652,12 @@ def _prepare_sim_request(
     # explicit choice is never second-guessed, so it is refused by name.
     # Runner-resolved entries (issue #3819) need neither staging nor a local
     # file, so only the host-local ones count here.
-    backend = _yield_host_default_backend(
+    backend = yield_host_default_backend(
         backend,
         backend_from_host_default,
         reason_ok=not osdi_preload or stage_model_inputs,
     )
-    if osdi_preload and backend in _OFFHOST_BACKENDS and not stage_model_inputs:
+    if osdi_preload and backend in OFFHOST_BACKENDS and not stage_model_inputs:
         raise SimError(
             f"options.osdi_preload is not supported for backend {backend!r}: "
             "an `.osdi` file is a host-architecture shared library compiled "
@@ -2672,7 +2672,7 @@ def _prepare_sim_request(
     osdi_preload, osdi_runner_environment = finalize_osdi_preload(
         options,
         request_dir,
-        backend in _OFFHOST_BACKENDS,
+        backend in OFFHOST_BACKENDS,
         osdi_preload,
         osdi_runner_resolved,
         pdk_root=osdi_pdk_root_pin(request),
@@ -2970,7 +2970,7 @@ def _prepare_sim_request(
         request_dir=request_dir,
         # The rewritten closure cannot leave this host, so an env-sourced
         # off-host default yields to local (an explicit choice is refused).
-        backend=_yield_host_default_backend(
+        backend=yield_host_default_backend(
             backend, backend_from_host_default, reason_ok=False
         ),
         explicit_points=explicit_points_wire is not None,
@@ -3048,13 +3048,13 @@ def _prepare_sim_request(
     # this process does not reconcile against a local `CornerPoint.corner_id`,
     # so it stays rejected, mirroring the existing `hosts > 1` + `remote`
     # restriction above rather than inventing a new error shape.
-    offhost_before_yield = backend in _OFFHOST_BACKENDS
-    backend = _yield_host_default_backend(
+    offhost_before_yield = backend in OFFHOST_BACKENDS
+    backend = yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=not resume
     )
     # Issue #5492: that yield can land a run whose OSDI list was settled
     # off-host back on this host -- re-settle it against what executes.
-    yielded_on_host = offhost_before_yield and backend not in _OFFHOST_BACKENDS
+    yielded_on_host = offhost_before_yield and backend not in OFFHOST_BACKENDS
     # A conditional expression, not an `if`: a new branch here would push this
     # function past its `complexity-baseline.json` value without sign-off.
     osdi_preload, osdi_runner_environment = (
@@ -3278,7 +3278,7 @@ def _run_sim_corners(
         _ownership,
         artifacts_dir,
         plot_dir,
-        persistent=bool(keep_artifacts or resume or backend in _OFFHOST_BACKENDS),
+        persistent=bool(keep_artifacts or resume or backend in OFFHOST_BACKENDS),
         dry_run=dry_run,
     )
     checkpoint_path = _checkpoint_path(artifacts_dir)
@@ -3346,7 +3346,7 @@ def _run_sim_corners(
     fleet_hosts = sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points)
     sim_subckt_override.refuse_on_host_default(
         netlist_overrides_report,
-        backend_is_offhost=backend in _OFFHOST_BACKENDS,
+        backend_is_offhost=backend in OFFHOST_BACKENDS,
         backend=backend,
         backend_from_host_default=backend_from_host_default,
         n_points=len(dispatch_points),
@@ -3354,14 +3354,14 @@ def _run_sim_corners(
     # A single-unit run under a host default stays here: one corner does not
     # repay a Spot instance's minutes of boot, and it is exactly the "probe
     # one corner locally" case 2am#1004's ruling keeps local.
-    offhost_before_yield = backend in _OFFHOST_BACKENDS
-    backend = _yield_host_default_backend(
+    offhost_before_yield = backend in OFFHOST_BACKENDS
+    backend = yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
     )
     # Issue #5492: the unit count is only known here, so this is the one yield
     # that can move the run on-host after the OSDI list was already settled
     # for an off-host backend -- re-settle it against the backend that runs.
-    yielded_on_host = offhost_before_yield and backend not in _OFFHOST_BACKENDS
+    yielded_on_host = offhost_before_yield and backend not in OFFHOST_BACKENDS
     osdi_preload, osdi_runner_environment = (  # expression, see the resume site
         resettle_osdi_preload_for_local(
             request, request_dir, backend, engine, ngspice_binary or XYCE_BINARY
@@ -3389,7 +3389,7 @@ def _run_sim_corners(
         ngspice_binary or XYCE_BINARY,
         engine_version_pin,
         settle=yielded_on_host
-        or (backend_from_host_default and backend in _OFFHOST_BACKENDS),
+        or (backend_from_host_default and backend in OFFHOST_BACKENDS),
     )
     # Issue #2977: which backend actually ran, and where the request for it
     # came from -- so a host-policy audit can spot a `local` run although
@@ -3428,7 +3428,7 @@ def _run_sim_corners(
     if (
         fail_fast_probe
         and not dry_run
-        and backend not in _OFFHOST_BACKENDS
+        and backend not in OFFHOST_BACKENDS
         and dispatch_points
     ):
         probe_result = _run_fail_fast_probe(
@@ -3497,7 +3497,7 @@ def _run_sim_corners(
         osdi_preload=osdi_preload,
     )
     ngspice_init_env = sim_spiceinit.record(  # Issue #5648
-        ngspice_init_lines, effective_threads, engine, backend in _OFFHOST_BACKENDS
+        ngspice_init_lines, effective_threads, engine, backend in OFFHOST_BACKENDS
     )
     local_engine_kwargs = (
         {
@@ -3521,7 +3521,7 @@ def _run_sim_corners(
             "stimulus_lines": stimulus_lines,
             "convergence_retry": convergence_retry,
         }
-        if backend not in _OFFHOST_BACKENDS
+        if backend not in OFFHOST_BACKENDS
         else {"request_dir": request_dir}
     )
     _apply_attach(
@@ -3606,7 +3606,7 @@ def _run_sim_corners(
         bool(pre_completed),
         attach_job_id,
     )
-    if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
+    if not dispatch_points and backend in OFFHOST_BACKENDS and attach_job_id is None:
         # An all-covered resume dispatches nothing (#5775).
         corners_new, backend_engine_version, remote_environment = [], None, None
     elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
@@ -3640,7 +3640,7 @@ def _run_sim_corners(
                 else {}
             ),
         )
-    elif backend in _OFFHOST_BACKENDS:
+    elif backend in OFFHOST_BACKENDS:
         # Real fleet dispatch (Epic #375 Phase 1B, #377, wired in here by
         # issue #906; `batch`'s own one-job-per-shard analog by issue
         # #2080) -- distinct from the generic `_run_sharded` seam below,
@@ -3721,7 +3721,7 @@ def _run_sim_corners(
         code=IC_UNSUPPORTED_WORKER_CODE,
     )
     _sao.require_echo(dispatch_points, corners_new, backend)
-    sim_op_check.require_echo(analysis, corners_new, backend, _OFFHOST_BACKENDS)
+    sim_op_check.require_echo(analysis, corners_new, backend, OFFHOST_BACKENDS)
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
@@ -4399,7 +4399,7 @@ def _preflight_staged_model_inputs(
     reports the same netlist refusals the real submit would, before any run
     directory exists.
     """
-    if backend not in _OFFHOST_BACKENDS or not (enabled or dry_run):
+    if backend not in OFFHOST_BACKENDS or not (enabled or dry_run):
         return {}
     staged_job = sim_staging.stage_sim_job(
         request,
@@ -4684,7 +4684,7 @@ def _maybe_gate_instances(
 
     if mc_spec is None or "instances" not in mc_spec:
         return netlist_path, monte_carlo_info
-    if backend in _OFFHOST_BACKENDS or explicit_points:
+    if backend in OFFHOST_BACKENDS or explicit_points:
         raise SimError(
             "request.monte_carlo.instances is only supported on local "
             f"backends (got backend {backend!r}); the per-instance netlist "
@@ -4762,7 +4762,7 @@ def _maybe_override_subckts(
 
     if "netlist_overrides" not in request:
         return netlist_path, None
-    if backend in _OFFHOST_BACKENDS or explicit_points:
+    if backend in OFFHOST_BACKENDS or explicit_points:
         raise SimError(
             "request.netlist_overrides is only supported on local backends "
             f"(got backend {backend!r}); the rewritten include closure is not "
@@ -6180,7 +6180,7 @@ def _effective_threads_per_worker(
     the batch fleet). A lone worker keeps the ambient behaviour. A netlist
     that itself ``set num_threads=N`` still overrides this (it runs later).
     """
-    if backend in _OFFHOST_BACKENDS:
+    if backend in OFFHOST_BACKENDS:
         return None
     if explicit is not None:
         return explicit

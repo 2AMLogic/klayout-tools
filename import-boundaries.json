@@ -2266,12 +2266,6 @@
       "reason": "Issue #5792: reuses the exact behavioural-latch regex place_and_route's netlist pre-flight rejects on, so the synthesize-time warning and the P&R rejection cannot drift; lives in the shared netlist_construct_scan module (place_and_route group) alongside the other two scanner primitives."
     },
     {
-      "consumer": "klayout_tools.characterize_osdi",
-      "exporter": "klayout_tools.sim",
-      "symbol": "_OFFHOST_BACKENDS",
-      "reason": "Issue #4911: characterize forwards runner-resolved OSDI entries only for the same off-host backends klt sim recognises; promote to a public name when sim is next split."
-    },
-    {
       "consumer": "klayout_tools.evidence_lint",
       "exporter": "klayout_tools.sim",
       "symbol": "_grade_corners",
@@ -2563,12 +2557,6 @@
       "consumer": "klayout_tools.place_and_route_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_status_exit_code",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools.sim",
-      "symbol": "_yield_host_default_backend",
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {

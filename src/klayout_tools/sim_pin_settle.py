@@ -29,7 +29,7 @@ same split :mod:`klayout_tools.sim_osdi_settle` makes for
 ``options.osdi_preload`` (issue #5492), whose ``resettle_osdi_preload_for_local``
 is called from the same two yield sites.
 
-``sim`` keeps the backend vocabulary (``_OFFHOST_BACKENDS``), the shared
+``sim`` keeps the backend vocabulary (``OFFHOST_BACKENDS``), the shared
 version comparison and the local engine probe, so those are reached through
 a deferred ``from . import sim`` -- ``sim`` imports this module at import
 time, and the attribute access also keeps ``sim._probe_engine_version``
@@ -51,7 +51,7 @@ def check_local_engine_version_pin(
     engine (local backends); a no-op when unset or for off-host backends."""
     from . import sim
 
-    if pin is None or backend in sim._OFFHOST_BACKENDS:
+    if pin is None or backend in sim.OFFHOST_BACKENDS:
         return
     sim._check_engine_version_pin(
         pin,
@@ -84,7 +84,7 @@ def check_offhost_engine_version_pin(
     report is an error envelope carrying no ``environment.engine_version``."""
     from . import sim
 
-    if pin is None or backend not in sim._OFFHOST_BACKENDS:
+    if pin is None or backend not in sim.OFFHOST_BACKENDS:
         return
     sim._check_engine_version_pin(
         pin, engine_version, engine, where=f"the {backend} runner's report"
@@ -168,7 +168,7 @@ def check_pdk_version_pin(pin: str | None, models: Any, backend: str) -> None:
 
     if pin is None:
         return
-    if backend in sim._OFFHOST_BACKENDS:
+    if backend in sim.OFFHOST_BACKENDS:
         raise SimError(
             f"models.pdk_version is not supported for backend {backend!r}: "
             "use a local backend for an installed-version pin, or use a batch "
@@ -229,7 +229,7 @@ def check_pdk_version_pin_early(
     from . import sim
 
     pin = validate_pdk_version_pin(models)
-    if backend_from_host_default and backend in sim._OFFHOST_BACKENDS:
+    if backend_from_host_default and backend in sim.OFFHOST_BACKENDS:
         return
     check_pdk_version_pin(pin, models, backend)
 
