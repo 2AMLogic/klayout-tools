@@ -873,10 +873,13 @@ Pinned inputs (lambdapdk v0.2.17, `scripts/fetch-pdks.sh`):
 `asap7sc7p5t_28_R.cdl` (sha256 `3e3e2548...caf53`), each cell compared as
 `klt lvs` with `finfet_bulk: {"nmos": "VSS", "pmos": "VDD"}`. Of the 209
 `.SUBCKT` entries in the CDL (verified through the public path, in a
-checked subprocess with a timeout; no native crash on any cell, ICG cells
+checked subprocess with a timeout, once unanchored and once with
+`options.anchor_top_level_pins: true`; no native crash on any cell, ICG cells
 included):
 
-- **191 match** (all 208 cells that draw devices, less the 17 below).
+- **191 match unanchored** (all 208 cells that draw devices, less the 17
+  below): 180 by port identity, plus the 11 series-order-port-swap cells
+  below, whose `match` rests on a commutative port swap.
 - **11 folded-stack cells: explicitly unsupported.** The layout draws
   parallel series stacks with distinct internal nodes that the CDL folds into
   one wider stack: `AND2x4 AND2x6 AOI21x1 AOI22x1 NAND3x2 NOR3x2 OAI21x1
@@ -894,21 +897,51 @@ included):
   For `SDFLx1`/`SDFLx2`/`SDFLx3`, exchanging the gates of the two series
   nFETs (`SE`, `SI`) in the scan-mux stack of the reference makes the cell
   match. No normalisation is applied; they are not silently turned green.
+- **11 series-order-port-swap cells: `match` standalone only through a
+  commutative port swap (issue #8084).** `AND4x1 AO21x1 AO21x2 AOI32xp33 FAx1
+  OAI31xp33 OAI31xp67 OAI322xp33 OAI32xp33 OAI33xp33 XOR2x2` (suffix
+  `_ASAP7_75t_R`). Like the series-order cells, layout and CDL order the same
+  series devices differently -- but across two *commutative* inputs, so a
+  standalone unanchored compare absorbs the difference by pairing the two
+  ports with each other (`A1↔A2`, `A1↔A3`, `B1↔B2`, `B1↔B3`, `A↔B`, or
+  `A↔D` with `B↔C`, visible as a non-identity `net_correspondence`) and the
+  verdict reads `match`. That swap exists only while the two ports are free to
+  trade places:
+  - With `options.anchor_top_level_pins: true` (or `hints.same_nets` pinning
+    each port to itself) exactly these 11 flip to `status: "mismatch"` on
+    their stack devices (2, 4 or 8 `device.unmatched`, plus a
+    `hints.rejected` entry per anchored port), while the other 180
+    device-drawing cells and `TAPCELL` keep matching under identity port
+    correspondence.
+  - A block cannot make the swap either. Once the pins are anchored (a
+    `gate-level-verilog` reference does so by default) or an instance's two
+    inputs are wired to nets the rest of the block already tells apart, those
+    inputs are identified with distinct reference nets and the instance fails
+    on exactly its two stack devices. Issue #8084 found this on a routed block
+    instantiating none of the 17 cells above.
+  - Permuting each cell's swapped ports in its CDL body, and nothing else,
+    restores `match` with the pins anchored: the difference is series order,
+    not an extraction defect. No normalisation is applied. A block that keeps
+    the compare matching -- both gates on one net, or a hierarchical instance
+    on interchangeable nets -- reports nothing.
 - **`TAPCELL`** has no devices: inline extraction yields no circuit and
   `klt lvs` exits 1 ("not found in layout netlist"). `FILLER*` and
   `TAPCELL_WITH_FILLER` have no CDL entry.
 
-For these 17 cells (and only when the compare mismatches), `klt lvs` adds one
+For these 28 cells (and only when the compare mismatches), `klt lvs` adds one
 `severity: "warning"` `topology.known_limitation` entry to `mismatches[]`
 naming the cell (`details`: `{"cell", "limitation": "folded-stack" |
-"series-order"}`), so an agent gets the known-limit signal in-band. It never
-changes `status`: the cell stays `mismatch`, and the real `device.unmatched` /
-`net.unmatched` errors are still reported. The list is
+"series-order" | "series-order-port-swap"}`), so an agent gets the known-limit
+signal in-band. It never changes `status`: the cell stays `mismatch`, and the
+real `device.unmatched` / `net.unmatched` errors are still reported. The
+port-swap entry's description says that the cell's drawn series-stack order
+matches the CDL only under a commutative swap of symmetric input ports, since
+the unanchored table above calls that same cell a `match`. The list is
 `KNOWN_UNSUPPORTED_ASAP7_CELLS` in `klayout_tools/lvs_known_limits.py`, pinned to the
 corpus by the tests.
 
 **Block-level compares (issue #6931).** The single-cell warning above fires
-only when the compared *top* is itself one of the 17 cells -- exactly where
+only when the compared *top* is itself one of the 28 cells -- exactly where
 the top name already tells the reader which cell is involved. A block-level
 compare (a routed design whose top *instantiates* the cells) gets the same
 never-silent disclosure for every pinned master it instantiates: on a
@@ -940,7 +973,7 @@ order:
   named cells are still the reader's to bisect (the cell-level bisect recipe
   above remains the path).
 
-Corpus tests live in `tests/test_asap7_finfet.py` (unit tests in `tests/test_lvs_known_limits.py`); they skip with an
+Corpus tests live in `tests/test_asap7_finfet.py` and, for the port-swap cells, `tests/test_asap7_port_swap.py` (unit and synthetic report-path tests in `tests/test_lvs_known_limits.py` and `tests/test_lvs_port_swap.py`); they skip with an
 explicit reason when the pinned PDK is not fetched and write only to temp
 paths.
 
@@ -4702,17 +4735,23 @@ original hierarchy — the same transparency precedent
 `device.parameter_tolerated`/`device.bulk_reconciled` establish for their own
 opt-in normalisations.
 
-#### `topology.known_limitation`: a pinned unsupported ASAP7 RVT cell participated in the compare (issues #4819, #6931)
+#### `topology.known_limitation`: a pinned unsupported ASAP7 RVT cell participated in the compare (issues #4819, #6931, #8084)
 
 Two shapes, both `severity: "warning"` and both emitted only on a
 **mismatching FinFET compare** (`layout.deck` is a FinFET deck and `status`
 is `"mismatch"` — never on a `"match"`, an inconclusive/timeout compare, or a
 planar deck):
 
-- **Single cell (issue #4819):** the compared top itself is one of the 17
+- **Single cell (issue #4819):** the compared top itself is one of the 28
   pinned cells. `side` is `"layout"`; `details` is `{"cell", "limitation"}`
   with no count keys. See "Pinned ASAP7 RVT corpus" above for the limitation
-  kinds and why the verdict stays `mismatch`.
+  kinds and why the verdict stays `mismatch`. For the 11
+  `"series-order-port-swap"` cells (issue #8084) the mismatch gate is the
+  whole story: their unanchored standalone compare is a `"match"` and emits
+  nothing, and the entry appears only once anchored pins or a block's wiring
+  takes the commutative swap away. Its `description` then says that the cell's
+  drawn series-stack order matches the CDL only under a commutative swap of
+  symmetric input ports.
 - **Block level (issue #6931):** one entry per pinned master *instantiated*
   beneath either selected top, in canonical master-name order. `side` is
   `"both"`; `details` adds `layout_count`/`reference_count` — the per-side
