@@ -25,7 +25,7 @@ installed, no deck involved) are ``null`` -- never fabricated.
 
 This module also owns the single ``sha256_file`` implementation the verbs
 share (previously copy-pasted in ``sim.py``, ``extract.py``, and ``lvs.py``),
-plus ``_yosys_version``/``_combined_content_hash`` (issue #1112) and
+plus ``yosys_version``/``combined_content_hash`` (issue #1112) and
 ``wasi_sandbox_hint_if_applicable`` (issues #1755/#1368; #2453 narrowed
 it to scripts under the host temp dir).
 
@@ -137,8 +137,8 @@ def wasi_sandbox_hint_if_applicable(error_line: str) -> str:
     failure and must not get the hint. Shared by ``synthesize.py`` and
     ``equiv.py`` (issue #1755) so the #1368 WASI-sandboxed-yosys (e.g.
     ``yowasp-yosys``) detection can't silently diverge between verbs again,
-    the same failure mode issue #1112 fixed for ``_yosys_version``/
-    ``_combined_content_hash`` above.
+    the same failure mode issue #1112 fixed for ``yosys_version``/
+    ``combined_content_hash`` above.
 
     When ``<path>`` is inside ``tempfile.gettempdir()`` (normalized
     containment, symlinks resolved) the hint is
@@ -348,7 +348,7 @@ def layout_geometry_digest(path: str | None) -> str | None:
         return None
 
 
-def _yosys_version(binary: str = "yosys") -> str | None:
+def yosys_version(binary: str = "yosys") -> str | None:
     """Yosys's own reported version token (``<binary> -V``'s output), or
     ``None`` if unresolvable -- never raises. Shared by ``equiv.py`` (SAT
     equivalence checking) and ``synthesize.py`` (RTL synthesis), which both
@@ -380,7 +380,7 @@ def _yosys_version(binary: str = "yosys") -> str | None:
     return match.group(1) if match else None
 
 
-def _combined_content_hash(paths: list[str]) -> str | None:
+def combined_content_hash(paths: list[str]) -> str | None:
     """A single ``sha256:``-prefixed digest covering every file in ``paths``
     (order-independent -- sorted before hashing), for the multi-``sources``
     case :func:`build_provenance`'s single-path ``input_path`` argument
@@ -404,7 +404,7 @@ def _combined_content_hash(paths: list[str]) -> str | None:
     return f"sha256:{combined}"
 
 
-def _klt_version() -> str:
+def klt_version() -> str:
     """The same build identity as ``klt --version``, including ``+unknown``
     when no git provenance can be recovered."""
     return build_identity.build_version()
@@ -420,14 +420,10 @@ def _klt_build_handle() -> tuple[str | None, str | None]:
     return (ident.get("git_commit") or None, spec)
 
 
-def _klayout_version() -> str | None:
+def klayout_version() -> str | None:
     """``klayout.__version__`` (the KLayout Python engine build), or ``None``
     -- mirrors ``lvs.py``'s existing engine-version lookup."""
-    try:
-        import klayout
-    except Exception:
-        return None
-    return getattr(klayout, "__version__", None)
+    return build_identity.klayout_version()
 
 
 #: `provenance` fields `--check` treats as a non-fatal *advisory*
@@ -443,8 +439,8 @@ def _klayout_version() -> str | None:
 #: all three fields from `--rerun`'s drift diff (#1106); that exclusion is
 #: unchanged by this constant.
 VERSION_ADVISORY_FIELDS: tuple[tuple[str, Callable[[], str | None]], ...] = (
-    ("klt_version", _klt_version),
-    ("klayout_version", _klayout_version),
+    ("klt_version", klt_version),
+    ("klayout_version", klayout_version),
 )
 
 
@@ -675,7 +671,7 @@ def explicit_deck_options(deck_block: Any) -> dict[str, str] | None:
     return passed or None
 
 
-def _deck_block(
+def deck_block(
     name: str | None,
     path: str | None,
     deck_options: Mapping[str, str] | None = None,
@@ -827,7 +823,7 @@ def deck_identity(name: str) -> dict[str, Any]:
     ``provenance.deck.content_hash`` is the identity that actually pins a
     run's rule set, but obtaining it used to require *running a check* (and
     therefore having some layout handy to run it against). This is the same
-    block a report carries for ``name``, computed by :func:`_deck_block`.
+    block a report carries for ``name``, computed by :func:`deck_block`.
 
     Raises :class:`UnknownProvenanceDeckError` for an unregistered name.
     """
@@ -838,8 +834,8 @@ def deck_identity(name: str) -> dict[str, Any]:
         raise UnknownProvenanceDeckError(
             f"unknown deck '{name}' (available: {', '.join(known)})"
         )
-    block = _deck_block(name, deck_source_path(name))
-    if block is None:  # unreachable: _deck_block is None only for name=None
+    block = deck_block(name, deck_source_path(name))
+    if block is None:  # unreachable: deck_block is None only for name=None
         raise UnknownProvenanceDeckError(f"unknown deck '{name}'")
     return block
 
@@ -893,14 +889,14 @@ def build_provenance(
     a role outside :data:`INPUT_ROLES` -- a silently-unknown role would
     disable the cross-check for that verb instead of failing loudly.
     ``deck_options`` (issue #595) is recorded onto ``provenance.deck.options``
-    via :func:`_deck_block`; ``resolve_deck_options`` (issue #2394) additionally
+    via :func:`deck_block`; ``resolve_deck_options`` (issue #2394) additionally
     fills in the options the deck resolved *by default* and records which of
     the resulting values the caller actually pinned
     (``options_explicit``/``options_hash``) -- see that function's docstring
     for both. ``klt_version``/``klayout_version`` are read at call time.
 
     ``deck_path_envelope`` (issue #3785, opt-in) adds ``provenance.deck.path``
-    -- see :func:`_deck_block`.
+    -- see :func:`deck_block`.
 
     ``include_klayout_version_mismatch`` (issue #1490, opt-in and ``False``
     by default) adds ``provenance.klayout_version_mismatch``: ``True`` when
@@ -919,19 +915,19 @@ def build_provenance(
             f"unknown provenance input role {input_role!r} "
             f"(expected one of {', '.join(sorted(INPUT_ROLES))})"
         )
-    actual_klayout_version = _klayout_version()
+    actual_klayout_version = klayout_version()
     if klayout_version_override_active:
         actual_klayout_version = klayout_version_override
     git_commit, reinstall_spec = _klt_build_handle()
     block: dict[str, Any] = {
-        "klt_version": _klt_version(),
+        "klt_version": klt_version(),
         # Additive (issue #4412): the handle that re-obtains the build a
         # dev-build `klt_version` (never published to an index) names.
         "klt_git_commit": git_commit,
         "klt_reinstall_spec": reinstall_spec,
         "klayout_version": actual_klayout_version,
         "pdk": _pdk_block(pdk, deck_path),
-        "deck": _deck_block(
+        "deck": deck_block(
             deck_name,
             deck_path,
             deck_options,
@@ -960,5 +956,5 @@ def build_provenance(
                 reinstall_spec,
             )
     if klayout_version_override_active:
-        block["klayout_module_version"] = _klayout_version()
+        block["klayout_module_version"] = klayout_version()
     return block

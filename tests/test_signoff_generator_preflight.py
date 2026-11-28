@@ -33,7 +33,7 @@ def test_an_unpinnable_client_version_is_a_package_failed_row(
 ):
     """The row is a ``failed`` outcome carrying the preflight's own message,
     and nothing is ever submitted to the fleet."""
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: _UNPINNABLE)
+    monkeypatch.setattr(_provenance, "klt_version", lambda: _UNPINNABLE)
 
     row = sgb_tests._item1(repo, sgb_tests._execution(tmp_path))
 

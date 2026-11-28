@@ -1290,7 +1290,7 @@ def _build_deck_report(
             "engine": "ngspice",
             "engine_version": engine_version,
             "ngspice_binary": ngspice_binary,
-            "klt_version": _provenance._klt_version(),
+            "klt_version": _provenance.klt_version(),
             "max_workers": max_workers,
         },
     }
@@ -1627,7 +1627,7 @@ def _deck_batch_command(
     return (
         sim_batch._job_stderr_capture_prefix()
         + sim_batch._runner_preflight_script(
-            _provenance._klt_version(),
+            _provenance.klt_version(),
             enforce=version_check == "enforce",
             capture=sim_batch._worker_capture_command(worker_request, model_names),
         )
@@ -1712,7 +1712,7 @@ def _synthesized_deck_report(
         "environment": {
             "engine": "ngspice",
             "engine_version": None,
-            "klt_version": _provenance._klt_version(),
+            "klt_version": _provenance.klt_version(),
             "max_workers": None,
             "remote": environment,
         },

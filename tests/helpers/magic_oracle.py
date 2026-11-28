@@ -135,7 +135,7 @@ class MagicOracleError(RuntimeError):
 def magic_version() -> str | None:
     """magic's own reported version (e.g. ``"8.3.683"``), or ``None``.
 
-    Never raises -- mirrors ``_provenance._yosys_version``'s shape for the
+    Never raises -- mirrors ``_provenance.yosys_version``'s shape for the
     same "record the engine's version, don't fabricate one" reason.
     """
     if MAGIC_BINARY is None:

@@ -402,7 +402,7 @@ def build_job_command(
     from . import _provenance, sim_batch
 
     version = (
-        client_version if client_version is not None else _provenance._klt_version()
+        client_version if client_version is not None else _provenance.klt_version()
     )
     try:
         preflight = sim_batch._runner_preflight_script(

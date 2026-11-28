@@ -802,7 +802,7 @@ def _assess_published_runner(
     appending the #7857 pinned-client remedy when the client is the older
     side. Unavailable metadata leaves the runner-side preflight
     authoritative."""
-    client = _provenance._klt_version()
+    client = _provenance.klt_version()
     assessment: dict[str, Any] = {
         "status": "unknown",
         "check": config.runner_version_check,
@@ -2044,7 +2044,7 @@ def _read_runner_identity(
     to ``required``, judged by :func:`_runner_supports_decks` since it is
     not a plain min-version entry.
     """
-    client = _provenance._klt_version()
+    client = _provenance.klt_version()
     runner: str | None = None
     step_probe = None
     if local_dir is not None:

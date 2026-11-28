@@ -720,8 +720,8 @@ def oracle_provenance(
         },
         "klt": {
             "schema_version": klt_report.get("schema_version"),
-            "klayout_version": _provenance._klayout_version(),
-            "klt_version": _provenance._klt_version(),
+            "klayout_version": _provenance.klayout_version(),
+            "klt_version": _provenance.klt_version(),
             "klt_mom_native_source_fingerprint": native_fingerprint,
             "panel_size_um": klt_report.get("panel_size_um"),
             "panel_count": klt_report.get("panel_count"),

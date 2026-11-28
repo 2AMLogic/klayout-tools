@@ -144,7 +144,7 @@ class TestNgspiceInit:
         # batch collector hands _read_job_identity), the generic
         # min-runner registry entry (options.ngspice_init, 0.7.0) gates a
         # deck job too -- it never fired before issue #5738.
-        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.9.0")
+        monkeypatch.setattr(sb._provenance, "klt_version", lambda: "0.9.0")
         (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
             json.dumps({"runner_klt_version": "0.6.0"}), encoding="utf-8"
         )
@@ -160,7 +160,7 @@ class TestNgspiceInit:
     def test_runner_feature_gate_passes_on_supporting_runner(
         self, tmp_path, monkeypatch
     ):
-        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.9.0")
+        monkeypatch.setattr(sb._provenance, "klt_version", lambda: "0.9.0")
         (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
             json.dumps({"runner_klt_version": "0.8.0"}), encoding="utf-8"
         )

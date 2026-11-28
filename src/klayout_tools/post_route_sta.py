@@ -292,8 +292,8 @@ from ._power_activity import validate_power_activity
 from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
-    _deck_block,
     build_provenance,
+    deck_block,
     sha256_file,
 )
 from ._request_fields import check_known_fields
@@ -1621,7 +1621,7 @@ def _run_multi_corner(
                 **axis_fields,
                 **corner_fields,
                 **corner_targets,
-                "deck": _deck_block(
+                "deck": deck_block(
                     deck_name,
                     resolution["liberty_path"],
                     path_envelope=report_paths.output_envelope(

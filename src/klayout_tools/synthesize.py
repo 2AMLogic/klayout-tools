@@ -240,11 +240,11 @@ from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
-    _combined_content_hash,
-    _yosys_version,
     build_provenance,
+    combined_content_hash,
     content_hash,
     sha256_file,
+    yosys_version,
 )
 from ._report_verify import (
     build_check_result,
@@ -1051,7 +1051,7 @@ def run_synthesize(
     )
     if len(resolved_sources) > 1:
         provenance["input"] = {
-            "content_hash": _combined_content_hash(resolved_sources),
+            "content_hash": combined_content_hash(resolved_sources),
             "role": INPUT_ROLE_SOURCE,
         }
     # Issue #3466: record which elaboration this is, so two parameterisations
@@ -1230,7 +1230,7 @@ def run_synthesize(
         delay_target_ps,
         stats_path=stats_capture.stats_path if stats_capture is not None else None,
     )
-    engine_version = _yosys_version()
+    engine_version = yosys_version()
     structural = _compute_structural(module_stats, yosys_log, expected_latches)
     instance_counts_by_type = dict(
         sorted((module_stats.get("num_cells_by_type") or {}).items())
@@ -3998,7 +3998,7 @@ def _synthesize_provenance_hashes(
     the sources are resolved through the same :func:`_resolve_sources`, a
     single source hashes through :func:`klayout_tools._provenance.content_hash`
     (what :func:`build_provenance`'s ``input_path`` does) and multiple sources
-    through :func:`klayout_tools._provenance._combined_content_hash` (what
+    through :func:`klayout_tools._provenance.combined_content_hash` (what
     :func:`run_synthesize` substitutes for the multi-source case), and the
     liberty resolves through the same :func:`_resolve_liberty`. Any divergence
     here would show up as permanent, unexplained drift on a report that never
@@ -4023,7 +4023,7 @@ def _synthesize_provenance_hashes(
     if len(resolved_sources) == 1:
         input_hash = content_hash(resolved_sources[0])
     else:
-        input_hash = _combined_content_hash(resolved_sources)
+        input_hash = combined_content_hash(resolved_sources)
     if skip_deck:
         return input_hash, None
     liberty_path, _corner, _pdk_info = _resolve_liberty(

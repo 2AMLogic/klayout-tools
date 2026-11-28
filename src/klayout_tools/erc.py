@@ -3209,7 +3209,7 @@ def run_erc(
     # `provenance.deck` (issue #2204): `--deck` names a curated extraction
     # deck (see `_resolve_deck`), so this is populated exactly the way every
     # other `--deck`-taking verb populates it (`deck_name`/`deck_path` -->
-    # `build_provenance`'s own `_deck_block`), unlike `provenance.pdk`
+    # `build_provenance`'s own `deck_block`), unlike `provenance.pdk`
     # above, which is hand-built because `klt erc` resolves no filesystem
     # PDK at all. `None` when `--deck` was omitted, matching every other
     # verb's conditional `deck` population -- and this module's own

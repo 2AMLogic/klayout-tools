@@ -140,7 +140,7 @@ def _divergent_host(monkeypatch) -> None:
     and only the *application* agrees with the build."""
     from klayout_tools import _provenance, build_identity
 
-    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.13")
+    monkeypatch.setattr(_provenance, "klayout_version", lambda: "0.30.13")
     monkeypatch.setattr(
         build_identity, "_recorded_klayout_version_expected", lambda: "0.30.12"
     )

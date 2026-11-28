@@ -16,7 +16,7 @@ def _force_engine_axis(monkeypatch, runtime: str | None, expected: str | None) -
     version, so without this the mismatch flag is always `false`."""
     from klayout_tools import _provenance, build_identity
 
-    monkeypatch.setattr(_provenance, "_klayout_version", lambda: runtime)
+    monkeypatch.setattr(_provenance, "klayout_version", lambda: runtime)
     monkeypatch.setattr(
         build_identity, "_recorded_klayout_version_expected", lambda: expected
     )

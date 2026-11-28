@@ -155,7 +155,7 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
     monkeypatch.delenv(par_batch.BACKEND_ENV, raising=False)
     monkeypatch.delenv(sim_batch.PROFILE_ENV, raising=False)
     monkeypatch.delenv(sim_batch.MAX_JOB_SECONDS_ENV, raising=False)
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: CLIENT_VERSION)
+    monkeypatch.setattr(_provenance, "klt_version", lambda: CLIENT_VERSION)
     keep = tmp_path / "uploads"
     keep.mkdir()
     deck_hash = {}
@@ -530,7 +530,7 @@ def _run_job_cmd(tmp_path: Path, runner_version: str, version_check: str = "enfo
 def test_pre_backend_runner_exits_87_with_the_capability_code(
     tmp_path, monkeypatch, runner_version, version_check
 ):
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: "0.7.1.dev1127")
+    monkeypatch.setattr(_provenance, "klt_version", lambda: "0.7.1.dev1127")
 
     result, out = _run_job_cmd(tmp_path, runner_version, version_check)
 
@@ -545,7 +545,7 @@ def test_pre_backend_runner_exits_87_with_the_capability_code(
 def test_runner_at_or_after_the_floor_passes_the_capability_gate(
     tmp_path, monkeypatch, runner_version
 ):
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: runner_version)
+    monkeypatch.setattr(_provenance, "klt_version", lambda: runner_version)
 
     result, out = _run_job_cmd(tmp_path, runner_version)
 

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
-from klayout_tools._provenance import _combined_content_hash
+from klayout_tools._provenance import combined_content_hash
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
@@ -229,7 +229,7 @@ def test_integration_sdf_annotated_run(tmp_path):
         str(tmp_path / name) for name in ("and_cell.v", "and2.v", "tb_and2.v")
     ]
     assert report["provenance"]["input"] == {
-        "content_hash": _combined_content_hash(source_paths),
+        "content_hash": combined_content_hash(source_paths),
         "role": "source",
     }
 

@@ -2068,7 +2068,7 @@ class TestRunnerDecksGate:
     def test_known_old_runner_is_refused_before_any_submit(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
         _publish_runner(monkeypatch, "0.7.0")
-        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        monkeypatch.setattr(sb._provenance, "klt_version", lambda: "0.7.1.dev500")
         fleet = install_fake_batch(
             monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
         )
@@ -2080,7 +2080,7 @@ class TestRunnerDecksGate:
     def test_refused_even_under_warn(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
         _publish_runner(monkeypatch, "0.7.0")
-        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        monkeypatch.setattr(sb._provenance, "klt_version", lambda: "0.7.1.dev500")
         fleet = install_fake_batch(
             monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
         )
@@ -2096,7 +2096,7 @@ class TestRunnerDecksGate:
     ):
         write_stub_engine(tmp_path)
         _publish_runner(monkeypatch, "0.7.1.dev500+gabc")
-        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        monkeypatch.setattr(sb._provenance, "klt_version", lambda: "0.7.1.dev500")
         fleet = install_fake_batch(
             monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
         )
@@ -2217,7 +2217,7 @@ class TestDecksRequestFeatureReport:
 
     @staticmethod
     def _identity(tmp_path, monkeypatch, runner, request):
-        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        monkeypatch.setattr(sb._provenance, "klt_version", lambda: "0.7.1.dev500")
         if runner is not None:
             (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
                 json.dumps({"runner_klt_version": runner}), encoding="utf-8"

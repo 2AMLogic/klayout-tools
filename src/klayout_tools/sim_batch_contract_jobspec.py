@@ -114,9 +114,7 @@ def _build_batch_job_spec(
     command = (
         _job_stderr_capture_prefix()
         + _runner_preflight_script(
-            client_version
-            if client_version is not None
-            else _provenance._klt_version(),
+            client_version if client_version is not None else _provenance.klt_version(),
             enforce=version_check == "enforce",
             capture=_worker_capture_command(
                 remote_request, [asset.name for asset in staged.model_assets]

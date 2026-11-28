@@ -27,7 +27,7 @@ def _script(path, body):
 
 @pytest.mark.parametrize("threads,expected", [("max", 4), (3, 3), (4, 4), (8, None)])
 def test_worker_resolves_or_refuses_threads(tmp_path, monkeypatch, threads, expected):
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: "0.8.0")
+    monkeypatch.setattr(_provenance, "klt_version", lambda: "0.8.0")
     worker_bin = tmp_path / "bin"
     worker_bin.mkdir()
     _script(worker_bin / "nproc", "echo 4\n")

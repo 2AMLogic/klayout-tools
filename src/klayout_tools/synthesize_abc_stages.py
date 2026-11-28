@@ -66,7 +66,7 @@ class AbcTimeout(SynthesizeError):
             _read_produced_netlist,
             _read_stats,
             _summarize_warnings,
-            _yosys_version,
+            yosys_version,
         )
 
         stages = self.stages
@@ -90,7 +90,7 @@ class AbcTimeout(SynthesizeError):
         response = {
             "schema_version": SCHEMA_VERSION,
             "engine": "yosys",
-            "engine_version": _yosys_version(),
+            "engine_version": yosys_version(),
             "hdl_toplevel": top,
             "parameters": provenance["parameters"],
             "defines": provenance["defines"],

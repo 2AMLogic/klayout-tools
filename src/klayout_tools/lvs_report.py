@@ -177,14 +177,14 @@ def assemble_lvs_report(
         input_role=layout_input_role,
         # Issue #600: echo the resolved `layout.deck_options` mapping
         # under `provenance.deck.options`, matching `klt extract`'s
-        # shape exactly (`_deck_block` omits the key entirely when
+        # shape exactly (`deck_block` omits the key entirely when
         # `deck_options` is `None`/empty).
         deck_options=opts.deck_options,
         # Issue #2394: ...and, identically to `klt extract`, record the
         # *fully resolved* option set (the deck's own defaults for every
         # key `layout.deck_options` did not pin) plus `options_explicit`/
         # `options_hash`. `layout_deck_name` is `None` for the
-        # pre-extracted `layout.netlist` shape, where `_deck_block`
+        # pre-extracted `layout.netlist` shape, where `deck_block`
         # returns `None` and this has no effect.
         resolve_deck_options=True,
         include_klayout_version_mismatch=True,

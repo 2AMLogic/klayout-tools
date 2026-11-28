@@ -21,7 +21,7 @@ def _capture_mismatch_warning(monkeypatch, capsys, reinstall_spec):
     which keeps the no-subprocess guard below about the warning itself."""
     from klayout_tools import build_identity
 
-    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.12")
+    monkeypatch.setattr(_provenance, "klayout_version", lambda: "0.30.12")
     monkeypatch.setattr(
         build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
     )
