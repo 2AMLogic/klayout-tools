@@ -432,7 +432,10 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
 - `--substrate-tie-ohms` — passed through to `klt extract
   --substrate-tie-ohms` (issue #3089): the substrate DC-tie resistance (default
   `1e12`, substrate capacitively floating in transient; `0` = hard tie). See
-  [`extract.md`](extract.md)'s "Substrate tie value" section.
+  [`extract.md`](extract.md)'s "Substrate tie value" section. On a multi-top
+  run every extracted top carries its own tie card on the shared global
+  `vsubs`, so a bench sees `R / N` for `N` instantiated extracted cells — see
+  "Several drawn tops in one run (`--top A --top B`)" below (issue #5997).
 - `--mom-rlc-net` / `--mom-rlc-resistance-ohm` / `--mom-rlc-capacitance-ff` /
   `--mom-rlc-inductance-nh` — passed through to `klt extract --mom-rlc-net`
   (issue #988, Epic #709 Phase 3a). Substitutes a caller-supplied,
@@ -934,6 +937,26 @@ demotes its own extra labelled nets. A declared name matching no promoted net
 in a given top's extraction produces that extraction's ordinary warning, not
 an error.
 
+**The substrate DC tie is one resistor per extracted top, and they sit in
+parallel** (issue #5997). The "one per extraction" reference above is an
+`Rvsubs_dctie vsubs 0 <R>` card *inside* each top's `.SUBCKT`, with `R` the
+`--substrate-tie-ohms` value. Concatenating keeps every tie card as written
+(it de-duplicates only the repeated `.GLOBAL` card — see "The combined
+netlist" below), and `vsubs` is one global net, so the combined netlist
+carries no single substrate tie of its own: a testbench gets **one `<R>` tie
+per *instantiated* extracted cell**, all on the same `vsubs`. For a positive
+`R`, `N > 0` live instances and no other substrate DC path, the bench sees
+`R / N` — and `N` is the number of `X...` instances the bench draws, not the
+number of `--top` flags. Measured in ngspice 47 on a `--top RESA --top RESB`
+run with `--substrate-tie-ohms 1e6`: the current into a 1 V `vsubs` was 1 µA
+with `RESA` alone or `RESB` alone, 2 µA with one `RESA` and one `RESB` or
+with two `RESA`, and 3 µA with two `RESA` and one `RESB`. This is the
+single-top contract unchanged — one tie per instantiated cell; what the mode
+adds is the further cells whose ties join the same `vsubs`. At the default
+`1e12` it is immaterial (a DC reference only, issue #1263); a caller who sets
+`--substrate-tie-ohms` deliberately to model a real tie should expect `R / N`
+for the bench's own `N`.
+
 ### The combined netlist
 
 Written by `klt pex` itself (not by `klt extract`), to `-o` — or to the same
@@ -1019,7 +1042,6 @@ extraction**:
 | `--schematic-top` | Binds one schematic subcircuit name to one layout top. |
 | `--engine klayout-runset` | Each extraction can emit shared child circuit definitions. Concatenating those netlists can redefine a subcircuit. |
 | `--resume` | A sharded leg's resume fingerprint hashes the testbench body, not the extracted netlist its DUT `.include` names, so it cannot tell one `--top` list's shards from another's. |
-| `--dry-run` | A dry run reports one resolved `top` and validates one extraction request (issue #5464), so it cannot describe a multi-top run yet — tracked in [#5511](https://github.com/2AMLogic/klayout-tools/issues/5511). Dry-run each top on its own, or drop `--dry-run`. |
 
 These are **refusals, not designs**: each flag is single-top by construction,
 and inventing a per-top syntax for every one of them would make this mode's
@@ -2011,23 +2033,28 @@ the same input, rather than a lookalike that can drift:
 1. **The pre-extraction flag refusals.** Async flags (`--submit-only` /
    `--attach` / `--resume` / backend), `--wait-for-capacity`, the
    measure-mode rules (`<testbench>` vs `--measure-command` vs
-   `--extract-only`, and every flag each of them forbids), and
-   `--resistance-graph` with `--distributed-rc`. The output-directory lock
-   is the one thing deliberately **not** taken (see below).
+   `--extract-only`, and every flag each of them forbids),
+   `--resistance-graph` with `--distributed-rc`, and — when `--top` is given
+   more than once (issue #5511) — duplicate `--top` rejection plus the
+   shared multi-top flag refusals above. The output-directory lock is the
+   one thing deliberately **not** taken (see below).
 2. **The extraction preflight** — every check `klt extract --parasitics`
    makes before its engine starts: PDK and device-model binding resolution,
    the parasitics deck, the `run_extract` argument rules, then the layout
    file checks, `--deck` / `--deck-option` / `--label-layer` resolution, the
-   layout read, `--top` resolution, the per-deck option refusals, and
-   `--rename-declared-pins` / `--tie-declared-pins` needing a declared pin
-   set. Reading the stream to resolve `--top` is in scope: it is a file
-   read, not an extraction.
+   layout read, `--top` resolution (once per `--top` in `--top` order on a
+   multi-top run, naming the missing or failing top), the per-deck option
+   refusals, and `--rename-declared-pins` / `--tie-declared-pins` needing a
+   declared pin set. Reading the stream to resolve `--top` is in scope: it
+   is a file read, not an extraction.
 3. **The per-testbench DUT resolution** that a real run only reaches *after*
    extraction has already been paid for: the request loads, its body netlist
    exists, the body carries exactly one `.include`/`.inc`, that target
    plausibly declares a circuit, and every testbench agrees on one schematic
-   DUT. In `--measure-command` mode, the same "does it declare a circuit"
-   check on `--reference-netlist` instead.
+   DUT — plus, when two or more `--top` values are given (issue #5511), that
+   the schematic DUT declares a `.SUBCKT` for every `--top`. In
+   `--measure-command` mode, the same "does it declare a circuit" check on
+   `--reference-netlist` instead.
 4. **One nested `klt sim --dry-run` per testbench**, with the same backend
    and shard arguments the schematic leg would pass. Its report is embedded
    verbatim as that testbench's `sim` field.
@@ -2054,7 +2081,7 @@ Each entry is a fixed string code:
 
 | Code | Why a dry run cannot see it |
 |---|---|
-| `extraction` | Always present. Anything needing the extracted netlist: whether a `--critical-net` / `--mom-rlc-net` name resolves to a real net, and whether the label roles the deck reads are actually present in the layout. |
+| `extraction` | Always present. Anything needing the extracted netlist: whether a `--critical-net` / `--mom-rlc-net` name resolves to a real net, whether the label roles the deck reads are actually present in the layout, and (on a multi-top run) whether each `--top` extracts flat without retaining a device hierarchy. |
 | `netlist_diagnostics` | Always present. `pin_count_mismatch`, `pin_order_mismatch`, `flat_dut_mismatch` and `model_mismatch` all compare the extracted netlist's own `.SUBCKT` text against the schematic DUT's. |
 | `extracted_leg_preflight` | Always present. The extracted-side `klt sim` staging runs against a DUT-swapped request pointing at a netlist that does not exist yet. Dry-running it against a placeholder would validate a file the real run will never use. |
 | `tie_nets` | With `--tie-net`. Each pair names a net of *this extraction's* `body_bias.unbiased_nets`. |
@@ -2072,7 +2099,8 @@ fields use the same `{path, scope}` shape the full report uses.
 | `status` | string | Always `"valid"` — a dry run that reaches a report passed every check it made. A failure is an error envelope, exit 1. |
 | `layout` | object | `{path, scope}` — the layout this invocation would extract. |
 | `deck` | string | The `--deck` value, resolved. |
-| `top` | string | The resolved top cell name (`--top`, or the stream's single top cell). |
+| `top` | string | The resolved top cell name (`--top`, or the stream's single top cell; on a multi-top dry run, the first resolved `--top`). |
+| `tops` | array\|null | `null` on a zero- or one-`--top` dry run. With two or more `--top` values (issue #5511), one `{"top": "<resolved cell name>"}` object per `--top` in `--top` order. |
 | `deck_options` | object | The **fully resolved** deck-option mapping, including keys the deck defaulted — the same mapping `provenance.deck.options` records on a real run. `{}` for a deck with no selectable options. |
 | `declared_pins` | array\|null | `--pins`, sorted; `null` when the flag was not given. |
 | `legs` | array | The measurement legs this invocation would run: `["schematic", "extracted"]`, plus `"device-only"` with `--device-only-leg`. Empty for `--extract-only`, which measures nothing. |

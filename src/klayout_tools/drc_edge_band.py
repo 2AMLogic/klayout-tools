@@ -28,6 +28,13 @@ Both well-depth checks measure to the edges of
 ``nplus.not(dnwell).not_outside(nwell)``. A DNWELL cut in the implant can
 therefore set the enclosure of a tap inside a pure well.
 
+The same two statements subtract ``pplus.edges`` from the checked NCOMP
+edges, and ``NP.5dii`` from the enclosing ``Nplus`` edges as well: a butted
+NCOMP/PCOMP pair inside a well is ``NP.6``'s to measure, not ``NP.5d``'s
+(issue #7987). :class:`EdgeBandSpec.mask_layers` names that mask; it is
+applied per segment, so the part of an edge beyond the coincident stretch
+is still measured.
+
 The whole-polygon ``DerivedLayer.context`` split (issue #3484) cannot express
 it. One tap can carry edges in both classes -- near the well's boundary on
 one side, deep inside on the others -- and selecting a class by clipping
@@ -105,6 +112,15 @@ class EdgeBandSpec:
     An edge exactly ``band_width_um`` from the boundary is in the band (the
     strict class), matching the foundry expressions this mirrors.
 
+    ``mask_layers`` (``"enclosed"`` only) names layers whose merged edges
+    are subtracted, segment by segment, from the checked region's edges in
+    both well-depth classes, and from ``other_layer``'s edges in the interior
+    alone. gf180mcu's ``NP.5di``/``NP.5dii`` drop an NCOMP edge that
+    coincides with a ``Pplus`` edge from their checked edges, and only
+    ``NP.5dii`` drops it from the enclosing ``Nplus`` edges. A mask layer
+    absent from the stream is an empty mask: nothing is dropped. The rest
+    class is not touched -- it has its own ``butted_spec`` selection.
+
     An invalid descriptor raises :class:`ValueError` at construction; how it
     combines with its rule is :func:`validate_edge_band`'s to check.
     """
@@ -116,6 +132,7 @@ class EdgeBandSpec:
     band_metrics: str = "projection"
     inner_metrics: str = "euclidian"
     strict_layers: tuple[tuple[int, int], ...] = ()
+    mask_layers: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.context_layers:
@@ -132,7 +149,12 @@ class EdgeBandSpec:
 
     def layers(self) -> tuple[tuple[int, int], ...]:
         """Every layer this spec reads, in declaration order."""
-        return (*self.context_layers, *self.exclude_layers, *self.strict_layers)
+        return (
+            *self.context_layers,
+            *self.exclude_layers,
+            *self.strict_layers,
+            *self.mask_layers,
+        )
 
 
 def validate_edge_band(rule: Any) -> None:
@@ -167,29 +189,33 @@ def validate_edge_band(rule: Any) -> None:
             f"rule '{rule.id}': band_spec strict_layers is only meaningful on "
             "'separation' checks"
         )
+    if spec.mask_layers and rule.check != "enclosed":
+        raise DrcError(
+            f"rule '{rule.id}': band_spec mask_layers is only meaningful on "
+            "'enclosed' checks"
+        )
 
 
 def edge_band_fields(rule: Any, nominal_dbu_um: float) -> dict[str, Any]:
     """``--list-rules`` JSON for ``rule.band_spec``: an ``edge_band`` object
     naming both layer sets, the band width and the interior's own threshold
-    in um, plus ``strict_layers`` when the spec declares any. Empty for a
-    rule without one, so no other rule's JSON changes."""
+    in um, plus ``strict_layers`` and ``mask_layers`` when the spec declares
+    any. Empty for a rule without one, so no other rule's JSON changes."""
     spec = rule.band_spec
     if spec is None:
         return {}
+    optional = {}
+    if spec.strict_layers:
+        optional["strict_layers"] = [_layer_str(layer) for layer in spec.strict_layers]
+    if spec.mask_layers:
+        optional["mask_layers"] = [_layer_str(layer) for layer in spec.mask_layers]
     return {
         "edge_band": {
             "context_layers": [_layer_str(layer) for layer in spec.context_layers],
             "exclude_layers": [_layer_str(layer) for layer in spec.exclude_layers],
             "band_width_um": spec.band_width_um,
             "inner_threshold_um": round(spec.inner_threshold_dbu * nominal_dbu_um, 9),
-            **(
-                {}
-                if not spec.strict_layers
-                else {
-                    "strict_layers": [_layer_str(layer) for layer in spec.strict_layers]
-                }
-            ),
+            **optional,
         }
     }
 
@@ -216,7 +242,8 @@ def run_edge_band_check(
     single class (:func:`run_butted_edge_check`). On an ``"enclosed"`` rule
     carrying both, the rest class goes through its butted selection
     (:func:`rest_pairs`): the band and the interior are ``NP.5di``/``NP.5dii``,
-    which keep their operand.
+    which keep their operand -- save for the spec's ``mask_layers``, dropped
+    from both classes' checked edges and from the interior's implant edges.
     """
     import klayout.db as kdb
 
@@ -249,18 +276,29 @@ def run_edge_band_check(
     outside_wells, overlapping = eligible.split_outside(context)
     at_well, away_from_pure = overlapping.split_interacting(pure)
     well_edges = at_well.edges()
+    well_implant_edges = (other_region - exclude).not_outside(context).edges()
+    interior_implant_edges = well_implant_edges
+    if spec.mask_layers:
+        # The foundry's `.not(pplus.edges)`: an edge coincident with a mask
+        # edge is not measured -- from the checked edges of both classes, and
+        # from the enclosing implant edges of the interior only. The band
+        # keeps its operand, so an NCOMP edge facing a masked implant edge
+        # is still short there. Before the split, so neither class keeps the
+        # masked stretch.
+        mask_edges = _joined_region(cell, layout, spec.mask_layers).edges()
+        well_edges = well_edges - mask_edges
+        interior_implant_edges = well_implant_edges - mask_edges
     band_edges = well_edges & (pure - inner)
     interior_edges = well_edges & inner
-    well_implant_edges = (other_region - exclude).not_outside(context).edges()
 
     edge_pairs = kdb.EdgePairs()
-    for edges, limit, metrics in (
-        (band_edges, distance, spec.band_metrics),
-        (interior_edges, inner_distance, spec.inner_metrics),
+    for edges, implant, limit, metrics in (
+        (band_edges, well_implant_edges, distance, spec.band_metrics),
+        (interior_edges, interior_implant_edges, inner_distance, spec.inner_metrics),
     ):
         edge_pairs.insert(
             edges.enclosed_check(
-                well_implant_edges,
+                implant,
                 limit,
                 metrics=getattr(kdb.Region, _METRICS[metrics]),
             )

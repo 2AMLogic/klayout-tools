@@ -115,16 +115,16 @@ from .sim import (
     SIMULATION_ABORTED_RE,
     CornerPoint,
     SimError,
-    _corner_lib_lines,
     _expand_corners,
     _needs_models_lib,
     _resolve_corner_section_libs,
     _resolve_models_lib,
-    _resolve_netlist_include,
     _resolve_param_file,
-    _scale_supply_waveforms,
-    _supply_alter_lines,
     classify_diagnostics,
+    corner_lib_lines,
+    resolve_netlist_include,
+    scale_supply_waveforms,
+    supply_alter_lines,
 )
 from .sim_case_names import validate_request_measurements
 from .sim_request_overrides import _with_pdk_root_override
@@ -432,7 +432,7 @@ def expand_includes(
         reference = card.group(2).strip().strip("\"'")
         if "$" in reference:
             continue
-        path = _resolve_netlist_include(reference, base_dir)
+        path = resolve_netlist_include(reference, base_dir)
         if path is None:
             continue
         real = os.path.realpath(path)
@@ -835,14 +835,14 @@ def _write_op_deck(
     lines = ["* klt sim --op-lint -- generated operating-point deck, do not edit"]
     # Same helper the sweep's deck uses, so the lint cannot drift from it on
     # multi-section bundles or issue #2522's per-section corner libraries.
-    lines.extend(_corner_lib_lines(point, models_lib))
+    lines.extend(corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     lines.append(f".temp {point.temperature_c}")
 
     lines.append(".control")
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
-    lines.extend(_supply_alter_lines(point))
+    lines.extend(supply_alter_lines(point))
     lines.append("op")
     for index, device in enumerate(devices):
         lines.append(f"echo {_DEVICE_MARKER} {index} {device.name}")
@@ -1741,7 +1741,7 @@ def _run_op(
         # Issue #3624: a `corners.supply_waveforms` source is rescaled in a
         # per-corner netlist copy (as the sweep does), not `alter`ed.
         try:
-            deck_netlist_path, _ = _scale_supply_waveforms(
+            deck_netlist_path, _ = scale_supply_waveforms(
                 netlist_path, netlist_path, work_dir, point
             )
         except SimError as exc:

@@ -2,6 +2,24 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-28
+
+- **PR #2606**: fix(lvs): name an unresolvable --check input instead of a bare null hash
+- **PR #2604**: fix(lvs): declare a dummy marker layer for the gf180mcu extraction deck
+- **PR #2603**: fix(functional-verification): read sim_time_ns from cocotb 2.1.0 properties
+- **PR #2598**: ci: move short and scheduled jobs off Blacksmith to GitHub-hosted
+- **PR #2596**: fix: adapt fixtures and cocotb pin to klayout 0.30.12 / cocotb 2.1.0
+- **PR #2589**: fix(gen): report mos_array's absent S/D implant in drc_hints
+- **PR #2588**: fix: drop stale sky130/gf180mcu-only claim from klt gen --help
+- **PR #2562**: feat(pdk): add resistivity/effective-thickness fields to substrate stackup entry
+- **Issue #2599** (closed): lvs: gf180mcu extraction deck declares no `dummy` marker layer, so `klt gen`'s own dummy devices are unsuppressable `device.unmatched` errors
+- **Issue #2595** (closed): lvs: --check resolves a report's relative input paths against CWD, so a committed request/report pair only checks from its own directory
+- **Issue #2592** (closed): klt functional-verification: sim_time_ns is always null under cocotb >= 2.1.0
+- **Issue #2583** (closed): PR #2578 (python deps bump): klayout 0.30.12 changes PCell rows-param serialization; cocotb 2.1.0 breaks pin/testcase-filter tests
+- **Issue #2580** (closed): gen: mos_array draws no source/drain implant on ihp-sg13g2, and no rule or hint reports the omission
+- **Issue #2577** (closed): klt gen --help still says every generator but resistor_strip is sky130/gf180mcu-only, and that an 'other' family is an application error — sg13g2 invocations succeed
+- **Issue #2560** (closed): klt pdk stackup: substrate entry lacks resistivity/thickness fields
+
 ### 2026-09-27
 
 - **PR #2566**: fix(sim): case-fold spice-form measurement name lookup for ngspice

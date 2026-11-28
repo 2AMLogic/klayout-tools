@@ -120,7 +120,7 @@ from .pdk_families import (
     pdk_variant_family,
     pdk_variant_install_names,
 )
-from .pdk_store import read_store_stamp
+from .pdk_store import read_store_install, read_store_stamp, store_layout_of
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -213,23 +213,21 @@ def find_pdk(
     Every ``assets`` key is always present; a value is the absolute directory
     when it exists on disk, or ``None`` when the install does not ship it.
 
-    ``has_pcell_library`` (issue #1535) is ``True`` when the resolved variant
-    ships at least one importable KLayout PyCell library package under
-    ``assets["klayout"]/python/`` (see :func:`pdk_pcell_libraries`), so a
-    caller can discover PyCell availability without invoking ``klt gen
-    --list-pdk-pcells``. It reports only that a *package* is present, never
-    that it is loadable in this environment -- a PDK's PyCell package
-    routinely imports third-party modules klt does not depend on (verified:
-    sky130A's ``cells`` needs ``gdsfactory``; ihp-sg13g2's needs ``cni``).
-    Additive field; see ``docs/json-contract.md``.
+    ``has_pcell_library`` (issue #1535) is ``True`` when the resolved variant ships at
+    least one importable KLayout PyCell library package under
+    ``assets["klayout"]/python/`` (see :func:`pdk_pcell_libraries`), so a caller can
+    discover PyCell availability without invoking ``klt gen --list-pdk-pcells``. It
+    reports only that a *package* is present, never that it is loadable in this
+    environment -- a PDK's PyCell package routinely imports third-party modules klt does
+    not depend on (verified: sky130A's ``cells`` needs ``gdsfactory``; ihp-sg13g2's
+    needs ``cni``). Additive field; see ``docs/json-contract.md``.
 
-    ``pcell_shim`` (issue #4236) says whether the vendored compat shim a
-    shipped PyCell package imports (ihp-sg13g2's ``pycell4klayout-api``, a git
-    submodule the release tarball omits) is on disk: ``"present"``,
-    ``"missing"`` (absent or empty -- the package exists but cannot load), or
-    ``"not_required"`` (no shipped package needs one, e.g. sky130A). A cheap
-    filesystem check, so a repo can state PCell usability from ``pdk find``
-    alone. Additive field.
+    ``pcell_shim`` (issue #4236) says whether the vendored compat shim a shipped PyCell
+    package imports (ihp-sg13g2's ``pycell4klayout-api``, a git submodule the release
+    tarball omits) is on disk: ``"present"``, ``"missing"`` (absent or empty -- the
+    package exists but cannot load), or ``"not_required"`` (no shipped package needs
+    one, e.g. sky130A). A cheap filesystem check, so a repo can state PCell usability
+    from ``pdk find`` alone. Additive field.
 
     ``broken_symlinks`` (issue #1406) reports every **dangling** symlink
     (:func:`_find_broken_symlinks`) found under any resolved ``assets``
@@ -241,31 +239,31 @@ def find_pdk(
     caller can gate on ``bool(report["broken_symlinks"])`` without special-
     casing the empty result. Additive field; see ``docs/json-contract.md``.
 
-    ``ambiguous_roots`` (issue #2564) reports every **later** candidate root
-    in the search order that also holds a variant of the resolved name --
-    the ordinary state of a host carrying both a ``volare``-managed and a
-    ``ciel``-managed install of the same variant. Resolution itself is
-    unchanged (strict first-match-wins), but the fact that the choice was
-    ambiguous is no longer discarded: without it, a run can name a pinned
-    ``open_pdks`` commit that the tool never actually read, and the only
-    trace is a ``resolved_via`` nobody had reason to suspect. Each entry is
-    ``{"root": <abs path>, "resolved_via": <search-order label>}``, in search
-    order; duplicate candidate paths (``$PDK_ROOT`` pointing at a store dir,
-    say) are reported once, and never as ambiguity against themselves. ``[]``
-    -- the common, single-install case -- so a caller can gate on
-    ``bool(report["ambiguous_roots"])``, or render
-    :func:`ambiguity_warning`, without special-casing the empty result. An
-    explicit ``root=`` disables the search entirely, so it is always ``[]``.
-    Additive field; see ``docs/json-contract.md``.
+    ``ambiguous_roots`` (issue #2564) reports every **later** candidate root in the
+    search order that also holds a variant of the resolved name -- the ordinary state of
+    a host carrying both a ``volare``-managed and a ``ciel``-managed install of the same
+    variant. Resolution itself is unchanged (strict first-match-wins), but the fact that
+    the choice was ambiguous is no longer discarded: without it, a run can name a pinned
+    ``open_pdks`` commit that the tool never actually read, and the only trace is a
+    ``resolved_via`` nobody had reason to suspect. Each entry is ``{"root": <abs path>,
+    "resolved_via": <search-order label>}``, in search order; duplicate candidate paths
+    (``$PDK_ROOT`` pointing at a store dir, say) are reported once, and never as
+    ambiguity against themselves. ``[]`` -- the common, single-install case -- so a
+    caller can gate on ``bool(report["ambiguous_roots"])``, or render
+    :func:`ambiguity_warning`, without special-casing the empty result. An explicit
+    ``root=`` disables the search entirely, so it is always ``[]``. Additive field; see
+    ``docs/json-contract.md``.
 
-    ``alternative_variants`` (issue #3814) lists the sorted names of the
-    *other* variants in the chosen root when the variant was **not**
-    explicitly selected (no ``variant=`` and no ``$PDK``) -- the "silent
-    default" case, where ``variants[0]`` was picked and e.g.
-    ``gf180mcuB``-``D`` sat unmentioned beside ``gf180mcuA``. ``[]`` when the
-    variant was pinned or the root holds a single variant. Resolution is
-    unchanged; render :func:`alternative_variants_warning` to surface it.
-    Additive field; see ``docs/json-contract.md``.
+    ``alternative_variants`` (issue #3814) lists the sorted names of the *other*
+    variants in the chosen root when the variant was **not** explicitly selected (no
+    ``variant=`` and no ``$PDK``) -- the "silent default" case, where ``variants[0]``
+    was picked and e.g. ``gf180mcuB``-``D`` sat unmentioned beside ``gf180mcuA``. ``[]``
+    when the variant was pinned or the root holds a single variant. Resolution is
+    unchanged; render :func:`alternative_variants_warning` to surface it. Additive
+    field; see ``docs/json-contract.md``.
+
+    ``install`` and ``store_layout`` (issue #8007) record what placed the
+    tree and where it sits; :mod:`klayout_tools.pdk_store` defines both.
 
     ``compatibility`` (issue #2759) compares the install's version identity
     with the one a klt technology package declares it was built for
@@ -313,6 +311,8 @@ def find_pdk(
             "layout": chosen["_layout"],
             "commit": chosen["_commit"],
             "resolved_via": resolved_via,
+            "install": read_store_install(variant_dir),
+            "store_layout": store_layout_of(root_path, variant_dir),
             "assets": assets,
             "broken_symlinks": _broken_symlinks_in_assets(assets),
             "has_pcell_library": bool(_pcell_packages_for_assets(assets)),

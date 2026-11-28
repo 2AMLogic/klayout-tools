@@ -78,10 +78,10 @@ from klayout_tools.extract_parasitics import (
 from klayout_tools.gen_compose import _write_composed_gds
 from klayout_tools.pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
-    _format_um,
-    _format_um2,
     _select_bipolar_variant,
     equivalent_rectangle_um,
+    format_um,
+    format_um2,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -4831,14 +4831,14 @@ def test_optional_pdk_resolution_is_reported(tmp_path, tmp_path_factory):
     }
     assert str(external_pdk_root) not in json.dumps(report)
 
-    # The shared provenance block mirrors the resolved PDK (name/source/
-    # version), independent of extract's own richer `pdk` echo above.
-    assert report["provenance"]["pdk"] == {
-        "name": "sky130A",
-        "source": report["provenance"]["pdk"]["source"],
-        "version": None,
-    }
-    assert report["provenance"]["pdk"]["source"] is not None
+    # The shared provenance block mirrors the resolved PDK (name/source/version,
+    # plus its install evidence, issue #8007), independent of the `pdk` echo above.
+    pdk_block = report["provenance"]["pdk"]
+    assert set(pdk_block) == {"name", "source", "version", "install", "store_layout"}
+    assert (pdk_block["name"], pdk_block["version"]) == ("sky130A", None)
+    assert pdk_block["source"] is not None
+    # Issue #8007: install evidence is always reported, `null` when unknown.
+    assert (pdk_block["install"], pdk_block["store_layout"]) == (None, "flat")
 
 
 def test_extraction_does_not_require_pdk_resolution(tmp_path):
@@ -5506,10 +5506,10 @@ def test_pdk_resolved_x_card_carries_asadpspd(tmp_path):
     assert nfet["params"]["pd_um"] > 0.0
 
     bare = GEOMETRY_STYLE_BARE_UM
-    assert f"AS={_format_um2(nfet['params']['as_um2'], bare)} " in bound_text
-    assert f"AD={_format_um2(nfet['params']['ad_um2'], bare)} " in bound_text
-    assert f"PS={_format_um(nfet['params']['ps_um'], bare)} " in bound_text
-    assert f"PD={_format_um(nfet['params']['pd_um'], bare)}" in bound_text
+    assert f"AS={format_um2(nfet['params']['as_um2'], bare)} " in bound_text
+    assert f"AD={format_um2(nfet['params']['ad_um2'], bare)} " in bound_text
+    assert f"PS={format_um(nfet['params']['ps_um'], bare)} " in bound_text
+    assert f"PD={format_um(nfet['params']['pd_um'], bare)}" in bound_text
 
 
 def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):

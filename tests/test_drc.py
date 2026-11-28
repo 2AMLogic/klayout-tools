@@ -793,12 +793,12 @@ def test_run_drc_pdk_populates_provenance_pdk(tmp_path):
 
     report = run_drc(str(path), "sky130", pdk_variant="sky130A", pdk_root=root)
 
-    assert report["provenance"]["pdk"] == {
-        "name": "sky130A",
-        "source": report["provenance"]["pdk"]["source"],
-        "version": None,
-    }
-    assert report["provenance"]["pdk"]["source"] is not None
+    pdk_block = report["provenance"]["pdk"]
+    assert set(pdk_block) == {"name", "source", "version", "install", "store_layout"}
+    assert (pdk_block["name"], pdk_block["version"]) == ("sky130A", None)
+    assert pdk_block["source"] is not None
+    # Issue #8007: install evidence is always reported, `null` when unknown.
+    assert (pdk_block["install"], pdk_block["store_layout"]) == (None, "flat")
 
 
 def test_run_drc_no_pdk_flags_leaves_provenance_pdk_null(tmp_path):
@@ -5819,9 +5819,8 @@ def test_run_drc_sky130_met5_no_holes_clean(tmp_path):
 
 def test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc():
     """Every `met{1..5}.holes_area.1` rule carries a `provenance` citation
-    naming the official `sky130A_mr.drc` rule id it was transcribed from, at
-    the same pinned open_pdks commit the rest of the deck cites (#1976), and
-    a `DerivedLayer(mode="holes")` whose `base` matches the plain layer:
+    naming its `sky130A_mr.drc` rule at the pinned mpw_precheck commit (#1976)
+    and a `DerivedLayer(mode="holes")` whose `base` matches the plain layer:
 
       m1.7  m1.holes.with_area(0..0.14)  -> 140_000 dbu^2
       m2.7  m2.holes.with_area(0..0.14)  -> 140_000 dbu^2
@@ -5851,10 +5850,10 @@ def test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc():
         assert rule.derived_layer.base == layer
         assert rule.derived_layer.intersect_with is None
         assert rule.provenance is not None, f"sky130/{rule_id}: no provenance"
-        assert rule.provenance.source_repo == "fossi-foundation/open-pdks"
-        assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
+        assert rule.provenance.source_repo == "fossi-foundation/mpw_precheck"
+        assert rule.provenance.source_path == "checks/tech-files/sky130A_mr.drc"
         assert rule.provenance.rule_id == source_rule_id
-        assert rule.provenance.commit == "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
+        assert rule.provenance.commit == "86b7362dacd931bf1fd957c84501bfbe7955fa7c"
 
 
 def test_sky130_deck_check_kind_breakdown():
@@ -5894,9 +5893,8 @@ def test_sky130_deck_check_kind_breakdown():
 
 def test_sky130_area_rules_cite_pinned_sky130a_mr_drc():
     """Every `"area"`-kind sky130 rule carries a `provenance` citation naming
-    the official `sky130A_mr.drc` rule id it was transcribed from, at the same
-    pinned open_pdks commit the rest of the deck cites (#1955). The
-    `area_min_dbu2` values are the source deck's own um^2 thresholds converted
+    its `sky130A_mr.drc` rule at the pinned mpw_precheck commit (#1955).
+    The `area_min_dbu2` values are the source deck's own um^2 thresholds converted
     at the deck's nominal dbu (0.001 um => 1 um^2 == 1_000_000 dbu^2):
 
       m1.6   m1.with_area(0..0.083)   -> 83_000 dbu^2
@@ -5932,12 +5930,10 @@ def test_sky130_area_rules_cite_pinned_sky130a_mr_drc():
         # and the source `with_area(0..X)` form has no upper bound.
         assert rule.area_max_dbu2 is None
         assert rule.provenance is not None, f"sky130/{rule_id}: no provenance"
-        assert rule.provenance.source_repo == "fossi-foundation/open-pdks"
-        assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
+        assert rule.provenance.source_repo == "fossi-foundation/mpw_precheck"
+        assert rule.provenance.source_path == "checks/tech-files/sky130A_mr.drc"
         assert rule.provenance.rule_id == source_rule_id
-        # sky130.py's own `_OPEN_PDKS_COMMIT` -- the pinned open_pdks revision
-        # of the ciel sky130A install every other sky130 rule cites.
-        assert rule.provenance.commit == "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
+        assert rule.provenance.commit == "86b7362dacd931bf1fd957c84501bfbe7955fa7c"
 
 
 # --- nwell.width.1 / nwell.space.1 (issue #1420) ------------------------

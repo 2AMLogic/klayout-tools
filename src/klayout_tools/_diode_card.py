@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import _spice_number as spice_number
-from .pdk_models import GEOMETRY_STYLE_BARE_UM
+from .pdk_models import GEOMETRY_STYLE_BARE_UM, format_um, format_um2
 
 if TYPE_CHECKING:
     from .pdk_models import DeviceLookup
@@ -99,8 +99,6 @@ def convert_diode_card(
     """
     from .netlist_normalize import (
         NormalizeError,
-        _format_um,
-        _format_um2,
         _parse_um,
         _reject_multiplicity,
         _resolve_call_geometry,
@@ -122,7 +120,7 @@ def convert_diode_card(
         perimeter_um = 2.0 * (l_um + w_um)
         return (
             f"{instance} {' '.join(nodes)} {lookup.device_class}"
-            f" A={_format_um2(area_um2)} P={_format_um(perimeter_um)}"
+            f" A={format_um2(area_um2)} P={format_um(perimeter_um)}"
         )
     extra = ""
     if "area" in params:
@@ -132,11 +130,11 @@ def convert_diode_card(
             param="area",
             geometry_style=geometry_style,
         )
-        extra += f" A={_format_um2(area_um2)}"
+        extra += f" A={format_um2(area_um2)}"
     perim = params.get("perim", params.get("pj"))
     if perim is not None:
         perim_um = _parse_um(
             perim, device=instance, param="perim", geometry_style=geometry_style
         )
-        extra += f" P={_format_um(perim_um)}"
+        extra += f" P={format_um(perim_um)}"
     return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"

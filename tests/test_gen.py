@@ -328,11 +328,11 @@ def test_generate_report_includes_provenance_block(tmp_path, pdk_root):
     # No rule/model deck and no single input layout stream for this verb.
     assert provenance["deck"] is None
     assert provenance["input"] is None
-    # `provenance.pdk` must agree with the report's own top-level `pdk`.
-    assert set(provenance["pdk"]) == {"name", "source", "version"}
-    assert provenance["pdk"]["name"] == report["pdk"]["variant"]
-    assert provenance["pdk"]["version"] == report["pdk"]["version"]
-    assert provenance["pdk"]["source"]
+    # `provenance.pdk` agrees with the report's own top-level `pdk` + install evidence.
+    pdk_block = provenance["pdk"]
+    assert set(pdk_block) == {"name", "source", "version", "install", "store_layout"}
+    assert pdk_block["name"] == report["pdk"]["variant"]
+    assert pdk_block["version"] == report["pdk"]["version"] and pdk_block["source"]
 
 
 def test_generate_provenance_pdk_resolves_via_env_fallback(

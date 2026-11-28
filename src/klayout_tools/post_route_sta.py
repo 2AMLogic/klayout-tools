@@ -36,25 +36,27 @@ or runs CTS -- there is no
 ``target_stage``, no netlist, no ``link_design``; the DEF handed in is the
 one and only geometry analysed.
 
-Deliberately duplicates a couple of small helpers already defined in
-``place_and_route.py`` (``_clock_lines``, ``_read_metrics``) rather than
-importing them -- this repo's own stated convention (see
-``place_and_route.py``'s own helper docstrings) is that each verb
-module stays self-contained. Every existing cross-module import between verb
-modules in this repo is of a *public* name (``run_place_and_route``,
-``PlaceAndRouteError``, ``run_extract``, ...), never a private one.
-``_run_openroad``, ``_count_violations``, ``_openroad_version``, and (issue
-#1703) the SPEF net-name-correlation Tcl helpers ``_tcl_net_list``/
-``_count_spef_nets_annotated`` are the exceptions: those were byte-identical
-(modulo exception class/docstring length, or -- for
-``_count_spef_nets_annotated`` -- module-local marker constants) between this
-module and ``place_and_route.py`` with no caller-visible behavioral
-difference worth preserving per-copy, so they were consolidated into the
-shared ``_openroad_engine``/``_paths.py`` internal utility modules both
-import from (issues #1637/#1703) -- following the same precedent as
-``_paths.py`` (issue #642). ``_openroad_engine``/``_paths.py`` are shared
-utility modules, not verb modules, so importing their (underscore-prefixed)
-helpers by name does not violate the convention above. ``_resolve_liberty``
+Deliberately duplicates one small helper already defined in
+``place_and_route.py`` (``_clock_lines``) rather than importing it -- this
+repo's own stated convention (see ``place_and_route.py``'s own helper
+docstrings) is that each verb module stays self-contained. Every existing
+cross-module import between verb modules in this repo is of a *public* name
+(``run_place_and_route``, ``PlaceAndRouteError``, ``run_extract``, ...),
+never a private one. ``run_openroad``, ``count_violations``,
+``openroad_version``, ``write_script``, ``format_engine_error``,
+``read_metrics``, and (issue #1703) the SPEF net-name-correlation Tcl
+helpers ``_tcl_net_list``/``_count_spef_nets_annotated`` do not break that
+convention: they were byte-identical (modulo exception class / label /
+docstring length, or -- for ``_count_spef_nets_annotated`` -- module-local
+marker constants) between this module and ``place_and_route.py`` with no
+caller-visible behavioral difference worth preserving per-copy, so they
+were consolidated into the shared ``_openroad_engine``/``_openroad_io``/
+``_paths.py`` utility modules both import from (issues #1637/#1703/#8051) --
+following the same precedent as ``_paths.py`` (issue #642). Those are
+shared utility modules, not verb modules, so calling their helpers -- public
+from ``_openroad_engine``/``_openroad_io`` since issue #8051 retired the
+last grandfathered private imports, still underscore-prefixed from
+``_paths.py`` -- does not violate the convention above. ``_resolve_liberty``
 (this module's own thin wrapper, below) follows the same precedent one level
 further: its body is a one-line call into
 :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`, a *public* name
@@ -267,15 +269,16 @@ from . import _sta_timing_derate as _derate
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number, is_number
 from ._openroad_engine import (
-    _count_violations,
-    _openroad_version,
-    _OpenRoadResult,
-    _run_openroad,
-    _timing_status,
-    _timing_violation_report_lines,
+    OpenRoadResult,
     container_runtime_hint,
+    count_violations,
+    openroad_version,
+    run_openroad,
+    timing_status,
+    timing_violation_report_lines,
     write_sdf_line,
 )
+from ._openroad_io import format_engine_error, read_metrics, write_script
 from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import (
     _count_spef_nets_annotated,
@@ -1149,7 +1152,7 @@ def _dispatch_sta(
         sdf_stem=run.basename if run.write_sdf else None,
     )
 
-    engine_version = _openroad_version()
+    engine_version = openroad_version()
     deck_name = f"{run.cell_library}__{resolution['corner']}"
     provenance = build_provenance(
         deck_name=deck_name,
@@ -1370,9 +1373,9 @@ def _run_corner_session(
         multicycle_lines=mcp_lines,
         timing_derate=run.timing_derate,
     )
-    _write_script(script_path, lines)
+    write_script(script_path, lines, label="sta", error_cls=PostRouteStaError)
 
-    completed = _run_openroad(
+    completed = run_openroad(
         script_path,
         metrics_path,
         error_cls=PostRouteStaError,
@@ -1394,11 +1397,11 @@ def _run_corner_session(
                 _engine_error_message(completed, pdk_info, verilog_mode=not has_def)
             )
 
-        metrics = _read_metrics(metrics_path)
-    setup_violation_count = _count_violations(
+        metrics = read_metrics(metrics_path, label="sta", error_cls=PostRouteStaError)
+    setup_violation_count = count_violations(
         completed.stdout, _SETUP_VIOLATIONS_BEGIN, _SETUP_VIOLATIONS_END
     )
-    hold_violation_count = _count_violations(
+    hold_violation_count = count_violations(
         completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
     )
 
@@ -1431,7 +1434,7 @@ def _run_corner_session(
             round(hold_tns, 5) if hold_tns is not None else None
         ),
         "fmax_mhz": round(fmax_hz / 1e6, 4) if fmax_hz is not None else None,
-        "timing_status": _timing_status((worst_slack, worst_hold_slack)),
+        "timing_status": timing_status((worst_slack, worst_hold_slack)),
         # Additive field (issue #2780): whether every endpoint is constrained
         # and every register is clocked in this session -- independent of
         # `timing_status`, which only says whether the slack numbers are
@@ -1578,7 +1581,7 @@ def _run_multi_corner(
     report_paths = run.report_paths
     input_hash_before = sha256_file(run.input_path)
 
-    engine_version = _openroad_version()
+    engine_version = openroad_version()
     shared_pdk_info: dict[str, Any] | None = None
     corner_entries: list[dict[str, Any]] = []
     spef_axis: list[tuple[str | None, str | None]] = (
@@ -1676,7 +1679,7 @@ def _run_multi_corner(
 
 
 def _spef_annotation_block(
-    completed: _OpenRoadResult,
+    completed: OpenRoadResult,
     spef_net_names: list[str] | None,
 ) -> dict[str, Any]:
     """Assemble the ``spef_annotation`` response block from one completed
@@ -2446,7 +2449,7 @@ def _sdf_record(
     sdf_path: str,
     report_paths: _ReportPaths | None,
     *,
-    completed: _OpenRoadResult,
+    completed: OpenRoadResult,
     scrub: Callable[[str], str],
 ) -> dict[str, Any]:
     """The ``sdf`` response record (issue #2886) for one corner session's
@@ -2587,16 +2590,6 @@ def _resolve_lef(cell_library: str, pdk_info: dict[str, Any]) -> tuple[str, str]
 # --------------------------------------------------------------------------- #
 # Tcl script generation
 # --------------------------------------------------------------------------- #
-
-
-def _write_script(script_path: str, lines: list[str]) -> None:
-    try:
-        with open(script_path, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
-    except OSError as exc:
-        raise PostRouteStaError(
-            f"could not write sta script '{script_path}': {exc}"
-        ) from exc
 
 
 # Pins the session's command units so every unit-less ``_ns`` / ``_pF``
@@ -3247,7 +3240,7 @@ def _violation_count_lines() -> list[str]:
     ``corners[]`` entry -- every per-corner session calls this).
 
     Delegates the check-family policy to
-    :func:`~klayout_tools._openroad_engine._timing_violation_report_lines`
+    :func:`~klayout_tools._openroad_engine.timing_violation_report_lines`
     (issue #2741): the setup side counts data setup + recovery + clock-gating
     setup and the hold side data hold + removal + clock-gating hold -- the
     same populations ``report_worst_slack_metric``/``report_tns_metric``
@@ -3255,7 +3248,7 @@ def _violation_count_lines() -> list[str]:
     with the WNS/TNS fields next to them. Unit: violating endpoints (one
     ``-format end`` row per endpoint per path group), not enumerated paths.
     """
-    return _timing_violation_report_lines(
+    return timing_violation_report_lines(
         setup_begin=_SETUP_VIOLATIONS_BEGIN,
         setup_end=_SETUP_VIOLATIONS_END,
         hold_begin=_HOLD_VIOLATIONS_BEGIN,
@@ -3609,78 +3602,37 @@ def _spef_name_map(text: str) -> dict[str, str]:
 
 
 def _engine_error_message(
-    completed: _OpenRoadResult,
+    completed: OpenRoadResult,
     pdk_info: dict[str, Any] | None = None,
     *,
     verilog_mode: bool = False,
 ) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
-    Prefer a bracketed OpenROAD error over a bare Tcl error, as place-and-route
-    does. Append a container runtime or mount hint when the output supports it.
-    The mount hint uses the resolved PDK root when the unreadable path is a
-    PDK asset. The raw diagnostic remains available in either case."""
-    bracket_lines: list[str] = []
-    bare_error_lines: list[str] = []
-    for stream in (completed.stdout or "", completed.stderr or ""):
-        for line in stream.splitlines():
-            stripped = line.strip()
-            if "[ERROR" in stripped:
-                bracket_lines.append(stripped)
-            elif stripped.startswith("Error:"):
-                bare_error_lines.append(stripped)
-
-    if bracket_lines:
-        message = f"openroad sta run failed: {bracket_lines[0]}"
-    elif bare_error_lines:
-        message = f"openroad sta run failed: {bare_error_lines[-1]}"
-    else:
-        tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-        snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-        message = f"openroad sta run exited with code {completed.returncode}: {snippet}"
-
-    hint = container_runtime_hint(completed)
-    if hint is not None:
-        message = f"{message} -- {hint}"
-    mount_hint = mount_namespace_hint(completed, pdk_info)
-    if mount_hint is not None:
-        message = f"{message} -- {mount_hint}"
-    # Issue #2635: `ORD-2013` names the instance and the LEF master but
-    # nothing about which request field would have supplied it -- the one
-    # failure mode a caller with a hard macro and no `request.macros` entry
-    # hits first. Appended as a further `--` clause, the same
-    # recognized-hint structure `container_runtime_hint` above uses.
-    macro_hint = macro_spec.missing_lef_master_hint(
-        (completed.stdout or "") + "\n" + (completed.stderr or ""),
-        blackbox_form=verilog_mode,
+    This verb's hint list wrapped around the shared diagnostic scraper
+    :func:`~klayout_tools._openroad_io.format_engine_error`: a bracketed
+    OpenROAD error is preferred over a bare Tcl error, as place-and-route
+    does, and a container runtime or mount hint is appended when the output
+    supports it. The mount hint uses the resolved PDK root when the unreadable
+    path is a PDK asset. The raw diagnostic remains available in either
+    case."""
+    return format_engine_error(
+        completed,
+        context="sta run",
+        hints=(
+            container_runtime_hint(completed),
+            mount_namespace_hint(completed, pdk_info),
+            # Issue #2635: `ORD-2013` names the instance and the LEF master
+            # but nothing about which request field would have supplied it --
+            # the one failure mode a caller with a hard macro and no
+            # `request.macros` entry hits first. Appended as a further `--`
+            # clause, the same recognized-hint structure the hints above use.
+            macro_spec.missing_lef_master_hint(
+                (completed.stdout or "") + "\n" + (completed.stderr or ""),
+                blackbox_form=verilog_mode,
+            ),
+        ),
     )
-    if macro_hint is not None:
-        message = f"{message} -- {macro_hint}"
-    return message
-
-
-def _read_metrics(metrics_path: str) -> dict[str, Any]:
-    if not os.path.isfile(metrics_path):
-        raise PostRouteStaError(
-            "openroad exited successfully but did not produce the expected "
-            f"sta metrics file '{metrics_path}'"
-        )
-    try:
-        with open(metrics_path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise PostRouteStaError(
-            f"could not read sta metrics '{metrics_path}': {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise PostRouteStaError(
-            f"sta metrics '{metrics_path}' is not valid JSON: {exc}"
-        ) from exc
-    if not isinstance(data, dict):
-        raise PostRouteStaError(
-            f"sta metrics '{metrics_path}' must contain a JSON object"
-        )
-    return data
 
 
 def _spef_reader_warnings(stdout: str, stderr: str) -> list[str]:

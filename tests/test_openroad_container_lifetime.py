@@ -55,7 +55,7 @@ def test_launch_snapshot_exists_with_running_outcome_before_completion(
             return None, None
 
     monkeypatch.setattr(engine, "Popen", _ObservingProc)
-    result = engine._run_openroad(
+    result = engine.run_openroad(
         str(script),
         str(tmp_path / "metrics.json"),
         error_cls=RuntimeError,
@@ -112,7 +112,7 @@ def test_launch_snapshot_records_wrapper_container_id(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(engine, "Popen", factory)
-    result = engine._run_openroad(
+    result = engine.run_openroad(
         str(script),
         str(tmp_path / "metrics.json"),
         error_cls=RuntimeError,
@@ -181,7 +181,7 @@ def test_delayed_container_id_is_retained(tmp_path, monkeypatch, keep_running):
             return None, None
 
     monkeypatch.setattr(engine, "Popen", _LateMarkerProc)
-    result = engine._run_openroad(
+    result = engine.run_openroad(
         str(script),
         str(tmp_path / "metrics.json"),
         error_cls=RuntimeError,
@@ -264,7 +264,7 @@ def test_timeout_kill_hits_group_and_recorded_container(tmp_path, monkeypatch):
         monkeypatch, tmp_path, recorded_container=True
     )
     with pytest.raises(RuntimeError, match="timed out") as exc:
-        engine._run_openroad(
+        engine.run_openroad(
             str(script),
             str(tmp_path / "metrics.json"),
             error_cls=RuntimeError,
@@ -293,7 +293,7 @@ def test_interrupt_kill_hits_group_and_recorded_container(tmp_path, monkeypatch)
         monkeypatch, tmp_path, recorded_container=True
     )
     with pytest.raises(KeyboardInterrupt, match="openroad interrupted") as exc:
-        engine._run_openroad(
+        engine.run_openroad(
             str(script),
             str(tmp_path / "metrics.json"),
             error_cls=RuntimeError,
@@ -324,7 +324,7 @@ def test_termination_unwind_kills_and_retains_but_propagates_unchanged(
         monkeypatch, tmp_path, recorded_container=True
     )
     with pytest.raises(SystemExit) as exc:
-        engine._run_openroad(
+        engine.run_openroad(
             str(script),
             str(tmp_path / "metrics.json"),
             error_cls=RuntimeError,
@@ -367,7 +367,7 @@ def test_driver_killed_after_late_cid_keeps_running_snapshot(tmp_path, monkeypat
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.delenv("KLAYOUT_TOOLS_OPENROAD_BINARY", raising=False)
     driver = multiprocessing.get_context("spawn").Process(
-        target=engine._run_openroad,
+        target=engine.run_openroad,
         args=(str(script), str(tmp_path / "metrics.json")),
         kwargs={"error_cls": RuntimeError, "container_id_wait_s": 0},
     )
@@ -419,7 +419,7 @@ def test_engine_run_is_isolated_in_its_own_session(tmp_path, monkeypatch):
     result: dict = {}
 
     def run():
-        result["value"] = engine._run_openroad(
+        result["value"] = engine.run_openroad(
             str(script),
             str(tmp_path / "metrics.json"),
             error_cls=RuntimeError,
@@ -440,7 +440,7 @@ def test_engine_run_is_isolated_in_its_own_session(tmp_path, monkeypatch):
     os.kill(child_pid, signal.SIGKILL)
     thread.join(timeout=30)
     assert not thread.is_alive()
-    value: engine._OpenRoadResult = result["value"]
+    value: engine.OpenRoadResult = result["value"]
     assert value.returncode == -signal.SIGKILL
     assert value.engine_log["outcome"] == "exited"
     assert value.engine_log["container_id"] is None

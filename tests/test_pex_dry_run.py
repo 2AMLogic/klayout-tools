@@ -40,6 +40,7 @@ _REPORT_KEYS = {
     "layout",
     "deck",
     "top",
+    "tops",
     "deck_options",
     "declared_pins",
     "legs",
@@ -91,6 +92,7 @@ def test_dry_run_reports_the_expansion_and_writes_nothing(bench):
     assert report["status"] == "valid"
     assert report["deck"] == "sky130"
     assert report["top"] == "RES"
+    assert report["tops"] is None
     assert report["legs"] == ["schematic", "extracted"]
     assert report["deck_options"] == {}
     assert report["declared_pins"] is None

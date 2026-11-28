@@ -42,7 +42,7 @@ import os
 from typing import Any
 
 from ._jsonnum import is_number
-from ._native import _load_native_extension
+from ._native import load_native_extension
 from ._paths import _load_request_json
 
 #: Mirrors ``native/yield/src/contract.rs``'s ``SENSITIVITY_SCHEMA_VERSION``
@@ -62,7 +62,7 @@ class SensitivityError(Exception):
 
 
 def _load_native() -> Any:
-    return _load_native_extension(
+    return load_native_extension(
         "klt_yield_native",
         SensitivityError,
         "native/yield/",
