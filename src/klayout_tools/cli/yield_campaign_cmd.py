@@ -32,7 +32,7 @@ import argparse
 
 from ..yield_campaign import CampaignError, run_campaign
 from .output import emit_error, emit_success
-from .yield_cmd import _print_text as _print_yield_report
+from .yield_cmd import print_yield_report
 
 EXIT_PASS = 0
 EXIT_TARGET_MISSED = 3
@@ -86,4 +86,4 @@ def _print_text(report: dict) -> None:
     )
     print(f"sim report written to: {campaign['sim_report_path']}")
     print()
-    _print_yield_report(report)
+    print_yield_report(report)

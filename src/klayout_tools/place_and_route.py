@@ -215,9 +215,6 @@ from .place_and_route_request import (
     PlaceAndRouteError as PlaceAndRouteError,
 )
 from .place_and_route_request import (
-    _blank_verilog_comments as _blank_verilog_comments,
-)
-from .place_and_route_request import (
     _effective_tapcell_distance as _effective_tapcell_distance,
 )
 from .place_and_route_request import (
@@ -297,6 +294,9 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _validate_target_stage as _validate_target_stage,
+)
+from .place_and_route_request import (
+    blank_verilog_comments as blank_verilog_comments,
 )
 from .place_and_route_request import (
     validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,

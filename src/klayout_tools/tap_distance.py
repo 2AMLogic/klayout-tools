@@ -15,7 +15,7 @@ shaped and have no connectivity, so they cannot filter taps by net name;
 ``klt erc`` ``ties[]`` answers only "does this well island have a tap wired
 to net X" with no distance bound. This verb is the single-purpose geometric
 assertion for the distance question and reuses the ERC extraction helpers
-(``erc._match_net_clusters`` / ``_register_label_layer``) for the optional
+(``erc.match_net_clusters`` / ``register_label_layer``) for the optional
 net filter rather than a second extraction.
 
 Geometry and the error bound
@@ -216,7 +216,7 @@ def _tied_taps(
     the ``spec`` stackup, and the requested names no net carried."""
     import klayout.db as kdb
 
-    from .erc import _match_net_clusters, _register_label_layer
+    from .erc import match_net_clusters, register_label_layer
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
     regions: dict[str, Any] = {}
@@ -225,7 +225,7 @@ def _tied_taps(
         regions[entry["name"]] = conductor
         l2n.register(conductor, entry["name"])
         l2n.connect(conductor)
-        _register_label_layer(l2n, layout, top_cell, entry, conductor, None)
+        register_label_layer(l2n, layout, top_cell, entry, conductor, None)
     for via in spec["vias"]:
         via_region = region(layout, top_cell, via["layer"])
         l2n.register(via_region, via["name"])
@@ -249,7 +249,7 @@ def _tied_taps(
     tied = kdb.Region()
     missing: list[str] = []
     for name in nets:
-        clusters = _match_net_clusters(circuit, name)
+        clusters = match_net_clusters(circuit, name)
         if not clusters:
             missing.append(name)
         for net in clusters:

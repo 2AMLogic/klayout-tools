@@ -295,7 +295,7 @@ from .extract import (
 #: than joined by a new one. No bump.
 #: Issue #2415 adds one always-present ``provenance`` key, ``label_layers``
 #: (one ``{name, label_layer, label_text_count}`` entry per stackup role
-#: declaring a ``label_layer`` -- see :func:`_register_label_layer`), so the
+#: declaring a ``label_layer`` -- see :func:`register_label_layer`), so the
 #: #2401 empty-label-layer condition is visible in JSON, not only on stderr.
 #: Evidence only: no finding, status or coverage value changes. A new key on
 #: an existing object is additive. No bump.
@@ -1473,7 +1473,7 @@ def _antenna_verdict(levels: list[dict[str, Any]]) -> str:
     return "unchecked"
 
 
-def _match_net_clusters(circuit: Any, name: str) -> list[Any]:
+def match_net_clusters(circuit: Any, name: str) -> list[Any]:
     """Every net in ``circuit`` whose label set includes ``name``, one per
     disconnected electrical island, sorted by ``cluster_id`` for
     deterministic output.
@@ -1505,7 +1505,7 @@ def _declared_net_entry(
     ``erc.unconnected_net`` actually graded this declared net on, retained
     whether or not it produced a finding.
 
-    ``matched_islands`` is ``len(_match_net_clusters(...))`` -- the number of
+    ``matched_islands`` is ``len(match_net_clusters(...))`` -- the number of
     disconnected electrical islands **carrying this net's declared label**,
     which is the number of islands its conductor geometry forms only when
     the stream labels every piece. A stream that draws one text per net (the
@@ -1571,7 +1571,7 @@ def _unlabelled_by_role(
     A net is labelled iff KLayout named it from a registered label text
     (``Net.name`` non-empty -- an unlabelled net's name is ``""``; its
     ``expanded_name()`` is a synthetic ``$N``). ``cluster_id`` 0 is skipped,
-    the :func:`_match_net_clusters` convention. Not called at all -- zero
+    the :func:`match_net_clusters` convention. Not called at all -- zero
     cost -- when no declared net declares ``roles``.
 
     Kept **per cluster** rather than pre-merged into one region per role
@@ -2071,7 +2071,7 @@ def _net_connectivity_findings(
 
     A multi-island finding carries **where** each island is (issue #2194):
     an ``islands[]`` entry per island in the same ``cluster_id`` order
-    :func:`_match_net_clusters` returns (see :func:`_island_entry` for the
+    :func:`match_net_clusters` returns (see :func:`_island_entry` for the
     per-island shape), plus a top-level ``bbox`` spanning all of them. The
     count alone is only the alarm -- without per-island locations a caller
     has to rebuild this module's own connectivity graph by hand just to find
@@ -2122,7 +2122,7 @@ def _net_connectivity_findings(
             matches[decl["name"]] = []
             clusters_by_name[decl["name"]] = set()
             continue
-        matched = _match_net_clusters(circuit, decl["name"])
+        matched = match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
         clusters_by_name[decl["name"]] = {net.cluster_id for net in matched}
         state = _unlabelled_state(l2n, decl, unlabelled, device_connected)
@@ -2243,7 +2243,7 @@ def _warn_label_layer_empty(verb: str, name: str, label_layer: str) -> None:
     )
 
 
-def _register_label_layer(
+def register_label_layer(
     l2n: Any,
     layout: Any,
     top_cell: Any,
@@ -2312,7 +2312,7 @@ def _extract_connectivity(
     ``erc.unconnected_net`` without that warning. ``label_layers``, when
     given, collects the measured text count of every declared label layer
     in stackup order (``provenance.label_layers``, issue #2415; see
-    :func:`_register_label_layer`), so a JSON consumer sees the same
+    :func:`register_label_layer`), so a JSON consumer sees the same
     condition without reading stderr.
 
     Returns ``(l2n, circuit, layer_index, tie_layers)``.
@@ -2372,7 +2372,7 @@ def _extract_connectivity(
         regions[entry["name"]] = conductor_region
         layer_index[entry["name"]] = l2n.register(conductor_region, entry["name"])
         l2n.connect(conductor_region)
-        _register_label_layer(
+        register_label_layer(
             l2n, layout, top_cell, entry, conductor_region, verb, label_layers
         )
 

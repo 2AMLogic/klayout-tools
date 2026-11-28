@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .env_provenance import _absolute_paths_in, find_repo_root, repo_relative_path
+from .env_provenance import absolute_paths_in, find_repo_root, repo_relative_path
 
 PDK_ROOT_TOKEN = "$PDK_ROOT"
 
@@ -56,7 +56,7 @@ def _portable_text(text: str, *, repo_root: str | None, pdk_root: str | None) ->
     """``text`` (a message, not a bare path) with each embedded absolute path
     replaced by its string form: ``$PDK_ROOT/...``, a repo-relative path, or
     ``<external>``."""
-    for found in sorted(set(_absolute_paths_in(text, ())), key=len, reverse=True):
+    for found in sorted(set(absolute_paths_in(text, ())), key=len, reverse=True):
         value = _portable_value(found, repo_root=repo_root, pdk_root=pdk_root)
         if isinstance(value, dict):
             value = value["path"] if value["path"] is not None else "<external>"

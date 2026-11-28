@@ -245,7 +245,7 @@ def test_socket_descriptor_non_utf8_raises_socketcheckerror(tmp_path):
     path = tmp_path / "bad.json"
     path.write_bytes(_NON_UTF8)
     with pytest.raises(socket_check.SocketCheckError, match="could not read"):
-        socket_check._load_descriptor(str(path))
+        socket_check.load_socket_descriptor(str(path))
 
 
 def test_tap_distance_net_spec_non_utf8_raises_tapdistanceerror(tmp_path):

@@ -11,7 +11,7 @@ re-simulation elaborates against resolve through one shared posture.
 
 Deliberately **not** shared with the liberty resolver:
 
-- no :func:`klayout_tools.pdk_cells._default_variant_shipping` fallback
+- no :func:`klayout_tools.pdk_cells.default_variant_shipping` fallback
   (issue #4204) -- a gate-level re-simulation that silently resolved its cell
   models from a *different* install than the one synthesis timed against is
   the plausible-looking-pass failure this resolver exists to prevent, so an

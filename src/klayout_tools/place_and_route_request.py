@@ -31,10 +31,10 @@ from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .netlist_construct_scan import (
     _NETLIST_BEHAVIOURAL_RE,
     _NETLIST_SIGNED_DECL_RE,
-    _NETLIST_X_CONSTANT_RE,
+    NETLIST_X_CONSTANT_RE,
     _behavioural_statement_message,
-    _blank_verilog_comments,
     _strip_verilog_comments,
+    blank_verilog_comments,
 )
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
@@ -1346,7 +1346,7 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     except OSError:
         return
 
-    lines = _blank_verilog_comments(text)
+    lines = blank_verilog_comments(text)
     for lineno, line in enumerate(lines, start=1):
         signed_match = _NETLIST_SIGNED_DECL_RE.search(line)
         if signed_match is not None:
@@ -1360,7 +1360,7 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
                 "use a `$signed(...)` cast in the RTL instead."
             )
 
-        x_match = _NETLIST_X_CONSTANT_RE.search(line)
+        x_match = NETLIST_X_CONSTANT_RE.search(line)
         if x_match is not None:
             raise PlaceAndRouteError(
                 f"netlist '{netlist_path}' line {lineno} drives a bare "

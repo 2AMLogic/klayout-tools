@@ -14,12 +14,11 @@ into a LEF abstract OpenROAD can place as a hard macro
 (``klt place-and-route``, #425) alongside its own standard cells.
 
 Reuses ``socket_check.py``'s own descriptor loader/validator
-(``_load_descriptor``) rather than duplicating ~150 lines of shape
-validation -- an intentional cross-module import of a private helper, the
-same precedent ``gen_compose.py`` already set importing ``gen.py``'s
-``_PDK_ROLE_LAYERS``/``_pdk_family`` (each verb module stays self-contained
-for *its own* logic, but a shared, already-tested validator is reused rather
-than copy-pasted).
+(:func:`klayout_tools.socket_check.load_socket_descriptor`) rather than
+duplicating ~150 lines of shape validation -- a public cross-module import
+under the ``lef_abstract -> socket_check`` group edge (each verb module stays
+self-contained for *its own* logic, but a shared, already-tested validator is
+reused rather than copy-pasted).
 
 Translation from socket descriptor to LEF ``MACRO``
 ------------------------------------------------------
@@ -95,8 +94,8 @@ from .socket_check import (
     GROUND_NAME_TOKENS,
     POWER_NAME_TOKENS,
     SocketCheckError,
-    _load_descriptor,
     classify_pin_by_name,
+    load_socket_descriptor,
 )
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -181,7 +180,7 @@ def run_lef_abstract(
         top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
 
     try:
-        descriptor = _load_descriptor(socket_path)
+        descriptor = load_socket_descriptor(socket_path)
     except SocketCheckError as exc:
         raise LefAbstractError(str(exc)) from exc
 
