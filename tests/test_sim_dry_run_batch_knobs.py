@@ -154,6 +154,7 @@ def test_configless_host_stays_valid_for_a_valid_batch_block(tmp_path):
         tmp_path,
         {
             "job_ceiling_check": "split",
+            "max_launch_attempts": 2,
             "runner_version_check": "warn",
             "capacity_wait_s": 30,
             "interrupted_grace_s": 0,
@@ -162,6 +163,10 @@ def test_configless_host_stays_valid_for_a_valid_batch_block(tmp_path):
     report = sim.run_sim(path, backend="batch", dry_run=True)
     assert report["status"] == "valid"
     assert "job_ceiling" not in report
+    assert report["batch"]["max_launch_attempts"] == 2
+    local = sim.run_sim(path, backend="local", dry_run=True)
+    assert local["status"] == "valid"
+    assert "max_launch_attempts" not in local.get("batch", {})
 
 
 def test_cli_knob_refusal_exits_1_with_the_code(tmp_path, capsys):

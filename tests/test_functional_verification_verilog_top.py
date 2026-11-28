@@ -4,8 +4,10 @@ only ``iverilog``/``vvp``."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,32 @@ def _edit(request_path: Path, **updates) -> str:
 def _rewrite_bench(tmp_path: Path, old: str, new: str) -> None:
     bench = tmp_path / "tb_and2.v"
     bench.write_text(bench.read_text().replace(old, new))
+
+
+def _stage_sdf_units(
+    tmp_path: Path,
+    *,
+    sdf_timescale: str | None = "1ns",
+    delay: str = "0.5",
+    leaf_timescale: str | None = "1ns/1ps",
+    sdf_text: str | None = None,
+) -> str:
+    """The example's SDF request with the SDF's ``TIMESCALE`` and both of
+    its delays rewritten, and the leaf model's own `` `timescale ``. ``None``
+    removes the SDF header's ``TIMESCALE`` / the leaf's directive. ``sdf_text``
+    replaces the whole SDF."""
+    request = _stage(tmp_path, "request-sdf.json")
+    if sdf_text is None:
+        original = "  (TIMESCALE 1ns)\n"
+        header = "" if sdf_timescale is None else f"  (TIMESCALE {sdf_timescale})\n"
+        sdf_text = (tmp_path / "and2.sdf").read_text().replace(original, header)
+        sdf_text = sdf_text.replace("(0.5:0.5:0.5)", f"({delay}:{delay}:{delay})")
+    (tmp_path / "and2.sdf").write_text(sdf_text)
+    declaration = "`timescale 1ns/1ps\n"
+    leaf = "`timescale " + leaf_timescale + "\n" if leaf_timescale else ""
+    cell = tmp_path / "and_cell.v"
+    cell.write_text(cell.read_text().replace(declaration, leaf))
+    return request
 
 
 # -- request validation ------------------------------------------------------
@@ -190,6 +218,13 @@ def test_integration_sdf_annotated_run(tmp_path):
     sdf = report["environment"]["sdf"]
     assert sdf["annotated"] is True
     assert sdf["partial"] is False
+    # Issue #7983: the stored verdict states which timing it is evidence
+    # for -- the SDF's own TIMESCALE and the unit its delays were applied in.
+    assert (sdf["timescale"], sdf["time_unit"]) == ("1ns", "1ns")
+    assert (
+        sdf["file"]["sha256"]
+        == "sha256:" + hashlib.sha256((tmp_path / "and2.sdf").read_bytes()).hexdigest()
+    )
     source_paths = [
         str(tmp_path / name) for name in ("and_cell.v", "and2.v", "tb_and2.v")
     ]
@@ -197,6 +232,117 @@ def test_integration_sdf_annotated_run(tmp_path):
         "content_hash": _combined_content_hash(source_paths),
         "role": "source",
     }
+
+
+@needs_icarus
+def test_integration_sdf_ps_file_passes_once_the_model_declares_ps(tmp_path):
+    """The curator's third fixture variant: the physically equivalent ``1ps``
+    file passes on the same request once only the leaf's unit is ``1ps``."""
+    request = _stage_sdf_units(
+        tmp_path, sdf_timescale="1ps", delay="500", leaf_timescale="1ps/1ps"
+    )
+    report = run_functional_verification(request)
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+    assert (sdf["timescale"], sdf["time_unit"]) == ("1ps", "1ps")
+
+
+@needs_icarus
+def test_integration_sdf_unrelated_module_unit_does_not_invalidate(tmp_path):
+    """Only modules receiving a retained delay are compared: a source that
+    declares another unit, for a module no delay lands in, changes nothing."""
+    request = _stage_sdf_units(tmp_path)
+    (tmp_path / "unused.v").write_text(
+        "`timescale 1ps/1ps\nmodule unused_cell; endmodule\n"
+    )
+    doc = json.loads(Path(request).read_text())
+    doc["sources"].append("unused.v")
+    Path(request).write_text(json.dumps(doc))
+    report = run_functional_verification(request)
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert (sdf["timescale"], sdf["time_unit"]) == ("1ns", "1ns")
+
+
+@needs_icarus
+def test_integration_sdf_interconnect_mode_compares_only_retained_delays(tmp_path):
+    """``entries: "interconnect"`` drops every IOPATH, so the ``1ps`` leaf no
+    longer receives a delay and its unit is no longer compared; the retained
+    INTERCONNECT uses the ``1ns`` annotation module, which matches the SDF."""
+    request = _stage_sdf_units(
+        tmp_path,
+        leaf_timescale="1ps/1ps",
+        sdf_text="""\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "and2")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL (CELLTYPE "and2") (INSTANCE)
+    (DELAY (ABSOLUTE (INTERCONNECT a u1.A (0.5:0.5:0.5)))))
+  (CELL (CELLTYPE "and_cell") (INSTANCE u1)
+    (DELAY (ABSOLUTE (IOPATH A Y (0.5:0.5:0.5)))))
+)
+""",
+    )
+    sdf_option = {"file": "and2.sdf", "corner": "typ", "entries": "interconnect"}
+    request = _edit(request, **{"options.sdf": sdf_option})
+    report = run_functional_verification(request)
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert (sdf["timescale"], sdf["time_unit"]) == ("1ns", "1ns")
+    assert sdf["dropped"]["iopath_interconnect_only"]["count"] == 1
+
+
+@needs_icarus
+@pytest.mark.parametrize(
+    ("sdf_timescale", "delay", "y_event"),
+    [("1ps", "100", "105.000"), ("1ns", "0.100", "5.100")],
+    ids=["ps-file-on-ns-model", "same-delay-in-ns"],
+)
+def test_icarus_applies_sdf_delays_in_the_module_unit(
+    tmp_path, sdf_timescale, delay, y_event
+):
+    """The simulator fact the pre-build refusal rests on (issue #7983's first
+    table row and its control), on raw ``iverilog``/``vvp`` with no klt in
+    between: the same 100 ps path delay, written as ``100`` in a ``1ps`` file,
+    lands at 105 ns on a ``1ns/1ps`` leaf, and as ``0.100`` in a ``1ns`` file
+    at 5.1 ns. Icarus ignores the file's TIMESCALE."""
+    (tmp_path / "u.v").write_text(
+        "`timescale 1ns/1ps\n"
+        "module leaf(input a, output y);\n"
+        "  specify (a => y) = 0; endspecify\n"
+        "  buf (y, a);\n"
+        "endmodule\n"
+        "`timescale 1ns/1ps\n"
+        "module tb;\n"
+        "  reg a = 0; wire y;\n"
+        "  leaf u(.a(a), .y(y));\n"
+        "  initial begin #5 a = 1; #200 $finish; end\n"
+        '  always @(y) $display("evt t=%0.3f a=%b y=%b", $realtime, a, y);\n'
+        "endmodule\n"
+        'module annot(); initial $sdf_annotate("d.sdf", tb.u); endmodule\n'
+    )
+    (tmp_path / "d.sdf").write_text(
+        '(DELAYFILE (SDFVERSION "3.0")\n'
+        f" (TIMESCALE {sdf_timescale})\n"
+        ' (CELL (CELLTYPE "leaf") (INSTANCE)\n'
+        f"  (DELAY (ABSOLUTE (IOPATH a y ({delay}:{delay}:{delay}))))))\n"
+    )
+    subprocess.run(
+        ["iverilog", "-g2012", "-gspecify", "-o", "u.vvp", "u.v"],
+        cwd=tmp_path,
+        check=True,
+    )
+    ran = subprocess.run(
+        ["vvp", "u.vvp"], cwd=tmp_path, capture_output=True, text=True, check=True
+    )
+    # The input rises at 5 ns; the output event is what the SDF delay moved.
+    assert ran.stdout.splitlines()[:2] == [
+        "evt t=0.000 a=0 y=0",
+        f"evt t={y_event} a=1 y=1",
+    ]
 
 
 @needs_icarus

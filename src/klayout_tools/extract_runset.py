@@ -2,10 +2,8 @@
 own KLayout LVS runset in batch and take the **extracted netlist** out of the
 ``.lvsdb`` it writes.
 
-Both engines call :mod:`.lvs_runset` for the launcher, timeout and error handling.
-``import-boundaries.json`` grants ``shared_private_permissions`` for ``_run_runset``
-and its peers. Look them up through the module so monkeypatches cover both engines.
-``lvs_runset.py`` is at its size ceiling. Promote the helpers when it is next split.
+Both engines use :mod:`.runset_launch` to resolve and launch KLayout. Each
+supplies its own exception type and timeout hint.
 
 The curated deck has no class for IHP's ``pnpMPA`` on ``sg13cmos5l`` and reports
 zero such devices. The vendor runset recognizes them. Reading its extracted
@@ -69,8 +67,8 @@ import tempfile
 from collections.abc import Mapping
 from typing import Any
 
-from . import env_provenance
-from ._provenance import build_provenance, sha256_file
+from . import env_provenance, runset_launch
+from ._provenance import build_provenance
 from .extract_base import SCHEMA_VERSION, _build_metrics, instantiated_device_counts
 from .extract_progress import _staged
 from .extract_report_canonicalize import _normalized_netlist_sha256
@@ -136,16 +134,6 @@ from .extract_spef import ExtractError
 
 #: Default wall-clock budget for the runset, shared with ``klt lvs``.
 RUNSET_DEFAULT_TIMEOUT_S = 600.0
-
-
-def _resolve_path(path: str, base_dir: str) -> str:
-    expanded = os.path.expanduser(os.path.expandvars(path))
-    return expanded if os.path.isabs(expanded) else os.path.join(base_dir, expanded)
-
-
-def _sha_prefixed(path: str | None) -> str | None:
-    digest = sha256_file(path)
-    return f"sha256:{digest}" if digest is not None else None
 
 
 def _stub_schematic(work_dir: str, top: str) -> str:
@@ -214,62 +202,6 @@ def _select_circuit(netlist: Any, top: str) -> Any:
     )
 
 
-def _resolve_binary(klayout_binary: str | None, base_dir: str) -> str:
-    """The standalone ``klayout`` application, through ``klt lvs``'s own
-    resolver (and its own error text, re-raised as an ``ExtractError``)."""
-    from . import lvs_runset
-    from .lvs import LvsError
-
-    options: dict[str, Any] = {}
-    if klayout_binary is not None:
-        options["klayout_binary"] = klayout_binary
-    try:
-        return lvs_runset._resolve_klayout_binary(options, base_dir)
-    except LvsError as exc:
-        raise ExtractError(str(exc)) from exc
-
-
-def _launch_runset(
-    *,
-    binary: str,
-    deck_file: str,
-    layout: str,
-    top: str,
-    deck_vars: dict[str, str],
-    timeout_s: float,
-    work_dir: str,
-) -> tuple[str, Any]:
-    """Synthesize the stub schematic and run the runset; return
-    ``(lvsdb_path, completed)``."""
-    from . import lvs_runset
-    from .extract_progress import stage
-    from .lvs import LvsError
-
-    stub = _stub_schematic(work_dir, top)
-    try:
-        with stage("runset"):
-            return lvs_runset._run_runset(
-                binary=binary,
-                deck_file=deck_file,
-                layout=layout,
-                reference=stub,
-                top=top,
-                deck_vars=deck_vars,
-                timeout_s=timeout_s,
-                work_dir=work_dir,
-            )
-    except LvsError as exc:
-        # The launcher's text is `klt lvs`'s (deliberately shared), but its
-        # one knob reference names that verb's request field; point it at
-        # this verb's own flag instead.
-        raise ExtractError(
-            str(exc).replace(
-                "raise options.runset_timeout_s to allow more time",
-                "raise --runset-timeout to allow more time",
-            )
-        ) from exc
-
-
 def run_extract_klayout_runset(
     path: str,
     *,
@@ -299,12 +231,11 @@ def run_extract_klayout_runset(
     a caller (:mod:`klayout_tools.pex_net_correspondence`) can read the
     database's per-net geometry back after this function returns.
     """
-    from . import lvs_runset
     from .extract_progress import stage
     from .extract_report import _describe_devices, _describe_nets
 
     base_dir = request_dir or os.getcwd()
-    resolved_deck = _resolve_path(deck_file, base_dir)
+    resolved_deck = runset_launch.resolve_path(deck_file, base_dir)
     if not os.path.isfile(resolved_deck):
         raise ExtractError(f"--deck-file not found: {resolved_deck}")
     if not os.path.isfile(path):
@@ -322,19 +253,26 @@ def run_extract_klayout_runset(
     with stage("layout_load"):
         top_cell_name, dbu_um, labels = _layout_identity(path, top)
 
-    binary = _resolve_binary(klayout_binary, base_dir)
+    binary = runset_launch.resolve_klayout_binary(
+        {"klayout_binary": klayout_binary}, base_dir, error_cls=ExtractError
+    )
 
     work_dir = tempfile.mkdtemp(prefix="klt-extract-runset-")
     try:
-        lvsdb_path, completed = _launch_runset(
-            binary=binary,
-            deck_file=resolved_deck,
-            layout=path,
-            top=top_cell_name,
-            deck_vars=vars_,
-            timeout_s=timeout_s,
-            work_dir=work_dir,
-        )
+        stub = _stub_schematic(work_dir, top_cell_name)
+        with stage("runset"):
+            lvsdb_path, completed = runset_launch.run_runset(
+                binary=binary,
+                deck_file=resolved_deck,
+                layout=path,
+                reference=stub,
+                top=top_cell_name,
+                deck_vars=vars_,
+                timeout_s=timeout_s,
+                work_dir=work_dir,
+                error_cls=ExtractError,
+                timeout_knob="--runset-timeout",
+            )
         if lvsdb_out is not None:
             shutil.copy2(lvsdb_path, lvsdb_out)
 
@@ -385,10 +323,10 @@ def run_extract_klayout_runset(
         runset_block = {
             "deck_file": deck_file,
             "deck_vars": vars_,
-            "content_hash": _sha_prefixed(resolved_deck),
-            "klayout_application_version": lvs_runset._application_version(binary),
+            "content_hash": runset_launch.sha_prefixed(resolved_deck),
+            "klayout_application_version": runset_launch.application_version(binary),
             "exit_status": completed.returncode,
-            "engine_error_lines": lvs_runset._error_lines(
+            "engine_error_lines": runset_launch.error_lines(
                 (completed.stdout or "") + (completed.stderr or "")
             ),
         }
@@ -418,7 +356,7 @@ def run_extract_klayout_runset(
     provenance = build_provenance(input_path=path)
     provenance["deck"] = {
         "name": os.path.basename(resolved_deck),
-        "content_hash": _sha_prefixed(resolved_deck),
+        "content_hash": runset_launch.sha_prefixed(resolved_deck),
         "released": None,
     }
     provenance["runset"] = runset_block

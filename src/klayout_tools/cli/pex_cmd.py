@@ -91,6 +91,8 @@ def _submit_request(args: argparse.Namespace) -> dict:
     """The invocation's request, as recorded in a ``--submit-only`` manifest
     (issue #4692): every flag that shapes the run, paths made absolute."""
     request = {k: v for k, v in vars(args).items() if k not in _REQUEST_EXCLUDED}
+    if isinstance(request.get("top"), list) and len(request["top"]) == 1:
+        request["top"] = request["top"][0]
     if request.get("timeout_s") is None:
         request.pop("timeout_s", None)
     for key in _REQUEST_PATH_FIELDS:

@@ -1,0 +1,1 @@
+- Local simulation corners omit `peak_rss_bytes` when workers or shards can run corners concurrently and share the same child-process memory counter (#8026).

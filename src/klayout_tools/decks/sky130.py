@@ -377,6 +377,7 @@ from . import (
     ResistorDevice,
     RuleProvenance,
 )
+from .sky130_cuts import ORDINARY_LICON, ORDINARY_MCON
 from .sky130_lvt import lvt_mos_flavour
 from .sky130_offgrid import (  # noqa: F401
     _OFFGRID_ROWS,
@@ -386,22 +387,15 @@ from .sky130_offgrid import (  # noqa: F401
 )
 from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
 
-DRC_RULE_SOURCES = ("sky130_offgrid", "sky130_unmodeled")
+DRC_RULE_SOURCES = ("sky130_cuts", "sky130_offgrid", "sky130_unmodeled")
 
-# `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
-# rule's provenance below (issue #747, piloted on this deck's 11 width/space
-# rules only -- see the module docstring's own citation of this repo/commit
-# for the resistor/capacitor coefficients above, the same `ciel enable
-# --pdk sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` fetch this deck's DRC
-# rule values were themselves verified against, per the "met2/via rule
-# coverage" note above).
+# The open-pdks revision used to install the SKY130 PDK and verify these rules.
 _OPEN_PDKS_REPO = "fossi-foundation/open-pdks"
 _OPEN_PDKS_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
-    """:class:`RuleProvenance` for a sky130 rule (issue #747); repo/commit are
-    deck-wide (module constants above), `source_path`/`rule_id` per call."""
+    """Identify a rule in the pinned open-pdks source tree."""
     return RuleProvenance(
         source_repo=_OPEN_PDKS_REPO,
         source_path=source_path,
@@ -410,10 +404,18 @@ def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
     )
 
 
+def _mpw_precheck_provenance(rule_id: str) -> RuleProvenance:
+    """Identify a rule in the MR runset copied by the open-pdks SKY130 Makefile."""
+    return RuleProvenance(
+        source_repo="fossi-foundation/mpw_precheck",
+        source_path="checks/tech-files/sky130A_mr.drc",
+        rule_id=rule_id,
+        commit="86b7362dacd931bf1fd957c84501bfbe7955fa7c",
+    )
+
+
 # `RuleProvenance` for `EXTRACTION_DECK`'s device-recognition entries (issue
-# #868, Epic #711 Phase 2a). Unlike the DRC rules above (transcribed from
-# `sky130.lydrc`/`sky130A_mr.drc`, both vendored into `fossi-foundation/
-# open-pdks` itself), device-recognition/extraction rules are transcribed
+# #868, Epic #711 Phase 2a). Device-recognition/extraction rules are transcribed
 # from the companion **KLayout LVS deck**, `sky130.lvs` -- a different
 # upstream repo, `efabless/sky130_klayout_pdk`, per this module's own
 # docstring provenance note above (the MiM-capacitor/resistor section).
@@ -798,45 +800,15 @@ DECK: list[DrcRule] = [
     ),
     DrcRule(
         id="licon1.width.1",
-        description=(
-            "minimum licon1 size (approximates the official fixed-size "
-            "min/max-length rule as a minimum-width check)"
-        ),
-        layer=(66, 44),  # licon1.drawing
+        description="ordinary licon1 size (0.17 um)",
+        layer=(66, 44),
         check="width",
-        threshold_dbu=170,  # 0.17 um
-        # sky130.lydrc rule "licon.1":
-        #   licon.not(poly.interacting(poly_rs).and(rpm)).edges
-        #     .without_length(0.17)
-        # -> "licon.1 : minimum/maximum width of licon : 0.17um"
-        # The same rule in sky130A_mr.drc (issue #2594), which states the
-        # min-and-max nature in one predicate rather than two halves:
-        #   prec_resistor = (rpm | urpm) & psdm & (poly.interacting(poly_rs))
-        #   licon.not(prec_resistor).drc(length != 0.17)
-        # -> "licon.1: min/max. licon length : 0.17um"
-        # So licon1 is a *fixed*-size cut, 0.17um on every edge -- which is
-        # why (66, 44) is an entry in `gen_layer_params`'
-        # `_PDK_CUT_FIXED_SIZE_UM` (issue #2594): before that, every `klt gen`
-        # generator drew its licon1 cuts at the PDK-generic 0.22um contact
-        # budget, over the upstream *maximum*. This rule exists so the deck
-        # carries the minimum half of that rule at all (before #2594 licon1
-        # had no width rule of any kind here, only enclosure rules), and so
-        # the fixed-size table has a deck minimum to agree with.
-        #
-        # No `threshold_max_dbu` yet (issue #2388): via.width.1 below has
-        # taken its max half, but this rule's is still deferred -- see the
-        # compound-layer narrowing note below.
-        # Two approximations stay even once it lands, both the same shape
-        # via.width.1 already documents: the *rectangularity* half
-        # ("licon.1_c", "licon should be rectangle") cannot be expressed as a
-        # bounding-box bound, and the precision-poly-resistor exemption above
-        # (`prec_resistor`, whose licons are 0.19um/2.0um per "licon.1b/c")
-        # is a compound-layer narrowing this engine does not evaluate --
-        # harmless for a *minimum* of 0.17um, since both exempt sizes exceed
-        # it, but a reason a future `threshold_max_dbu` here would need the
-        # narrowing first. See docs/cli/drc.md's "sky130" approximation notes.
-        scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "licon.1"),
+        threshold_dbu=170,
+        threshold_max_dbu=170,
+        # sky130A_mr.drc: licon.not((rpm | urpm) & psdm & poly.interacting(poly_rs)).
+        layer_selection=ORDINARY_LICON,
+        scope="licon",
+        provenance=_mpw_precheck_provenance("licon.1"),
     ),
     DrcRule(
         id="diff.enclosing.licon.1",
@@ -948,41 +920,15 @@ DECK: list[DrcRule] = [
     ),
     DrcRule(
         id="mcon.width.1",
-        description=(
-            "minimum mcon (li1<->met1 via) size (approximates the official "
-            "fixed-size min/max-length rule as a minimum-width check)"
-        ),
-        layer=(67, 44),  # mcon.drawing
+        description="ordinary non-ring mcon size (0.17 um)",
+        layer=(67, 44),
         check="width",
-        threshold_dbu=170,  # 0.17 um
-        # sky130.lydrc rule "ct.1": mcon.edges.without_length(0.17)
-        # -> "ct.1 : minimum/maximum width of mcon : 0.17um"
-        # The same rule in sky130A_mr.drc (issue #2594) splits into the two
-        # halves and narrows them to mcon outside areaid:ce:
-        #   rectMCON_peri = mcon.not(ring-shaped mcon).outside(areaid_ce)
-        #   rectMCON_peri.drc(width < 0.17)  -> "ct.1_a : minimum width of
-        #     mcon : 0.17um"
-        #   rectMCON_peri.drc(length > 0.17) -> "ct.1_b : maximum length of
-        #     mcon : 0.17um"
-        # So mcon is a *fixed*-size cut, 0.17um -- hence (67, 44)'s entry in
-        # `gen_layer_params`' `_PDK_CUT_FIXED_SIZE_UM` (issue #2594); before
-        # that, `klt gen compose`'s li1<->met1 via drops were drawn at the
-        # PDK-generic 0.22um contact budget, over the upstream maximum, and
-        # this deck had no mcon width rule of any kind to notice.
-        #
-        # No `threshold_max_dbu` yet: still deferred under issue #2388
-        # (via.width.1 below has taken its own).
-        # Approximations that stay regardless, both mirroring via.width.1's:
-        # the rectangularity half ("ct.1 : non-ring mcon should be
-        # rectangular") is not a bounding-box bound, and sky130A_mr.drc's
-        # areaid:ce / ring-shaped-mcon narrowings ("ct.3"/"ct.3_a" cover
-        # ring-shaped mcon separately, at 0.17-0.175um) are compound-layer
-        # expressions this engine does not evaluate -- note sky130.lydrc's own
-        # "ct.1" applies the same 0.17um unconditionally, and this curated
-        # deck models no areaid.* layer anywhere (see met2.enclosing.via.1's
-        # own note on "m2.4_b").
-        scope="ct",  # sky130.lydrc "ct.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "ct.1"),
+        threshold_dbu=170,
+        threshold_max_dbu=170,
+        # Non-ring mcon outside areaid:ce includes edge- and corner-touching cuts.
+        layer_selection=ORDINARY_MCON,
+        scope="ct",
+        provenance=_mpw_precheck_provenance("ct.1_a/ct.1_b"),
     ),
     DrcRule(
         id="mcon.space.1",

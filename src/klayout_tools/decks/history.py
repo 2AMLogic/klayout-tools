@@ -1083,24 +1083,23 @@ def _project_rule(
 
 
 def _rule_layers(rule: DrcRule, layer_names: dict[tuple[int, int], str]) -> list[str]:
-    """The drawn layer name(s) a rule reads, in ``layer``/``other_layer``
-    order -- the deck's published name when it has one, else the raw
-    ``"<layer>/<datatype>"`` pair so the entry is never empty."""
-    return [
-        layer_names.get(pair) or f"{pair[0]}/{pair[1]}" for pair in _rule_pairs(rule)
-    ]
+    """Names of drawn operands in order, falling back to layer/datatype pairs."""
+    return [layer_names.get((n, d)) or f"{n}/{d}" for n, d in _rule_pairs(rule)]
 
 
 def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
     """Rule layer pairs in operand order, followed by masks and spec inputs."""
+    from .sky130_cuts import CUT_SELECTION_LAYERS
+
     pairs = [rule.layer]
     if rule.other_layer is not None:
         pairs.append(rule.other_layer)
     pairs.extend(rule.other_layer_subtract)
-    if rule.region_spec is not None:
-        pairs.extend(rule.region_spec.layers())
-    if rule.net_spec is not None:
-        pairs.extend(rule.net_spec.layers())
+    if rule.layer_selection:
+        pairs.extend(CUT_SELECTION_LAYERS.get(rule.layer_selection, ()))
+    for spec in (rule.region_spec, rule.net_spec):
+        if spec is not None:
+            pairs.extend(spec.layers())
     return pairs
 
 

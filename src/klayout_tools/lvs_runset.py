@@ -39,11 +39,10 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import tempfile
 from typing import TYPE_CHECKING, Any
 
-from ._paths import resolve_tool_binary
+from . import runset_launch
 from ._provenance import build_provenance, sha256_file
 from .env_provenance import repo_relative_path, repo_root_for
 from .lvs_base import (
@@ -54,6 +53,7 @@ from .lvs_base import (
 from .lvs_mismatch import _mismatch
 from .lvs_runset_census import _attach_reference_source, _build_coverage, _class_census
 from .lvs_runset_findings import _circuit_findings, _device_label, _paired_ok
+from .lvs_runset_passthrough import passthrough_finding, reference_conversion_echo
 from .lvs_runset_ports import augment_verdict, strict_top_port_mode
 from .runset_deck_vars import (
     RESERVED_RUNSET_VARS as RESERVED_RUNSET_VARS,
@@ -71,13 +71,9 @@ RUNSET_ENGINE = "klayout-runset"
 #: block can run for minutes); override via ``options.runset_timeout_s``.
 RUNSET_DEFAULT_TIMEOUT_S = 600.0
 
-_KLAYOUT_BINARY_ENV_VAR = "KLT_KLAYOUT_BINARY"
-
 #: Request ``options`` keys this engine understands; anything else is refused,
 #: not silently ignored -- an option believed in force but absent is worse.
 _ALLOWED_OPTIONS = ("runset_timeout_s", "klayout_binary")
-
-_ERROR_LINE_RE = re.compile(r"^\s*ERROR\b", re.IGNORECASE)
 
 #: Status vocabulary shared with the other engines (see ``cli/lvs_cmd.py``).
 STATUS_MATCH = "match"
@@ -88,21 +84,11 @@ CATEGORY_NO_DEVICES = "coverage.no_devices_recognized"
 CATEGORY_RUNSET_INCOMPLETE = "runset.incomplete"
 
 
-def _resolve_path(path: str, base_dir: str) -> str:
-    expanded = os.path.expanduser(os.path.expandvars(path))
-    return expanded if os.path.isabs(expanded) else os.path.join(base_dir, expanded)
-
-
-def _sha_prefixed(path: str | None) -> str | None:
-    digest = sha256_file(path)
-    return f"sha256:{digest}" if digest is not None else None
-
-
 def _existing_file(raw: Any, request_dir: str, label: str) -> str:
 
     if not isinstance(raw, str) or not raw:
         raise LvsError(f"engine '{RUNSET_ENGINE}' requires {label}")
-    path = _resolve_path(raw, request_dir)
+    path = runset_launch.resolve_path(raw, request_dir)
     if not os.path.isfile(path):
         raise LvsError(f"{label} not found: {path}")
     return path
@@ -153,109 +139,6 @@ def _validate_request(
         deck_file,
         _parse_deck_vars(request.get("deck_vars")),
         _parse_options(request.get("options")),
-    )
-
-
-def _resolve_klayout_binary(options: dict[str, Any], request_dir: str) -> str:
-
-    resolved = resolve_tool_binary(
-        "klayout",
-        options,
-        option_key="klayout_binary",
-        option_label="options.klayout_binary",
-        env_var=_KLAYOUT_BINARY_ENV_VAR,
-        request_dir=request_dir,
-        fallback_names=("klayout",),
-        error_cls=LvsError,
-        install_hint=(
-            "Install the standalone KLayout application "
-            "(https://www.klayout.de/build.html) -- the pip `klayout` package "
-            "cannot run a PDK runset -- or use engine 'klayout' instead."
-        ),
-    )
-    assert resolved is not None
-    return resolved
-
-
-def _run_runset(
-    *,
-    binary: str,
-    deck_file: str,
-    layout: str,
-    reference: str,
-    top: str | None,
-    deck_vars: dict[str, str],
-    timeout_s: float,
-    work_dir: str,
-) -> tuple[str, subprocess.CompletedProcess[str]]:
-    """Launch the runset; return ``(lvsdb_path, completed)``. Raises
-    ``LvsError`` for a launch failure, timeout, or no database written (a
-    non-zero exit that did write one is returned; the caller reads it)."""
-
-    # cwd=work_dir below: path arguments must not depend on klt's own cwd.
-    binary = os.path.abspath(binary) if os.sep in binary else binary
-    deck_file, layout, reference = (
-        os.path.abspath(p) for p in (deck_file, layout, reference)
-    )
-    report_path = os.path.join(work_dir, "report.lvsdb")
-    cmd = [
-        binary,
-        "-b",
-        "-r",
-        deck_file,
-        "-rd",
-        f"input={layout}",
-        "-rd",
-        f"schematic={reference}",
-        "-rd",
-        f"report={report_path}",
-    ]
-    if top:
-        cmd.extend(["-rd", f"top={top}", "-rd", f"topcell={top}"])
-    for name, value in deck_vars.items():
-        cmd.extend(["-rd", f"{name}={value}"])
-    try:
-        # cwd=work_dir catches only cwd-relative side files, not where
-        # ``<top>_extracted.cir`` lands (#5481; see extract_runset.py).
-        completed = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s, cwd=work_dir
-        )
-    except FileNotFoundError as exc:
-        raise LvsError(
-            f"could not launch klayout: '{binary}' could not be executed ({exc})"
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise LvsError(
-            f"the LVS runset did not complete within {timeout_s}s (raise "
-            "options.runset_timeout_s to allow more time)"
-        ) from exc
-
-    output = (completed.stdout or "") + (completed.stderr or "")
-    if completed.returncode != 0 and not os.path.isfile(report_path):
-        raise LvsError(_nonzero_exit_message(binary, completed))
-    if not os.path.isfile(report_path):
-        raise LvsError(
-            "the LVS runset did not write an .lvsdb database -- it likely "
-            "failed before comparing (klayout can exit 0 in that case). "
-            f"klayout's own output:\n{output.strip()}"
-        )
-    return report_path, completed
-
-
-def _nonzero_exit_message(
-    binary: str, completed: subprocess.CompletedProcess[str]
-) -> str:
-    """Error text for a runset that exited non-zero without a usable verdict."""
-    output = (completed.stdout or "") + (completed.stderr or "")
-    errors = _error_lines(output)
-    cause = f"last error: {errors[-1]}\n" if errors else ""
-    app_version = _application_version(binary) or "unknown"
-    module_version = _module_version()
-    return (
-        f"{cause}klayout exited with status {completed.returncode} while "
-        f"running the LVS runset -- no trustworthy verdict (klayout "
-        f"application {app_version}, pip klayout module "
-        f"{module_version}). klayout's own output:\n{output.strip()}"
     )
 
 
@@ -568,10 +451,6 @@ def _first_circuit_name(xref: Any, side: str) -> str | None:
     return tops[0].name if tops else None
 
 
-def _error_lines(output: str) -> list[str]:
-    return [ln.strip() for ln in output.splitlines() if _ERROR_LINE_RE.match(ln)]
-
-
 _DEVICE_LIST_RE = re.compile(r"^\s*DEVICE_LIST\s*=\s*\[(.*?)\]", re.S | re.M)
 _DEVICE_LIST_ITEM_RE = re.compile(r"""["']([^"']+)["']""")
 
@@ -600,7 +479,6 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     from .lvs import (
         _DECK_FILE_GIVEN_KEY,
         SCHEMA_VERSION,
-        _reference_conversion_echo,
         _unresolved_reference_subckt_calls,
     )
 
@@ -611,17 +489,19 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     )
     top = request["layout"].get("top")
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
-    binary = _resolve_klayout_binary(options, request_dir)
+    binary = runset_launch.resolve_klayout_binary(
+        options, request_dir, error_cls=LvsError
+    )
 
     from .lvs_passive_pairing import runset_report_field
     from .lvs_runset_reference import _unresolved_reference_calls, prepare_reference
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
-        ref_sp, scan_top, source_top = prepare_reference(
+        ref_sp, scan_top, source_top, passthrough = prepare_reference(
             reference, request, work_dir, deck_file
         )
-        lvsdb_path, completed = _run_runset(
+        lvsdb_path, completed = runset_launch.run_runset(
             binary=binary,
             deck_file=deck_file,
             layout=layout,
@@ -630,6 +510,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             deck_vars=deck_vars,
             timeout_s=timeout_s,
             work_dir=work_dir,
+            error_cls=LvsError,
         )
         try:
             diagnose_passives = (
@@ -642,7 +523,9 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
                 raise
             # A crash after extraction left a db with no cross-reference:
             # keep the exit-status diagnosis, not just the db-read message.
-            raise LvsError(_nonzero_exit_message(binary, completed)) from exc
+            raise LvsError(
+                runset_launch.nonzero_exit_message(binary, completed)
+            ) from exc
         augment_verdict(verdict, lvsdb_path)
         _attach_reference_source(verdict, ref_sp, deck_file)
         unresolved = _unresolved_reference_calls(
@@ -651,7 +534,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             verdict["coverage"]["declared_device_classes"],
             deck_file,
             _unresolved_reference_subckt_calls,
-        )
+        ) + passthrough_finding(passthrough, verdict)
     finally:
         import shutil
 
@@ -672,17 +555,17 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     provenance = build_provenance(input_path=layout)
     provenance["deck"] = {
         "name": os.path.basename(deck_file),
-        "content_hash": _sha_prefixed(deck_file),
+        "content_hash": runset_launch.sha_prefixed(deck_file),
         "released": None,
     }
     runset_output = (completed.stdout or "") + (completed.stderr or "")
     runset_block = {
         "deck_file": deck_file_echo,
         "deck_vars": deck_vars,
-        "content_hash": _sha_prefixed(deck_file),
-        "klayout_application_version": _application_version(binary),
+        "content_hash": runset_launch.sha_prefixed(deck_file),
+        "klayout_application_version": runset_launch.application_version(binary),
         "exit_status": completed.returncode,
-        "engine_error_lines": _error_lines(runset_output),
+        "engine_error_lines": runset_launch.error_lines(runset_output),
         # Issue #6903: the strict-port answer and the xref's own log.
         "strict_top_port_mode": strict_top_port_mode(runset_output),
         "xref_log": verdict.pop("runset_xref_log", []),
@@ -692,9 +575,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": RUNSET_ENGINE,
-        **_reference_conversion_echo(
-            request["reference"].get("form", "plain-element"), request["reference"]
-        ),
+        **reference_conversion_echo(request["reference"], passthrough),
         "layout": repo_relative_path(layout, repo_root=repo_root_for(layout)),
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
@@ -730,25 +611,3 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "mismatches": mismatches,
         "net_correspondence": verdict["net_correspondence"],
     }
-
-
-def _module_version() -> str:
-    """Version of the pip ``klayout`` module (``unknown`` if unreadable)."""
-    from importlib import metadata
-
-    try:
-        return metadata.version("klayout")
-    except metadata.PackageNotFoundError:
-        return "unknown"
-
-
-def _application_version(binary: str) -> str | None:
-    """Version string of the standalone application (``klayout -v``)."""
-    try:
-        out = subprocess.run(
-            [binary, "-v"], capture_output=True, text=True, timeout=30
-        ).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    match = re.search(r"(\d+\.\d+(?:\.\d+)?)", out or "")
-    return match.group(1) if match else None

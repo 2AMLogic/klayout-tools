@@ -57,6 +57,10 @@ _CORE_UNMODELED_RULES: tuple[str, ...] = (
     #   not modelled (dnwell, lvtn, ncm, nsm, rpm, urpm, tunm, thkox, ldntm),
     #   licon spacing, areaid:core splits (poly.3, li.7) and capacitor-plate
     #   separations needing two-layer checks (capm.*, cap2m.*).
+    # - ct.1 ("non-ring mcon should be rectangular") is the rectangularity half
+    #   of the mcon size rule: ``mcon.width.1`` bounds the bounding box
+    #   (ct.1_a/ct.1_b) but cannot check the shape (issue #2835). The licon
+    #   counterpart is licon.1_c below.
     # - ct.4 ("mcon must be covered by li") has no curated rule (issue #5233).
     # - li.5 is only floor-modeled by ``li1.enclosing.licon1.1`` (zero margin):
     #   the official 0.08um on two adjacent edges is not checked (issue #5233).
@@ -101,6 +105,7 @@ _CORE_UNMODELED_RULES: tuple[str, ...] = (
     "capm.6",
     "capm.7",
     "capm.8",
+    "ct.1",
     "ct.4",
     "ct.irdrop.1",
     "ct.irdrop.2",

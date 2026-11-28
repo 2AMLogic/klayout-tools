@@ -2534,6 +2534,20 @@ def test_stubbed_sdf_appends_the_required_build_args(tmp_path, monkeypatch):
     ]
 
 
+#: `environment.sdf` of a clean 1 ns annotation: nothing dropped, and (issue
+#: #7983) the SDF's `TIMESCALE` equal to the unit its delays were applied in.
+_ANNOTATED_1NS_RECEIPT = {
+    "file": _envelope(None, "external"),
+    "corner": "typ",
+    "entries": "all",
+    "annotated": True,
+    "partial": False,
+    "dropped": {},
+    "timescale": "1ns",
+    "time_unit": "1ns",
+}
+
+
 def test_stubbed_sdf_defaults_to_the_typ_corner(tmp_path, monkeypatch):
     request_path = _sdf_request(tmp_path)
     runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
@@ -2548,6 +2562,9 @@ def test_stubbed_sdf_defaults_to_the_typ_corner(tmp_path, monkeypatch):
         "annotated": True,
         "partial": False,
         "dropped": {},
+        # Issue #7983: a header-only SDF states a unit but applies no delay.
+        "timescale": "1ns",
+        "time_unit": None,
     }
 
 
@@ -3360,14 +3377,7 @@ def test_integration_real_icarus_sdf_annotation_changes_the_verdict(tmp_path):
     assert plain_report["status"] == "pass"
     assert plain_report["environment"]["sdf"] is None
     assert annotated_report["status"] == "fail"
-    assert annotated_report["environment"]["sdf"] == {
-        "file": _envelope(None, "external"),
-        "corner": "typ",
-        "entries": "all",
-        "annotated": True,
-        "partial": False,
-        "dropped": {},
-    }
+    assert annotated_report["environment"]["sdf"] == _ANNOTATED_1NS_RECEIPT
 
 
 @SKIP_NO_COCOTB
@@ -3813,14 +3823,7 @@ def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_p
     # This is the assertion that would previously raise
     # FunctionalVerificationError instead of returning a report at all.
     assert annotated_report["status"] == "fail"
-    assert annotated_report["environment"]["sdf"] == {
-        "file": _envelope(None, "external"),
-        "corner": "typ",
-        "entries": "all",
-        "annotated": True,
-        "partial": False,
-        "dropped": {},
-    }
+    assert annotated_report["environment"]["sdf"] == _ANNOTATED_1NS_RECEIPT
 
 
 # --------------------------------------------------------------------------- #
@@ -4365,10 +4368,7 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_alias_port_interconnect(
     assert plain_report["environment"]["sdf"] is None
     assert annotated_report["status"] == "fail"
     assert annotated_report["environment"]["sdf"] == {
-        "file": _envelope(None, "external"),
-        "corner": "typ",
-        "entries": "all",
-        "annotated": True,
+        **_ANNOTATED_1NS_RECEIPT,
         "partial": True,
         "dropped": {
             "zero_delay_alias_port_interconnect": {
@@ -4946,10 +4946,7 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_physical_only_interconne
     assert plain_report["environment"]["sdf"] is None
     assert annotated_report["status"] == "fail"
     assert annotated_report["environment"]["sdf"] == {
-        "file": _envelope(None, "external"),
-        "corner": "typ",
-        "entries": "all",
-        "annotated": True,
+        **_ANNOTATED_1NS_RECEIPT,
         "partial": True,
         "dropped": {
             "zero_delay_physical_only_interconnect": {
@@ -5116,14 +5113,7 @@ def test_integration_real_icarus_sdf_resolves_bus_port_output_fanout_sibling(tmp
     # FunctionalVerificationError ("Could not find intermodpath!" on the
     # sibling entry) instead of returning a report at all.
     assert annotated_report["status"] == "fail"
-    assert annotated_report["environment"]["sdf"] == {
-        "file": _envelope(None, "external"),
-        "corner": "typ",
-        "entries": "all",
-        "annotated": True,
-        "partial": False,
-        "dropped": {},
-    }
+    assert annotated_report["environment"]["sdf"] == _ANNOTATED_1NS_RECEIPT
 
 
 _BUS_PORT_FANOUT_INPUT_DUT_V = """\

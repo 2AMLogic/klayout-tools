@@ -217,6 +217,7 @@ from .lvs_base import (  # noqa: F401 -- shared vocabulary re-exported by lvs
     LvsError,
 )
 from .lvs_body import (
+    _body_inspected_and_unverified_counts,
     _body_net_warnings,
     _body_verification_report,
     _body_verification_unchecked,
@@ -314,7 +315,7 @@ from .lvs_replay import (
     _combine_devices_max_attempts_replay_options,
     _constant_nets_replay_hints,
     _omit_mismatches_replay,
-    _reference_conversion_echo,  # noqa: F401 (re-export: lvs_report/lvs_runset)
+    _reference_conversion_echo,  # noqa: F401 (re-export: lvs_report)
     _reference_conversion_replay,
     _supply_nets_replay_options,
     _validate_omit_mismatches,
@@ -322,6 +323,7 @@ from .lvs_replay import (
 )
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
+from .lvs_runset_passthrough import passthrough_rerun_excludes
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
 from .lvs_short_nets import _short_nets_drop_devices as _short_nets_drop_devices
 from .lvs_short_nets import _short_nets_merge_nets as _short_nets_merge_nets
@@ -694,14 +696,7 @@ def _aggregate_lvs_findings(
         list(layout_deck.device_classes) if layout_deck is not None else None
     )
 
-    # Issue #1983: the machine-checkable counterpart of the
-    # `device.body_unverified` warning below, replaced with a real verdict
-    # whenever inline extraction ran. Emitted as an explicit `"unchecked"`
-    # carrying a reason rather than omitted, so "were this layout's device
-    # bodies verifiably tied?" is answerable from any `klt lvs` report on its
-    # own -- on the pre-extracted `layout.netlist` form the warning's absence
-    # means "not checked", and on an inline extraction it means "checked and
-    # clean", and nothing in the report used to tell those apart.
+    # A pre-extracted netlist without a deck has no body-verification evidence.
     body_verification: dict[str, Any] = _body_verification_unchecked(
         "no request.layout.deck was given (the pre-extracted "
         "request.layout.netlist form), so nothing establishes this layout's "
@@ -711,27 +706,21 @@ def _aggregate_lvs_findings(
     )
 
     if layout_deck is not None:
-        # Issue #281: MOS body terminals extracted onto deck-synthesized or
-        # anonymous nets (never a real schematic net -- see
-        # `_body_net_warnings`) are a property of the inline extraction --
-        # which deck ran and what tie geometry this layout drew (per-device
-        # on both arms since issue #2048) -- not of this particular compare
-        # run's pairings. Appended (and the list re-sorted)
-        # rather than folded into `_build_mismatches`, since these entries
-        # never come from a `NetlistComparer` event and do not participate in
-        # the `compare_result`/safety-net invariant above -- they are purely
-        # additive, non-blocking notes.
-        mismatches.extend(_body_net_warnings(layout_circuit, layout_deck))
-        # Issue #1983: same determination, rendered as the gradeable block
-        # -- see `_body_verification_report` for why one source of truth
-        # backs both renderings.
-        body_verification = _body_verification_report(layout_circuit, layout_deck)
+        inspected, unverified = _body_inspected_and_unverified_counts(
+            layout_circuit, layout_deck
+        )
+        # Body warnings describe extracted connectivity independently of the
+        # comparer's device pairings and leave the match status unchanged.
+        mismatches.extend(_body_net_warnings(unverified, layout_deck))
+        body_verification = _body_verification_report(
+            inspected, unverified, layout_deck
+        )
 
     if combine_warnings:
         # Issue #466: same rationale as `_body_net_warnings` above -- these
         # never come from a `NetlistComparer` event either, so they are
         # appended (and the list re-sorted) rather than folded into
-        # `_build_mismatches`. Unlike the inline-extraction-only body-net
+        # `_build_mismatches`. Unlike the deck-dependent body-net
         # warnings, this fires for any request (pre-extracted `layout.netlist` and
         # `"netgen"` engine included), since `combine_devices()` runs before
         # the engine branch above.
@@ -1046,22 +1035,17 @@ def run_lvs(
     response's top-level ``label_layers`` field (absent otherwise) and
     replayed by ``--check --rerun``.
 
-    Same inline-extraction condition also gates ``device.body_unverified``
+    A resolved layout deck also enables ``device.body_unverified``
     (issue #281, see :func:`_body_net_warnings`): non-blocking
     ``severity: "warning"`` ``mismatches[]`` entries noting that some MOS
     body terminals were compared against a deck-synthesized net rather than
-    a real schematic one -- never emitted for the pre-extracted
-    ``layout.netlist`` form, and never affecting ``status``.
+    a real schematic one. These warnings leave ``status`` unchanged.
 
     ``body_verification`` (issue #1983) is that same disclosure in
     machine-checkable form: a top-level block, always present, whose
     ``status`` is ``"verified"``/``"unverified"``/``"unchecked"``
     (:data:`BODY_STATUS_VERIFIED` and friends) -- see
-    :func:`_body_verification_report`. Both renderings come from one
-    determination, so they cannot disagree, and ``status`` is unchanged:
-    unverified bodies still match when the compare matches. The block
-    exists because a ``mismatches[]`` warning is not gradeable, so nothing
-    asked the question and a warned record was indistinguishable from a clean one.
+    :func:`_body_verification_report`.
 
     ``request.reference.device_bulk`` (issue #506) is the reconciliation
     counterpart of that disclosure: it normalises a named reference device
@@ -2314,8 +2298,7 @@ def rerun_lvs_report(
     fresh = rerun_with_conversion_paths(
         request, committed, report_path, _run_reconstructed_lvs
     )
-    # Pair-dependent exclusions supplement the shared LVS policy (#5541).
-    exclude: set[tuple[str, ...]] = set()
+    exclude = passthrough_rerun_excludes(committed)
     if isinstance(committed.get("reference"), str) and not isinstance(
         fresh.get("reference"), str
     ):

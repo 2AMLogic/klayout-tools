@@ -253,12 +253,13 @@ def test_drc_rule_preserves_positional_approximations(tmp_path, monkeypatch):
         rule.text_exempt,
         rule.approximations,
     )
-    positional = DrcRule(*legacy_args)
+    assert DrcRule(*legacy_args) == rule
+    positional = DrcRule(*legacy_args, rule.other_layer_subtract)
     assert positional == rule
-    assert DrcRule(*legacy_args, rule.other_layer_subtract) == rule
     monkeypatch.setattr("klayout_tools.drc.get_deck", lambda name: [positional])
     (listed,) = list_deck_rules("gf180mcu")["rules"]
     assert "edge_band" not in listed
+    assert "butted_edges" not in listed
     report = _run(tmp_path, _nwell_layout(10000))
     assert {entry["class"] for entry in _approximations_for(report, NWELL_RULE)} == (
         APPROX_CLASSES

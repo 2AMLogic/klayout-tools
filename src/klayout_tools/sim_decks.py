@@ -1978,22 +1978,19 @@ def _deck_dry_run_report(
     request_dir: str,
     backend: str,
 ) -> dict[str, Any]:
-    """``--dry-run`` for a deck list (issue #4543): the staging and batch
-    config checks a real off-host run makes before anything billable, then
-    a report of the planned units. Nothing is spawned, submitted or
-    written. ``plan_deck_units`` (already run by the caller) covers deck,
-    input and include existence on every backend."""
+    """Report planned deck units after the off-host staging and batch preflight."""
     from .sim import SCHEMA_VERSION
 
     staged: list[sim_staging.StagedFile] = []
+    spec = None
     if backend in ("remote", "batch"):
         staged, worker_request = stage_deck_job(request, request_dir=request_dir)
         if backend == "batch":
             try:
-                _prepare_decks_batch(request, staged, worker_request)
+                _, spec = _prepare_decks_batch(request, staged, worker_request)
             except sim_batch.BatchError as exc:
                 raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "mode": DECK_MODE,
         "dry_run": True,
@@ -2014,6 +2011,9 @@ def _deck_dry_run_report(
         ],
         "warnings": [],
     }
+    if spec is not None and spec.max_launch_attempts is not None:
+        report["batch"] = {"max_launch_attempts": spec.max_launch_attempts}
+    return report
 
 
 def _run_decks_batch_pending(

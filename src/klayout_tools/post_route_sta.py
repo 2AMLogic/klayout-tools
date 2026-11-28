@@ -337,6 +337,7 @@ from ._sta_request_diag import (
     SPEF_NAME_MISMATCH_HINT,
     SPEF_NO_PIN_ATTACH_HINT,
     SPEF_SKIP_DRIVER_ONLY,
+    validate_name_list,
 )
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
@@ -2265,32 +2266,12 @@ def _validate_report_ports(
     emitted, so the generated Tcl is byte-identical to a request without
     it). Existence and direction are verified inside the engine session
     (:func:`_port_check_lines`); the clock port is rejected here."""
-    field = "request.constraints.report_ports"
-    value = constraints.get("report_ports")
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        raise PostRouteStaError(f"{field} must be a list of port names")
-    seen: set[str] = set()
-    for port in value:
-        if not isinstance(port, str) or not port or port != port.strip():
-            raise PostRouteStaError(
-                f"{field} entries must be non-empty port-name strings without "
-                f"leading/trailing whitespace (got {port!r})"
-            )
-        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
-            raise PostRouteStaError(
-                f"{field} entry {port!r} contains a control character"
-            )
-        if port == clock_port:
-            raise PostRouteStaError(
-                f"{field} must not name the clock port {port!r} -- "
-                "it has no data path of its own"
-            )
-        if port in seen:
-            raise PostRouteStaError(f"{field} must not repeat a port ({port!r})")
-        seen.add(port)
-    return list(value) or None
+    return validate_name_list(
+        constraints,
+        "report_ports",
+        clock_port=clock_port,
+        clock_reason="it has no data path of its own",
+    )
 
 
 def _validate_report_path_stages(constraints: dict[str, Any]) -> bool:

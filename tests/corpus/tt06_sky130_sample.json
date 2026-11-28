@@ -1,0 +1,26 @@
+{
+  "id": "tt06",
+  "source_index": "https://index.tinytapeout.com/tt06.json",
+  "projects": [
+    {
+      "macro": "tt_um_8bitALU",
+      "repo": "https://github.com/EdricOngKhaiJieh/8bitALU_verilog",
+      "commit": "f9bcfd7d3cb6da2972d1678d9ec5e9402ae9eecb"
+    },
+    {
+      "macro": "tt_um_ALU",
+      "repo": "https://github.com/JoseKaisen/ALU_3bits",
+      "commit": "aef5319d47e2f6644e4df935d932ae1136e0cc20"
+    },
+    {
+      "macro": "tt_um_CKPope_top",
+      "repo": "https://github.com/CKPope/tt06-verilog-template",
+      "commit": "c93539faf09c864f1e4ed1ac31a8b16fcb5d7b73"
+    },
+    {
+      "macro": "tt_um_LFSR_shivam",
+      "repo": "https://github.com/beaprog/tt06-LFSR",
+      "commit": "6bffe5f606707446700dc5dc43db8fa4d6a74394"
+    }
+  ]
+}
