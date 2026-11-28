@@ -202,6 +202,9 @@ where the fleet's provisioner writes it) and one level above the real
 (symlink-resolved) variant dir (issue #5318's documented placement); the
 nearest one wins, and a present-but-unusable stamp is never skipped in favour
 of a farther one. It carries no commit; recording one is out of scope here.
+What else it records — the bundle digest and what synced the tree — is
+reported separately as `install` (see "Install provenance" under `klt pdk
+find`, issue #8007).
 
 ## PDK layouts: what resolves and what doesn't
 
@@ -550,6 +553,8 @@ Resolves one install/variant.
   "variant": "sky130A",
   "version": "open_pdks 0fe599b; sky130 41c0908",
   "commit": null,
+  "install": null,
+  "store_layout": "flat",
   "resolved_via": "PDK_ROOT environment variable",
   "assets": {
     "ngspice": "/usr/share/pdk/sky130A/libs.tech/ngspice",
@@ -575,7 +580,9 @@ Resolves one install/variant.
 | `version` | string \| null | Version stamp from `SOURCES`, or `null`. |
 | `commit` | string \| null | Additive (issue #3786): 40-hex upstream commit from `.fetched-commit` (written by `scripts/fetch-*.sh`), or `null`. |
 | `resolved_via` | string | Which resolution step matched (see table above). |
-| `layout` | string | Additive (issue #3782): the tree shape that matched — `open_pdks`, `asap7`, or `descriptor` (a `klt-pdk.json` was present). |
+| `layout` | string | Additive (issue #3782): the tree shape that matched — `open_pdks`, `asap7`, or `descriptor` (a `klt-pdk.json` was present). This is the *asset* layout; where the tree was placed is `store_layout`. |
+| `install` | object \| null | Additive (issue #8007): what the nearest `.pdk-store.json` records about the install — `{sha256, version, via, synced}` — or `null` when there is no usable marker evidence. See "Install provenance" below. |
+| `store_layout` | string \| null | Additive (issue #8007): the layout the tree was found in — `manager_family`, `legacy_manager` or `flat` — or `null` when it cannot be established. See "Install provenance" below. |
 | `assets` | object | Tool area → absolute directory. |
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 | `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
@@ -779,6 +786,54 @@ prints a one-line warning to stderr (rendered by
 `klayout_tools.pdk.alternative_variants_warning(report)`) only when the field
 is non-empty; the exit code stays `0`. The remedy is to set `$PDK` or pass
 `--pdk`.
+
+### Install provenance (`install`, `store_layout`, issue #8007)
+
+Two additive fields on `klt pdk find` — and on `provenance.pdk`, see
+[`docs/json-contract.md`](../json-contract.md) — say what placed a resolved
+tree and where it sits. Both are read from the tree, never inferred: `~/.ciel`
+is a search root, not evidence that a version manager ran there, and a tool
+found on `PATH` says nothing about what placed a tree.
+
+- `install` is what the nearest `.pdk-store.json` records:
+  `{sha256, version, via, synced}`. The marker is looked for at the variant
+  root first and then one level above the real (symlink-resolved) variant
+  directory, and only the nearer one is read: a present-but-unusable marker is
+  not skipped in favour of a farther one. `sha256` is the recorded bundle
+  digest (exactly 64 hex digits, case preserved) and `version` the marker's
+  own version string; the top-level `version` is unchanged and a present
+  `SOURCES` file still supplies it. A fact the marker does not carry as a
+  non-empty string is `null`. `install` itself is `null` when there is no
+  usable evidence — no marker, or one that is unreadable, oversized,
+  malformed, not an object, or names none of the four — so an install without
+  a marker reports its placing tool as unknown rather than implying one.
+- `store_layout` is the layout the tree was found in. It follows an enabled
+  symlink and measures the resolved tree from the first of the conventional
+  stores (`~/.ciel`, `~/.volare`) and the searched root that holds it in a
+  version-manager shape:
+
+  | Value | Shape |
+  | ----- | ----- |
+  | `manager_family` | `<root>/<manager>/<family>/versions/<commit>/<variant>` |
+  | `legacy_manager` | `<root>/<family>/versions/<commit>/<variant>` |
+  | `flat` | no version-manager shape: the root itself, a real `root/<variant>` directory, or a link to a plain directory |
+
+  A store is asked before the searched root because that is where a manager's
+  layout is defined: `$PDK_ROOT` often holds only the enabled links, or sits
+  inside the store. If the tree sits in a `versions/<commit>/` directory and
+  neither root identifies the manager layout, the value is `null`. This can
+  happen when the search starts at a custom store's revision directory.
+
+`resolved_via` (JSON) / `source` (`provenance.pdk`) stays the search step and
+`layout` the asset layout; neither changes. Text output prints a
+`store_layout:` line and an `install:` block after `resolved_via:` —
+`install: none (no usable .pdk-store.json: placing tool unknown)` without
+evidence — with `null` facts and an unknown layout shown as `-`.
+
+For `klt sim --backend batch` the worker reports its own evidence in
+`environment.remote.worker_environment.pdk` (see
+[`sim.md`](sim.md) "Worker-observed environment"), so two hosts at one
+revision can show their respective recorded bundles.
 
 ### PCell libraries (`has_pcell_library`, issue #1535)
 

@@ -2305,7 +2305,7 @@ an incremental report).
 
 ### Both off-host backends validate `models.pdk` up front
 
-`remote` and `batch` (`sim._OFFHOST_BACKENDS`) each validate against the set
+`remote` and `batch` (`sim.OFFHOST_BACKENDS`) each validate against the set
 of PDKs *their* image publishes, and both refuse an unsupported one **before
 spending anything** — `remote` before its `run-instances` call, `batch`
 before its first S3 write
@@ -3033,7 +3033,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). Regular ngspice batch captures include `binary_sha256` when the worker resolves the executable. It is a lowercase SHA-256 digest, or `null` if hashing failed. Older captures, unresolved executables, deck-list requests and Xyce requests omit the key. |
 | `ngspice_init` | Issue #6045. Corner-mode worker report's `{source, lines, sha256}`: path-free `source` is `request`, `thread_pin`, `home` or `none`; `lines` is retained only for klt-written `request`/`thread_pin` files, never home contents. Digest is `sha256:<hex>` (`null` for `none`). Missing/legacy, Xyce or malformed observations are `null`. Collected from the worker's simulation report after execution, independently of preflight `capture`, including recovered failed jobs and each fleet shard. Init lines are bounded to 256 entries, 2000 characters per entry and 32768 characters total including newlines; oversized content is rejected as `null`, never truncated beside its full-file digest. The client's `environment.ngspice_init.source` remains `runner`; SSH and deck-mode provenance are outside this field's scope. |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
-| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true, and also on a deck-list job with a unit whose `.include`/`.lib` closure stages one of that unit's declared `inputs[]` (issue #7981): the engine then ran client-supplied bytes, whatever `models_staged` says, so `stamp_*` describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
+| `pdk` | `variant` is the requested PDK and `root` is the worker’s `$PDK_ROOT`. The worker probes `$PDK_ROOT/<variant>/SOURCES` for the revision stamp. It reports `stamp_scheme: "sources-sha256"`, the digest in `stamp_sha256`, and bounded text in `stamp_text`. If that file is unreadable, a bundle marker in the parent of the real path of `$PDK_ROOT/<variant>` can supply `stamp_scheme: "store-version-sha256"`, the SHA-256 of its version string, and `stamp_text: "store:<version>"`. Stamp fields are `null` when neither probe yields a revision. Under `options.stage_model_inputs`, `models_staged` is true. The worker reports `stamp_scope` as `image` when models are staged or when a deck’s `.include` or `.lib` closure stages one of that unit’s declared `inputs[]` (issue #7981). Otherwise `stamp_scope` is `executed`. The worker also reports `install` and `store_layout` for the PDK it discovers. |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
 | `omp_num_threads` | The worker's ambient `OMP_NUM_THREADS` at preflight, before klt launches ngspice. A successful capture reports `null` when unset. |
 | `threads_per_worker` | Positive integer launch pin from the worker's corner-mode simulation report. An unpinned run, missing report, legacy field omission or malformed value gives `null`. |
@@ -3041,6 +3041,22 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `diagnostics` | Bounded list of capture problems (missing binary, unreadable stamp, ...). |
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the submitting client's own `environment.client_engine_build.version_banner` (whitespace-normalised; issue #5566 — on an off-host report `environment.engine_build` is the worker's, so the client's probe is the one kept under `client_engine_build`). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. With a valid `binary_sha256` on both sides (the worker's `simulator.binary_sha256`, the client's `environment.client_engine_build.binary_sha256`; issue #7959) the object also carries `digest`: `match` or `mismatch`, the same binary or not. `status` and `digest` are independent — `{"status": "match", "digest": "mismatch"}` is the same version built differently. The member is omitted when either hash is absent, `null` or malformed (an older worker capture, a hash that failed), leaving the banner-only object. |
+
+Each worker, including each `fleet[]` member, reports `install` and
+`store_layout` for the variant found by PDK discovery. As in the submitter’s
+`provenance.pdk`, `install` records the marker’s `sha256`, `version`, `via` and
+`synced` fields. Discovery checks the variant directory first and checks its
+resolved parent only when the nearer marker is absent. Missing facts are
+`null`. The observed layout is `manager_family`, `legacy_manager` or `flat`.
+Each field is `null` when its evidence is unavailable. Older captures report
+`null` for both. See [Install provenance](pdk.md#install-provenance-install-store_layout-issue-8007).
+
+Discovery can find a variant in a fallback store. For example, if
+`$PDK_ROOT` points directly to a marked `sky130A` tree and the worker finds
+the requested `gf180mcuD` in `~/.ciel`, `install` and `store_layout` describe
+that `gf180mcuD` install. The revision probe still starts at
+`$PDK_ROOT/gf180mcuD`, so `stamp_text` can report the `sky130A` marker’s
+revision. Revision comparisons use the stamp from that probe.
 
 **Closure-only deck caveat (issue
 [#7985](https://github.com/2AMLogic/klayout-tools/issues/7985)): `stamp_scope`
@@ -3065,6 +3081,7 @@ empty), and `environment.remote.worker_environment.pdk` reads:
 ```json
 {"variant": "gf180mcuD", "root": "/opt/pdk", "stamp_scheme": "sources-sha256",
  "stamp_sha256": "<hex>", "stamp_text": "open_pdks <hash>",
+ "install": null, "store_layout": null,
  "models_staged": false, "stamp_scope": "executed"}
 ```
 

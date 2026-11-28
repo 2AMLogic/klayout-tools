@@ -375,7 +375,7 @@ def test_cli_host_default_batch_single_unit_keeps_the_default_remedy(
     tmp_path, monkeypatch, capsys
 ):
     """A single-unit run under `$KLT_SIM_BACKEND=batch` yields back to
-    `local` (`_yield_host_default_backend`), so `--pdk-root` /
+    `local` (`yield_host_default_backend`), so `--pdk-root` /
     `models.pdk_root` *are* accepted and *do* silence the warning. Keying the
     remedy on the pre-yield backend named `$PDK_ROOT` as the only pin, which
     is false for that run, and disagreed with the `--format text` line
@@ -421,7 +421,7 @@ def test_cli_host_default_batch_osdi_preload_keeps_the_default_remedy(
     tmp_path, monkeypatch, capsys
 ):
     """The OSDI-preload yield (`sim.py`'s second
-    `_yield_host_default_backend`) is the same class: a host-local `.osdi`
+    `yield_host_default_backend`) is the same class: a host-local `.osdi`
     keeps the run here, so the remedy must stay the default one."""
     request, _ciel, _volare = _two_store_request(tmp_path, monkeypatch)
     osdi = tmp_path / "model.osdi"

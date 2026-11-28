@@ -497,36 +497,34 @@ def _pdk_block(
 ) -> dict[str, Any] | None:
     """Normalise a :func:`klayout_tools.pdk.find_pdk`-style dict into the
     provenance ``pdk`` shape ``{name, source, version}``; ``None`` when no PDK
-    was resolved for the run.
+    was resolved for the run. ``install`` and ``store_layout`` (issue #8007)
+    ride along as reported, ``None`` included, when the input carries them.
 
-    ``ambiguous_sources`` (issue #2564) is added **only** when ``find_pdk``
-    reported more than one candidate install holding the resolved variant --
-    the search-order labels (``"search root: ~/.volare"``, ...) of the
-    installs the first-match-wins resolution skipped. Present only in that
-    abnormal case, so an unambiguous run's provenance is byte-identical to
-    what it was before this field existed and a ``--rerun`` diff against an
-    older committed report cannot drift on it. Deliberately the path-free
-    ``resolved_via`` labels rather than the absolute roots: this block is
-    committed evidence, and a raw store path carries the resolving machine's
-    home directory (see the ``{path, scope}`` discipline in
-    ``docs/json-contract.md``). The absolute roots are named in the
-    stderr warning instead (:func:`klayout_tools.pdk.ambiguity_warning`).
+    ``ambiguous_sources`` (issue #2564) is added **only** when ``find_pdk`` reported
+    more than one candidate install holding the resolved variant -- the search-order
+    labels (``"search root: ~/.volare"``, ...) of the installs the first-match-wins
+    resolution skipped. Present only in that abnormal case, so an unambiguous run's
+    provenance is byte-identical to what it was before this field existed and a
+    ``--rerun`` diff against an older committed report cannot drift on it. Deliberately
+    the path-free ``resolved_via`` labels rather than the absolute roots: this block is
+    committed evidence, and a raw store path carries the resolving machine's home
+    directory (see the ``{path, scope}`` discipline in ``docs/json-contract.md``). The
+    absolute roots are named in the stderr warning instead
+    (:func:`klayout_tools.pdk.ambiguity_warning`).
 
     ``commit`` (issue #3786) is added **only** when the install carries a
     ``.fetched-commit`` record (the 40-hex upstream commit); ``version``
     stays ``fetched:<tag>``.
 
-    ``compatibility`` (issue #3427) is likewise added **only** on a
-    ``mismatch`` -- the resolved tree's ``SOURCES`` stamp differs from the
-    declared open_pdks pin (:mod:`klayout_tools.pdk_compat`); ``version``
-    already carries the installed stamp.
+    ``compatibility`` (issue #3427) is likewise added **only** on a ``mismatch`` -- the
+    resolved tree's ``SOURCES`` stamp differs from the declared open_pdks pin
+    (:mod:`klayout_tools.pdk_compat`); ``version`` already carries the installed stamp.
 
-    ``linked_trees`` (issue #3070) is added **only** when ``deck_path`` -- the
-    model library the run resolved -- realpath-resolves into a *different* PDK
-    variant tree than ``pdk`` names (a cross-variant symlink): one
-    ``{name, version}`` entry for that tree, ``version`` from the same reader
-    as ``pdk.version``. Path-free, and absent otherwise, so a run with no
-    cross-tree resolution is byte-identical to before.
+    ``linked_trees`` (issue #3070) is added **only** when ``deck_path`` -- the model
+    library the run resolved -- realpath-resolves into a *different* PDK variant tree
+    than ``pdk`` names (a cross-variant symlink): one ``{name, version}`` entry for that
+    tree, ``version`` from the same reader as ``pdk.version``. Path-free, and absent
+    otherwise, so a run with no cross-tree resolution is byte-identical to before.
     """
     if not pdk:
         return None
@@ -555,6 +553,7 @@ def _pdk_block(
     linked = _linked_trees(pdk, deck_path)
     if linked:
         block["linked_trees"] = linked
+    block.update((key, pdk[key]) for key in ("install", "store_layout") if key in pdk)
     return block
 
 

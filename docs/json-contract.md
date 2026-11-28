@@ -809,7 +809,12 @@ additively as `environment.remote.worker_environment` (and in each
 `environment.remote.fleet[]` member), never merged into `provenance`. Missing
 observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
-environment" for the field names and limits.
+environment" for the field names and limits. The worker's own PDK install
+evidence is reported there too (issue #8007): `worker_environment.pdk.install`
+and `.store_layout` are that worker's marker record and layout, read by the
+worker — never the submitter's `provenance.pdk` values — so two hosts at one
+revision show their respective recorded bundles. An older worker's capture
+carries neither, and both read as `null`.
 
 For sharded batch simulation, `environment.remote.run` records whole-run
 completion, the original host count, observed rounds, distinct jobs with launch
@@ -1412,6 +1417,20 @@ stability statement, concrete precedents, and drift-detection guidance, and
     stays `fetched:<tag>`. Like `version`, excluded from `--rerun` drift
     comparison. Additive; no `schema_version` bump. The fleet-bundle
     `.pdk-store.json` is read, never written, here (issue #5318).
+  - `install` (issue #8007) — what the nearest `.pdk-store.json` records about
+    the install: `{sha256, version, via, synced}`, each the marker's own string
+    or `null`, and `null` when there is no usable marker evidence — so an
+    install without a marker reports its placing tool as unknown rather than
+    implying one. Carried from `klt pdk find` as reported (present whenever
+    that report is; absent only for a hand-built `pdk` dict without it).
+    Path-free: only the four named fields travel, never the marker's store
+    `key`, and nothing is inferred from directory names or tools on `PATH`.
+    Excluded from `--rerun` drift comparison like `source`: it records how
+    this host came by the tree.
+  - `store_layout` (issue #8007) — the layout the tree was found in:
+    `manager_family`, `legacy_manager` or `flat`, or `null` when it cannot be
+    established (see [`cli/pdk.md`](cli/pdk.md) → "Install provenance").
+    Same carriage and `--rerun` exclusion as `install`.
   - `version` (issue #3070) is a self-describing stamp, or `null` when no
     revision can be read mechanically (never guessed): an open_pdks `SOURCES`
     file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
@@ -2187,6 +2206,8 @@ a test keeps this table equal to it). Dotted paths:
 | `provenance.pdk.linked_trees` | host PDK install layout |
 | `provenance.pdk.ambiguous_sources` | other PDK roots on this machine (issue #2564) |
 | `provenance.pdk.source` | how the PDK was resolved — search roots vs `$PDK_ROOT` vs `--pdk-root` (issue #5863) |
+| `provenance.pdk.install` | store marker's record of what placed the PDK tree on this host (issue #8007) |
+| `provenance.pdk.store_layout` | layout the PDK tree was found in on this host (issue #8007) |
 <!-- run-specific-fields:end -->
 
 No field is added or removed by this list; `schema_version` is unchanged.
@@ -3083,14 +3104,17 @@ report field is added and `provenance.input.content_hash` keeps meaning the top
 deck only. A stale include sets `citation.input_verified` to `false` without
 changing the item's status. See [`cli/signoff.md`](cli/signoff.md).
 
-### `klt pex --dry-run` (issue #5464)
+### `klt pex --dry-run` (issues #5464, #5511)
 
 `klt pex --dry-run` emits a **different payload** from a graded run, not a
 superset of one: `dry_run: true`, `status: "valid"`, `layout`, `deck`,
-`top`, `deck_options`, `declared_pins`, `legs`, `reference_netlist`,
-`testbenches[]` (each `{request, schematic_netlist, sim}`, where `sim` is
-the nested `klt sim --dry-run` report verbatim) and `not_checked[]`. It
-rides the same envelope at the same `SCHEMA_VERSION` (`2`) — **no bump**.
+`top`, `tops` (`null` on a zero- or one-`--top` dry run, or
+`[{"top": "<resolved cell name>"}, ...]` in `--top` order when two or more
+`--top` values are given; issue #5511), `deck_options`, `declared_pins`,
+`legs`, `reference_netlist`, `testbenches[]` (each `{request,
+schematic_netlist, sim}`, where `sim` is the nested `klt sim --dry-run`
+report verbatim) and `not_checked[]`. It rides the same envelope at the same
+`SCHEMA_VERSION` (`2`) — **no bump**.
 
 This is additive under the opt-in-flag rule above: the payload exists only
 when `--dry-run` is given, no field of the graded report changes name, type

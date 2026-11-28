@@ -299,3 +299,38 @@ def test_require_subckt_per_top_on_a_flat_dut_names_every_top(tmp_path):
         _require_subckt_per_top(str(dut), ["RESA", "RESB"])
     assert "RESA, RESB" in str(excinfo.value)
     assert "(none)" in str(excinfo.value)
+
+
+# --- the substrate DC tie the docs disclose (issue #5997) -------------------- #
+
+
+def test_docs_pex_md_multi_top_discloses_one_substrate_tie_per_instantiated_cell():
+    """Issue #5997: concatenating the per-top extractions keeps every top's
+    ``Rvsubs_dctie`` card (only the repeated ``.GLOBAL`` card is commented
+    out), so a bench sees one tie per *instantiated* extracted cell -- ``R /
+    N`` for ``N`` live instances -- and the number of ``--top`` flags does not
+    determine it. The multi-top section must say so, and the
+    ``--substrate-tie-ohms`` bullet must point there: a caller who sets the
+    flag deliberately would otherwise read the card value as the tie the
+    bench gets."""
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "cli" / "pex.md").read_text(
+        encoding="utf-8"
+    )
+    section = doc.split("## Several drawn tops in one run", 1)[1].split("\n## ", 1)[0]
+    # Prose assertions run on whitespace-normalized text so a re-wrap of the
+    # paragraph is not a failure.
+    prose = " ".join(section.split())
+    # One tie card of the requested value per extracted `.SUBCKT`, on the one
+    # global `vsubs`.
+    assert "Rvsubs_dctie" in prose
+    assert "per *instantiated* extracted cell" in prose
+    assert "R / N" in prose
+    # The measured statement is scoped to a positive tie value, and says what
+    # `N` counts -- instances the bench draws, not `--top` flags.
+    assert "positive" in prose
+    assert "not the number of `--top` flags" in prose
+    # The refuted framing -- a tie fixed by the top count -- must not return.
+    assert "substrate-tie-ohms / N" not in prose
+    # The flag's own bullet points at the paragraph.
+    bullet = doc.split("- `--substrate-tie-ohms`", 1)[1].split("\n- `", 1)[0]
+    assert "Several drawn tops in one run" in bullet

@@ -10,6 +10,11 @@ selects its operands its own way (``other_layer_selection``, ``butted_spec``,
 
 The coarse-grid and sloped-edge controls record results from the native
 GF180 tables at revision 10ee7fc7, run with KLayout 0.30.12.
+
+``nplus.enclosing.comp.1`` is compared against all three of its statements:
+``NP.5b`` outside the wells, and ``NP.5di``/``NP.5dii`` inside a pure one,
+where both drop the Pplus-coincident NCOMP edges and ``NP.5dii`` the
+coincident ``Nplus`` edges too (issue #7987).
 """
 
 from __future__ import annotations
@@ -85,6 +90,46 @@ _CASES = {
             "butted_pair_and_under_extended_tap",
             _BUTTED_WITH_STUBS
             + [(COMP, (0, 5000, 1000, 6000)), (NPLUS, (-100, 4900, 1100, 6100))],
+        ),
+        # Inside a pure Nwell NP.5di/NP.5dii drop the butted NCOMP edge, as
+        # NP.5b drops it outside (issue #7987).
+        (
+            "butted_pair_with_stubs_in_a_well",
+            _BUTTED_WITH_STUBS + [(NWELL, (-1000, -1000, 6000, 3000))],
+        ),
+        (
+            # only the enclosing Nplus edge coincides with Pplus: NP.5dii
+            # drops it from its operand, NP.5di keeps it and, 200nm from the
+            # well boundary, reports the 10nm it falls short
+            "enclosing_edge_coincident_deep_in_a_well",
+            [
+                (COMP, (0, 0, 1000, 1000)),
+                (NPLUS, (-160, -160, 1010, 1160)),
+                (PPLUS, (1010, -160, 1500, 1160)),
+                (NWELL, (-1000, -1000, 6000, 3000)),
+            ],
+        ),
+        (
+            "enclosing_edge_coincident_in_the_band",
+            [
+                (COMP, (0, 0, 1000, 1000)),
+                (NPLUS, (-160, -160, 1010, 1160)),
+                (PPLUS, (1010, -160, 1500, 1160)),
+                (NWELL, (-1000, -1000, 1200, 3000)),
+            ],
+        ),
+        (
+            # the Nplus edge coincides with only the middle of the butted edge,
+            # in the band: the two remaining stretches are NP.5di's. (Deep
+            # inside, NP.5dii's collinear markers collapse to two hull points;
+            # those are compared by bounding box in test_drc_edge_band_foundry.py.)
+            "partly_coincident_edge_in_the_band",
+            [
+                (COMP, (0, 0, 4000, 2000)),
+                (NPLUS, (-160, -160, 2000, 2160)),
+                (PPLUS, (2000, 500, 4160, 1500)),
+                (NWELL, (-1000, -1000, 2200, 3000)),
+            ],
         ),
     ],
     PP_ENC_FAR: [
@@ -170,9 +215,29 @@ def _foundry(layout, rule):
     nplus, pplus = _region(layout, NPLUS), _region(layout, PPLUS)
     ncomp, pcomp = comp & nplus, comp & pplus
     projection = {"metrics": kdb.Edges.Projection}
-    if rule == NP_ENC:  # NP.5b
-        outer = nplus.edges() - (nplus.edges() & pcomp.edges())
-        return _sides(ncomp.edges().enclosed_check(outer, 160, **projection))
+    if rule == NP_ENC:  # NP.5b, NP.5di, NP.5dii
+        nwell, dnwell = _region(layout, NWELL), _region(layout, DNWELL)
+        pplus_edges = pplus.edges()
+        # NP.5b measures the selected Nplus edges outside every well (no
+        # LVPWELL is drawn in these fixtures).
+        np5b_nplus = nplus.edges() - (nplus.edges() & pcomp.edges())
+        sides = _sides(
+            ncomp.edges().enclosed_check(np5b_nplus - nwell - dnwell, 160, **projection)
+        )
+        # NP.5di / NP.5dii drop the Pplus-coincident edges: NP.5di from the
+        # checked side alone, NP.5dii from the enclosing Nplus edges too
+        # (issue #7987).
+        nwell_n_dn = nwell.not_interacting(dnwell)
+        sized_in = nwell_n_dn.sized(-429)
+        well_nplus = (nplus - dnwell).not_outside(nwell).edges()
+        at_well = ncomp.not_outside(nwell).outside(dnwell).edges() - pplus_edges
+        for implant, edges, distance, metrics in (
+            (well_nplus, nwell_n_dn - sized_in, 160, kdb.Edges.Projection),  # NP.5di
+            (well_nplus - pplus_edges, sized_in, 20, kdb.Edges.Euclidian),  # NP.5dii
+        ):
+            pairs = implant.enclosing_check(at_well & edges, distance, metrics=metrics)
+            sides.update(_sides(pairs, "second"))
+        return sides
     if rule == PP_ENC_FAR:  # PP.5di
         inner = pcomp.edges() - (pcomp.edges() & nplus.edges())
         pairs = pplus.edges().enclosing_check(inner, 20, **projection)
@@ -322,6 +387,11 @@ def test_half_grid_limit_is_three_layout_units(
     )
 
 
+# The first marker of each case is the foundry's own region, now listed as a
+# perimeter ring (#7979): the extra vertex the raw enclosing pair carried
+# ((708, 996) / (716, 992)) sits on the straight side between two corners, and
+# the ring walked from ``EdgePair.normalized()`` does not repeat it. The
+# marker's region is unchanged.
 @pytest.mark.parametrize(
     ("rule", "implant", "x", "y", "expected"),
     [
@@ -331,7 +401,7 @@ def test_half_grid_limit_is_three_layout_units(
             867,
             996,
             [
-                [(707, 996), (708, 996), (867, 1095), (867, 996)],
+                [(707, 996), (867, 1095), (867, 996)],
                 [(867, 917), (1000, 850), (867, 996), (1066, 996)],
             ],
         ),
@@ -341,7 +411,7 @@ def test_half_grid_limit_is_three_layout_units(
             735,
             992,
             [
-                [(715, 992), (716, 992), (735, 1005), (735, 992)],
+                [(715, 992), (735, 1005), (735, 992)],
                 [(735, 983), (756, 972), (735, 992), (761, 992)],
             ],
         ),

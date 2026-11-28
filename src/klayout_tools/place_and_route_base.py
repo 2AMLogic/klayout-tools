@@ -59,7 +59,7 @@ _GLOBAL_PLACEMENT_DENSITY = 0.6
 
 
 #: Markers delimiting each `report_check_types -violators` block in a
-#: stage's captured stdout, so :func:`_count_violations` can isolate the
+#: stage's captured stdout, so :func:`count_violations` can isolate the
 #: setup-check block from the hold-check block within one run's combined
 #: output.
 _SETUP_VIOLATIONS_BEGIN = "===KLT_SETUP_VIOLATIONS_BEGIN==="
@@ -77,7 +77,7 @@ _HOLD_VIOLATIONS_END = "===KLT_HOLD_VIOLATIONS_END==="
 #: Same marker convention as the setup/hold pair above, isolating the
 #: post-route corner sweep's own design-rule-check reports (issue #1709's
 #: "Two smaller things found alongside" item 1, folded into that issue's own
-#: Builder scope by its 2026-09-15 revision) so :func:`_count_violations` can
+#: Builder scope by its 2026-09-15 revision) so :func:`count_violations` can
 #: isolate the max-transition block from the max-capacitance block within the
 #: sweep invocation's own combined stdout -- see
 #: :func:`_design_rule_check_lines`.
@@ -102,7 +102,7 @@ _MAX_CAPACITANCE_VIOLATIONS_END = "===KLT_MAX_CAPACITANCE_VIOLATIONS_END==="
 #: ``capacitance_end`` parameters and
 #: :func:`~klayout_tools.place_and_route_sta._corner_sweep_script_lines`
 #: for where the two passes are ordered. Distinct markers so
-#: :func:`_count_violations` can isolate this pass's own stdout block from
+#: :func:`count_violations` can isolate this pass's own stdout block from
 #: the effective (library-*and*-constraint) one the original markers above
 #: still isolate.
 _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN = (

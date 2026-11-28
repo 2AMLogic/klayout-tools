@@ -38,19 +38,23 @@ import tempfile
 
 from .liberty_header_diff import header_mismatch
 from .liberty_merge_syntax import (
-    _CELL_NAME_RE,
     _TEMPLATE_KINDS,
+    _colon_attr,
+    _depth1_groups,
+    _find_attr_reference,
     _find_matching,
-    _find_terminator,
     _next_significant,
     _normalize_header,
     _scan_cells,
-    _skip_ws,
     _template_shape,
     _tokens,
+    _unquote,
     inherited_table_axis,
 )
-from .liberty_merge_voltage import VoltageUnion
+from .liberty_merge_syntax import (
+    _find_terminator as _find_terminator,  # kept for tests/test_liberty_merge.py
+)
+from .liberty_merge_voltage import VoltageUnion, _without
 
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
 #: ``~/.cache``, plus ``klt/liberty-merged``).
@@ -289,15 +293,14 @@ def _take_field(
     return the new cursor (the old one when unrecognised, so the text rides
     in the next residue flush instead of being silently skipped)."""
     name = header[pos:end]
-    nxt, ch = _next_significant(header, end)
     n = len(header)
-    if ch == ":":
+    if attr := _colon_attr(header, end):
         # A terminator scan, not a bracket match: a second unquoted ':' in the
         # value (``date : $Date: N $;``) must not look like a nested opener.
-        semi = _find_terminator(header, nxt + 1)
         if name not in _IGNORED_HEADER_ATTRS:
-            fields[name] = _normalize_header(header[nxt + 1 : min(semi, n)])
-        return min(semi + 1, n)
+            fields[name] = _normalize_header(header[attr[0] + 1 : attr[1]])
+        return min(attr[1] + 1, n)
+    nxt, ch = _next_significant(header, end)
     if ch == "(":
         close = _find_matching(header, nxt, "(", ")")
         args = _normalize_header(header[nxt + 1 : close])
@@ -324,11 +327,6 @@ def _add_residue(text: str, fields: dict[str, str]) -> None:
     fields[_RESIDUE_KEY] = f"{prior} {norm}" if prior else norm
 
 
-def _unquote(value: str) -> str:
-    """``value`` without one pair of surrounding double quotes."""
-    return value[1:-1] if value[:1] == '"' and value[-1:] == '"' else value
-
-
 def _local_condition(fields: dict[str, str]) -> tuple[str, str, str] | None:
     """``(group key, name, body)`` when the header declares exactly one
     ``operating_conditions`` group whose name the
@@ -353,23 +351,21 @@ def _references_condition(text: str, name: str) -> bool:
         "default_operating_conditions",
         "operating_conditions",
     }
+    if _find_attr_reference(text, value_attrs, {name}) is not None:
+        return True
+    if "scaled_cell" not in text:
+        return False
     for kind, start, end in _tokens(text):
-        keyword = text[start:end]
-        if kind != "ident" or keyword not in value_attrs and keyword != "scaled_cell":
+        if kind != "ident" or text[start:end] != "scaled_cell":
             continue
         pos, char = _next_significant(text, end)
-        if keyword in value_attrs and char == ":":
-            stop = _find_terminator(text, pos + 1)
-            value = _normalize_header(text[pos + 1 : stop])
-        elif keyword == "scaled_cell" and char == "(":
-            stop = _find_matching(text, pos, "(", ")")
-            args = _normalize_header(text[pos + 1 : stop])
-            # scaled_cell(existing_cell, operating_conditions_group)
-            match = re.fullmatch(r'(?:"(?:[^"\\]|\\.)*"|[^",]+)\s*,\s*(.+)', args)
-            value = match[1] if match else ""
-        else:
+        if char != "(":
             continue
-        if _unquote(value) == name:
+        stop = _find_matching(text, pos, "(", ")")
+        args = _normalize_header(text[pos + 1 : stop])
+        # scaled_cell(existing_cell, operating_conditions_group)
+        match = re.fullmatch(r'(?:"(?:[^"\\]|\\.)*"|[^",]+)\s*,\s*(.+)', args)
+        if match and _unquote(match[1]) == name:
             return True
     return False
 
@@ -409,37 +405,17 @@ def _reconcile_conditions(
             f"'{first_path}' spelling '{a[1]}'",
         )
     drop = {a[0], b[0], "default_operating_conditions"}
-    return (
-        {k: v for k, v in first.items() if k not in drop},
-        {k: v for k, v in other.items() if k not in drop},
-        "",
-    )
+    return _without(first, drop), _without(other, drop), ""
 
 
 def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
     """``(header without template groups, [(name, group text), ...])``."""
-    found: list[tuple[str, str]] = []
-    spans: list[tuple[int, int]] = []
-    depth = 0
-    start: int | None = None
-    name = ""
-    for kind, pos, end in _tokens(header):
-        if kind == "{":
-            depth += 1
-        elif kind == "}":
-            depth -= 1
-            if depth == 1 and start is not None:
-                found.append((name, header[start : pos + 1]))
-                spans.append((start, pos + 1))
-                start = None
-        elif depth == 1 and start is None and header[pos:end] in _TEMPLATE_KINDS:
-            match = _CELL_NAME_RE.match(header, _skip_ws(header, end))
-            if match:
-                start, name = pos, match.group(1)
     stripped, last = [], 0
-    for lo, hi in spans:
-        stripped.append(header[last:lo])
-        last = hi
+    found = []
+    for _, name, start, stop in _depth1_groups(header, _TEMPLATE_KINDS):
+        found.append((name, header[start:stop]))
+        stripped.append(header[last:start])
+        last = stop
     stripped.append(header[last:])
     return " ".join(stripped), found
 

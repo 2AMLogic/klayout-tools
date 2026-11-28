@@ -134,7 +134,12 @@ class TestDeckStampScope:
 
         assert report["status"] == "pass"
         # The stamp still identifies the image; only its claim changes.
-        assert _worker_pdk(report) == {**_IMAGE_CAPTURE["pdk"], "stamp_scope": "image"}
+        assert _worker_pdk(report) == {
+            **_IMAGE_CAPTURE["pdk"],
+            "stamp_scope": "image",
+            "install": None,
+            "store_layout": None,
+        }
 
     def test_one_qualifying_unit_anywhere_in_the_job_suffices(
         self, tmp_path, monkeypatch
@@ -179,6 +184,8 @@ class TestDeckStampScope:
         assert _worker_pdk(report) == {
             **_IMAGE_CAPTURE["pdk"],
             "stamp_scope": "executed",
+            "install": None,
+            "store_layout": None,
         }
 
     def test_failed_job_recovery_reports_the_same_scope(self, tmp_path, monkeypatch):

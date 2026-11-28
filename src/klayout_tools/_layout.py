@@ -59,6 +59,51 @@ def load_layout(path: str, error_cls: type[Exception]) -> kdb.Layout:
     return layout
 
 
+def validate_cells(
+    cells: list[str] | None, error_cls: type[Exception]
+) -> list[str] | None:
+    """Validate an explicit ``cells`` scope; return it de-duplicated (order
+    preserved) or ``None`` when no scope was requested.
+
+    Call it before :func:`load_layout`, so a malformed name wins over a layout
+    read error, then :func:`require_known_cells` once the layout is loaded.
+    Shared by ``ring_check.py`` and ``keepout_check.py`` (issue #8065); the
+    messages are the verbs' documented error text, kept verbatim.
+    """
+    if cells is None:
+        return None
+    if isinstance(cells, str) or not isinstance(cells, (list, tuple)):
+        raise error_cls("--cells must be a list of cell names")
+    if not cells:
+        raise error_cls("--cells is empty: at least one cell name required")
+    seen: list[str] = []
+    for name in cells:
+        if not isinstance(name, str) or not name.strip():
+            raise error_cls(
+                f"malformed cell name in --cells: {name!r} (must be a non-empty string)"
+            )
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def require_known_cells(
+    layout: kdb.Layout, selected: list[str] | None, error_cls: type[Exception]
+) -> None:
+    """Raise unless every name in ``selected`` is a cell of ``layout``.
+
+    The post-load half of :func:`validate_cells`: ``None`` (no scope) passes,
+    and every unknown name is listed, in input order.
+    """
+    if selected is None:
+        return
+    unknown = [name for name in selected if layout.cell(name) is None]
+    if unknown:
+        raise error_cls(
+            "unknown cell(s) in --cells: " + ", ".join(repr(n) for n in unknown)
+        )
+
+
 def select_top_cells(
     layout: kdb.Layout, top: str | None, error_cls: type[Exception]
 ) -> list[kdb.Cell]:
