@@ -9,7 +9,7 @@ ratchet.
 
 Since issue #7371 this stdlib-only leaf also owns the shared ``_REASON_*``
 unmet-reason strings themselves (moved verbatim from :mod:`.signoff`, which
-re-imports every one so ``klayout_tools.signoff.<name>`` keeps resolving):
+re-imports the ones still referenced through ``klayout_tools.signoff``):
 every ``signoff_*`` sibling that renders or compares a reason imports it
 here, at module scope, instead of bouncing through the orchestrator.
 """

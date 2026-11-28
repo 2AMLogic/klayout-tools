@@ -45,8 +45,8 @@ routed back through ``sim`` at call time still observes that patch.
 ``sim.py`` in turn imports this
 module's entry points back (module scope, no cycle -- this module never
 imports ``sim`` at its own module scope) to preserve
-``klayout_tools.sim.<name>`` as a working import path for every name the
-test suite/callers used before this split.
+``klayout_tools.sim.<name>`` as a working import path for the names
+still referenced through ``sim``.
 """
 
 from __future__ import annotations

@@ -34,9 +34,6 @@ from ._jsonnum import is_finite_number, is_int
 from .decks import UnknownDeckError, get_extraction_deck
 from .gen import GenError
 from .gen_compose_base import GenComposeError
-from .gen_compose_layer_rules import (
-    _landing_pad_side_um_for_pair as _landing_pad_side_um_for_pair,
-)
 from .gen_compose_port_search import _search_landing
 from .gen_compose_routing import (
     _pdk_family,

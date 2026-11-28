@@ -3974,9 +3974,9 @@ def _mark_resumed(
     return corners, engine_version, environment
 
 
-#: Re-exported so ``sim.py``'s own module namespace keeps the same
-#: "every shard/merge helper is reachable from `klayout_tools.sim`" property
-#: the `remote` backend established -- see that module's import block.
+#: Public batch constants, types and operations exported by this module.
+#: The simulation runner imports its backend entry points explicitly and
+#: keeps selected helpers, such as ``_resolve_batch_config``, available there.
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
     "BATCH_INTERRUPTED_CODE",

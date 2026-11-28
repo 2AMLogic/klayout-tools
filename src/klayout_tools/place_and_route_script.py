@@ -4,7 +4,7 @@ Split out of ``place_and_route.py`` (issue #3904, following #1808/#3699) as a
 self-contained subsystem: the near-pure ``*_lines(...) -> list[str]`` OpenROAD
 Tcl emitters and the per-stage script assembly (:func:`_stage_script_lines`).
 The orchestration (``run_place_and_route``) stays in ``place_and_route.py``,
-which re-exports every name here so
+which re-exports the still-referenced helpers so
 ``klayout_tools.place_and_route.<name>`` keeps resolving.
 """
 

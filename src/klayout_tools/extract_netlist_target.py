@@ -11,8 +11,9 @@ in the same place, honours ``--no-netlist`` the same way and is hashed the
 same way. They lived in ``extract.py``, which is at its file-size ceiling;
 moving them is what let the second engine reuse them instead of copying.
 
-``extract.py`` re-exports all four, so every existing
-``from .extract import _resolve_netlist_target`` keeps working.
+``extract.py`` re-exports ``_default_output_path``, ``_resolve_netlist_target``
+and ``_validate_no_netlist_flags`` so existing ``extract.<name>`` imports keep
+working.
 """
 
 from __future__ import annotations

@@ -200,12 +200,6 @@ from .gen import (
     _pdk_family,
 )
 from .gen_compose_base import (
-    _DIRECTION_VECTORS as _DIRECTION_VECTORS,
-)
-from .gen_compose_base import (
-    _ORIENTATION_DIRECTION_MAP as _ORIENTATION_DIRECTION_MAP,
-)
-from .gen_compose_base import (
     _ORIENTATION_KDB_ARGS as _ORIENTATION_KDB_ARGS,
 )
 from .gen_compose_base import (
@@ -308,9 +302,6 @@ from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
 from .gen_compose_via_cuts import (
     _cut_fixed_size_um as _cut_fixed_size_um,
-)
-from .gen_compose_via_cuts import (
-    _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_via_cuts import _via_fixed_size_um as _via_fixed_size_um
 from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um

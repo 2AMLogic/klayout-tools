@@ -5,10 +5,10 @@ Split out of :mod:`klayout_tools.lvs_mismatch` as a pure move -- the
 (:class:`_SupplyPinUniverse`, :func:`_net_name_aliases`,
 :func:`_is_unverified_supply_correspondence`) is a cohesive,
 low-coupling subsystem with no dependency on the rest of that module.
-``lvs_mismatch`` re-imports every name defined here, so
-``klayout_tools.lvs_mismatch.<name>`` stays a working import path for the
-test suite and callers (the same discipline as the earlier
-``lvs_mismatch_tolerance`` split).
+``lvs_mismatch`` re-imports the names still referenced through it
+(:class:`_SupplyPinUniverse`, :func:`_is_unverified_supply_correspondence`),
+so ``klayout_tools.lvs_mismatch.<name>`` stays a working import path for the
+test suite and callers.
 """
 
 from __future__ import annotations

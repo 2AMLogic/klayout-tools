@@ -63,7 +63,6 @@ from .gen_compose_base import (
     GenComposeError,
     _port_has_geometry,
 )
-from .gen_compose_base import _drop_array_extra_um as _drop_array_extra_um
 
 # Layer-rule resolution (``routing.layer_role`` -> ``(layer, datatype)`` and
 # the deck floors that pair implies) lives in ``gen_compose_layer_rules``

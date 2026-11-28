@@ -25,11 +25,11 @@ sizing policy:
   electrical-contact rejection.
 
 ``gen_compose_landing_pads`` re-imports ``_pad_is_intermediate`` (its
-resolver needs it) and re-exports the message entry points, so every
-pre-existing ``from klayout_tools.gen_compose_landing_pads import <name>``
-path keeps resolving unchanged -- the same convention the earlier splits
-of this family (``gen_compose_layer_rules``, ``gen_compose_via_cuts``,
-``gen_compose_landing_pads`` itself) established.
+resolver needs it) and re-exports the still-referenced message entry points
+(``_leg_conflict_message``, ``_landing_pad_conflict_reason``,
+``_pad_other_block_contact_reason``), so pre-existing
+``from klayout_tools.gen_compose_landing_pads import <name>`` paths keep
+resolving unchanged.
 
 The resolver and conflict checks share the landing-pad and via-cut geometry.
 """

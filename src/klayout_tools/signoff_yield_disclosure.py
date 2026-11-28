@@ -1,8 +1,8 @@
 """The `klt yield` campaign-disclosure rollups (issue #2467), split out of
 `signoff.py` for its size-ratchet ceiling (issue #5815) -- the #2313
 `signoff_envelopes.py` precedent: pure functions over a report dict,
-importing nothing from the module they were split out of, re-imported there
-by name so `signoff.<name>` keeps resolving."""
+importing nothing from the module they were split out of, with the
+still-referenced names re-imported there so `signoff.<name>` keeps resolving."""
 
 from __future__ import annotations
 

@@ -353,18 +353,12 @@ from .pdk_cells import resolve_liberty_for_cell_library
 from .post_route_sta_clock_propagation import (  # noqa: F401 -- re-exported names
     _CLOCK_LATENCY_BEGIN,
     _CLOCK_LATENCY_END,
-    _CLOCK_SECTION_RE,
     _CLOCK_SINK_COUNT_BEGIN,
     _CLOCK_SINK_COUNT_END,
-    _CLOCK_SINK_COUNT_RE,
     _CLOCK_SINK_SAMPLE_LIMIT,
-    _NETWORK_LATENCY_RE,
     _clock_latency_lines,
-    _clock_latency_rows,
     _clock_sink_count_lines,
-    _max_network_latency,
     _parse_clock_latency,
-    _parse_clock_sink_count,
 )
 from .post_route_sta_electrical import (
     _ELECTRICAL_NET_PREFIX,
@@ -401,7 +395,6 @@ from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
     _WORST_PATHS_END,
     _empty_path_record,
     _port_paths,
-    _worst_path_record,
     _worst_paths,
     _worst_paths_by_group,
 )
@@ -1447,7 +1440,7 @@ def _run_corner_session(
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         # Additive fields (issue #2740): identity of the worst setup-side /
-        # hold-side path end this session found -- see `_worst_path_record`.
+        # hold-side path end found (`post_route_sta_path_groups._worst_path_record`).
         "worst_setup_path": worst_setup_path,
         "worst_hold_path": worst_hold_path,
         # Additive field (issue #5424): every per-path-group row behind

@@ -9,9 +9,9 @@ entry has a passing measurement of that name.
 
 Moved verbatim from :mod:`.signoff` (issue #7807) to pay the size-ratchet
 offset for the per-citation ``requires`` hooks (the same reason the joint-grid
-helpers moved out for #6969); ``signoff._grade_timing_margin``,
-``signoff._missing_timing_margin`` and ``signoff._row_margin_lacking_corners``
-keep resolving through the re-import there, so no caller changes.
+helpers moved out for #6969); ``signoff._grade_timing_margin`` and
+``signoff._row_margin_lacking_corners`` keep resolving through the re-import
+there, so no caller changes.
 """
 
 from __future__ import annotations

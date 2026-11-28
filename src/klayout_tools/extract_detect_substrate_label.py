@@ -3,8 +3,7 @@
 Split out of `extract.py` to keep it under its file-size ceiling. A move, not
 a rewrite: the code below is byte-for-byte what lived inline there. It reads
 ``layout`` / ``top_cell`` / ``deck`` geometry after the extraction pass and
-only appends to ``warnings[]``. `extract.py` re-exports
-``_is_synthesized_substrate_net_name`` (used by `extract_parasitics.py`).
+only appends to ``warnings[]``.
 """
 
 from __future__ import annotations

@@ -93,8 +93,8 @@ from typing import Any, NamedTuple
 from . import _spice_number as spice_number
 
 #: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
-#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
-#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
+#: 2am's EDA batch fleet. `run_sim` dispatches into the batch runners below.
+#: The self-aliased imports preserve the helper paths used by callers.
 from . import (
     _warn,
     env_provenance,
@@ -206,7 +206,6 @@ from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 from .sim_attach import apply_attach as _apply_attach
-from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import (
     _remove_shard_manifest,
     _run_batch,
@@ -241,9 +240,6 @@ from .sim_checkpoint import (  # noqa: F401 -- keep runner checkpoint imports wo
     _Checkpoint,
     _checkpoint_fingerprint,
     _checkpoint_path,
-    _key_in_initial_conditions,
-    _key_in_mc_mismatch_scale,
-    _key_in_mc_seed_options,
     _load_checkpoint,
     restore_checkpoint,
 )
@@ -261,7 +257,6 @@ from .sim_convergence_retry import (
 #: nothing below calls them -- so ``klayout_tools.sim.<name>`` keeps working.
 from .sim_corner_axes import CORNER_OPTION_NAMES as CORNER_OPTION_NAMES
 from .sim_corner_axes import NGSPICE_SOLVER_OPTIONS as NGSPICE_SOLVER_OPTIONS
-from .sim_corner_axes import _matches_exclude as _matches_exclude
 from .sim_corner_axes import _parse_process_entry as _parse_process_entry
 from .sim_corner_axes import _validate_ngspice_options
 from .sim_corner_keys import unknown_key_warnings
@@ -273,21 +268,9 @@ from .sim_corner_point import (
     _options_report_field,
     _params_report_field,
 )
-from .sim_corner_point import (
-    _validate_param_name as _validate_param_name,
-)
-from .sim_corner_point import (
-    _validate_param_scalar as _validate_param_scalar,
-)
 from .sim_corner_rules import (  # noqa: F401 -- retain the runner's selector imports
-    _NODESET_MATCH_KEYS,
-    _NODESET_MATCH_VALIDATORS,
     _apply_nodeset_rules,
-    _check_nodeset_selector_names,
     _nodeset_match_number,
-    _nodeset_match_params,
-    _nodeset_match_process,
-    _nodeset_match_supply,
     _validate_nodeset_match,
 )
 from .sim_corner_variants import _parse_variants as _parse_variants
@@ -449,9 +432,6 @@ from .sim_measurement_grading import (
     _tian_measurement_result as _tian_measurement_result,
 )
 from .sim_measurement_grading import (
-    _vector_measurement_result as _vector_measurement_result,
-)
-from .sim_measurement_grading import (
     _within_plausible_range as _within_plausible_range,
 )
 from .sim_measurement_results import (
@@ -479,16 +459,13 @@ from .sim_raw import persist_waveform_with_header
 from .sim_remote import ShardRunner as ShardRunner
 from .sim_remote import _build_remote_job_description as _build_remote_job_description
 from .sim_remote import _build_remote_request as _build_remote_request
-from .sim_remote import _default_remote_run_timeout_s as _default_remote_run_timeout_s
 from .sim_remote import _lost_shard_corner as _lost_shard_corner
-from .sim_remote import _rewrite_remote_artifact_paths as _rewrite_remote_artifact_paths
 from .sim_remote import (
     _run_remote,
     _run_remote_fleet,
     _run_sharded,
     _unrun_corner_report,
 )
-from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
     _check_capacity_wait_applies,
@@ -503,38 +480,16 @@ from .sim_request_overrides import (
 from .sim_request_overrides import _with_max_units_override as _with_max_units_override
 from .sim_request_overrides import _with_pdk_root_override as _with_pdk_root_override
 from .sim_request_overrides import _with_timeout_override as _with_timeout_override
-from .sim_slug import _NON_FILENAME_CHARS_RE as _NON_FILENAME_CHARS_RE
-from .sim_slug import _PARAMS_ID_RE as _PARAMS_ID_RE
-from .sim_slug import _SLUG_HASH_CHARS as _SLUG_HASH_CHARS
-from .sim_slug import _SLUG_MAX_BYTES as _SLUG_MAX_BYTES
-from .sim_slug import _SLUG_PREFIX_BYTES as _SLUG_PREFIX_BYTES
-from .sim_slug import _bound_slug as _bound_slug
-from .sim_slug import _readable_slug as _readable_slug
 from .sim_slug import _slugify_corner_id as _slugify_corner_id
-from .sim_slug import _slugify_label as _slugify_label
 from .sim_slug import _slugify_signal as _slugify_signal
-from .sim_validate import _EXPR_MEAS_NAME_RE as _EXPR_MEAS_NAME_RE
-from .sim_validate import _MEAS_CARD_TYPE_RE as _MEAS_CARD_TYPE_RE
-from .sim_validate import _MEAS_VALUE_REF_RE as _MEAS_VALUE_REF_RE
-from .sim_validate import _SUPPORTED_MEAS_TYPES as _SUPPORTED_MEAS_TYPES
 from .sim_validate import ON_UNREACHED_VALUES as ON_UNREACHED_VALUES
 from .sim_validate import _expr_measurements as _expr_measurements
-from .sim_validate import _measurement_name_key as _measurement_name_key
-from .sim_validate import _require_measurement_form as _require_measurement_form
-from .sim_validate import _validate_crossings_form as _validate_crossings_form
-from .sim_validate import _validate_expr_body as _validate_expr_body
-from .sim_validate import _validate_expr_names_unique as _validate_expr_names_unique
 from .sim_validate import _validate_fail_on_diagnostic as _validate_fail_on_diagnostic
 from .sim_validate import _validate_meas_card as _validate_meas_card
-from .sim_validate import _validate_measurement_form as _validate_measurement_form
 from .sim_validate import _validate_measurement_forms as _validate_measurement_forms
 from .sim_validate import (
     _validate_no_dependent_meas_cards as _validate_no_dependent_meas_cards,
 )
-from .sim_validate import _validate_noise_measurement as _validate_noise_measurement
-from .sim_validate import _validate_on_unreached as _validate_on_unreached
-from .sim_validate import _validate_optional_flag as _validate_optional_flag
-from .sim_validate import _validate_rawfile_form as _validate_rawfile_form
 from .sim_window import parse_tran_window as _parse_tran_window
 
 #: Bumped only on a non-additive (breaking) change to this command's own
