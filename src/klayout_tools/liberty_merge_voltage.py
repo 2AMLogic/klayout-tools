@@ -29,13 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .liberty_header_diff import header_mismatch
-from .liberty_merge_syntax import (
-    _find_matching,
-    _find_terminator,
-    _next_significant,
-    _normalize_header,
-    _tokens,
-)
+from .liberty_merge_syntax import _depth1_groups, _find_attr_reference
 
 #: The optional library-level groups a merge may union.
 KINDS = ("input_voltage", "output_voltage")
@@ -108,7 +102,7 @@ class VoltageUnion:
             for path, text, declared in self._members:
                 if kind in declared or kind not in text:
                     continue
-                if name := _referenced(text, kind, names):
+                if name := _find_attr_reference(text, {kind}, names):
                     return (
                         f"'{path}' references {kind} '{name}' but declares no such "
                         f"group, and the merged header would take it from "
@@ -127,53 +121,12 @@ def _declared(header: str, fields: dict[str, str]) -> dict[str, _Declared]:
     Two independent scans must agree on how many groups a kind has (the field
     map also holds complex attributes such as ``input_voltage (x);``); a kind
     where they disagree is left out, so the ordinary comparison refuses it."""
-    raw = _raw_groups(header)
+    raw: dict[str, list[tuple[str, str]]] = {}
+    for kind, name, start, stop in _depth1_groups(header, KINDS):
+        raw.setdefault(kind, []).append((name, header[start:stop]))
     found = {}
     for kind, groups in raw.items():
         sliced = {k: v for k, v in fields.items() if k.startswith(f"{kind}(")}
         if len(sliced) == len(groups):
             found[kind] = _Declared(sliced, groups)
     return found
-
-
-def _raw_groups(header: str) -> dict[str, list[tuple[str, str]]]:
-    """``{kind: [(name, raw group text)]}`` for the depth-1 voltage groups."""
-    found: dict[str, list[tuple[str, str]]] = {}
-    depth = resume = 0
-    for kind, pos, end in _tokens(header):
-        if pos < resume:
-            continue  # inside a group already consumed below
-        if kind == "{":
-            depth += 1
-        elif kind == "}":
-            depth -= 1
-        elif depth == 1 and header[pos:end] in KINDS:
-            opener, char = _next_significant(header, end)
-            if char != "(":
-                continue
-            closer = _find_matching(header, opener, "(", ")")
-            brace, char = _next_significant(header, closer + 1)
-            if char != "{":
-                continue
-            stop = _find_matching(header, brace, "{", "}")
-            name = _unquote(_normalize_header(header[opener + 1 : closer]))
-            found.setdefault(header[pos:end], []).append((name, header[pos : stop + 1]))
-            resume = stop + 1
-    return found
-
-
-def _referenced(text: str, kind: str, names: set[str]) -> str | None:
-    """The first of ``names`` that ``kind : NAME ;`` in ``text`` refers to."""
-    for token, start, end in _tokens(text):
-        if token != "ident" or text[start:end] != kind:
-            continue
-        pos, char = _next_significant(text, end)
-        if char == ":":
-            value = _normalize_header(text[pos + 1 : _find_terminator(text, pos + 1)])
-            if (name := _unquote(value)) in names:
-                return name
-    return None
-
-
-def _unquote(value: str) -> str:
-    return value[1:-1] if value[:1] == '"' and value[-1:] == '"' else value
