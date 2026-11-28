@@ -247,6 +247,10 @@ from .functional_verification_initial_state import (
 from .functional_verification_pdk import (
     _resolve_defines,
 )
+from .functional_verification_python_runtime import (
+    _check_icarus_python_runtime,
+    _interpreter_mismatch_hint,
+)
 from .functional_verification_results import (  # noqa: F401 -- preserve earlier import paths
     _SIM_TIME_UNIT_NS_EXPONENT,
     _executed_result_counts,
@@ -489,15 +493,12 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
 }
 
 
-#: The exact transcript signature cocotb's ``libembed`` emits when its
-#: compiled VPI module was ``dlopen``'d by a different CPython than the one
-#: cocotb was built for (issue #1103's live finding) -- e.g. a ``cp312``
-#: wheel loaded inside a CPython 3.14 simulator subprocess. The pre-flight
-#: ``WHEEL``-tag check (:func:`_check_cocotb_abi_compatibility`) catches this
-#: *before* the runner is invoked in the common case; these markers are the
-#: fallback for whatever that check doesn't cover (unreadable wheel metadata,
-#: a mismatch pattern the tag comparison misses), scanned only once
-#: ``results.xml`` is confirmed missing.
+#: Transcript markers of the Python cocotb *loaded* inside the simulator
+#: disagreeing with its compiled VPI module (issue #1103: a ``cp312`` wheel in
+#: a CPython 3.14 simulator subprocess). The second is only the embed
+#: function's name in older cocotb log lines, so neither is proof alone. The
+#: pre-flights (wheel-tag check, Icarus runtime probe) run first; these cover
+#: what they leave open, scanned once ``results.xml`` is confirmed missing.
 INTERPRETER_MISMATCH_MARKERS = (
     "Unexpected sys.executable value",
     "_embed_init_python",
@@ -892,10 +893,9 @@ def _parse_run_results(
     try:
         return parse_results_xml(spec_xml)
     except FunctionalVerificationError as exc:
-        # The pre-flight ABI check catches the common case up front; this
-        # is the fallback for whatever it doesn't -- only fires when
-        # `results.xml` is confirmed missing, so a genuinely unparseable or
-        # unreadable results file keeps its own unaugmented message.
+        # Fallback for what the pre-flights (wheel-tag check, Icarus runtime
+        # probe) leave open; only when `results.xml` is confirmed missing, so
+        # a genuinely unparseable results file keeps its own message.
         diagnostic = None
         if not os.path.isfile(spec_xml):
             diagnostic = _scan_interpreter_mismatch_diagnostics(
@@ -904,10 +904,7 @@ def _parse_run_results(
         if diagnostic is None:
             raise
         raise FunctionalVerificationError(
-            f"{exc} -- probable cause: the {engine} transcript contains "
-            f"{diagnostic!r}, which usually means the installed cocotb was "
-            "built for a different CPython than the one running klt (an "
-            "ABI-mismatched wheel)"
+            f"{exc} -- {_interpreter_mismatch_hint(engine, diagnostic)}"
         ) from exc
 
 
@@ -1198,12 +1195,11 @@ def _scan_interpreter_mismatch_diagnostics(*log_paths: str) -> str | None:
     """The first line in ``log_paths`` naming cocotb's ABI-mismatch failure
     mode (issue #1103), or ``None``.
 
-    Fallback for whatever :func:`_check_cocotb_abi_compatibility`'s pre-flight
-    ``WHEEL``-tag check doesn't catch. This diagnostic-only fallback never
-    raises: a missing/unreadable transcript contributes nothing, the same
-    posture :func:`_log_tail` takes. The affirmative SDF annotation gate
-    separately requires readable transcripts (issue #2130).
-    """
+    Fallback for whatever the pre-flights (the ``WHEEL``-tag check, the Icarus
+    runtime probe) don't settle. This diagnostic-only fallback never raises: a
+    missing/unreadable transcript contributes nothing, the same posture
+    :func:`_log_tail` takes; the SDF annotation gate needs readable
+    transcripts (issue #2130)."""
     for log_path in log_paths:
         try:
             with open(log_path, encoding="utf-8", errors="replace") as handle:
@@ -1572,6 +1568,7 @@ def _run_test(
     waves: bool = False,
     plusargs: list[str] | None = None,
     extra_env: dict[str, str] | None = None,
+    probe_dir: str | None = None,
 ) -> None:
     """``Runner.test()``, with the simulator's own exit code deliberately
     discarded (spike section 4): a :class:`SystemExit` here means only "the
@@ -1579,12 +1576,10 @@ def _run_test(
     from "one test failed" to "nothing ran". The verdict comes from
     :func:`parse_results_xml` instead, which the caller runs next.
 
-    ``module_dirs`` are prepended to ``sys.path`` (list order preserved, so
-    entry 0 shadows entry 1) for the duration of the call. A single directory
-    already on the path keeps its legacy position. This is done
-    because ``Runner._set_env`` propagates the *calling* process's ``sys.path``
-    to the simulator as ``PYTHONPATH`` (verified live) -- there is no
-    ``test_module`` search-path parameter to use instead.
+    Cocotb forwards ``sys.path`` as the simulator's ``PYTHONPATH``. Prepend
+    ``module_dirs`` in order, except that a single directory already on the
+    path keeps its position. The runtime probe adds its scratch directory
+    ahead of that same path for its own test module.
 
     ``random_seed``, when given, is forwarded to ``Runner.test()``'s own
     ``seed`` parameter, which sets ``COCOTB_RANDOM_SEED`` in the simulator
@@ -1618,6 +1613,8 @@ def _run_test(
             *(path for path in original_path if path not in module_dirs),
         ]
     try:
+        if probe_dir is not None:
+            sys.path = [probe_dir, *sys.path]
         engine_runner.test(
             test_module=module,
             hdl_toplevel=hdl_toplevel,
@@ -2430,6 +2427,9 @@ def run_functional_verification(
 
     runner_module = _import_runner()
     _check_cocotb_abi_compatibility()
+    _check_icarus_python_runtime(
+        runner_module, engine, module_dirs, env, timescale, output_dir
+    )
     engine_runner = _run_build(
         runner_module,
         engine=engine,

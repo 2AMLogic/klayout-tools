@@ -241,6 +241,34 @@ the reviewer-side check.
   startup even though the run proceeds and writes `results_<engine>.xml`
   normally. It is alarming and its cause is non-obvious, but it is not the
   verdict — read the verdict from the results file, as always.
+- **A Python runtime probe runs before your build** (issue #8015). With
+  `engine: "icarus"` and a cocotb testbench, klt first compiles an empty
+  module and runs one throwaway cocotb test through the same `vvp` launcher,
+  cocotb loading path and working directory as your own run, so a relative
+  `PATH` entry selects the same launcher in both. The probe puts its scratch
+  directory first and preserves your testbench's import order after it.
+  It uses your launcher environment, including `request.env`. Testcase selectors
+  (`COCOTB_TEST_FILTER` and `COCOTB_TESTCASE`), user coverage, waveform
+  recording and viewing, and debugger settings apply only to your design.
+  For example, `COCOTB_ATTACH` pauses the design's `vvp` process. The probe
+  takes about 0.5 s on an idle host and has a 60 s timeout. Inside `vvp` it
+  calls `Py_GetVersion()`. On Linux it checks the supplying file's device and
+  inode against the mapping that contains that symbol. If it cannot verify a
+  path, the error reports the path as unresolved. A release difference, including a patch or prerelease
+  such as `3.13.0rc1` versus `3.13.18`, stops the run before your build.
+  For example, the error can read `klt is running on CPython 3.13.18, but the Icarus vvp process
+  loads CPython 3.13.0rc1 for cocotb (...), supplied by
+  /usr/lib/x86_64-linux-gnu/libpython3.13.so.1.0`. Two things are
+  deliberately **not** evidence: cocotb's `Using Python X interpreter`
+  banner, which prints the wheel's compile-time version and routinely
+  differs from the runtime on a healthy install, and the libpython that
+  `cocotb_tools.config --libpython` names, which is only what cocotb asks
+  the loader for. When the probe cannot establish the runtime — `vvp` fails
+  to start Python at all, which is what a libpython from another minor
+  release usually does, or the probe cannot run on this platform or stage its
+  scratch files (a full disk, say) — klt says nothing and the ordinary run proceeds with its usual diagnostics: a
+  missing `results.xml` whose transcript carries an embed marker is reported
+  as a lead, not as proof that the wheel is wrong.
 
 ### Requirements
 
@@ -283,10 +311,13 @@ ways:
   dependencies, e.g. `ModuleNotFoundError: rpds.rpds`. This breaks before the
   verb's own error handling runs, so it may surface as a raw traceback rather
   than a structured envelope.
-- **cocotb built for a different CPython** — loads, then the simulator
-  segfaults (`Simulation failed: -11`). klt's ABI pre-flight rejects the wheel
-  tags it recognizes with a structured error; a mismatch it does not catch
-  shows up as this exit `-11`.
+- **cocotb running on a different CPython** — loads, then the simulator
+  segfaults (`Simulation failed: -11`) or exits without `results.xml`. Two
+  pre-flights refuse what they can confirm before the build: the wheel-tag
+  check (a wheel built for another `major.minor`) and, on Icarus, the Python
+  runtime probe under [Icarus notes](#icarus-notes), which measures the
+  release `vvp` actually loads. A mismatch neither can establish shows up as
+  this exit `-11`.
 
 In either case, clear `PYTHONPATH` and run with the extra in an isolated
 environment instead of reinstalling the tool:
