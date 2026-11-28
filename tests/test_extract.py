@@ -26128,7 +26128,7 @@ def test_resistance_graph_report_two_level_series_matches_analytic(r_cut, expect
     """F5/F5v at adapter level: a metal0 strip (Rs = 10, 20 x 2 um) and a
     metal1 strip (10 x 2 um) joined by one landing at their shared end edge:
     `Rs * 20 / 2` on level 0, the single cut, `Rs * 10 / 2` on level 1."""
-    from klayout_tools.extract_parasitics import _resistance_graph_report
+    from klayout_tools.extract_graph_ports import resistance_graph_report
 
     um, region = _graph_report_regions()
     roles = [
@@ -26140,7 +26140,7 @@ def test_resistance_graph_report_two_level_series_matches_analytic(r_cut, expect
         region((19 * um, 0, 20 * um, 2 * um)),  # metal0 <-> metal1 landing
         region((10 * um, 0, 10 * um + um // 2, 2 * um)),  # metal1 terminal
     ]
-    report = _resistance_graph_report(roles, contacts, vias, 0.001, 123.0, r_cut)
+    report = resistance_graph_report(roles, contacts, vias, 0.001, 123.0, r_cut)
     assert report["legacy_resistance_ohm"] == 123.0
     if expected is None:
         assert report["status"] == "unsupported"
@@ -26151,7 +26151,7 @@ def test_resistance_graph_report_two_level_series_matches_analytic(r_cut, expect
 
 
 def _strap_report(strapped):
-    from klayout_tools.extract_parasitics import _resistance_graph_report
+    from klayout_tools.extract_graph_ports import resistance_graph_report
 
     um, region = _graph_report_regions()
     roles = [("metal0", 10.0, region((0, 0, 40 * um, 2 * um)), None)]
@@ -26163,7 +26163,7 @@ def _strap_report(strapped):
         ]
     # Terminals: metal0 contacts at both ends (not landings).
     contacts = region((0, 0, um // 2, 2 * um), (39 * um, 0, 40 * um, 2 * um))
-    return _resistance_graph_report(roles, contacts, vias, 0.001, 400.0, 0.5)
+    return resistance_graph_report(roles, contacts, vias, 0.001, 400.0, 0.5)
 
 
 def test_resistance_graph_report_interior_landings_use_graph():
@@ -26182,7 +26182,7 @@ def test_resistance_graph_report_strapped_rail_is_lower_than_unstrapped():
 
 
 def test_resistance_graph_report_interior_landing_array_over_cap_is_too_large():
-    from klayout_tools.extract_parasitics import _resistance_graph_report
+    from klayout_tools.extract_graph_ports import resistance_graph_report
 
     um, region = _graph_report_regions()
     roles = [
@@ -26195,7 +26195,7 @@ def test_resistance_graph_report_interior_landing_array_over_cap_is_too_large():
         for y in range(2, 18, 2)
     ]
     contacts = region((0, 0, um // 2, 20 * um), (399 * um, 0, 400 * um, 20 * um))
-    report = _resistance_graph_report(roles, contacts, [region(*cuts)], 0.001, 9.0, 1.0)
+    report = resistance_graph_report(roles, contacts, [region(*cuts)], 0.001, 9.0, 1.0)
     assert report["status"] == "unsupported"
     assert {d["code"] for d in report["diagnostics"]} == {"graph_too_large"}
     assert report["resistance_source"] == "legacy"
@@ -26365,7 +26365,7 @@ def test_selection_fallbacks_keep_the_legacy_scalar_with_a_reason(tmp_path):
     ],
 )
 def test_selection_rule_unit(status, terminals, pair, source, reason):
-    from klayout_tools.extract_parasitics import _with_selected_resistance
+    from klayout_tools.extract_graph_ports import _with_selected_resistance
 
     result = _with_selected_resistance(
         {
