@@ -432,7 +432,10 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
 - `--substrate-tie-ohms` — passed through to `klt extract
   --substrate-tie-ohms` (issue #3089): the substrate DC-tie resistance (default
   `1e12`, substrate capacitively floating in transient; `0` = hard tie). See
-  [`extract.md`](extract.md)'s "Substrate tie value" section.
+  [`extract.md`](extract.md)'s "Substrate tie value" section. On a multi-top
+  run every extracted top carries its own tie card on the shared global
+  `vsubs`, so a bench sees `R / N` for `N` instantiated extracted cells — see
+  "Several drawn tops in one run (`--top A --top B`)" below (issue #5997).
 - `--mom-rlc-net` / `--mom-rlc-resistance-ohm` / `--mom-rlc-capacitance-ff` /
   `--mom-rlc-inductance-nh` — passed through to `klt extract --mom-rlc-net`
   (issue #988, Epic #709 Phase 3a). Substitutes a caller-supplied,
@@ -933,6 +936,26 @@ is the natural value**: each top keeps its own declared pins promoted and
 demotes its own extra labelled nets. A declared name matching no promoted net
 in a given top's extraction produces that extraction's ordinary warning, not
 an error.
+
+**The substrate DC tie is one resistor per extracted top, and they sit in
+parallel** (issue #5997). The "one per extraction" reference above is an
+`Rvsubs_dctie vsubs 0 <R>` card *inside* each top's `.SUBCKT`, with `R` the
+`--substrate-tie-ohms` value. Concatenating keeps every tie card as written
+(it de-duplicates only the repeated `.GLOBAL` card — see "The combined
+netlist" below), and `vsubs` is one global net, so the combined netlist
+carries no single substrate tie of its own: a testbench gets **one `<R>` tie
+per *instantiated* extracted cell**, all on the same `vsubs`. For a positive
+`R`, `N > 0` live instances and no other substrate DC path, the bench sees
+`R / N` — and `N` is the number of `X...` instances the bench draws, not the
+number of `--top` flags. Measured in ngspice 47 on a `--top RESA --top RESB`
+run with `--substrate-tie-ohms 1e6`: the current into a 1 V `vsubs` was 1 µA
+with `RESA` alone or `RESB` alone, 2 µA with one `RESA` and one `RESB` or
+with two `RESA`, and 3 µA with two `RESA` and one `RESB`. This is the
+single-top contract unchanged — one tie per instantiated cell; what the mode
+adds is the further cells whose ties join the same `vsubs`. At the default
+`1e12` it is immaterial (a DC reference only, issue #1263); a caller who sets
+`--substrate-tie-ohms` deliberately to model a real tie should expect `R / N`
+for the bench's own `N`.
 
 ### The combined netlist
 
