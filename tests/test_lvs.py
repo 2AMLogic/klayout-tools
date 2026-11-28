@@ -21848,7 +21848,7 @@ def test_pre_extracted_layout_netlist_carries_resistor_geometry_for_lvs_match(
     the same run's own JSON `devices[].params`)."""
     from klayout_tools.decks import get_extraction_deck
     from klayout_tools.extract import run_extract
-    from klayout_tools.pdk_models import _format_um
+    from klayout_tools.pdk_models import format_um
 
     gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
     spice_path = str(tmp_path / "poly_res.spice")
@@ -21867,12 +21867,12 @@ def test_pre_extracted_layout_netlist_carries_resistor_geometry_for_lvs_match(
     # The written netlist itself must carry the geometry the JSON report
     # measured -- not just an assertion about the round trip below.
     written_text = Path(spice_path).read_text()
-    assert f"L={_format_um(l_um)} W={_format_um(w_um)}" in written_text
+    assert f"L={format_um(l_um)} W={format_um(w_um)}" in written_text
 
     substrate_net = get_extraction_deck("gf180mcu").substrate_net
     r_card = (
         f"R1 RA RB {substrate_net} {r_ohm:.5f} {device_class} "
-        f"L={_format_um(l_um)} W={_format_um(w_um)}"
+        f"L={format_um(l_um)} W={format_um(w_um)}"
     )
     reference_spice = f"""
 .subckt {top_name} RA RB {substrate_net}

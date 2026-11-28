@@ -26,7 +26,7 @@ from typing import Any
 
 from . import pdk_stackup
 from ._layout import load_layout, select_top_cells
-from ._native import _load_native_extension
+from ._native import load_native_extension
 from ._paths import _load_spec_json, _reject_unknown_keys, parse_layer_datatype
 from .touchstone import TOUCHSTONE_VERSION, format_s2p
 
@@ -128,7 +128,7 @@ class MomError(Exception):
 
 
 def _load_native() -> Any:
-    return _load_native_extension(
+    return load_native_extension(
         "klt_mom_native",
         MomError,
         "native/mom/",

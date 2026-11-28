@@ -1024,7 +1024,7 @@ def finfet_card(device: kdb.Device, format_name: Any, net_to_string: Any) -> str
     """
     import klayout.db as kdb
 
-    from .pdk_models import _format_um
+    from .pdk_models import format_um
 
     device_class = device.device_class()
     if not isinstance(device_class, kdb.DeviceClassMOS4Transistor):
@@ -1040,8 +1040,8 @@ def finfet_card(device: kdb.Device, format_name: Any, net_to_string: Any) -> str
     return (
         f"M{format_name(device.expanded_name())} "
         f"{' '.join(net_to_string(net) for net in nets)} {device_class.name} "
-        f"L={_format_um(device.parameter('L'))} "
-        f"W={_format_um(device.parameter('W'))} "
+        f"L={format_um(device.parameter('L'))} "
+        f"W={format_um(device.parameter('W'))} "
         f"NFIN={int(round(device.parameter(NFIN_PARAM)))}"
     )
 

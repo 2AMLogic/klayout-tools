@@ -7501,7 +7501,7 @@ def test_deck_auto_detected_resistor_reported_in_provenance(tmp_path):
             "on": "poly",
             # `poly & RES_MK & Pplus & SAB`, not the marker's own raw area
             # (unlike a hand-declared `devices[]` entry, which subtracts
-            # its `body_layer` region directly -- see `_device_body_cuts`):
+            # its `body_layer` region directly -- see `device_body_cuts`):
             # poly spans x=[1,9]/y=[0.2,0.8] (8 x 0.6 um), the requires-
             # narrowed marker spans x=[2,8]/y=[0.1,0.9] (6 x 0.8 um), so
             # the overlap is 6 x 0.6 = 3.6 um^2.

@@ -78,10 +78,10 @@ from klayout_tools.extract_parasitics import (
 from klayout_tools.gen_compose import _write_composed_gds
 from klayout_tools.pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
-    _format_um,
-    _format_um2,
     _select_bipolar_variant,
     equivalent_rectangle_um,
+    format_um,
+    format_um2,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -5506,10 +5506,10 @@ def test_pdk_resolved_x_card_carries_asadpspd(tmp_path):
     assert nfet["params"]["pd_um"] > 0.0
 
     bare = GEOMETRY_STYLE_BARE_UM
-    assert f"AS={_format_um2(nfet['params']['as_um2'], bare)} " in bound_text
-    assert f"AD={_format_um2(nfet['params']['ad_um2'], bare)} " in bound_text
-    assert f"PS={_format_um(nfet['params']['ps_um'], bare)} " in bound_text
-    assert f"PD={_format_um(nfet['params']['pd_um'], bare)}" in bound_text
+    assert f"AS={format_um2(nfet['params']['as_um2'], bare)} " in bound_text
+    assert f"AD={format_um2(nfet['params']['ad_um2'], bare)} " in bound_text
+    assert f"PS={format_um(nfet['params']['ps_um'], bare)} " in bound_text
+    assert f"PD={format_um(nfet['params']['pd_um'], bare)}" in bound_text
 
 
 def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):

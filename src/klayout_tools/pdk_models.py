@@ -374,11 +374,11 @@ def _unbound_resistor_card(
         return (
             f"X{name} {pins} {class_name} "
             f"r={resistance:.12g} "
-            f"L={_format_um(length_um)} W={_format_um(width_um)}"
+            f"L={format_um(length_um)} W={format_um(width_um)}"
         )
     return (
         f"R{name} {pins} {resistance:.12g} {class_name} "
-        f"L={_format_um(length_um)} W={_format_um(width_um)}"
+        f"L={format_um(length_um)} W={format_um(width_um)}"
     )
 
 
@@ -504,8 +504,7 @@ def _unbound_mom_capacitor_card(
     ``test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params``.
     """
     card = (
-        f"X{name} {pins} {class_name} "
-        f"W={_format_um(width_um)} L={_format_um(length_um)}"
+        f"X{name} {pins} {class_name} W={format_um(width_um)} L={format_um(length_um)}"
     )
     if mmin is not None and mmax is not None and mmin >= 1 and mmax >= 1:
         card += f" MMIN={mmin} MMAX={mmax}"
@@ -975,14 +974,14 @@ def _round_um_text(value: float) -> str:
     """``value`` rounded to :data:`_PARAM_PRECISION_UM` decimal places and
     rendered without unnecessary trailing zeros (``8.0`` -> ``"8"``, ``0.5``
     -> ``"0.5"``, ``0.0`` -> ``"0"``) -- the shared numeric half of
-    :func:`_format_um`/:func:`_format_um2`, before either applies (or omits) a
+    :func:`format_um`/:func:`format_um2`, before either applies (or omits) a
     unit suffix."""
     rounded = round(value, _PARAM_PRECISION_UM)
     text = f"{rounded:.{_PARAM_PRECISION_UM}f}".rstrip("0").rstrip(".")
     return text or "0"
 
 
-def _format_um(value: float, style: str = GEOMETRY_STYLE_UNIT_SUFFIX) -> str:
+def format_um(value: float, style: str = GEOMETRY_STYLE_UNIT_SUFFIX) -> str:
     """Format a micrometre value for a device card's length-dimensioned
     parameter (``L``/``W``/``PS``/``PD``).
 
@@ -999,7 +998,7 @@ def _format_um(value: float, style: str = GEOMETRY_STYLE_UNIT_SUFFIX) -> str:
     return text if style == GEOMETRY_STYLE_BARE_UM else f"{text}U"
 
 
-def _format_um2(value: float, style: str = GEOMETRY_STYLE_UNIT_SUFFIX) -> str:
+def format_um2(value: float, style: str = GEOMETRY_STYLE_UNIT_SUFFIX) -> str:
     """Format a square-micrometre value for a device card's area-dimensioned
     parameter (``AS``/``AD``, and ``A`` on a normalized ``C`` card).
 
@@ -1007,7 +1006,7 @@ def _format_um2(value: float, style: str = GEOMETRY_STYLE_UNIT_SUFFIX) -> str:
     own default ``M``-card writer (``0.8`` -> ``"0.8P"``) -- ``1 um^2 ==
     1e-12 m^2``, the same order of magnitude the SPICE ``P`` (pico, ``1e-12``)
     unit suffix denotes, so a value already expressed in square micrometres
-    needs no numeric conversion at all, only swapping :func:`_format_um`'s
+    needs no numeric conversion at all, only swapping :func:`format_um`'s
     ``"U"`` (micro) suffix for ``"P"`` (issue #695). Under
     :data:`GEOMETRY_STYLE_BARE_UM` the same number is written with no suffix
     (``"0.8"``): ngspice scales a MOS card's ``as``/``ad`` by ``scale^2``, so a
@@ -1613,8 +1612,8 @@ def _apply_narrow_fallback(
     min_width_um, fallback_subckt = binding.narrow_fallback
     if round(width_um, _PARAM_PRECISION_UM) >= min_width_um:
         return subckt
-    w_txt = _format_um(width_um, GEOMETRY_STYLE_BARE_UM)
-    l_txt = _format_um(length_um, GEOMETRY_STYLE_BARE_UM)
+    w_txt = format_um(width_um, GEOMETRY_STYLE_BARE_UM)
+    l_txt = format_um(length_um, GEOMETRY_STYLE_BARE_UM)
     notes.append(
         f"device {name} (W={w_txt} um, L={l_txt} um) is "
         f"narrower than {subckt}'s smallest width bin "
@@ -2056,16 +2055,16 @@ def create_model_binding_delegate(
                 ps_um = self._device_param(device, "PS") or 0.0
                 pd_um = self._device_param(device, "PD") or 0.0
                 extra_params = (
-                    f" AS={_format_um2(as_um2, style)}"
-                    f" AD={_format_um2(ad_um2, style)}"
-                    f" PS={_format_um(ps_um, style)}"
-                    f" PD={_format_um(pd_um, style)}"
+                    f" AS={format_um2(as_um2, style)}"
+                    f" AD={format_um2(ad_um2, style)}"
+                    f" PS={format_um(ps_um, style)}"
+                    f" PD={format_um(pd_um, style)}"
                 )
 
             self.emit_line(
                 f"X{name} {pins} {subckt} "
-                f"{binding.length_param}={_format_um(length_um, style)} "
-                f"{binding.width_param}={_format_um(width_um, style)}{extra_params}"
+                f"{binding.length_param}={format_um(length_um, style)} "
+                f"{binding.width_param}={format_um(width_um, style)}{extra_params}"
             )
 
     return _ModelBindingSpiceWriterDelegate(bindings, global_nets)

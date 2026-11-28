@@ -47,10 +47,10 @@ from typing import Any
 from . import _warn, env_provenance
 from . import erc_antenna_gf180mcu as _gf180
 from ._devices import (
-    _conductor_role_layers,
-    _cut_device_bodies,
-    _device_body_cuts,
-    _validate_devices,
+    conductor_role_layers,
+    cut_device_bodies,
+    device_body_cuts,
+    validate_devices,
 )
 from ._layout import ActiveIndex as _ActiveIndex
 from ._layout import cells_in_hierarchy, load_layout, select_top_cells
@@ -420,7 +420,7 @@ def _spec_declared_layers(
     declared side of :func:`_undeclared_stream_layers`' set difference
     (issue #2389).
 
-    The conductor roles (:func:`_conductor_role_layers`, ``stackup`` +
+    The conductor roles (:func:`conductor_role_layers`, ``stackup`` +
     ``vias``) are what the connectivity graph is actually built from, and
     they are what the disclosure is *about*. But a layer the spec names in
     any other capacity -- a ``stackup[].label_layer`` this run reads net
@@ -433,7 +433,7 @@ def _spec_declared_layers(
     stream), and a disclosure field that is never empty is one readers
     learn to ignore.
     """
-    declared = set(_conductor_role_layers(stackup, vias).values())
+    declared = set(conductor_role_layers(stackup, vias).values())
     for entry in stackup:
         for key in ("label_layer", "active_layer"):
             if entry.get(key) is not None:
@@ -971,7 +971,7 @@ def _deck_device_cuts(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Resolve a curated extraction ``deck``'s own device-marker
     declarations into ``(cuts, applied)`` -- the deck-driven analogue of
-    :func:`klayout_tools._devices._device_body_cuts` (issue #2204, built on
+    :func:`klayout_tools._devices.device_body_cuts` (issue #2204, built on
     #2183's hand-declared ``devices[]``).
 
     **The mapping rule** (this issue's own "Marker-to-role mapping" design
@@ -2318,7 +2318,7 @@ def _extract_connectivity(
     Returns ``(l2n, circuit, layer_index, tie_layers)``.
 
     **A declared device body is not a wire (issue #2183).** ``device_cuts``
-    (from :func:`_device_body_cuts`, ``{}`` when the spec declares no
+    (from :func:`device_body_cuts`, ``{}`` when the spec declares no
     ``devices[]``) maps a ``stackup``/``vias`` role to the merged region of
     the device bodies drawn on it; each role's conductor region is
     registered with that region subtracted, so a rail-to-rail poly-resistor
@@ -2366,7 +2366,7 @@ def _extract_connectivity(
     layer_index: dict[str, int] = {}
     regions: dict[str, Any] = {}
     for entry in stackup:
-        conductor_region = _cut_device_bodies(
+        conductor_region = cut_device_bodies(
             _region(layout, top_cell, entry["layer"]), device_cuts.get(entry["name"])
         )
         regions[entry["name"]] = conductor_region
@@ -2377,7 +2377,7 @@ def _extract_connectivity(
         )
 
     for via in vias:
-        via_region = _cut_device_bodies(
+        via_region = cut_device_bodies(
             _region(layout, top_cell, via["layer"]), device_cuts.get(via["name"])
         )
         regions[via["name"]] = via_region
@@ -2548,7 +2548,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     # #2260), so it lives in `_devices.py` and takes the flat list of
     # conductor role names -- `stackup` first, then `vias` -- this module
     # would otherwise assemble internally.
-    devices = _validate_devices(
+    devices = validate_devices(
         spec,
         spec_path,
         stackup_names + [via["name"] for via in vias],
@@ -2838,8 +2838,8 @@ def run_erc(
 
     # The antenna/net graph and the separate tie graph both subtract device
     # bodies from their own role. Geometry keepouts inspect the raw role layers.
-    role_layers = _conductor_role_layers(stackup, vias)
-    device_cuts, devices_applied = _device_body_cuts(
+    role_layers = conductor_role_layers(stackup, vias)
+    device_cuts, devices_applied = device_body_cuts(
         layout, top_cell, devices, role_layers, verb="klt erc"
     )
 

@@ -143,10 +143,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ._devices import (
-    _conductor_role_layers,
-    _cut_device_bodies,
-    _device_body_cuts,
-    _validate_devices,
+    conductor_role_layers,
+    cut_device_bodies,
+    device_body_cuts,
+    validate_devices,
 )
 from ._jsonnum import is_int
 from ._layout import load_layout, select_top_cells
@@ -2357,7 +2357,7 @@ def run_power(
     # The `devices[]` fragment is shared verbatim with `klt erc` (issue
     # #2260), so it lives in `_devices.py` and takes the flat list of
     # conductor role names -- `stackup` first, then `vias`.
-    devices = _validate_devices(
+    devices = validate_devices(
         spec,
         spec_path,
         stackup_names + [via["name"] for via in vias],
@@ -2387,20 +2387,20 @@ def run_power(
     # or MiM-capacitor body breaks the net instead of becoming a low-
     # resistance path in the R network that the IR-drop and EM verdicts are
     # then computed against. `role_layers` (role name -> its declared
-    # `(layer, datatype)`) is what lets `_device_body_cuts` report the area
+    # `(layer, datatype)`) is what lets `device_body_cuts` report the area
     # each declaration *actually* subtracted -- `marker ∩ that role's own
     # drawn region` -- rather than the marker layer's own area. Both are
     # empty (and so a no-op) whenever the spec declares no `devices`, which
     # is what keeps this feature byte-identical when unused.
-    role_layers = _conductor_role_layers(stackup, vias)
-    device_cuts, devices_applied = _device_body_cuts(
+    role_layers = conductor_role_layers(stackup, vias)
+    device_cuts, devices_applied = device_body_cuts(
         layout, top_cell, devices, role_layers, verb="klt power"
     )
 
     layer_index: dict[str, int] = {}
     metal_regions: dict[str, Any] = {}
     for entry in stackup:
-        metal_region = _cut_device_bodies(
+        metal_region = cut_device_bodies(
             _region(layout, top_cell, entry["layer"]), device_cuts.get(entry["name"])
         )
         metal_regions[entry["name"]] = metal_region
@@ -2413,7 +2413,7 @@ def run_power(
 
     via_layer_index: dict[str, int] = {}
     for via in vias:
-        via_region = _cut_device_bodies(
+        via_region = cut_device_bodies(
             _region(layout, top_cell, via["layer"]), device_cuts.get(via["name"])
         )
         via_layer_index[via["name"]] = l2n.register(via_region, via["name"])
