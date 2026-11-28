@@ -2708,6 +2708,13 @@ divergence is deliberate and recorded in
 [`docs/json-contract.md`](../json-contract.md).
 Existing instances in the input netlist can still appear in the output.
 
+For ASAP7 RVT, [`lvs.md`](lvs.md#keeping-the-17-masters-out-of-a-routed-block-issue-8080)
+derives the list from the LVS known-limitation table, so a block avoids the
+masters whose drawn layout cannot compare against the library CDL. The same
+array goes into `constraints.dont_use` for synthesis and `library.dont_use`
+here, and the worked example records a routed block that reaches `klt lvs`
+`status: match` with it.
+
 ### Unknown request keys are errors (issue #4230)
 
 An unrecognised **top-level** request key is rejected with an error naming it

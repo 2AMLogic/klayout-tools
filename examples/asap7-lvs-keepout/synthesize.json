@@ -1,0 +1,8 @@
+{
+  "schema": "klt.synthesize.request/1",
+  "sources": ["keepout.v"],
+  "hdl_toplevel": "keepout",
+  "pdk": {"cell_library": "asap7sc7p5t_rvt", "corner": "TT"},
+  "constraints": {"clock_period_ns": 1.0},
+  "outputs": {"dir": "build/syn"}
+}

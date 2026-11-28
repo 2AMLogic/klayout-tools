@@ -3,8 +3,10 @@
 import pytest
 
 from klayout_tools._dont_use import cell_exclusion_fields
+from klayout_tools.lvs_known_limits import KNOWN_UNSUPPORTED_ASAP7_CELLS
 from klayout_tools.place_and_route import PlaceAndRouteError, run_place_and_route
 from klayout_tools.place_and_route_request import _validate_library
+from klayout_tools.synthesize import _resolve_dont_use_request
 from test_place_and_route import (
     _setup_success_env,
     _stub_merge_def_to_gds,
@@ -131,3 +133,26 @@ def test_omitted_field_has_no_report(tmp_path, monkeypatch):
     _stub_openroad_success(monkeypatch)
     _stub_merge_def_to_gds(monkeypatch)
     assert "cell_exclusions" not in run_place_and_route(path)
+
+
+def test_asap7_keep_out_recipe_reaches_every_post_floorplan_stage():
+    """Issue #8080: the docs/cli/lvs.md recipe feeds ``sorted(
+    KNOWN_UNSUPPORTED_ASAP7_CELLS)`` to both request fields, both parsers
+    keep the library's mixed-case spelling and exact RVT suffix, and the
+    exclusion leaves the built-in ASAP7 RVT defaults in place."""
+    name = "asap7sc7p5t_rvt"
+    keep_out = sorted(KNOWN_UNSUPPORTED_ASAP7_CELLS)
+    assert keep_out[:2] == ["A2O1A1O1Ixp25_ASAP7_75t_R", "AND2x4_ASAP7_75t_R"]
+    assert all(cell.endswith("_ASAP7_75t_R") for cell in keep_out)
+
+    patterns, mode = _resolve_dont_use_request({"dont_use": keep_out})
+    library = _validate_library({"dont_use": keep_out}, name)
+    assert (mode, list(patterns)) == ("additive", keep_out)
+    assert library == {**_validate_library(None, name), "dont_use": tuple(keep_out)}
+
+    emitted = [f"set_dont_use {{{cell}}}" for cell in keep_out]
+    for stage in ("place", "cts", "route"):
+        lines = _stage_lines(name, stage, library=library)
+        assert [line for line in lines if line.startswith("set_dont_use ")] == emitted
+    floorplan = _stage_lines(name, "floorplan", library=library)
+    assert not [line for line in floorplan if line.startswith("set_dont_use ")]
