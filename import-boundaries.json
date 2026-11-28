@@ -1092,7 +1092,6 @@
         "klayout_tools.sim_batch_fleet_status",
         "klayout_tools.sim_batch_pdk",
         "klayout_tools.sim_batch_corner_libs",
-        "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_log",
         "klayout_tools.sim_batch_image",
