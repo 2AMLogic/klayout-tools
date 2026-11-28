@@ -67,10 +67,10 @@ from klayout_tools.place_and_route import (
     _GLOBAL_PLACEMENT_DENSITY,
     _clock_lines,
     _floorplan_init_lines,
-    _openroad_version,
     _resolve_lef,
     _resolve_liberty,
     _validate_floorplan,
+    openroad_version,
 )
 
 
@@ -191,7 +191,7 @@ def main() -> int:
         "cell_library": args.cell_library,
         "corner": corner,
         "seed": args.seed,
-        "openroad_version": _openroad_version(),
+        "openroad_version": openroad_version(),
         "pdk_variant": pdk_info["variant"],
         "pdk_root": pdk_info["root"],
         "liberty_path": liberty_path,

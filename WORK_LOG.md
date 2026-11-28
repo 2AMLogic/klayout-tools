@@ -8,8 +8,41 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ## Entries
 
+### 2026-11-28
+
+- **PR #6131**: feat: report klayout-runset DEVICE_LIST passthrough in reference_conversion
+- **PR #8041**: refactor: share the KLayout runset launcher across LVS and extract
+- **PR #8019**: feat(functional-verification): probe the CPython Icarus vvp loads before the build
+- **Issue #5796** (closed): klt lvs (klayout-runset): no device map for subckt-call references — reference side converts ~nothing, silently
+- **Issue #8040** (closed): Promote KLayout runset launcher out of lvs_runset into shared runset_launch module
+- **Issue #8015** (closed): functional-verification: detect the cocotb libpython/interpreter mismatch before the simulation and name the resolved libpython
+
 ### 2026-11-27
 
+- **PR #8039**: perf(lvs): share MOS body counts between warnings and verification
+- **PR #8037**: refactor(drc): generate SG13G2 routing rules from metal and via rows
+- **PR #7989**: fix(drc): follow gf180mcu NP/PP butted-diffusion exclusions and the PP.3ci well-depth limit
+- **PR #8032**: fix: reject xschem disk-undo failures before publishing netlists
+- **PR #8028**: refactor: share the git-tracked batch input tree in _batch_tree
+- **PR #8027**: refactor(sim): split Monte Carlo sampling, rollup, and mismatch activity into three leaf modules
+- **PR #4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
+- **PR #8030**: fix(sim): omit peak RSS when local corners can overlap
+- **PR #7992**: fix: refuse an SDF whose TIMESCALE differs from the annotated module's time unit
+- **PR #8031**: refactor(drc): generate GF180MCU routing-metal rule pairs from layer rows
+- **PR #8025**: feat(sim): report per-job launch limits in batch dry runs
+- **PR #8021**: fix(sim): size the batch job-bound assessment by remote.hosts shard
+- **Issue #8038** (closed): Inspect MOS body terminals once per LVS comparison
+- **Issue #8036** (closed): Generate SG13G2 Metal1–Metal5 and Via1–Via4 DRC rules from explicit stack rows
+- **Issue #7970** (closed): GF180 implant spacing rules flag butted-diffusion edges that the foundry NP/PP spacing rules exclude
+- **Issue #8029** (closed): klt netlist accepts a truncated hierarchy after xschem exhausts disk undo space
+- **Issue #8023** (closed): Extract shared git-tracked batch input-tree module _batch_tree (~45 LOC dedup, 7 private permissions, 3 cross-verb edges)
+- **Issue #8020** (closed): Split sim.py (10,285 lines): move Monte Carlo sampling, rollup, and mismatch-activity clusters (~969 lines) into three leaf modules
+- **Issue #2835** (closed): sky130 DRC: enforce licon1/mcon maximum size without rejecting compound-layer exceptions
+- **Issue #8026** (closed): Omit per-corner peak RSS when local simulation engines can overlap
+- **Issue #7983** (closed): functional-verification options.sdf: Icarus applies SDF delays in the annotated module's time unit and ignores the file's TIMESCALE, so a ps SDF on ns-timescale models annotates every delay 1000x too large while the report says annotated: true
+- **Issue #8024** (closed): Generate GF180MCU Metal1–Metal5 width and spacing rules from five layer rows
+- **Issue #8022** (closed): klt sim --dry-run does not report batch.max_launch_attempts, so a caller cannot confirm the ceiling will be carried
+- **Issue #8011** (closed): klt sim: batch job-bound warning ignores remote.hosts sharding
 - **PR #8017**: feat: record sky130A synthesis counts for four pinned tt06 designs
 - **PR #7977**: fix(sim): retry temporary fleet capacity exits across profiles
 - **PR #8009**: refactor(sta): share literal constraint name validation
@@ -5333,22 +5366,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **PR #2609**: fix(signoff): resolve an ERC envelope's spec path beside the evidence too
 - **Issue #2613** (closed): CI wall-clock budget: Tests (Python 3.11) now breaches on main itself (~800-900s vs 420s budget)
 - **Issue #2608** (closed): Friction: klt signoff resolves an ERC envelope's spec path from the process cwd only, and reports the failure as supply_spec_incomplete
-
-### 2026-09-28
-
-- **PR #2606**: fix(lvs): name an unresolvable --check input instead of a bare null hash
-- **PR #2604**: fix(lvs): declare a dummy marker layer for the gf180mcu extraction deck
-- **PR #2603**: fix(functional-verification): read sim_time_ns from cocotb 2.1.0 properties
-- **PR #2598**: ci: move short and scheduled jobs off Blacksmith to GitHub-hosted
-- **PR #2596**: fix: adapt fixtures and cocotb pin to klayout 0.30.12 / cocotb 2.1.0
-- **PR #2589**: fix(gen): report mos_array's absent S/D implant in drc_hints
-- **PR #2588**: fix: drop stale sky130/gf180mcu-only claim from klt gen --help
-- **PR #2562**: feat(pdk): add resistivity/effective-thickness fields to substrate stackup entry
-- **Issue #2599** (closed): lvs: gf180mcu extraction deck declares no `dummy` marker layer, so `klt gen`'s own dummy devices are unsuppressable `device.unmatched` errors
-- **Issue #2595** (closed): lvs: --check resolves a report's relative input paths against CWD, so a committed request/report pair only checks from its own directory
-- **Issue #2592** (closed): klt functional-verification: sim_time_ns is always null under cocotb >= 2.1.0
-- **Issue #2583** (closed): PR #2578 (python deps bump): klayout 0.30.12 changes PCell rows-param serialization; cocotb 2.1.0 breaks pin/testcase-filter tests
-- **Issue #2580** (closed): gen: mos_array draws no source/drain implant on ihp-sg13g2, and no rule or hint reports the omission
-- **Issue #2577** (closed): klt gen --help still says every generator but resistor_strip is sky130/gf180mcu-only, and that an 'other' family is an application error — sg13g2 invocations succeed
-- **Issue #2560** (closed): klt pdk stackup: substrate entry lacks resistivity/thickness fields
 

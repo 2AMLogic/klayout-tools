@@ -26,7 +26,7 @@ def _deck(tmp_path: Path, point) -> list[str]:
 
 def test_unset_leaves_lib_lines_unchanged():
     point = sim.CornerPoint("tt", {}, 27)
-    assert sim._corner_lib_lines(point, "/m/models.lib") == [".lib /m/models.lib tt"]
+    assert sim.corner_lib_lines(point, "/m/models.lib") == [".lib /m/models.lib tt"]
 
 
 def test_include_precedes_lib_cards(tmp_path):
@@ -40,7 +40,7 @@ def test_include_precedes_lib_cards(tmp_path):
 def test_include_precedes_multi_section_libs():
     point = sim.CornerPoint("typ", {}, 27, process_sections=["nmos_t", "pmos_t"])
     point.param_file = "/m/design.ngspice"
-    assert sim._corner_lib_lines(point, "/m/models.lib") == [
+    assert sim.corner_lib_lines(point, "/m/models.lib") == [
         ".include /m/design.ngspice",
         ".lib /m/models.lib nmos_t",
         ".lib /m/models.lib pmos_t",

@@ -311,7 +311,7 @@ from .functional_verification_tools import (
     _check_required_tool,
 )
 from .request_paths import RequestPaths
-from .reset_coverage import ResetCoverageError, sequential_elements
+from .verilog_cell_models import sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -986,12 +986,12 @@ def _write_initial_state_shim(
     renamed: list[dict[str, str]],
 ) -> tuple[str, dict[str, Any]]:
     """Find flops in the original netlist and drive their elaborated names."""
-    try:
-        elements, unsupported = sequential_elements(
-            initial_state["netlist"], sources, hdl_toplevel
-        )
-    except ResetCoverageError as exc:
-        raise FunctionalVerificationError(f"options.initial_state: {exc}") from exc
+    elements, unsupported = sequential_elements(
+        initial_state["netlist"],
+        sources,
+        hdl_toplevel,
+        error_cls=lambda m: FunctionalVerificationError(f"options.initial_state: {m}"),
+    )
     if unsupported:
         shown = ", ".join(
             f"{u['instance']} ({u['cell']}: {u['reason']})" for u in unsupported[:5]

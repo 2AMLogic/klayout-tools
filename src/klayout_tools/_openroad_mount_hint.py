@@ -15,7 +15,7 @@ import os
 import re
 from typing import Any
 
-from ._openroad_engine import _OpenRoadResult
+from ._openroad_engine import OpenRoadResult
 from .liberty_merge import cache_root
 
 # --------------------------------------------------------------------------- #
@@ -77,7 +77,7 @@ def outside_cwd_note(path: str) -> str:
 
 
 def mount_namespace_hint(
-    completed: _OpenRoadResult, pdk_info: dict[str, Any] | None
+    completed: OpenRoadResult, pdk_info: dict[str, Any] | None
 ) -> str | None:
     """``None``, or an actionable hint that ``openroad`` and this process do
     not share a filesystem view (issue #1868).

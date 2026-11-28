@@ -26,12 +26,12 @@ fails (``fail-on-unlisted``) and a waiver naming no unreset element fails
 (``fail-on-stale``).
 
 Pure library: :func:`run_reset_coverage` returns plain JSON-serialisable
-data and never prints, mirroring ``socket_check.py``. Netlist parsing is
-:func:`klayout_tools.verilog_netlist.parse_gate_level_verilog`; this module
-adds no Verilog grammar of its own beyond a narrow scan of cell-model files.
-Cell-model pin names recognised as asynchronous controls are the sky130
-family's (``RESET_B``/``SET_B``/``RESET``/``SET``) plus the common
-``RN``/``SETN`` spellings; headless, no PDK data is vendored.
+data and never prints, mirroring ``socket_check.py``. Netlist parsing and
+cell-model loading live in :mod:`klayout_tools.verilog_netlist` and
+:mod:`klayout_tools.verilog_cell_models`. Cell-model pin names recognised as
+asynchronous controls are the sky130 family's
+(``RESET_B``/``SET_B``/``RESET``/``SET``) plus the common ``RN``/``SETN``
+spellings; headless, no PDK data is vendored.
 """
 
 from __future__ import annotations
@@ -39,14 +39,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .reset_coverage_models import (
-    _POWER_PINS,
-    ResetCoverageError,
-    _CellModel,
-    _read,
+from .verilog_cell_models import (
+    CONST_NETS,
+    POWER_PINS,
+    CellModel,
     load_cell_models,
+    load_flat_modules,
+    read_text,
+    reject_hierarchical_instances,
+    select_top_module,
 )
-from .verilog_netlist import VerilogNetlistError, parse_gate_level_verilog
+from .verilog_cell_models import (
+    sequential_elements as _sequential_elements,
+)
 
 SCHEMA_VERSION = 1
 
@@ -63,7 +68,10 @@ REASONS = {
     "hard_macro": "instance of a cell with no functional model (hard macro)",
 }
 
-_CONST_NETS = {"__CONST0__": 0, "__CONST1__": 1}
+
+class ResetCoverageError(Exception):
+    """A request-level problem: unreadable/unparsable inputs or a bad waiver
+    file. Maps to exit code 1; never a coverage finding."""
 
 
 # ------------------------------------------------------------------- tracing
@@ -72,7 +80,7 @@ _CONST_NETS = {"__CONST0__": 0, "__CONST1__": 1}
 def _trace(
     net: str,
     drivers: dict[str, tuple[dict, str]],
-    models: dict[str, _CellModel],
+    models: dict[str, CellModel],
     reset_port: str,
 ) -> tuple[str, int]:
     """Walk ``net`` back through buffers/inverters. Returns ``(outcome,
@@ -83,7 +91,7 @@ def _trace(
     while True:
         if net == reset_port:
             return "reset_port", parity
-        if net in _CONST_NETS:
+        if net in CONST_NETS:
             return "tied_off", parity
         if net in seen:
             return "gated_by_logic", parity
@@ -97,13 +105,13 @@ def _trace(
             return "gated_by_logic", parity
         if model.passthrough_parity is not None:
             parity ^= model.passthrough_parity
-            in_pin = next(p for p in model.inputs if p not in _POWER_PINS)
+            in_pin = next(p for p in model.inputs if p not in POWER_PINS)
             nxt = inst["connections"].get(in_pin)
             if not isinstance(nxt, str):
                 return "not_from_reset_port", parity
             net = nxt
             continue
-        if not [p for p in model.inputs if p not in _POWER_PINS]:
+        if not [p for p in model.inputs if p not in POWER_PINS]:
             return "tied_off", parity  # tie cell (conb): no signal inputs
         return "gated_by_logic", parity
 
@@ -145,7 +153,7 @@ def load_waivers(path: str) -> list[dict[str, str]]:
     """``{"waivers": [{"instance": ..., "justification": ...,
     "reason": <optional code>}]}``. Each needs a non-empty justification."""
     try:
-        doc = json.loads(_read(path, "waiver file"))
+        doc = json.loads(read_text(path, "waiver file", error_cls=ResetCoverageError))
     except json.JSONDecodeError as exc:
         raise ResetCoverageError(
             f"waiver file {path!r} is not valid JSON: {exc}"
@@ -184,32 +192,9 @@ def load_waivers(path: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------- main
 
 
-def _select_module(modules: list[dict], top: str | None, reset_port: str) -> dict:
-    by_name = {m["name"]: m for m in modules}
-    if top is None:
-        if len(modules) != 1:
-            raise ResetCoverageError(
-                f"netlist has {len(modules)} modules; name the top with --top "
-                f"(one of {sorted(by_name)})"
-            )
-        module = modules[0]
-    elif top in by_name:
-        module = by_name[top]
-    else:
-        raise ResetCoverageError(
-            f"top module {top!r} not in netlist (have {sorted(by_name)})"
-        )
-    if reset_port not in module["ports"]:
-        raise ResetCoverageError(
-            f"reset port {reset_port!r} is not a port of module {module['name']!r}"
-        )
-    return module
-
-
 def _classify_elements(
     module: dict,
-    netlist_modules: set[str],
-    models: dict[str, _CellModel],
+    models: dict[str, CellModel],
     reset_port: str,
     asserted: int,
 ) -> list[dict[str, Any]]:
@@ -225,12 +210,6 @@ def _classify_elements(
     for inst in module["instances"]:
         model = models.get(inst["cell"])
         if model is None:
-            if inst["cell"] in netlist_modules:
-                raise ResetCoverageError(
-                    f"instance {inst['name']!r} is of module {inst['cell']!r} "
-                    "defined in the netlist; hierarchical netlists are not "
-                    "supported -- flatten first"
-                )
             elements.append(_element(inst, "unreset", "hard_macro", []))
         elif not model.sequential:
             continue
@@ -261,18 +240,20 @@ def run_reset_coverage(
     if reset_polarity not in ("low", "high"):
         raise ResetCoverageError("reset_polarity must be 'low' or 'high'")
     asserted = 0 if reset_polarity == "low" else 1
-    models = load_cell_models(cell_model_paths)
-    try:
-        modules = parse_gate_level_verilog(_read(netlist_path, "netlist"))
-    except VerilogNetlistError as exc:
-        raise ResetCoverageError(
-            f"cannot parse netlist {netlist_path!r}: {exc}"
-        ) from exc
-    module = _select_module(modules, top, reset_port)
-    waivers = load_waivers(waiver_path) if waiver_path else []
-    elements = _classify_elements(
-        module, {str(m["name"]) for m in modules}, models, reset_port, asserted
+    models = load_cell_models(cell_model_paths, error_cls=ResetCoverageError)
+    modules = load_flat_modules(netlist_path, error_cls=ResetCoverageError)
+    module, netlist_modules = select_top_module(
+        modules, top, error_cls=ResetCoverageError
     )
+    if reset_port not in module["ports"]:
+        raise ResetCoverageError(
+            f"reset port {reset_port!r} is not a port of module {module['name']!r}"
+        )
+    waivers = load_waivers(waiver_path) if waiver_path else []
+    reject_hierarchical_instances(
+        module, netlist_modules, models, error_cls=ResetCoverageError
+    )
+    elements = _classify_elements(module, models, reset_port, asserted)
 
     return _apply_waivers(
         {
@@ -336,78 +317,11 @@ def reason_description(code: str) -> str:
     return REASONS.get(code, code)
 
 
-# ------------------------------------------------- initial-state drive list
-
-#: Clock/enable pins of a sequential cell.
-_CAPTURE_PINS = ("CLK", "GATE", "CLK_N", "GATE_N")
-
-#: Scan pin pairs: a scan cell's D is only captured while its scan enable
-#: is off, which the force-D drive cannot guarantee. sky130 spells the
-#: data/enable pair ``SCD``/``SCE``, ASAP7 ``SI``/``SE``; both pins of a
-#: pair must be present -- a clock gate's lone ``SE`` is not a scan pin.
-_SCAN_PIN_PAIRS = (("SCD", "SCE"), ("SI", "SE"))
-
-
 def sequential_elements(
     netlist_path: str, cell_model_paths: list[str], top: str
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Every sequential instance of module ``top`` in the gate-level netlist,
-    with the pins a testbench-independent initial-state drive needs (issue
-    #2998, ``options.initial_state`` of ``klt functional-verification``).
-
-    Returns ``(drivable, unsupported)``. A ``drivable`` entry is
-    ``{"instance", "cell", "d_pin", "d_net", "capture_pin", "capture_net"}``:
-    force ``d_pin`` and let the clock/enable at ``capture_net`` capture it.
-    ``unsupported`` entries (``{"instance", "cell", "reason"}``) are state the
-    force-D drive cannot reach: a hard macro, a sequential cell whose model
-    has no ``D`` pin or no recognised clock/enable pin, or a scan cell.
-    """
-    models = load_cell_models(cell_model_paths)
-    try:
-        modules = parse_gate_level_verilog(_read(netlist_path, "netlist"))
-    except VerilogNetlistError as exc:
-        raise ResetCoverageError(
-            f"cannot parse netlist {netlist_path!r}: {exc}"
-        ) from exc
-    by_name = {str(m["name"]): m for m in modules}
-    if top not in by_name:
-        raise ResetCoverageError(
-            f"top module {top!r} not in netlist (have {sorted(by_name)})"
-        )
-    module: dict[str, Any] = by_name[top]
-    drivable: list[dict[str, Any]] = []
-    unsupported: list[dict[str, str]] = []
-    for inst in module["instances"]:
-        model = models.get(inst["cell"])
-        if model is None:
-            if inst["cell"] in by_name:
-                raise ResetCoverageError(
-                    f"instance {inst['name']!r} is of module {inst['cell']!r} "
-                    "defined in the netlist; hierarchical netlists are not "
-                    "supported -- flatten first"
-                )
-            reason = "hard_macro"
-        elif not model.sequential:
-            continue
-        else:
-            capture = [p for p in model.inputs if p in _CAPTURE_PINS]
-            if any(all(p in model.inputs for p in pair) for pair in _SCAN_PIN_PAIRS):
-                reason = "scan_cell"
-            elif "D" not in model.inputs or len(capture) != 1:
-                reason = "no_d_or_clock_pin"
-            else:
-                drivable.append(
-                    {
-                        "instance": inst["name"],
-                        "cell": inst["cell"],
-                        "d_pin": "D",
-                        "d_net": inst["connections"].get("D"),
-                        "capture_pin": capture[0],
-                        "capture_net": inst["connections"].get(capture[0]),
-                    }
-                )
-                continue
-        unsupported.append(
-            {"instance": inst["name"], "cell": inst["cell"], "reason": reason}
-        )
-    return drivable, unsupported
+    """Compatibility wrapper around :func:`.verilog_cell_models.sequential_elements`
+    bound to :class:`ResetCoverageError`."""
+    return _sequential_elements(
+        netlist_path, cell_model_paths, top, error_cls=ResetCoverageError
+    )

@@ -12,14 +12,16 @@ margins from the square select the class of each edge. Counts were fixed by
 running the pinned foundry expressions on the same geometry.
 
 Also pins the ``DrcRule.band_spec`` contract itself (descriptor validation,
-``--list-rules`` JSON) and that the ``PCOMP`` mirror is untouched.
+``--list-rules`` JSON) and that the ``PCOMP`` mirror is untouched. The
+markers themselves are compared with the pinned expressions, ``Pplus`` edge
+mask included, in ``test_drc_edge_band_foundry.py``.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from golden_deck.manifest import build_layout, write_layout
+from golden_deck.manifest import write_layout
 from klayout_tools.decks import DrcRule, get_deck
 from klayout_tools.drc import DrcError, list_deck_rules, run_drc
 from klayout_tools.drc_edge_band import EdgeBandSpec
@@ -282,6 +284,7 @@ def test_rule_keeps_its_identity_and_declares_the_band():
         exclude_layers=(DNWELL,),
         band_width_um=0.429,
         inner_threshold_dbu=20,
+        mask_layers=(PPLUS,),
     )
 
 
@@ -295,6 +298,7 @@ def test_list_rules_reports_the_band_and_its_inner_threshold():
         "exclude_layers": ["12/0"],
         "band_width_um": 0.429,
         "inner_threshold_um": 0.02,
+        "mask_layers": ["31/0"],
     }
     # Additive: no rule without a band grows the key.
     banded = {rule.id for rule in get_deck("gf180mcu") if rule.band_spec is not None}
@@ -376,125 +380,3 @@ def test_rule_without_a_band_spec_is_unaffected(tmp_path, monkeypatch):
     report = run_drc(path, "synthetic")
 
     assert "s.enclosed.1" in report["coverage"]["rules_skipped"]
-
-
-#: Taps wholly inside a pure Nwell (no DNWELL), by (Comp box, Nplus margin,
-#: Nwell box): uniform and lopsided wells, a well only 390 nm deeper than the
-#: tap (band corners on the side edges), one narrower than the tap is long,
-#: and margins either side of both limits. For these the foundry deck judges
-#: every edge by ``NP.5di``/``NP.5dii`` alone.
-_INSIDE_PURE_WELL = [
-    ((0, 0, 1000, 1000), 80, (-1000, -1000, 2000, 2000)),
-    ((0, 0, 1000, 1000), 80, (-250, -250, 1250, 1250)),
-    ((0, 0, 1000, 1000), 10, (-1000, -1000, 2000, 2000)),
-    ((0, 0, 1000, 1000), 80, (-250, -1000, 2000, 2000)),
-    ((0, 0, 1000, 1000), 80, (-400, -390, 1400, 1390)),
-    ((0, 0, 1000, 1000), 100, (-2000, -5000, 5000, 5000)),
-    ((0, 0, 1000, 1000), 15, (-1000, -1000, 2000, 2000)),
-    ((0, 0, 2600, 700), 120, (-130, -1000, 2730, 1700)),
-]
-
-
-def _region(layout, layer):
-    """``layer``'s shapes as a region; a layer the fixture never drew is
-    empty."""
-    import klayout.db as kdb
-
-    index = layout.find_layer(*layer)
-    if index is None:
-        return kdb.Region()
-    return kdb.Region(layout.top_cell().begin_shapes_rec(index))
-
-
-def _segment(points):
-    return tuple(sorted(points))
-
-
-def _foundry_np5d_segments(layout):
-    """The NCOMP-side stretches ``NP.5di``/``NP.5dii`` report, transcribed
-    from the pinned ``main.drc`` and ``nplus.drc`` -- the deck's own selection
-    (whole wells clear of DNWELL, ``not_outside``/``outside``, the band as
-    ``nwell_n_dn - sized_in``) and the ``Nplus``-side ``enclosing`` checks.
-    Unlike the engine's band split this never partitions the tap's edges
-    itself, so agreement is not built in. No ``Pplus`` is drawn, so the
-    deck's butted-edge exclusion drops nothing."""
-    import klayout.db as kdb
-
-    nwell, nplus = _region(layout, NWELL).merged(), _region(layout, NPLUS).merged()
-    dnwell = _region(layout, DNWELL)
-    nwell_n_dn = nwell.not_interacting(dnwell)
-    sized_in = nwell_n_dn.sized(-429)
-    background = (nplus - dnwell).not_outside(nwell).edges()
-    foreground = (
-        (_region(layout, COMP) & nplus).not_outside(nwell).outside(dnwell).edges()
-    )
-    found = set()
-    for edges, distance, metrics in (
-        (nwell_n_dn - sized_in, 160, kdb.Region.Projection),
-        (sized_in, 20, kdb.Region.Euclidian),
-    ):
-        for pair in background.enclosing_check(
-            foreground & edges, distance, metrics=metrics
-        ).each():
-            found.add(
-                _segment(
-                    [(pair.second.x1, pair.second.y1), (pair.second.x2, pair.second.y2)]
-                )
-            )
-    return found
-
-
-def test_foundry_np5d_excludes_the_whole_well_on_distant_dnwell_overlap():
-    shapes = _tap_shapes(10, 1000)
-    assert len(_foundry_np5d_segments(build_layout(shapes))) == 4
-    shapes.append({"layer": list(DNWELL), "box": [1900, -1000, 2500, 2000]})
-    assert _foundry_np5d_segments(build_layout(shapes)) == set()
-
-
-def _curated_ncomp_segments(report, layout):
-    """Each marker's own NCOMP-side stretch: the two hull points on the NCOMP
-    boundary (the other two lie on ``Nplus``, a margin away)."""
-    import klayout.db as kdb
-
-    boundary = list(
-        ((_region(layout, COMP) & _region(layout, NPLUS)).merged()).edges().each()
-    )
-    found = set()
-    for violation in _markers(report):
-        own = [
-            tuple(point)
-            for point in violation["polygon"]
-            if any(edge.contains(kdb.Point(*point)) for edge in boundary)
-        ]
-        assert len(own) == 2, violation["polygon"]
-        found.add(_segment(own))
-    return found
-
-
-@pytest.mark.parametrize(("comp", "margin", "nwell_box"), _INSIDE_PURE_WELL)
-def test_markers_match_the_foundry_np5d_expressions(tmp_path, comp, margin, nwell_box):
-    """Differential check against the foundry deck: for a tap wholly inside a
-    pure well, the stretches of the tap's perimeter this rule reports are
-    exactly ``NP.5di``'s and ``NP.5dii``'s -- not merely the same count."""
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    layout.dbu = 0.001
-    top = layout.create_cell("TOP")
-    for layer, box in (
-        (COMP, kdb.Box(*comp)),
-        (
-            NPLUS,
-            kdb.Box(
-                comp[0] - margin, comp[1] - margin, comp[2] + margin, comp[3] + margin
-            ),
-        ),
-        (NWELL, kdb.Box(*nwell_box)),
-    ):
-        top.shapes(layout.layer(*layer)).insert(box)
-    path = tmp_path / "pure_well.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "gf180mcu", rules=[RULE])
-
-    assert _curated_ncomp_segments(report, layout) == _foundry_np5d_segments(layout)

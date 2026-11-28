@@ -341,7 +341,7 @@ also the order a `--rules` subset executes in.
 | `nominal_dbu_um` | The deck's nominal database unit in um; `threshold_dbu = threshold_um / nominal_dbu_um`. |
 | `rule_count` | Total registered rules in the deck. |
 | `groups.check` / `groups.scope` | Rule counts per check kind and per non-empty `scope` (the existing `DrcRule.scope` metadata `coverage.deck_scope` is built from), sorted by key. |
-| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `edge_band` (`{context_layers, exclude_layers, band_width_um, inner_threshold_um}`, plus `strict_layers` when the spec declares any; present only on a rule that declares `DrcRule.band_spec` — gf180mcu's `nplus.enclosing.comp.1` and `pplus.space.ncomp.1`, whose `threshold_um` is the band's limit and whose interior allows `inner_threshold_um`; see "Well-band split of `nplus.enclosing.comp.1`" and "Butted-diffusion exclusions" in the gf180mcu section below), `butted_edges` (`{side, mask_layers, mask_intersect, metrics}`, present only on a rule that declares `DrcRule.butted_spec` — gf180mcu's `nplus.enclosing.comp.1` and `pplus.enclosing.comp.far.1`), `scope` (`null` when unset), `threshold_um` / `threshold_max_um` (the rule's distance threshold and optional upper bound in um; `null` for check kinds without a single distance threshold — `area`, `density`, `antenna`, `ongrid`, `angle`, `comp_coverage`, `tap_distance` — and `threshold_max_um` is `null` unless the rule has an upper bound). Pin a threshold to a deck via `provenance.deck.content_hash`. |
+| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `edge_band` (`{context_layers, exclude_layers, band_width_um, inner_threshold_um}`, plus `strict_layers` and `mask_layers` when the spec declares any; present only on a rule that declares `DrcRule.band_spec` — gf180mcu's `nplus.enclosing.comp.1` and `pplus.space.ncomp.1`, whose `threshold_um` is the band's limit and whose interior allows `inner_threshold_um`; see "Well-band split of `nplus.enclosing.comp.1`" and "Butted-diffusion exclusions" in the gf180mcu section below), `butted_edges` (`{side, mask_layers, mask_intersect, metrics}`, present only on a rule that declares `DrcRule.butted_spec` — gf180mcu's `nplus.enclosing.comp.1` and `pplus.enclosing.comp.far.1`), `scope` (`null` when unset), `threshold_um` / `threshold_max_um` (the rule's distance threshold and optional upper bound in um; `null` for check kinds without a single distance threshold — `area`, `density`, `antenna`, `ongrid`, `angle`, `comp_coverage`, `tap_distance` — and `threshold_max_um` is `null` unless the rule has an upper bound). Pin a threshold to a deck via `provenance.deck.content_hash`. |
 | `provenance` | The shared block, pinning the deck's content hash; no `input`, since no layout was read. |
 
 A listing **is not a DRC verdict**: it carries no `status`, `violations` or
@@ -2718,11 +2718,57 @@ the implant short even when both the tap and its well are clear of `DNWELL`.
 On coarse grids, the two enclosure limits and the signed well inset round
 to the nearest layout unit, with half-unit ties toward positive infinity.
 
+**`Pplus`-coincident edges (issue #7987).** Both well-depth checks drop
+the checked NCOMP edges that coincide with a `Pplus` edge, segment by
+segment, and the interior alone drops them from the enclosing `Nplus`
+edges too -- the deck's `.not(pplus.edges)` in `NP.5di`'s and `NP.5dii`'s
+checked edges and in `NP.5dii`'s `Nplus` edges alone. The rule's
+`edge_band` object carries the mask as `mask_layers: ["31/0"]`. An NCOMP
+edge butted to a PCOMP inside a well is therefore not measured in either
+class, where the band alone reported it at zero extension (the foundry deck
+hands a butted pair to `NP.6`). An NCOMP edge that merely *faces* a
+`Pplus`-coincident `Nplus` edge is still held to 0.16 µm in the band --
+`NP.5di` keeps its operand -- and is not measured in the interior. With
+`Pplus` over only part of a side, the rest of the side is reported as
+before. The rule id, check kind and `threshold_dbu` are unchanged.
+
+On the issue's fixtures, all on a 1 nm grid: with `Comp` from (0, 0) to
+(4000, 2000), `Nplus` from (−160, −160) to (2000, 2160), `Pplus` from
+(2000, −160) to (4160, 2160) and `Nwell` from (−1000, −1000) to (6000,
+3000) the rule reports **0** markers, where it reported a zero-width box at
+x = 2000 from y = −20 to 2020; the same with the `Nwell`'s right edge at
+x = 2200 reports **0**, where it reported one from y = 0 to 2000. With
+`Comp` from (0, 0) to (1000, 1000), `Nplus` from (−160, −160) to (1010,
+1160) and `Pplus` from (1010, −160) to (1500, 1160), so only the enclosing
+edge coincides, the deep case reports **0**, where it reported (1000, −17)
+to (1010, 1017), and the case with the `Nwell`'s right edge at x = 1200
+reports **1**, (1000, 0) to (1010, 1000) -- the pinned `NP.5di` box with
+identical bounds. A `Pplus` that coincides with no `Nplus` edge masks
+nothing.
+
+Replayed on the eight pinned layouts of the two tables below, with inputs
+checked against the campaign catalogue hashes (curated engine on the
+`klayout` 0.30.13 wheel; the pinned `NP.5b`, `NP.5di` and `NP.5dii` bodies
+at commit `10ee7fc`, run flat on one thread with the KLayout 0.30.12
+binary):
+
+| Layout | Before | After | Pinned tables |
+| --- | ---: | ---: | ---: |
+| `tt_um_analog_factory_test` | 8 | 0 | 0 |
+| `tt_um_LPCAS_TTGF0P3_TP1` | 3 | 0 | 0 |
+| `tt_um_74hct00` | 12 | 0 | 0 |
+| `tt_um_algofoogle_gf_analog` | 33 | 0 | 0 |
+| `tt_um_essen`, `tt_um_tnt_gf_555`, `tt_um_tnt_gf_vco`, `tt_um_cw_testbuffer` | 0 | 0 | 0 |
+
+"Before" is the rule ahead of this change. Each of the 56 markers it
+removes equals, bounding box for bounding box and with multiplicity, a
+marker of the pinned statements run without their three
+`.not(pplus.edges)` terms. After the change the rule's markers equal the
+unmodified statements' on every layout: none.
+
 What the split still leaves approximated: the strict fallback keeps the
 0.16 µm limit for taps touching `DNWELL`, where the foundry has a separate
-`NP.5c` split for `DNWELL`/`LVPWELL`; and butted edges *inside* the well are
-checked, where `NP.5di`/`NP.5dii` drop an NCOMP edge that coincides with a
-`Pplus` edge (the foundry deck hands butted pairs to `NP.6`). Outside the
+`NP.5c` split for `DNWELL`/`LVPWELL`. Outside the
 well it is `NP.5b`'s part, measured by `projection` against the implant
 edges the butted selection leaves (issue #7970, next section). The `PCOMP`
 side is deliberately not given a band: its own foundry rules differ. A
@@ -2806,7 +2852,8 @@ spacing and far-enclosure categories now agree with the unmodified pinned
 tables. What does not: the 11 `nplus.enclosing.comp.1` markers left on the
 analog factory test (8) and LPCAS (3) are NCOMP edges butted to a PCOMP
 inside an Nwell, which `NP.5di`/`NP.5dii` drop and the #7955 band keeps --
-they equal those two statements run without their `.not(pplus.edges)`; and
+they equal those two statements run without their `.not(pplus.edges)` --
+issue #7987, above, drops them; and
 `pplus.enclosing.comp.1` keeps its 445 markers pending #7969. The four
 far-well bounds the ledger saw only with edge shielding off were
 butted-pair markers and are gone; on the Linux KLayout 0.30.12 binary the
@@ -2828,7 +2875,7 @@ zero throughout):
 Every marker these layouts lose matches its statement in the experimental
 copy, bounding box for bounding box and with multiplicity, and the 45
 `nplus.enclosing.comp.1` markers they keep (12 and 33) equal `NP.5dii`
-without its `.not(pplus.edges)`.
+without its `.not(pplus.edges)`; issue #7987 drops them.
 
 `DerivedLayer` also takes an optional **second context stage**
 (`context2_layers`, `context2_sized_by_um`, `context2`, issue #3682): the same
@@ -4578,7 +4625,7 @@ zero-violation case (where `drc__error__count` is `0`).
 | `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). For a native physical-layer `ongrid` marker the owner is the one placement whose own source edges supply the offending coordinate, else `null` — never a mere bounding-box match. See "Per-instance attribution" below. |
 | `source_path` | array\<string\> \| null | The instance chain from the top cell's direct child down to `source_cell` (inclusive), e.g. `["block_a", "sky130_fd_sc_hd__inv_2"]`; a single-element list for a directly-placed leaf. `null` exactly when `source_cell` is `null`. |
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |
-| `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. A marker whose hull is zero-area — every vertex collinear on the failing edge, which a total-deficit edge pair produces (e.g. an `enclosing` violation where the enclosed edge is exactly coincident with the enclosing edge, zero extension) — is reported as a 2-point segment `[min, max]` spanning the failing edge's full extent, not as the self-touching quad the hull literally is. |
+| `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. A two-dimensional edge-pair marker lists its outline vertices in perimeter order. Connect the last vertex to the first to close the ring. Parallel edges form a quadrilateral. At a chamfer or where the measured edges double back, the outline can be a triangle with an intermediate collinear point omitted. The starting vertex and winding are unspecified. A marker whose hull is zero-area — every vertex collinear on the failing edge, which a total-deficit edge pair produces (e.g. an `enclosing` violation where the enclosed edge is exactly coincident with the enclosing edge, zero extension) — is reported as a 2-point segment `[min, max]` spanning the failing edge's full extent, not as the self-touching quad the hull literally is. |
 
 `violations` is sorted by
 `(rule, cell, bbox.left, bbox.bottom, bbox.right, bbox.top)` so repeated runs

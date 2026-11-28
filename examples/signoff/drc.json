@@ -1175,7 +1175,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:777ceaba8fba4206e7370518fa6f869c0b25d4b704db955423ce1e03af6d34c4",
+      "content_hash": "sha256:a12234d5571813c9f89b3dc0ff8d2a42600ea72276c29cef92b4985e4ab0f20b",
       "released": null
     },
     "input": {

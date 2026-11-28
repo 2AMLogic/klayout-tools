@@ -26,7 +26,7 @@ def native_provenance(module_name: str, dist_name: str) -> dict[str, Any]:
     return {"module": module_name, "version": version}
 
 
-def _load_native_extension(
+def load_native_extension(
     module_name: str,
     error_cls: type[Exception],
     build_dir: str,

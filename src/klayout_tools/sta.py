@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ._native import _load_native_extension
+from ._native import load_native_extension
 
 #: Matches the standalone ``klt-statime critical-path`` CLI's own defaults
 #: (``native/statime/src/main.rs``) and the boundary condition
@@ -63,7 +63,7 @@ class StaError(Exception):
 
 
 def _load_native() -> Any:
-    return _load_native_extension(
+    return load_native_extension(
         "klt_statime_native",
         StaError,
         "native/statime/",

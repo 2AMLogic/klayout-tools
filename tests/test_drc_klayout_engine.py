@@ -601,12 +601,12 @@ def test_klayout_engine_pdk_flags_populate_provenance_pdk(tmp_path, monkeypatch)
         gds, deck_file, pdk_variant="sky130A", pdk_root=root
     )
 
-    assert report["provenance"]["pdk"] == {
-        "name": "sky130A",
-        "source": report["provenance"]["pdk"]["source"],
-        "version": None,
-    }
-    assert report["provenance"]["pdk"]["source"] is not None
+    pdk_block = report["provenance"]["pdk"]
+    assert set(pdk_block) == {"name", "source", "version", "install", "store_layout"}
+    assert (pdk_block["name"], pdk_block["version"]) == ("sky130A", None)
+    assert pdk_block["source"] is not None
+    # Issue #8007: install evidence is always reported, `null` when unknown.
+    assert (pdk_block["install"], pdk_block["store_layout"]) == (None, "flat")
 
 
 def test_klayout_engine_no_pdk_flags_leaves_provenance_pdk_null(tmp_path, monkeypatch):

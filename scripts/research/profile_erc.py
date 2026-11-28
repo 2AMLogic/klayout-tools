@@ -81,7 +81,7 @@ from klayout_tools import erc
 # Top-level helpers run_erc calls directly, outside the candidate walk.
 _REMAINDER_FUNCS = (
     "load_layout",
-    "_device_body_cuts",
+    "device_body_cuts",
     "_floating_gate_findings",
     "_net_connectivity_findings",
     "_tie_findings",

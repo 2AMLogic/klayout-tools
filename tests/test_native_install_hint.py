@@ -11,7 +11,7 @@ import importlib.metadata
 import pytest
 
 from klayout_tools import yield_analysis, yield_sensitivity
-from klayout_tools._native import _load_native_extension, native_provenance
+from klayout_tools._native import load_native_extension, native_provenance
 
 
 def _no_import(name: str, *args, **kwargs):
@@ -39,7 +39,7 @@ def test_sensitivity_error_names_extra(monkeypatch):
 def test_callers_without_extra_keep_original_message(monkeypatch):
     monkeypatch.setattr(importlib, "import_module", _no_import)
     with pytest.raises(RuntimeError) as err:
-        _load_native_extension(
+        load_native_extension(
             "klt_mom_native", RuntimeError, "native/mom/", "pip install ./native/mom"
         )
     assert str(err.value) == (

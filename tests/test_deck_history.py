@@ -637,26 +637,25 @@ def test_cli_rules_json_reports_values_and_content_hash(capsys):
     entry = next(r for r in payload["rules"] if r["id"] == "poly.width.1")
     assert entry["value_um"] == 0.15
     assert entry["description"] == "minimum poly width"
-    assert entry["provenance"]["source_repo"] == "fossi-foundation/open-pdks"
+    assert entry["provenance"] == {
+        "source_repo": "fossi-foundation/open-pdks",
+        "source_path": "sky130/klayout/sky130.lydrc",
+        "commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
+        "rule_id": "poly.1a",
+    }
 
 
 def test_cli_rules_json_single_rule(capsys):
-    exit_code = main(
-        [
-            "deck",
-            "rules",
-            "--deck",
-            "sky130",
-            "--rule",
-            "poly.width.1",
-            "--format",
-            "json",
-        ]
-    )
-
-    assert exit_code == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert [rule["id"] for rule in payload["rules"]] == ["poly.width.1"]
+    args = ["deck", "rules", "--deck", "sky130", "--rule", "poly.space.1"]
+    assert main([*args, "--format", "json"]) == 0
+    (rule,) = json.loads(capsys.readouterr().out)["rules"]
+    assert rule["id"] == "poly.space.1"
+    assert rule["provenance"] == {
+        "source_repo": "fossi-foundation/mpw_precheck",
+        "source_path": "checks/tech-files/sky130A_mr.drc",
+        "commit": "86b7362dacd931bf1fd957c84501bfbe7955fa7c",
+        "rule_id": "poly.2",
+    }
 
 
 def test_cli_rules_text(capsys):

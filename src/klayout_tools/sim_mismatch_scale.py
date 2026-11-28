@@ -192,7 +192,7 @@ def selected_sections(
 
     The ref is the point's own per-section library (issue #2522) when it
     declared one, else ``models.lib`` -- the same precedence
-    ``_corner_lib_lines`` writes into the deck, so the scan reads exactly the
+    ``corner_lib_lines`` writes into the deck, so the scan reads exactly the
     file the deck's ``.lib`` card will name.
     """
     pairs: list[tuple[str, str | None]] = []

@@ -149,6 +149,8 @@ class TestClosureOnlyDeck:
         assert _worker_pdk(report) == {
             **_IMAGE_CAPTURE["pdk"],
             "stamp_scope": "executed",
+            "install": None,
+            "store_layout": None,
         }
         staged = _digest(tmp_path / "model.lib")
         assert record["key"]["inputs"] == {}

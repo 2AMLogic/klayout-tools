@@ -343,24 +343,23 @@ are always the real, unmodified DRM values:
   splits are expressed: (issue #3484) ``pplus.enclosing.comp.1``'s PCOMP by
   ``DerivedLayer.context`` -- strict within 0.429um of an ``Nwell`` or
   touching a ``Dnwell``, otherwise ``pplus.enclosing.comp.far.1`` (0.02um);
-  (issue #7955) ``nplus.enclosing.comp.1``'s NCOMP edges, per edge by
-  ``band_spec`` -- strict within 0.429um of the boundary of a pure ``Nwell``
-  (``NP.5di``; no ``DNWELL`` contact), 0.02um deeper inside (``NP.5dii``).
-  (issue #7970) ``NP.5b`` and ``PP.5di`` measure with the deck's own edge
-  selection and ``projection`` metric (``butted_spec``): a ``Nplus`` edge
-  coincident with a PCOMP edge, or a PCOMP edge coincident with a ``Nplus``
-  edge, is not measured. The ``DNWELL``/``LVPWELL`` splits (``NP.5c``,
-  ``PP.5ci``) stay unexpressed (strict), as do ``PP.5b``'s butted edges and
-  ``euclidian``-for-``projection`` metric on ``pplus.enclosing.comp.1``
-  (issue #7969). **Unlike ``NP.5b``, whose two sub-cases both resolve to the
-  same 0.16um, ``PP.5b`` only applies to a PCOMP shape "(1) Inside NWELL (2)
-  outside LVPWELL but inside DNWELL"** -- one with no such context anywhere
-  falls under ``PP.5di``/``PP.5dii`` instead and cannot be checked at a flat
-  0.16um (issue #2634, a false positive on real ``ppolyf_u_*`` P+ substrate
-  taps). ``pplus.enclosing.comp.1`` therefore also carries
-  ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``): a layout
-  drawing neither anywhere skips the rule rather than misapplying it.
-  ``nplus.enclosing.comp.1`` needs no equivalent gate.
+  (issue #7955) ``nplus.enclosing.comp.1``'s NCOMP edges, per edge by ``band_spec`` --
+  strict within 0.429um of the boundary of a pure ``Nwell`` (``NP.5di``; no ``DNWELL``
+  contact), 0.02um deeper inside (``NP.5dii``). (issue #7970) ``NP.5b`` and ``PP.5di``
+  measure with the deck's own edge selection and ``projection`` metric
+  (``butted_spec``): a ``Nplus`` edge coincident with a PCOMP edge, or a PCOMP edge
+  coincident with a ``Nplus`` edge, is not measured. (issue #7987)
+  ``NP.5di``/``NP.5dii`` also drop ``Pplus``-coincident NCOMP edges (``mask_layers``).
+  The ``DNWELL``/``LVPWELL`` splits (``NP.5c``, ``PP.5ci``) stay unexpressed (strict),
+  as do ``PP.5b``'s butted edges and ``euclidian``-for-``projection`` metric on
+  ``pplus.enclosing.comp.1`` (issue #7969). **Unlike ``NP.5b``, whose two sub-cases
+  both resolve to the same 0.16um, ``PP.5b`` only applies to a PCOMP shape "(1) Inside
+  NWELL (2) outside LVPWELL but inside DNWELL"** -- one with no such context anywhere
+  falls under ``PP.5di``/``PP.5dii`` instead and cannot be checked at a flat 0.16um
+  (issue #2634, a false positive on real ``ppolyf_u_*`` P+ substrate taps).
+  ``pplus.enclosing.comp.1`` therefore also carries ``requires_any_layer=((21, 0),
+  (12, 0))`` (``Nwell``, ``Dnwell``): a layout drawing neither anywhere skips the rule
+  rather than misapplying it. ``nplus.enclosing.comp.1`` needs no equivalent gate.
 - ``comp.coverage.1`` (``DF.12``): evaluated flat (no deep/hierarchical
   mode) on merged regions, as the upstream ``comp.rb`` expression
   ``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``. A COMP
@@ -1680,6 +1679,7 @@ DECK: list[DrcRule] = [
             exclude_layers=((12, 0),),  # DNWELL
             band_width_um=0.429,
             inner_threshold_dbu=20,  # 0.02 um, NP.5dii
+            mask_layers=((31, 0),),  # Pplus edges; the interior's `Nplus` too
         ),
         butted_spec=ButtedEdgeSpec(  # NP.5b: `nplus.edges.not(nplus_butted_edges)`
             side="other", mask_layers=((31, 0),), mask_intersect=(22, 0)
