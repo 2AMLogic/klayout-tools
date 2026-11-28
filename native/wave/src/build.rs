@@ -434,7 +434,7 @@ fn build_from_fst(
         id: &s.id,
         full_name: &s.full_name,
         width: s.width,
-        var_type: build_fst::var_type_string(s.var_type),
+        var_type: crate::fst_convert::var_type_str(s.var_type),
         is_real: s.is_real,
     });
     let exponent = source.timescale_exponent;

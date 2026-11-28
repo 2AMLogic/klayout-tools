@@ -24,6 +24,9 @@
 //   (VCD-build-path-only, not ported).
 // - Cross-module callers renamed to this crate's own module names
 //   (`crate::cache`, `crate::format`, `crate::signal`).
+// - `var_type_str` moved to `fst_convert.rs` (shared with the build path)
+//   and `timescale_str_from_exponent` replaced by that module's
+//   `timescale_from_exponent`.
 // - One nested `if` collapsed into its parent condition
 //   (`clippy::collapsible_if`, mechanical/behavior-preserving) to satisfy
 //   this crate's own `cargo clippy -- -D warnings` CI gate.
@@ -53,7 +56,9 @@ use fst_reader::{
 
 use crate::cache::{CachedSignal, ClockEntry, ColumnCache};
 use crate::format::format_value;
-use crate::fst_convert::RealFrameFill;
+use crate::fst_convert::{
+    ticks_to_ns_from_exponent, timescale_from_exponent, var_type_str, RealFrameFill,
+};
 
 /// Read-side backing for one open FST file: the reader plus decode memoization for the
 /// loader's probe signals (clock/reset candidates) and windowed multi-signal prefetches.
@@ -286,34 +291,6 @@ struct VarEntry {
     is_real: bool,
 }
 
-fn var_type_str(tpe: FstVarType) -> &'static str {
-    match tpe {
-        FstVarType::Wire => "wire",
-        FstVarType::Reg => "reg",
-        FstVarType::Integer => "integer",
-        FstVarType::Parameter => "parameter",
-        FstVarType::Real | FstVarType::RealParameter | FstVarType::ShortReal => "real",
-        FstVarType::RealTime => "realtime",
-        FstVarType::Time => "time",
-        FstVarType::Logic => "logic",
-        FstVarType::Bit => "bit",
-        FstVarType::Supply0 => "supply0",
-        FstVarType::Supply1 => "supply1",
-        FstVarType::Tri => "tri",
-        FstVarType::TriAnd => "triand",
-        FstVarType::TriOr => "trior",
-        FstVarType::TriReg => "trireg",
-        FstVarType::Tri0 => "tri0",
-        FstVarType::Tri1 => "tri1",
-        FstVarType::Wand => "wand",
-        FstVarType::Wor => "wor",
-        FstVarType::Event => "event",
-        FstVarType::Port => "port",
-        FstVarType::Int => "int",
-        _ => "wire",
-    }
-}
-
 /// Join the VCD token form "name [7:0]" / "name [3]" into "name[7:0]".
 /// GTKWave-family writers (Verilator's embedded fstapi) keep the two-token
 /// VCD form in the FST hierarchy; joining them here keeps FST-loaded
@@ -333,28 +310,6 @@ fn join_bit_range(name: String) -> String {
         }
     }
     name
-}
-
-/// Render an FST timescale exponent back to a VCD-style timescale string.
-/// exponent -9 -> "1ns", -10 -> "100ps", -11 -> "10ps".
-fn timescale_str_from_exponent(exp: i8) -> String {
-    let units: [(i8, &str); 6] = [
-        (0, "s"),
-        (-3, "ms"),
-        (-6, "us"),
-        (-9, "ns"),
-        (-12, "ps"),
-        (-15, "fs"),
-    ];
-    for (u, name) in units {
-        let delta = exp as i32 - u as i32;
-        if (0..=2).contains(&delta) {
-            let factor = 10_i32.pow(delta as u32);
-            return format!("{factor}{name}");
-        }
-    }
-    // out of the VCD range -- fall back to 1ns semantics
-    "1ns".to_string()
 }
 
 /// Load a plain FST file behind the `ColumnCache` interface.
@@ -610,8 +565,11 @@ pub fn load_fst(path: &Path) -> Option<ColumnCache> {
         None => (0, 0, String::new()),
     };
 
-    let ticks_to_ns = 10f64.powi(header.timescale_exponent as i32 + 9);
-    let timescale_str = timescale_str_from_exponent(header.timescale_exponent);
+    let ticks_to_ns = ticks_to_ns_from_exponent(header.timescale_exponent);
+    let timescale_str = {
+        let (unit, value) = timescale_from_exponent(header.timescale_exponent);
+        format!("{value}{unit}")
+    };
 
     // Seed the decode memo with the clock/reset probe results -- sync-mode
     // queries re-read those signals immediately (reset rebasing) and must

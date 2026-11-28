@@ -16,7 +16,11 @@
 // `canon_bits_into` are ported unchanged as free functions.
 // `timescale_from_exponent` adapts `timescale_str_from_exponent` to
 // return a split `(unit, value)` pair instead of a formatted string (see
-// its own doc comment below). NOT ported:
+// its own doc comment below). `var_type_str` (the inverse of
+// `var_type_of`) moved here from this crate's `fst.rs` read path -- see
+// that file's header for its provenance -- so the FST build and read
+// paths share one type table; `ticks_to_ns_from_exponent` is original to
+// this crate. NOT ported:
 // `fst.rs`'s `ColumnCache` FST *read* path, its `FstBuildHandler` struct
 // itself (which drives these helpers via booley's vendored parallel
 // `FstSectionEncoder`/`OrderedFstWriter` API -- not available from the
@@ -28,7 +32,8 @@
 // that module). The read-side `ColumnCache`/`cache.rs` query engine is
 // issue #1599's (Phase 2a's) job, not this one's.
 
-//! Small FST-conversion helpers shared by `build.rs`.
+//! Small FST-conversion helpers shared by the build path (`build.rs`,
+//! `build_fst.rs`, `store_writer.rs`) and the FST read path (`fst.rs`).
 
 /// The FST producer string identifies stores that reserve the writer's canonical
 /// NaN for unwritten real slots and use a different quiet NaN for explicit writes.
@@ -116,6 +121,43 @@ pub fn var_type_of(vt: &str) -> fst_writer::FstVarType {
     }
 }
 
+/// Inverse of `var_type_of`: map the FST format's own `FstVarType` back to
+/// the VCD `$var` type keyword. Shared by the FST ingestion frontend
+/// (`build_fst.rs` -- `StoreWriter::create` maps the keyword back through
+/// `var_type_of`, so VCD and FST inputs produce one `DeclSignal` shape) and
+/// by the FST reader (`fst.rs`), so a type cannot map one way on build and
+/// another way on query. `RealParameter` and `ShortReal` have no keyword of
+/// their own and map to `"real"` -- never to the `"wire"` fallback, which
+/// would re-read a real signal as a bit vector.
+pub fn var_type_str(tpe: fst_reader::FstVarType) -> &'static str {
+    use fst_reader::FstVarType as R;
+    match tpe {
+        R::Wire => "wire",
+        R::Reg => "reg",
+        R::Integer => "integer",
+        R::Parameter => "parameter",
+        R::Real | R::RealParameter | R::ShortReal => "real",
+        R::RealTime => "realtime",
+        R::Time => "time",
+        R::Logic => "logic",
+        R::Bit => "bit",
+        R::Supply0 => "supply0",
+        R::Supply1 => "supply1",
+        R::Tri => "tri",
+        R::TriAnd => "triand",
+        R::TriOr => "trior",
+        R::TriReg => "trireg",
+        R::Tri0 => "tri0",
+        R::Tri1 => "tri1",
+        R::Wand => "wand",
+        R::Wor => "wor",
+        R::Event => "event",
+        R::Port => "port",
+        R::Int => "int",
+        _ => "wire",
+    }
+}
+
 /// Canonicalize a VCD bit-vector value to exactly `width` lowercase chars
 /// in `out` (fst-writer panics on over-wide values and self-extends short
 /// ones, but VCD extension rules for x/z need to be ours). Returns `true`
@@ -163,6 +205,12 @@ pub fn timescale_from_exponent(exp: i8) -> (&'static str, i64) {
         }
     }
     ("ns", 1)
+}
+
+/// Nanoseconds per tick for an FST timescale exponent: -9 ("1ns") is
+/// `1.0`, -10 ("100ps") is `0.1`, 0 ("1s") is `1e9`.
+pub fn ticks_to_ns_from_exponent(exp: i8) -> f64 {
+    10f64.powi(exp as i32 + 9)
 }
 
 /// Emit scope transitions between two hierarchical paths: pop to the
@@ -228,6 +276,76 @@ mod tests {
         assert_eq!(timescale_from_exponent(-7), ("ns", 100));
         assert_eq!(timescale_from_exponent(-12), ("ps", 1));
         assert_eq!(timescale_from_exponent(0), ("s", 1));
+    }
+
+    #[test]
+    fn var_type_str_keeps_real_variants_real() {
+        use fst_reader::FstVarType as R;
+        use fst_writer::FstVarType as W;
+
+        for tpe in [R::Real, R::RealParameter, R::ShortReal] {
+            assert_eq!(var_type_str(tpe), "real", "{tpe:?}");
+            assert_eq!(var_type_of(var_type_str(tpe)), W::Real, "{tpe:?}");
+        }
+    }
+
+    #[test]
+    fn var_type_str_round_trips_through_var_type_of() {
+        use fst_reader::FstVarType as R;
+        use fst_writer::FstVarType as W;
+
+        let cases = [
+            (R::Event, "event", W::Event),
+            (R::Integer, "integer", W::Integer),
+            (R::Parameter, "parameter", W::Parameter),
+            (R::Real, "real", W::Real),
+            (R::RealParameter, "real", W::Real),
+            (R::Reg, "reg", W::Reg),
+            (R::Supply0, "supply0", W::Supply0),
+            (R::Supply1, "supply1", W::Supply1),
+            (R::Time, "time", W::Time),
+            (R::Tri, "tri", W::Tri),
+            (R::TriAnd, "triand", W::TriAnd),
+            (R::TriOr, "trior", W::TriOr),
+            (R::TriReg, "trireg", W::TriReg),
+            (R::Tri0, "tri0", W::Tri0),
+            (R::Tri1, "tri1", W::Tri1),
+            (R::Wand, "wand", W::Wand),
+            (R::Wire, "wire", W::Wire),
+            (R::Wor, "wor", W::Wor),
+            (R::Port, "port", W::Port),
+            (R::SparseArray, "wire", W::Wire),
+            (R::RealTime, "realtime", W::RealTime),
+            (R::GenericString, "wire", W::Wire),
+            (R::Bit, "bit", W::Bit),
+            (R::Logic, "logic", W::Logic),
+            (R::Int, "int", W::Int),
+            (R::ShortInt, "wire", W::Wire),
+            (R::LongInt, "wire", W::Wire),
+            (R::Byte, "wire", W::Wire),
+            (R::Enum, "wire", W::Wire),
+            (R::ShortReal, "real", W::Real),
+        ];
+        for (tpe, keyword, written) in cases {
+            assert_eq!(var_type_str(tpe), keyword, "{tpe:?}");
+            assert_eq!(var_type_of(keyword), written, "{tpe:?}");
+        }
+    }
+
+    #[test]
+    fn ticks_to_ns_from_exponent_is_ns_per_tick() {
+        for (exp, ns) in [
+            (-15, 1e-6),
+            (-12, 1e-3),
+            (-9, 1.0),
+            (-8, 10.0),
+            (-6, 1e3),
+            (-3, 1e6),
+            (0, 1e9),
+        ] {
+            let got = ticks_to_ns_from_exponent(exp);
+            assert!((got - ns).abs() < ns * 1e-12, "{exp}: {got} != {ns}");
+        }
     }
 
     #[test]

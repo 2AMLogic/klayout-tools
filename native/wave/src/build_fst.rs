@@ -17,7 +17,7 @@ use std::io::BufReader;
 use fst_reader::{FstFilter, FstHierarchyEntry, FstReader, FstSignalValue, FstVarType};
 use rustc_hash::FxHashSet;
 
-use crate::fst_convert::RealFrameFill;
+use crate::fst_convert::{ticks_to_ns_from_exponent, RealFrameFill};
 use crate::store_writer::StoreWriter;
 
 pub struct FstSourceSignal {
@@ -33,42 +33,6 @@ pub struct FstSource {
     pub signals: Vec<FstSourceSignal>,
     pub timescale_exponent: i8,
     pub ticks_to_ns: f64,
-}
-
-pub fn var_type_string(tpe: FstVarType) -> &'static str {
-    // Mirrors `fst_convert::var_type_of`'s own keyword set, in reverse --
-    // `StoreWriter::create` re-maps this string back through
-    // `var_type_of` so both ingestion frontends (VCD and FST) share one
-    // `DeclSignal` shape. See that module's header for why the round trip
-    // through a string (rather than passing `FstVarType` straight
-    // through) was chosen: `signal.rs::SignalMeta` (the VCD side's own
-    // declared-signal record, ported from upstream) already carries
-    // `var_type` as a VCD keyword string, so this keeps `DeclSignal`'s
-    // `var_type` field a single shared type across both frontends.
-    match tpe {
-        FstVarType::Reg => "reg",
-        FstVarType::Integer => "integer",
-        FstVarType::Parameter => "parameter",
-        FstVarType::Real => "real",
-        FstVarType::RealTime => "realtime",
-        FstVarType::Time => "time",
-        FstVarType::Logic => "logic",
-        FstVarType::Bit => "bit",
-        FstVarType::Supply0 => "supply0",
-        FstVarType::Supply1 => "supply1",
-        FstVarType::Tri => "tri",
-        FstVarType::TriAnd => "triand",
-        FstVarType::TriOr => "trior",
-        FstVarType::TriReg => "trireg",
-        FstVarType::Tri0 => "tri0",
-        FstVarType::Tri1 => "tri1",
-        FstVarType::Wand => "wand",
-        FstVarType::Wor => "wor",
-        FstVarType::Event => "event",
-        FstVarType::Port => "port",
-        FstVarType::Int => "int",
-        _ => "wire",
-    }
 }
 
 /// Open an FST trace and read its hierarchy, producing the same kind of
@@ -118,7 +82,7 @@ pub fn open(path: &std::path::Path) -> Result<FstSource, String> {
     // ns-per-tick from the FST's own power-of-ten timescale exponent
     // (e.g. -9 => 1ns/tick), matching `fst_convert::timescale_to_exponent`
     // used on the VCD-write side.
-    let ticks_to_ns = 10f64.powi(header.timescale_exponent as i32 + 9);
+    let ticks_to_ns = ticks_to_ns_from_exponent(header.timescale_exponent);
 
     Ok(FstSource {
         reader,
