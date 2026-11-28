@@ -153,7 +153,7 @@ description alone):
    ``_res_flavor_layers`` already hard-reject in ``gen.py`` itself) for
    every device whose declared class does not match what was actually
    drawn. A generator/family/selector pair with no static prediction
-   available (``_resolve_expected_device_class`` returns ``None``), or a
+   available (``resolve_expected_device_class`` returns ``None``), or a
    declared class that is one of KLayout's own generic primitive-element
    names (``RES``/``CAP``/..., see
    :data:`_GENERIC_PRIMITIVE_DEVICE_CLASSES`), is silently skipped --
@@ -181,7 +181,7 @@ from . import layout_plan, layout_plan_body_nets, layout_plan_ports
 from . import layout_plan_routing as nr
 from ._jsonnum import is_number
 from ._paths import _resolve_relative
-from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
+from .gen import GenError, generate, pdk_family, resolve_expected_device_class
 from .gen_compose import GenComposeError, _translate_bbox, compose
 from .layout_plan_diff_pair import apply_diff_pair_unit_w_um, apply_strap_splits
 from .layout_plan_fields import ingest_netlist
@@ -481,7 +481,7 @@ def _device_class_mismatch_warnings(
     ``kdb.NetlistSpiceReader`` assigns every device class it builds from SPICE
     text (confirmed against the installed ``klayout.db`` module -- e.g. a
     ``rm1``-model resistor call digests as ``"RM1"``, never ``"rm1"``) --
-    while :func:`klayout_tools.gen._resolve_expected_device_class` reports the
+    while :func:`klayout_tools.gen.resolve_expected_device_class` reports the
     lower-case class names ``klt extract``/the curated decks
     (``klayout_tools.decks.*.EXTRACTION_DECK``) actually use. These are the
     same device class under two different naming conventions from two
@@ -496,16 +496,16 @@ def _device_class_mismatch_warnings(
     PDK device class, so it can neither confirm nor contradict what the
     generator drew.
 
-    Never raises: :func:`klayout_tools.gen._resolve_expected_device_class`
+    Never raises: :func:`klayout_tools.gen.resolve_expected_device_class`
     returning ``None`` (this generator/family/selector combination has no
     static device-class prediction) is treated as "nothing to check," not a
     mismatch, so this returns ``[]`` for every generator/family
-    :func:`klayout_tools.gen._resolve_expected_device_class` does not yet
+    :func:`klayout_tools.gen.resolve_expected_device_class` does not yet
     cover -- no false positives for `mos_array`/`diff_pair`/`bjt_array`/
     `cap_array`/`guard_ring`/`bond_pad`/`resistor_strip`/`esd_device`/
     `well_island` groups today.
     """
-    expected_class = _resolve_expected_device_class(
+    expected_class = resolve_expected_device_class(
         group["generator"], family, resolved_params
     )
     if expected_class is None:
@@ -1032,7 +1032,7 @@ def execute_layout_plan(
                 raise LayoutPlanExecuteError(str(exc)) from exc
 
             # Reuse the actual PDK family when resolving subsequent groups.
-            family = _pdk_family(generated[group["id"]]["pdk"]["variant"])
+            family = pdk_family(generated[group["id"]]["pdk"]["variant"])
             warnings.extend(_device_class_mismatch_warnings(group, params, family))
 
         bboxes_um = {
@@ -1050,7 +1050,7 @@ def execute_layout_plan(
             group_ids,
             min_spacing_um_by_group,
             _family_mfg_grid_um(
-                _pdk_family(generated[device_groups[0]["id"]]["pdk"]["variant"])
+                pdk_family(generated[device_groups[0]["id"]]["pdk"]["variant"])
             ),
         )
         warnings.extend(placement_warnings)

@@ -158,7 +158,7 @@ sparse tables:
   this family?" locally, but never "what family is this variant?" — that
   question has exactly one implementation,
   `pdk_families.pdk_variant_family()`. The shape to copy is
-  `gen_layer_params._pdk_family()`: classify with the authoritative
+  `gen_layer_params.pdk_family()`: classify with the authoritative
   helper, then check the result against your own table.
 - **A narrowing is declared, not implied.** Any family list shorter than
   `KNOWN_PDK_FAMILIES` is built with `pdk_families.family_subset(...)`, so

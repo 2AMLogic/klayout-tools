@@ -218,7 +218,7 @@ def _ami_site(variant):
 def _layer_params_site(variant):
     """`klt gen`'s PDK-aware layer-role family answer, or ``None``."""
     try:
-        return gen_layer_params._pdk_family(variant)
+        return gen_layer_params.pdk_family(variant)
     except GenError:  # family not supported by the PDK-aware generators
         return None
 

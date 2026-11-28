@@ -315,11 +315,6 @@
     },
     {
       "file": "src/klayout_tools/gen.py",
-      "function": "_coerce_param",
-      "complexity": 11
-    },
-    {
-      "file": "src/klayout_tools/gen.py",
       "function": "_mos_array_layout",
       "complexity": 11
     },

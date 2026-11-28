@@ -496,13 +496,13 @@ via a `PDK_VARIANT_FAMILY_ALIASES` entry rather than a literal-prefix match
 
 There is no generator flag, config, or fallback to a PDK's own native PCell
 library today — supporting a new family means contributing that family's
-entry to `src/klayout_tools/gen.py`'s `_PDK_ROLE_LAYERS` table (and, for
+entry to `src/klayout_tools/gen.py`'s `PDK_ROLE_LAYERS` table (and, for
 `res_array`'s poly-resistor flavours and `mos_array`'s/`diff_pair`'s
 higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
 `_PDK_VOLTAGE_FLAVOR_LAYERS` tables). Concretely:
 
-- **Family key and resolution**: `_pdk_family()` maps a resolved
-  `pdk.variant` string to a family key in `_PDK_ROLE_LAYERS` by delegating to
+- **Family key and resolution**: `pdk_family()` maps a resolved
+  `pdk.variant` string to a family key in `PDK_ROLE_LAYERS` by delegating to
   `klayout_tools.pdk_families.pdk_variant_family()` (the package's single
   authoritative variant→family classifier — no module derives a family from
   a variant name itself) — a plain literal-prefix match against most variant
@@ -536,12 +536,12 @@ higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
   (`metal2`/`via1`, `metal3`/`via2`) `gen_compose`'s router resolves. Each
   role's purpose and the exact curated-deck citation it must match is
   documented inline as a comment on that role's entry in the existing
-  `sky130`/`gf180mcu`/`sg13g2` blocks of `_PDK_ROLE_LAYERS` — follow those
+  `sky130`/`gf180mcu`/`sg13g2` blocks of `PDK_ROLE_LAYERS` — follow those
   comments' citation style (point at the specific `klayout_tools.decks.<family>`
   rule or `EXTRACTION_DECK` entry the number comes from, never an unverified
   guess).
 - **Optional roles**: any role a family's curated deck has no equivalent
-  layer for (e.g. sky130's `_PDK_ROLE_LAYERS` entry has no `esd_mark`/
+  layer for (e.g. sky130's `PDK_ROLE_LAYERS` entry has no `esd_mark`/
   `salicide_block`) may simply be omitted — `_role_layer_info()` already
   returns `None` for a missing key, and generators report the resulting
   "role not drawn on this family" state through `drc_hints.notes` rather
@@ -624,7 +624,7 @@ its own centre, *inside* the unchanged 0.22 µm-derived contact region —
 the same way. The only geometry that changes is the cut itself: every other
 layer, every port coordinate and every `bbox_um` is exactly what the generic
 layout produced, and each cut's enclosure only grows. The per-layer size is
-resolved by `gen_layer_params._cut_fixed_size_um` from the curated deck's own
+resolved by `gen_layer_params.cut_fixed_size_um` from the curated deck's own
 `DrcRule.threshold_max_dbu` where the deck declares one (gf180mcu's
 `contact`/`via1`–`via4`, already equal to what the generators draw) and
 from `_PDK_CUT_FIXED_SIZE_UM` for the rules above, which the curated decks do
@@ -2284,7 +2284,7 @@ wherever the core circuit routes — but neither curated deck models a via
 role between `top_metal` and any lower level this generator's sibling
 generators already expose (`metal`/`metal2`/`metal3` for sky130, and — since
 issue #1058 — the same `metal`/`metal2`/`metal3` for gf180mcu; see
-`_PDK_ROLE_LAYERS`'s `"top_metal"` entry).
+`PDK_ROLE_LAYERS`'s `"top_metal"` entry).
 `down_to` therefore supports only its default, `"top_metal"` (no via drawn);
 any other value is rejected (`GenError`) rather than silently drawing a
 DRC-illegal via between layers that were never meant to touch directly.
@@ -2694,7 +2694,7 @@ family/variant split the resolver doesn't have. The response's
 | ----- | ---- | ----------- |
 | `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array` (plus a shared `WELL_TAP` on `flavor="pfet"`, `sg13cmos5l` only — issue #1473), `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, `M1_S`/`_D`/`_G` for `esd_device`, `C<i>_TOP`/`_BOT` for `cap_array`, etc). |
 | `net` | string \| null | The net this port carries. `null` for every generator except `well_island` (issue #1421), whose `TAP_*` ports carry its `params.net` — the one request field that feeds a port's net today. A `GAP_*` marker is never given one (it marks the *absence* of ring conductor). |
-| `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen._PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
+| `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen.PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
 | `direction_deg` | number | Outward-facing direction in degrees (`0`/`90`/`180`/`270`). |

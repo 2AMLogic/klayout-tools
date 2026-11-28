@@ -39,7 +39,7 @@ from .gen_compose_layer_rules import (
 )
 from .gen_compose_port_search import _search_landing
 from .gen_compose_routing import (
-    _pdk_family,
+    pdk_family,
 )
 from .gen_compose_via_cuts import _stack_sizes as _stack_sizes
 from .gen_compose_via_cuts import via_drop_cut_side_um as via_drop_cut_side_um
@@ -221,7 +221,7 @@ class _MacroNets:
         import klayout.db as kdb
 
         try:
-            self.deck = get_extraction_deck(_pdk_family(variant))
+            self.deck = get_extraction_deck(pdk_family(variant))
         except (GenError, UnknownDeckError) as exc:
             raise GenComposeError(
                 f"ports_from_labels: no extraction deck for '{variant}': {exc}"

@@ -124,22 +124,22 @@ def _diff_pair_describe(
     from .gen_diff_pair import _diff_pair_layout
     from .gen_diff_pair_strap import _STRAP_RAIL_H_UM
     from .gen_layer_params import (
-        _PDK_ROLE_LAYERS,
+        PDK_ROLE_LAYERS,
         _contact_gate_extra_offset_um,
         _gate_bottom_endcap_um,
         _gate_pad_clearance_um,
         _gate_top_endcap_um,
-        _pdk_family,
         mfg_grid_um,
+        pdk_family,
     )
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     # The strap geometry is drawn on the grid `_device_layer_params` threads
     # to the PCell (`pcell.mfg_grid_um`, resolved from the *contact* role),
     # and the ports reported here must sit on that drawn metal -- so this must
     # be the same source, not the metal2 role's own grid, which differs on
     # some families (sg13g2: contact 0.005, metal2 none).
-    strap_grid_um = mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact"))
+    strap_grid_um = mfg_grid_um(family, PDK_ROLE_LAYERS[family].get("contact"))
     info = _diff_pair_layout(
         params["w_um"],
         params["l_um"],
@@ -163,8 +163,8 @@ def _diff_pair_describe(
         pitch_x_um=params["pitch_x_um"],
     )
     unit = info["unit"]
-    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
-    poly_pair = _PDK_ROLE_LAYERS[family]["poly"]
+    metal_pair = PDK_ROLE_LAYERS[family]["metal"]
+    poly_pair = PDK_ROLE_LAYERS[family]["poly"]
     # `metal`/`poly` are the roles every supported family draws the device
     # on -- the table's `| None` values cover genuinely optional roles
     # (`well`, `metal2`, ...), not these two.
@@ -186,7 +186,7 @@ def _diff_pair_describe(
         # `metal2` role is only read here, under the strap guard -- an
         # unstrapped request never touches it -- and the strap cannot be
         # present unless the family's deck defines the layer it was drawn on.
-        strap_metal_pair = _PDK_ROLE_LAYERS[family]["metal2"]
+        strap_metal_pair = PDK_ROLE_LAYERS[family]["metal2"]
         assert strap_metal_pair is not None
         strap_metal_layer = {
             "layer": strap_metal_pair[0],
@@ -272,7 +272,7 @@ def _diff_pair_describe(
             "no guard ring drawn (params.add_guard_ring is false) -- isolation from "
             "adjacent structures is the caller's responsibility"
         )
-    if params["flavor"] == "pfet" and _PDK_ROLE_LAYERS[family]["well"] is None:
+    if params["flavor"] == "pfet" and PDK_ROLE_LAYERS[family]["well"] is None:
         notes.append(
             f"params.flavor is 'pfet' but the resolved PDK family ('{family}') has "
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
@@ -348,13 +348,13 @@ def _diff_pair_layer_params(
     from .gen_layer_mv_ring import apply_hv_mark_margins
     from .gen_layer_params import (
         _device_layer_params,
-        _pdk_family,
         _reject_deferred_family,
         _ring_layer_params,
         _role_layer_info,
+        pdk_family,
     )
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     _reject_deferred_family("diff_pair", family)
     strap_wanted = bool(params.get("strap_splits"))
     strap_metal = _role_layer_info(family, "metal2")
@@ -383,4 +383,4 @@ def _diff_pair_layer_params(
     layer_params["strap_via_layer"] = (
         strap_via if strap_via is not None else kdb.LayerInfo(0, 0)
     )
-    return apply_hv_mark_margins(layer_params, _pdk_family(pdk_info["variant"]), params)
+    return apply_hv_mark_margins(layer_params, pdk_family(pdk_info["variant"]), params)

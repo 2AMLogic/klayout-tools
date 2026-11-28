@@ -1982,7 +1982,7 @@ def _scan_hard_macro_libraries(libs_ref: str) -> list[dict[str, Any]]:
 #: (``"sky130A"`` -> ``"sky130"``, ``"ihp-sg13g2"`` -> ``"sg13g2"``) is not
 #: performed here at all -- :func:`_corner_pdk_family` delegates it to
 #: :func:`~klayout_tools.pdk_families.pdk_variant_family` and then checks
-#: membership in this set, the ``gen_layer_params._pdk_family`` pattern.
+#: membership in this set, the ``gen_layer_params.pdk_family`` pattern.
 #:
 #: A variant whose family is not in this set is simply unsupported --
 #: :func:`list_corners` returns an explanatory empty result (see its

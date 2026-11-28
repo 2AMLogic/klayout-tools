@@ -339,7 +339,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     hidden=True,
                 )
             # Fixed drawn side of every cut on cap_top_via_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
+            # harness-computed by `cut_fixed_size_um` from the resolved PDK
             # family and layer. `0.0` (no upper size bound) leaves the cuts
             # exactly as laid out; see `gen._clamp_cut_boxes`.
             self.param(

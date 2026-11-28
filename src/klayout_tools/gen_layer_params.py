@@ -7,8 +7,8 @@ module splits covering ``extract.py``->``extract_spef.py`` (#1195), ``lvs.py``->
 ``sim_remote.py`` (#1764), ``place_and_route.py``->
 ``place_and_route_sta.py`` (#1808), and ``gen.py``'s own earlier
 ``gen_pcells/`` package split (#1698/#1713)): the per-PDK-family constant
-tables (``_PDK_ROLE_LAYERS`` and friends) and the small resolver functions
-that read them (``_device_layer_params``, ``_pdk_family``,
+tables (``PDK_ROLE_LAYERS`` and friends) and the small resolver functions
+that read them (``_device_layer_params``, ``pdk_family``,
 ``_role_layer_info``, etc.), used by every phase-2 generator in ``gen.py``
 to translate a resolved PDK family into the concrete ``kdb.LayerInfo``
 layer pairs and geometry floors it draws on.
@@ -37,7 +37,6 @@ from .gen_layer_tables import (  # noqa: F401
     _PDK_CAP_GEOMETRY_MIN_UM,
     _PDK_CAP_PARALLEL_UNIT_RANGE_UM,
     _PDK_CAP_STACK_GEOMETRY_UM,
-    _PDK_ROLE_LAYERS,
     CAP_BOTTOM_PLATE_MARGIN_UM,
     CAP_PARALLEL_VIA_EDGE_INSET_UM,
     CAP_TOP_ESCAPE_CLEARANCE_UM,
@@ -51,6 +50,7 @@ from .gen_layer_tables import (  # noqa: F401
     GUARD_RING_DEFAULT_WIDTH_UM,
     PAD_OPENING_GUIDELINE_MIN_UM,
     PAD_TOP_METAL_ENCLOSURE_MIN_UM,
+    PDK_ROLE_LAYERS,
     SD_PAD_GATE_GAP_MIN_UM,
     UNIT_MIN_W_UM,
 )
@@ -511,7 +511,7 @@ def _cap_geometry_min_um(family: str) -> dict[str, float]:
 #:   either layer, so the exclusion is satisfied by construction. No curated
 #:   *DRC* rule in that deck checks 117/5 or 117/10, so drawing them never
 #:   affects `klt drc --deck gf180mcu` status -- the same "the layer is real,
-#:   just uncheckable for its own purpose" situation :data:`_PDK_ROLE_LAYERS`'
+#:   just uncheckable for its own purpose" situation :data:`PDK_ROLE_LAYERS`'
 #:   own `res_mark`/`bjt_mark` entries document.
 _PDK_CAP_TOP_PLATE_REQUIRES: dict[str, tuple[tuple[int, int], ...]] = {
     "gf180mcu": (
@@ -544,8 +544,8 @@ def _cap_top_plate_requires(family: str) -> tuple[tuple[int, int], ...]:
 
 
 #: Generators whose current geometry is not wired up for a family that
-#: :func:`_pdk_family` otherwise resolves successfully -- distinct from an
-#: unresolvable family (:func:`_pdk_family`'s own error, e.g. a variant
+#: :func:`pdk_family` otherwise resolves successfully -- distinct from an
+#: unresolvable family (:func:`pdk_family`'s own error, e.g. a variant
 #: matching no family at all) and from a per-role gap a generator already
 #: checks explicitly (:func:`_cap_family_layers`'s ``cap_top_plate``/
 #: ``cap_bottom_plate`` check; :func:`_bond_pad_layer_params`'s own
@@ -566,7 +566,7 @@ def _cap_top_plate_requires(family: str) -> tuple[tuple[int, int], ...]:
 #: ``diff_pair`` are *also* deferred here for this family -- unlike
 #: sg13g2, where both resolve every mandatory role fine (``"tap"`` there is
 #: real, if shared with ``"active"``): this family's own
-#: :data:`_PDK_ROLE_LAYERS` entry deliberately carries no ``"tap"`` role at
+#: :data:`PDK_ROLE_LAYERS` entry deliberately carries no ``"tap"`` role at
 #: all (see that entry's own comment), so ``guard_ring``'s ring layer
 #: resolution would otherwise pass a ``None`` ``tap_layer`` straight to a
 #: PCell parameter that requires a real ``kdb.LayerInfo`` -- an opaque
@@ -612,7 +612,7 @@ def _reject_deferred_family(generator_name: str, family: str) -> None:
 #: Per-PDK-family poly-resistor *flavour* -> the ordered set of extra mask
 #: layers that flavour's recognised device class requires over each unit's
 #: body segment, selected by ``res_array``'s ``flavor`` request param (issue
-#: #463). Unlike the always-single roles in :data:`_PDK_ROLE_LAYERS`, a poly
+#: #463). Unlike the always-single roles in :data:`PDK_ROLE_LAYERS`, a poly
 #: resistor's recognised device *class* is chosen by which implant/precision-
 #: resistor masks cover its body, and a single PDK family exposes several such
 #: classes -- with a *different number* of masks per class (issue #1451): from
@@ -810,7 +810,7 @@ def _res_flavor_layers(family: str, flavor: str) -> tuple[tuple[int, int], ...]:
     ``family`` (see :data:`_PDK_RES_FLAVOR_LAYERS`).
 
     Raises :class:`GenError` for a flavour the family does not expose, listing
-    the valid names -- mirroring :func:`_pdk_family`'s unsupported-family
+    the valid names -- mirroring :func:`pdk_family`'s unsupported-family
     error so a bad ``res_array`` ``flavor`` request fails clearly and early
     (during layer resolution, before any geometry is drawn)."""
     flavors = _PDK_RES_FLAVOR_LAYERS[family]
@@ -1331,8 +1331,8 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #: 0.22um is over the upstream maximum, so drawing it is a real DRC violation
 #: whether or not this repo's curated deck can yet see it. Drawn cuts on these
 #: layers are clamped *down* to the fixed size (see
-#: :func:`_cut_fixed_size_um`, :func:`~klayout_tools.gen._clamp_cut_boxes` and
-#: :func:`~klayout_tools.gen._fixed_cut_side_um`).
+#: :func:`cut_fixed_size_um`, :func:`~klayout_tools.gen._clamp_cut_boxes` and
+#: :func:`~klayout_tools.gen.fixed_cut_side_um`).
 #:
 #: The sky130 ordinary licon1 and mcon clamps match the deck's 0.17 um
 #: width bounds (licon.1 and ct.1_a/b). The generator handles precision-poly
@@ -1392,7 +1392,7 @@ def _deck_min_width_um(family: str, layer: tuple[int, int]) -> tuple[str, float]
     return max(mins, key=lambda m: m[1]) if mins else None
 
 
-def _cut_fixed_size_um(family: str, layer: Any) -> float:
+def cut_fixed_size_um(family: str, layer: Any) -> float:
     """The fixed drawn side (um) a cut on ``layer`` must be clamped to on
     ``family`` (issue #2585), or ``0.0`` -- "no upper bound, draw the
     generator's own size unchanged" -- when neither the curated deck
@@ -1454,7 +1454,7 @@ def mfg_grid_um(family: str, layer: Any) -> float:
 #: device-class name that level draws (issue #1731) -- the class-*name*
 #: sibling of :data:`_PDK_METAL_RES_LEVELS` (which resolves the same
 #: ``family``/``level`` pair to *layers*, never a name). Used only by
-#: :func:`_resolve_expected_device_class` below, itself only consumed by
+#: :func:`resolve_expected_device_class` below, itself only consumed by
 #: ``layout_plan_execute.py``'s silent-substitution guard (issue #1731) --
 #: ``gen.py``'s own layout code never needs the class name, only the layers,
 #: to draw geometry, so this table is intentionally *not* threaded through
@@ -1522,7 +1522,7 @@ def resistor_flavor_for_class(family: str, device_class: str) -> str | None:
     return None
 
 
-def _resolve_expected_device_class(
+def resolve_expected_device_class(
     generator: str, family: str, params: dict[str, Any]
 ) -> str | None:
     """The device-class name ``generator`` draws for ``family`` under
@@ -1544,10 +1544,10 @@ def _resolve_expected_device_class(
     return _PDK_RES_FLAVOR_DEVICE_CLASS.get(family, {}).get(flavor)
 
 
-def _pdk_family(variant: str) -> str:
+def pdk_family(variant: str) -> str:
     """Map a resolved PDK ``variant`` (e.g. ``"sky130A"``, ``"gf180mcuC"``,
     ``"ihp-sg13g2"``) to the layer-role family key
-    (``"sky130"``/``"gf180mcu"``/``"sg13g2"``) in :data:`_PDK_ROLE_LAYERS`.
+    (``"sky130"``/``"gf180mcu"``/``"sg13g2"``) in :data:`PDK_ROLE_LAYERS`.
 
     Delegates the variant -> family classification to
     :func:`klayout_tools.pdk_families.pdk_variant_family` -- the package's
@@ -1571,21 +1571,21 @@ def _pdk_family(variant: str) -> str:
     PDK-agnostic and never calls this).
     """
     family = pdk_variant_family(variant)
-    if family in _PDK_ROLE_LAYERS:
+    if family in PDK_ROLE_LAYERS:
         return family
     raise GenError(
         f"PDK variant '{variant}' is not supported by this generator -- "
-        f"supported families: {', '.join(sorted(_PDK_ROLE_LAYERS))}"
+        f"supported families: {', '.join(sorted(PDK_ROLE_LAYERS))}"
     )
 
 
 def _role_layer_info(family: str, role: str) -> Any:
     """Return the ``kdb.LayerInfo`` for ``role`` in ``family``, or ``None``
     when that family's curated deck has no layer for the role (see
-    :data:`_PDK_ROLE_LAYERS`)."""
+    :data:`PDK_ROLE_LAYERS`)."""
     import klayout.db as kdb
 
-    pair = _PDK_ROLE_LAYERS[family].get(role)
+    pair = PDK_ROLE_LAYERS[family].get(role)
     return kdb.LayerInfo(*pair) if pair is not None else None
 
 
@@ -1597,7 +1597,7 @@ def _role_layer_info(family: str, role: str) -> Any:
 #: same "verified, not assumed by analogy" bar :data:`_GENERATOR_FAMILY_DEFERRED`
 #: and :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` already hold themselves to.
 #:
-#: ``gf180mcu``'s own :data:`_PDK_ROLE_LAYERS` entry already declares a
+#: ``gf180mcu``'s own :data:`PDK_ROLE_LAYERS` entry already declares a
 #: ``"well_tap_implant"`` role (added by issue #1421 for ``well_island``'s own
 #: use), and that family's curated deck derives an equivalent well tie the
 #: *identical* way sg13cmos5l's does (``tap_nplus`` -- ``Nplus`` 32/0, see
@@ -1618,7 +1618,7 @@ _MOS_ARRAY_WELL_TAP_FAMILIES: frozenset[str] = frozenset({"sg13cmos5l"})
 def _mos_array_well_tap_role_layer(family: str) -> Any:
     """The ``"well_tap_implant"`` role's ``kdb.LayerInfo`` for ``family``,
     scoped to :data:`_MOS_ARRAY_WELL_TAP_FAMILIES` -- ``None`` outside that
-    set, even when :data:`_PDK_ROLE_LAYERS` itself declares the role for a
+    set, even when :data:`PDK_ROLE_LAYERS` itself declares the role for a
     different generator's own use (e.g. ``gf180mcu``, whose entry exists for
     ``well_island``, not (yet) for ``mos_array``). Shared by
     :func:`_device_layer_params` and :func:`_mos_array_describe` so both
@@ -1656,7 +1656,7 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 #: above.
 #:
 #: gf180mcu's single supported flavour, ``"medium_voltage"``, reuses
-#: :data:`_PDK_ROLE_LAYERS`'s existing ``esd_mark`` citation (``Dualgate``,
+#: :data:`PDK_ROLE_LAYERS`'s existing ``esd_mark`` citation (``Dualgate``,
 #: 55/0) -- *the same* verified layer, not a second private one: that role's
 #: own comment already establishes "the two 6V (``Dualgate``-marked,
 #: medium-voltage) flavours are the ones the PDK's own I/O library uses for
@@ -1683,7 +1683,7 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 #: mirroring gf180mcu's/sg13g2's own "reuse the deck's own marker citation"
 #: precedent above rather than inventing a new one. Before #1912, sky130 had no entry
 #: here at all: this deck's own transcription cited no numbered medium/high-voltage
-#: transistor marker layer (the same gap :data:`_PDK_ROLE_LAYERS`'s ``esd_mark`` role
+#: transistor marker layer (the same gap :data:`PDK_ROLE_LAYERS`'s ``esd_mark`` role
 #: still documents -- sky130's ``hvtr``/``hvtp`` *implant* names remain cited only as
 #: unnumbered exclusions in the official ``sky130.lvs``, never with a transcribed
 #: layer/datatype pair this module could cite without guessing; ``hvi`` is a distinct,
@@ -1716,7 +1716,7 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "gf180mcu": {
         "medium_voltage": (55, 0),  # Dualgate -- same citation as
-        # _PDK_ROLE_LAYERS's "esd_mark" entry.
+        # PDK_ROLE_LAYERS's "esd_mark" entry.
     },
     "sky130": {
         "hvi": (75, 20),  # hvi.drawing -- same citation as
@@ -1834,7 +1834,7 @@ def _mos_cap_min_width_um(
     undifferentiated width rule on a family with no oxide split)."""
     from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 
-    active = _PDK_ROLE_LAYERS[family]["active"]
+    active = PDK_ROLE_LAYERS[family]["active"]
     try:
         rules = get_deck(family)
         nominal_dbu_um = get_nominal_dbu(family)
@@ -1887,7 +1887,7 @@ def _device_layer_params(
 
     Also resolves ``dummy_layer``/``dummy_present`` (issue #491, extended to
     gf180mcu by #2599) -- the optional PDK dummy-device marker (see
-    :data:`_PDK_ROLE_LAYERS`'s ``"dummy"`` role and
+    :data:`PDK_ROLE_LAYERS`'s ``"dummy"`` role and
     ``klayout_tools.decks.sky130``/``klayout_tools.decks.gf180mcu``'s
     ``EXTRACTION_DECK.dummy``) that ``mos_array`` draws over its
     ``dummy_cells``' gate footprint so ``klt extract``'s existing
@@ -1943,7 +1943,7 @@ def _device_layer_params(
     ``"nplus"``/``"pplus"`` roles -- see :func:`_sd_implant_margin_um`)."""
     import klayout.db as kdb
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     well = _role_layer_info(family, "well")
     dummy = _role_layer_info(family, "dummy")
     well_tap_implant = _mos_array_well_tap_role_layer(family)
@@ -1980,9 +1980,9 @@ def _device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
-        "contact_fixed_size_um": _cut_fixed_size_um(
-            family, _PDK_ROLE_LAYERS[family].get("contact")
+        "mfg_grid_um": mfg_grid_um(family, PDK_ROLE_LAYERS[family].get("contact")),
+        "contact_fixed_size_um": cut_fixed_size_um(
+            family, PDK_ROLE_LAYERS[family].get("contact")
         ),
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
@@ -2084,7 +2084,7 @@ def _resistor_layer_params(
     geometry"."""
     import klayout.db as kdb
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     dummy = _role_layer_info(family, "dummy")
     dummy_params: dict[str, Any] = {
         "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
@@ -2098,7 +2098,7 @@ def _resistor_layer_params(
             "poly_layer": kdb.LayerInfo(*levels["body"]),
             "contact_layer": kdb.LayerInfo(*levels["via"]),
             "mfg_grid_um": mfg_grid_um(family, levels["via"]),
-            "contact_fixed_size_um": _cut_fixed_size_um(family, levels["via"]),
+            "contact_fixed_size_um": cut_fixed_size_um(family, levels["via"]),
             "metal_layer": kdb.LayerInfo(*levels["landing"]),
             "res_mark_layer": kdb.LayerInfo(*levels["marker"]),
             "res_mark_present": True,
@@ -2131,11 +2131,11 @@ def _resistor_layer_params(
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
+        "mfg_grid_um": mfg_grid_um(family, PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": (
             0.0
             if end_w_um > 0.0
-            else _cut_fixed_size_um(family, _PDK_ROLE_LAYERS[family].get("contact"))
+            else cut_fixed_size_um(family, PDK_ROLE_LAYERS[family].get("contact"))
         ),
         "end_contact_w_um": end_w_um,
         "end_contact_h_um": end_h_um,
@@ -2171,7 +2171,7 @@ def _resistor_layer_params(
 
 def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     """Return the resolved MiM-cap plate/via layer pairs for ``family`` (see
-    :data:`_PDK_ROLE_LAYERS`'s ``"cap_top_plate"``/``"cap_bottom_plate"``/
+    :data:`PDK_ROLE_LAYERS`'s ``"cap_top_plate"``/``"cap_bottom_plate"``/
     ``"cap_top_via"``/``"cap_top_via_metal"`` roles).
 
     Raises :class:`GenError` for a family with no ``cap_top_plate``/
@@ -2181,7 +2181,7 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     and ``gf180mcu`` (issue #1555, the follow-on #1117 deferred) are wired up
     today; a family missing these keys is a documented "not implemented yet"
     state, not a deck-authoring bug the way an unresolvable family name in
-    :func:`_pdk_family` is.
+    :func:`pdk_family` is.
 
     gf180mcu's stack -- alone among the three -- needs the DRM's oversized
     "virtual bottom plate" (see
@@ -2189,13 +2189,13 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     docstring) and two extra top-plate recognition masks; both are per-family
     *data* rather than per-family code, in :data:`_PDK_CAP_GEOMETRY_MIN_UM`
     and :data:`_PDK_CAP_TOP_PLATE_REQUIRES` respectively."""
-    roles = _PDK_ROLE_LAYERS[family]
+    roles = PDK_ROLE_LAYERS[family]
     top = roles.get("cap_top_plate")
     bottom = roles.get("cap_bottom_plate")
     if top is None or bottom is None:
         supported = ", ".join(
             name
-            for name, entry in _PDK_ROLE_LAYERS.items()
+            for name, entry in PDK_ROLE_LAYERS.items()
             if entry.get("cap_top_plate") is not None
             and entry.get("cap_bottom_plate") is not None
         )
@@ -2281,7 +2281,7 @@ def _cap_array_layer_params(
       fewer masks leaving its tail slots absent."""
     import klayout.db as kdb
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     _check_cap_stack_supported(family, params)
     _check_cap_parallel_supported(family, params)
     layers = _cap_family_layers(family)
@@ -2295,7 +2295,7 @@ def _cap_array_layer_params(
             kdb.LayerInfo(*top_via) if top_via is not None else kdb.LayerInfo(0, 0)
         ),
         "cap_top_via_present": top_via is not None,
-        "cap_top_via_fixed_size_um": _cut_fixed_size_um(family, top_via),
+        "cap_top_via_fixed_size_um": cut_fixed_size_um(family, top_via),
         "cap_top_via_metal_layer": (
             kdb.LayerInfo(*top_via_metal)
             if top_via_metal is not None
@@ -2306,7 +2306,7 @@ def _cap_array_layer_params(
     }
     stack_geometry = _PDK_CAP_STACK_GEOMETRY_UM.get(family)
     for name in ("cap2_top_plate", "cap2_top_via", "cap2_top_via_metal"):
-        pair = _PDK_ROLE_LAYERS[family].get(name)
+        pair = PDK_ROLE_LAYERS[family].get(name)
         resolved[f"{name}_layer"] = (
             kdb.LayerInfo(*pair) if pair is not None else kdb.LayerInfo(0, 0)
         )
@@ -2339,13 +2339,13 @@ def _ring_tap_implant_layer(family: str, well_tie: bool) -> Any:
     only family that satisfies both this collision *and* declares an
     implant role (``"well_tap_implant"``/``"pplus"``) to resolve here at all
     -- its curated deck declares no dedicated tap mask
-    (``_PDK_ROLE_LAYERS["gf180mcu"]["tap"] == (22, 0)``, the same pair as
+    (``PDK_ROLE_LAYERS["gf180mcu"]["tap"] == (22, 0)``, the same pair as
     ``"active"``). ``sky130``/``sg13cmos5l`` both declare a distinct
     ``"tap"`` layer, so the collision check alone already returns ``None``
     for them. ``sg13g2`` is the corrected case: its own ``"tap"`` role
     *does* collide with ``"active"`` (both ``(1, 0)``, "no distinct tap mask
     ... derives well ties from the same Activ layer", see this family's own
-    ``_PDK_ROLE_LAYERS`` entry) -- #1580's curation asserted otherwise,
+    ``PDK_ROLE_LAYERS`` entry) -- #1580's curation asserted otherwise,
     which does not hold against this tree. It still resolves ``None`` here,
     for an independent reason: this family declares neither a
     ``"well_tap_implant"`` nor a ``"pplus"`` role at all (no known
@@ -2367,7 +2367,7 @@ def _ring_tap_implant_layer(family: str, well_tie: bool) -> Any:
       ``guard_ring``'s own ``add_well``-gated well, or ``mos_array``'s/
       ``diff_pair``'s ``flavor='pfet'`` well): reuses the *same*
       ``"well_tap_implant"`` role ``well_island`` already reuses for its own
-      ring (Nplus on gf180mcu, ``_PDK_ROLE_LAYERS``'s own
+      ring (Nplus on gf180mcu, ``PDK_ROLE_LAYERS``'s own
       ``"well_tap_implant"`` entry) -- an n+ tie recognised as biasing the
       Nwell it sits inside, the identical precedent issue #1421 established
       and this issue's curation names as the template to follow.
@@ -2382,7 +2382,7 @@ def _ring_tap_implant_layer(family: str, well_tie: bool) -> Any:
     Neither choice is independently verified against a real gf180mcu
     signoff deck -- the same not-independently-verified caveat #1575/#1577/
     #1580 all carry (this sandbox has no such deck to check against)."""
-    roles = _PDK_ROLE_LAYERS[family]
+    roles = PDK_ROLE_LAYERS[family]
     tap_pair = roles.get("tap")
     active_pair = roles.get("active")
     if family in _DISTINCT_TAP_IMPLANT_FAMILIES:
@@ -2416,7 +2416,7 @@ def _ring_layer_params(
     decide whether their ring gets a well tie at all."""
     import klayout.db as kdb
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     _reject_deferred_family(generator_name, family)
     well = _role_layer_info(family, "well")
     if generator_name == "guard_ring":
@@ -2435,9 +2435,9 @@ def _ring_layer_params(
         **flavor_params,
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
-        "contact_fixed_size_um": _cut_fixed_size_um(
-            family, _PDK_ROLE_LAYERS[family].get("contact")
+        "mfg_grid_um": mfg_grid_um(family, PDK_ROLE_LAYERS[family].get("contact")),
+        "contact_fixed_size_um": cut_fixed_size_um(
+            family, PDK_ROLE_LAYERS[family].get("contact")
         ),
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
@@ -2482,7 +2482,7 @@ def _mos_array_layer_params(
     layer_params = _device_layer_params(pdk_info, params)
     # Issue #3648: a family with a tap-distance rule gets tap pads even
     # without a ring, which need the ring role's tap/implant layers.
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     if params.get("add_guard_ring") or _tap_pads_wanted(family):
         layer_params.update(
             _ring_layer_params(pdk_info, params, generator_name="mos_array")
@@ -2512,7 +2512,7 @@ def _bjt_layer_params(
     every PDK family whose *extraction* deck declares a bipolar marker --
     gf180mcu's ``DRC_BJT`` (also DRC-checked, via its ``bjt.separation.comp.1``
     rule) and sky130's ``pnp.drawing`` (extraction-only, issue #432; see
-    :data:`_PDK_ROLE_LAYERS`). ``*_present`` flags follow ``guard_ring``'s
+    :data:`PDK_ROLE_LAYERS`). ``*_present`` flags follow ``guard_ring``'s
     ``well_present`` precedent so the generator omits a role no currently
     supported family resolves to ``None`` for.
 
@@ -2542,7 +2542,7 @@ def _bjt_layer_params(
     """
     import klayout.db as kdb
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     _reject_deferred_family("bjt_array", family)
     well = _role_layer_info(family, "well")
     mark = _role_layer_info(family, "bjt_mark")
@@ -2554,9 +2554,9 @@ def _bjt_layer_params(
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
-        "contact_fixed_size_um": _cut_fixed_size_um(
-            family, _PDK_ROLE_LAYERS[family].get("contact")
+        "mfg_grid_um": mfg_grid_um(family, PDK_ROLE_LAYERS[family].get("contact")),
+        "contact_fixed_size_um": cut_fixed_size_um(
+            family, PDK_ROLE_LAYERS[family].get("contact")
         ),
         "metal_layer": _role_layer_info(family, "metal"),
         "tap_layer": _role_layer_info(family, "tap"),
@@ -2607,7 +2607,7 @@ def _bond_pad_layer_params(
     :func:`_cap_family_layers`'s own explicit missing-role check rather than
     passing ``None`` through to a PCell layer param that requires a real
     ``kdb.LayerInfo``."""
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     pad = _role_layer_info(family, "pad")
     top_metal = _role_layer_info(family, "top_metal")
     if pad is None or top_metal is None:
@@ -2630,7 +2630,7 @@ def _esd_device_layer_params(
     ``poly``/``contact``/``metal``) and ``guard_ring``'s ring ``tap`` role,
     plus two new roles this generator introduces: ``esd_mark`` (a
     device-class marker, only resolved for gf180mcu -- see
-    :data:`_PDK_ROLE_LAYERS`'s own comment for the citation and the sky130
+    :data:`PDK_ROLE_LAYERS`'s own comment for the citation and the sky130
     gap) and ``salicide_block`` (only resolved for gf180mcu, reusing the same
     SAB layer :data:`_PDK_RES_FLAVOR_LAYERS` already cites). Both follow the
     established ``*_present``-gated precedent (``bjt_mark_present``,
@@ -2672,7 +2672,7 @@ def _esd_device_layer_params(
     """
     import klayout.db as kdb
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     _reject_deferred_family("esd_device", family)
     esd_mark = _role_layer_info(family, "esd_mark")
     salicide_block = _role_layer_info(family, "salicide_block")
@@ -2688,9 +2688,9 @@ def _esd_device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
-        "contact_fixed_size_um": _cut_fixed_size_um(
-            family, _PDK_ROLE_LAYERS[family].get("contact")
+        "mfg_grid_um": mfg_grid_um(family, PDK_ROLE_LAYERS[family].get("contact")),
+        "contact_fixed_size_um": cut_fixed_size_um(
+            family, PDK_ROLE_LAYERS[family].get("contact")
         ),
         "metal_layer": _role_layer_info(family, "metal"),
         "tap_layer": _role_layer_info(family, "tap"),
@@ -2735,7 +2735,7 @@ def _diode_layer_params(
     from .gen_diode import DIODE_FAMILY_VOLTAGE_CLASSES
     from .gen_pcells.diode import DIODE_LAYER_ROLES
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     if family not in DIODE_FAMILY_VOLTAGE_CLASSES:
         raise GenError(
             f"generator 'diode': PDK family '{family}' is not yet supported "

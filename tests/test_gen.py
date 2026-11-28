@@ -64,7 +64,7 @@ def pdk_root(tmp_path):
 @pytest.fixture()
 def both_pdk_root(tmp_path):
     """Both PDK families the phase-2 generators support (see
-    `klayout_tools.gen._PDK_ROLE_LAYERS`), under one install root -- used by
+    `klayout_tools.gen.PDK_ROLE_LAYERS`), under one install root -- used by
     the DRC-clean-on-both-decks tests below."""
     root = tmp_path / "pdk_install"
     _make_install(root, "sky130A")
@@ -668,7 +668,7 @@ def test_generate_uses_shared_pdk_resolver(tmp_path, pdk_root, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 #: Every phase-2 generator, and the deck name (== PDK family, see
-#: `klayout_tools.gen._PDK_ROLE_LAYERS`) it must pass `klt drc --deck` on.
+#: `klayout_tools.gen.PDK_ROLE_LAYERS`) it must pass `klt drc --deck` on.
 _PHASE2_GENERATORS = ("mos_array", "res_array", "guard_ring", "diff_pair")
 _PHASE2_DECKS = ("sky130", "gf180mcu")
 _PHASE2_GENERATOR_X_DECK = [
@@ -677,19 +677,19 @@ _PHASE2_GENERATOR_X_DECK = [
 
 #: sky130's curated dummy-device marker layer (issue #491) -- matches
 #: `klayout_tools.decks.sky130.EXTRACTION_DECK.dummy` and
-#: `klayout_tools.gen._PDK_ROLE_LAYERS["sky130"]["dummy"]`.
+#: `klayout_tools.gen.PDK_ROLE_LAYERS["sky130"]["dummy"]`.
 _SKY130_DUMMY_LAYER = (83, 20)
 
 #: gf180mcu's curated dummy-device marker layer (issue #2599, the gf180mcu
 #: counterpart of sky130's own #491) -- matches
 #: `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.dummy` and
-#: `klayout_tools.gen._PDK_ROLE_LAYERS["gf180mcu"]["dummy"]`. See that deck's
+#: `klayout_tools.gen.PDK_ROLE_LAYERS["gf180mcu"]["dummy"]`. See that deck's
 #: own comment for the `LVS_*`-family provenance of (100, 50).
 _GF180_DUMMY_LAYER = (100, 50)
 
 #: sg13g2's curated dummy-device marker layer (issue #2590) -- matches
 #: `klayout_tools.decks.sg13g2.EXTRACTION_DECK.dummy` and
-#: `klayout_tools.gen_layer_params._PDK_ROLE_LAYERS["sg13g2"]["dummy"]`. See
+#: `klayout_tools.gen_layer_params.PDK_ROLE_LAYERS["sg13g2"]["dummy"]`. See
 #: that deck's own comment for the `Recog.*`-family provenance of (99, 50).
 _SG13G2_DUMMY_LAYER = (99, 50)
 
@@ -1222,7 +1222,7 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     # sky130 declares no S/D implant role (issue #2580), so its row now
     # carries the reporting-only absence note; gf180mcu (issue #1577) keeps
     # an empty list -- the note is the only difference.
-    family = gen._pdk_family(variant)
+    family = gen.pdk_family(variant)
     expected_notes = (
         []
         if family in ("gf180mcu", "sky130")
@@ -2087,7 +2087,7 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     dbu = layout.dbu
     licon = layout.layer(66, 44)
     li1 = layout.layer(67, 20)
-    half = gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0
+    half = gen.cut_fixed_size_um("sky130", (66, 44)) / 2.0
     insert_licon_with_li1_landing(
         layout, top, licon, li1, gate["x_um"], gate["y_um"], half, dbu
     )
@@ -2142,7 +2142,7 @@ def test_mos_gate_contact_reports_metal_port_and_is_drc_clean(
     gate port reported on the `metal` role so `klt gen-compose`'s router
     reaches it exactly like S/D. The drawn result must stay DRC-clean on both
     curated decks, and the gate metal must *not* merge with the S/D metal."""
-    from klayout_tools.gen import _PDK_ROLE_LAYERS
+    from klayout_tools.gen import PDK_ROLE_LAYERS
 
     variant = "sky130A" if deck == "sky130" else "gf180mcuD"
     output = tmp_path / f"{generator}_{deck}_gate_contact.gds"
@@ -2155,8 +2155,8 @@ def test_mos_gate_contact_reports_metal_port_and_is_drc_clean(
         }
     )
 
-    metal = _PDK_ROLE_LAYERS[deck]["metal"]
-    contact = _PDK_ROLE_LAYERS[deck]["contact"]
+    metal = PDK_ROLE_LAYERS[deck]["metal"]
+    contact = PDK_ROLE_LAYERS[deck]["contact"]
     ports = {p["name"]: p for p in report["ports"]}
     gate = ports[gate_name]
     source = ports[gate_name.replace("_G", "_S")]
@@ -2442,7 +2442,7 @@ def test_mos_array_series_fingers_gate_contacts_are_drc_clean(tmp_path, pdk_root
     dbu = layout.dbu
     licon = layout.layer(66, 44)
     li1 = layout.layer(67, 20)
-    half = gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0
+    half = gen.cut_fixed_size_um("sky130", (66, 44)) / 2.0
     for port in report["ports"]:
         if port["name"].startswith("U0_G"):
             insert_licon_with_li1_landing(
@@ -3415,7 +3415,7 @@ def test_gf180mcu_res_array_metal_level_default_zero_is_poly_body_unchanged(
     assert report_default["ports"] == report_explicit["ports"]
 
     extract_report = run_extract(str(output_default), "gf180mcu")
-    # `>= 3` (not `== 3`): gf180mcu's `_PDK_ROLE_LAYERS` entry declares no
+    # `>= 3` (not `== 3`): gf180mcu's `PDK_ROLE_LAYERS` entry declares no
     # `"dummy"` role layer at all -- the last family with that gap, now that
     # sky130 (#491) and sg13g2 (#2590) both declare one; wiring gf180mcu up is
     # tracked separately in #2599. So this family's dummy units are not
@@ -3713,8 +3713,8 @@ def test_res_array_half_dbu_tie_length_draws_full_contact_and_is_drc_clean(
             "options": {"cell_name": "r1", "output": str(output)},
         }
     )
-    expected_um = gen._fixed_cut_side_um(
-        gen.CONTACT_SIZE_UM, gen._cut_fixed_size_um(deck, (layer, datatype))
+    expected_um = gen.fixed_cut_side_um(
+        gen.CONTACT_SIZE_UM, gen.cut_fixed_size_um(deck, (layer, datatype))
     )
     expected_dbu = int(round(expected_um / gen._GRID_DBU_UM))
     boxes = _res_contact_boxes_dbu(output, layer, datatype)
@@ -4313,7 +4313,7 @@ def test_res_array_sky130_min_width_marker_meets_pdk_minimum(
 
 def test_res_array_invalid_flavor_rejected(tmp_path, pdk_root):
     """An unrecognised flavour name raises a clear `GenError` listing the
-    valid flavours (mirroring `_pdk_family`'s unsupported-family error)."""
+    valid flavours (mirroring `pdk_family`'s unsupported-family error)."""
     with pytest.raises(GenError, match="flavor 'bogus' is not a recognised"):
         generate(
             {
@@ -5410,7 +5410,7 @@ def test_guard_ring_add_well_false_on_gf180mcu_draws_no_well_note(
 def test_guard_ring_add_well_true_on_sky130_draws_well(tmp_path, pdk_root):
     """sky130's curated *DRC* deck has no well-layer rule, but the layer
     itself is real (`klayout_tools.decks.sky130.EXTRACTION_DECK.nwell` =
-    `(64, 20)`, see `klayout_tools.gen._PDK_ROLE_LAYERS`) -- `add_well=True`
+    `(64, 20)`, see `klayout_tools.gen.PDK_ROLE_LAYERS`) -- `add_well=True`
     (the default) now draws it there too, silently (no advisory note),
     mirroring gf180mcu's behaviour (issue #208's root-cause correction)."""
     import klayout.db as kdb
@@ -5979,11 +5979,11 @@ def test_well_island_on_a_family_with_no_well_layer_warns(
     """Edge case (c): a family whose layer table has no well role gets the
     same "no well shape was drawn" treatment `guard_ring`'s `add_well` already
     gives -- a note plus a top-level warning, not a hard failure."""
-    from klayout_tools.gen import _PDK_ROLE_LAYERS
+    from klayout_tools.gen import PDK_ROLE_LAYERS
 
-    roles = dict(_PDK_ROLE_LAYERS["sky130"])
+    roles = dict(PDK_ROLE_LAYERS["sky130"])
     roles["well"] = None
-    monkeypatch.setitem(_PDK_ROLE_LAYERS, "sky130", roles)
+    monkeypatch.setitem(PDK_ROLE_LAYERS, "sky130", roles)
 
     output, report = _well_island(tmp_path, pdk_root, "sky130A", "no_well", net="VB")
     assert (64, 20) not in _drawn_layers(output)
@@ -6443,7 +6443,7 @@ def test_diff_pair_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):
 def test_diff_pair_flavor_nfet_without_guard_ring_draws_no_well(tmp_path, pdk_root):
     """With no automatic guard ring (so the *ring's own* well-tie logic --
     unrelated to `flavor`, and now also active on sky130 by default after
-    this issue's `_PDK_ROLE_LAYERS` fix -- never runs), `flavor='nfet'`
+    this issue's `PDK_ROLE_LAYERS` fix -- never runs), `flavor='nfet'`
     (the default) must draw no well shape at all. Isolates this issue's new
     device-level well-drawing gate from that pre-existing ring behaviour."""
     import klayout.db as kdb
@@ -6797,7 +6797,7 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
 
 # --------------------------------------------------------------------------- #
 # sg13g2 (IHP-Open-PDK) support (issue #1448) -- the third family
-# `klayout_tools.gen._PDK_ROLE_LAYERS` supports, following #1266's own
+# `klayout_tools.gen.PDK_ROLE_LAYERS` supports, following #1266's own
 # "Adding a third PDK family" contribution guide. `res_array`/`guard_ring`
 # (#1448), `mos_array`/`diff_pair` (#1450, via the family-resolved
 # gate-pad clearance `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` supplies), and
@@ -6846,11 +6846,11 @@ def sg13g2_pdk_root(tmp_path):
 
 
 def test_pdk_family_resolves_ihp_sg13g2_variant_alias():
-    """`_pdk_family` must resolve the real-world `"ihp-sg13g2"` variant
+    """`pdk_family` must resolve the real-world `"ihp-sg13g2"` variant
     string to the `"sg13g2"` family key -- a plain prefix scan alone (this
     module's pre-#1448 mechanism) would never match it, since `"ihp-sg13g2"`
     does not start with `"sg13g2"`."""
-    assert gen._pdk_family(_SG13G2_VARIANT) == "sg13g2"
+    assert gen.pdk_family(_SG13G2_VARIANT) == "sg13g2"
 
 
 @pytest.mark.parametrize("generator_name", _SG13G2_GENERATORS)
@@ -7250,20 +7250,20 @@ def test_cut_fixed_size_table_agrees_with_every_curated_deck():
 def test_cut_fixed_size_um_resolves_deck_and_table(family, layer, expected_um):
     import klayout.db as kdb
 
-    assert gen._cut_fixed_size_um(family, layer) == expected_um
-    assert gen._cut_fixed_size_um(family, kdb.LayerInfo(*layer)) == expected_um
+    assert gen.cut_fixed_size_um(family, layer) == expected_um
+    assert gen.cut_fixed_size_um(family, kdb.LayerInfo(*layer)) == expected_um
 
 
 def test_cut_fixed_size_um_absent_layer_is_zero():
-    assert gen._cut_fixed_size_um("sg13g2", None) == 0.0
+    assert gen.cut_fixed_size_um("sg13g2", None) == 0.0
 
 
 def test_fixed_cut_side_um_only_ever_clamps_down():
-    assert gen._fixed_cut_side_um(0.22, 0.0) == 0.22
-    assert gen._fixed_cut_side_um(0.22, 0.16) == 0.16
+    assert gen.fixed_cut_side_um(0.22, 0.0) == 0.22
+    assert gen.fixed_cut_side_um(0.22, 0.16) == 0.16
     # A fixed size above the generator's own side is a minimum-side concern
     # for the per-family floors -- never grown here.
-    assert gen._fixed_cut_side_um(0.22, 0.42) == 0.22
+    assert gen.fixed_cut_side_um(0.22, 0.42) == 0.22
 
 
 def test_clamp_cut_boxes_shrinks_about_centre_to_exact_size():
@@ -7345,8 +7345,8 @@ def test_sg13g2_generators_draw_cont_at_its_fixed_size(
     assert count > 0
     assert sides == {(0.16, 0.16)}
 
-    monkeypatch.setattr(gen_layer_params, "_cut_fixed_size_um", lambda *a: 0.0)
-    monkeypatch.setattr(gen_describe, "_cut_fixed_size_um", lambda *a: 0.0)
+    monkeypatch.setattr(gen_layer_params, "cut_fixed_size_um", lambda *a: 0.0)
+    monkeypatch.setattr(gen_describe, "cut_fixed_size_um", lambda *a: 0.0)
     generic_output, generic_report = _generate("generic")
     assert _drawn_box_sides_um(generic_output, (6, 0))[0] == {(0.22, 0.22)}
 
@@ -7463,8 +7463,8 @@ def test_sky130_generators_draw_licon1_at_its_fixed_size(
     assert count > 0
     assert sides == {(0.17, 0.17)}
 
-    monkeypatch.setattr(gen_layer_params, "_cut_fixed_size_um", lambda *a: 0.0)
-    monkeypatch.setattr(gen_describe, "_cut_fixed_size_um", lambda *a: 0.0)
+    monkeypatch.setattr(gen_layer_params, "cut_fixed_size_um", lambda *a: 0.0)
+    monkeypatch.setattr(gen_describe, "cut_fixed_size_um", lambda *a: 0.0)
     generic_output, generic_report = _generate("generic")
     assert _drawn_box_sides_um(generic_output, (66, 44))[0] == {(0.22, 0.22)}
 
@@ -7532,7 +7532,7 @@ def test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged(
     extract_report = run_extract(str(output_default), "sg13g2")
     # `== 3`, matching sky130's own version of this test above: as of issue
     # #2590 sg13g2's curated extraction deck declares a `dummy` marker layer
-    # and `_PDK_ROLE_LAYERS["sg13g2"]` a matching `"dummy"` role, so
+    # and `PDK_ROLE_LAYERS["sg13g2"]` a matching `"dummy"` role, so
     # `res_array`'s edge-fill units -- two of them, one per end at
     # `dummy: 1` -- are suppressed by `klt extract` and only the `num` real
     # units survive. A loose `>= 3` bound (this test's pre-#2590 shape, from
@@ -7584,7 +7584,7 @@ def test_sg13cmos5l_res_array_metal_level_rejected(tmp_path, sg13cmos5l_pdk_root
 
 def test_sg13g2_guard_ring_extracts_no_recognised_device(tmp_path, sg13g2_pdk_root):
     """`guard_ring`'s tap ring draws on `active` (sg13g2 declares no distinct
-    tap mask, see `_PDK_ROLE_LAYERS`'s own `"tap"` entry) but is not itself a
+    tap mask, see `PDK_ROLE_LAYERS`'s own `"tap"` entry) but is not itself a
     recognised device class on *any* currently supported family --
     `klt extract --deck sg13g2` reports no devices at all."""
     output = tmp_path / "guard_ring_sg13g2.gds"
@@ -7993,7 +7993,7 @@ def test_sg13g2_bond_pad_rejected(tmp_path, sg13g2_pdk_root):
 
 # --------------------------------------------------------------------------- #
 # sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling) support (issue #1462) --
-# the fourth family `klayout_tools.gen._PDK_ROLE_LAYERS` supports. Only
+# the fourth family `klayout_tools.gen.PDK_ROLE_LAYERS` supports. Only
 # `mos_array`/`res_array` are wired up to *run* on this family -- see that
 # table's own "sg13cmos5l" entry, and `docs/cli/gen.md`'s "PDK-family
 # support" section, for why every other generator is explicitly deferred.
@@ -8034,11 +8034,11 @@ def sg13cmos5l_pdk_root(tmp_path):
 
 
 def test_pdk_family_resolves_ihp_sg13cmos5l_variant_alias():
-    """`_pdk_family` must resolve the real-world `"ihp-sg13cmos5l"` variant
+    """`pdk_family` must resolve the real-world `"ihp-sg13cmos5l"` variant
     string to the `"sg13cmos5l"` family key -- the same
     `pdk_families.PDK_VARIANT_FAMILY_ALIASES` mechanism `"ihp-sg13g2"`
     relies on."""
-    assert gen._pdk_family(_SG13CMOS5L_VARIANT) == "sg13cmos5l"
+    assert gen.pdk_family(_SG13CMOS5L_VARIANT) == "sg13cmos5l"
 
 
 @pytest.mark.parametrize("generator_name", _SG13CMOS5L_GENERATORS)
@@ -8221,7 +8221,7 @@ def test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port(
 ):
     """Issue #1473 deliberately scopes its `mos_array` well-tie tap pad to
     `sg13cmos5l` only (see `_MOS_ARRAY_WELL_TAP_FAMILIES`) -- `gf180mcu`'s
-    own `_PDK_ROLE_LAYERS` entry already declares a `"well_tap_implant"` role
+    own `PDK_ROLE_LAYERS` entry already declares a `"well_tap_implant"` role
     (added by issue #1421 for `well_island`'s own use), so a naive
     role-presence-only gate would have silently started drawing a tap pad
     for `gf180mcu` too, changing its drawn geometry/`ports[]` as an
@@ -8546,7 +8546,7 @@ def test_sg13cmos5l_deferred_generators_rejected(
     """`bjt_array` (no bipolar device recognition in this deck's curated
     extraction deck), `esd_device`/`well_island` (not attempted by this
     issue), and `guard_ring`/`diff_pair` (this family declares no distinct
-    `tap` role -- see `_PDK_ROLE_LAYERS`'s own comment) are all explicitly
+    `tap` role -- see `PDK_ROLE_LAYERS`'s own comment) are all explicitly
     deferred rather than silently accepted with untested/uncheckable
     geometry."""
     with pytest.raises(GenError, match="not yet supported by this generator"):
@@ -9580,7 +9580,7 @@ def test_bond_pad_opening_um_boundary_at_enclosure_minimum(tmp_path, pdk_root):
 # --------------------------------------------------------------------------- #
 
 #: gf180mcu's `Dualgate` layer, reused here as `esd_device`'s `esd_mark` role
-#: (see `klayout_tools.gen._PDK_ROLE_LAYERS`'s own citation).
+#: (see `klayout_tools.gen.PDK_ROLE_LAYERS`'s own citation).
 _GF180_ESD_MARK_LAYER = (55, 0)
 
 #: gf180mcu's `SAB` (salicide block) layer, reused here as `esd_device`'s
@@ -9704,7 +9704,7 @@ def test_esd_device_gf180_draws_esd_mark_and_no_fidelity_note(tmp_path, both_pdk
 
 def test_esd_device_sky130_has_no_esd_mark_layer_and_notes_it(tmp_path, both_pdk_root):
     """sky130's curated deck cites no numbered `esd_mark` layer (see the
-    `_PDK_ROLE_LAYERS` role comment) -- nothing is drawn on that role and the
+    `PDK_ROLE_LAYERS` role comment) -- nothing is drawn on that role and the
     absence is reported via `drc_hints.notes`, not silently dropped."""
     import klayout.db as kdb
 
@@ -10244,7 +10244,7 @@ def test_gf180mcu_sd_implant_covers_every_drawn_comp_shape(
     `add_guard_ring=False` on `esd_device` (whose default is `True`) keeps
     this test scoped to the unit device's own body: on gf180mcu the guard
     ring's tap shares the same physical Comp mask as `active`
-    (`_PDK_ROLE_LAYERS["gf180mcu"]["tap"] == (22, 0)`, "no separate tap layer
+    (`PDK_ROLE_LAYERS["gf180mcu"]["tap"] == (22, 0)`, "no separate tap layer
     in the curated deck") and is a pre-existing, separate gap this issue does
     not attempt -- see the follow-up issue filed alongside this PR."""
     import klayout.db as kdb
@@ -10613,7 +10613,7 @@ def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(
 # gf180mcu guard/tap-ring implant coverage (issue #1580, follow-up to #1577's
 # unit-device-only `sd_implant_*` fix): the guard ring's own tap shape shares
 # gf180mcu's `Comp` mask (22/0) with `active` (no distinct tap layer, see
-# `_PDK_ROLE_LAYERS`'s own `"tap"` entry) -- so it needs `DF.12` ("COMP not
+# `PDK_ROLE_LAYERS`'s own `"tap"` entry) -- so it needs `DF.12` ("COMP not
 # covered by Nplus or Pplus is forbidden") implant coverage too.
 #
 # Issue #2369 adds the *extension* half of that story: `DF.12` is a coverage
@@ -11173,7 +11173,7 @@ def test_sg13g2_guard_ring_draws_no_ring_implant_despite_tap_active_collision(
 ):
     """sg13g2's own `"tap"` role *does* collide with `"active"` (both
     `(1, 0)`, "no distinct tap mask ... derives well ties from the same
-    Activ layer", see `_PDK_ROLE_LAYERS`'s own `"tap"` entry for this
+    Activ layer", see `PDK_ROLE_LAYERS`'s own `"tap"` entry for this
     family) -- the same physical-layer-sharing shape gf180mcu's does. Unlike
     gf180mcu, though, this family declares neither a `"well_tap_implant"`
     nor a `"pplus"` role at all (no known `DF.12`-equivalent implant-
@@ -11409,11 +11409,11 @@ def test_no_supported_generator_path_draws_topvia1_and_compose_floor_holds():
     )
     from klayout_tools.gen_layer_params import (
         _PDK_METAL_RES_LEVELS,
-        _PDK_ROLE_LAYERS,
+        PDK_ROLE_LAYERS,
     )
 
     topvia1 = (125, 0)
-    for roles in _PDK_ROLE_LAYERS.values():
+    for roles in PDK_ROLE_LAYERS.values():
         assert topvia1 not in roles.values()
     for levels in _PDK_METAL_RES_LEVELS.values():
         assert all(topvia1 not in level.values() for level in levels.values())
@@ -11421,7 +11421,7 @@ def test_no_supported_generator_path_draws_topvia1_and_compose_floor_holds():
         floor = _min_width_um_for_layer(variant, topvia1)
         assert floor is not None and floor[0] == pytest.approx(0.42)
         fixed = _via_fixed_size_um(variant, topvia1)
-        assert gen._fixed_cut_side_um(
+        assert gen.fixed_cut_side_um(
             max(_VIA_DROP_SIZE_UM, floor[0]), fixed
         ) == pytest.approx(0.42)
 
@@ -11563,7 +11563,7 @@ def test_gf180mcu_off_grid_width_warns(tmp_path, both_pdk_root, generator):
     """gf180mcu's curated deck now declares a 0.005um `ongrid` rule, so an
     off-grid width warns like sky130."""
     assert (
-        gen.mfg_grid_um("gf180mcu", gen._PDK_ROLE_LAYERS["gf180mcu"]["active"]) == 0.005
+        gen.mfg_grid_um("gf180mcu", gen.PDK_ROLE_LAYERS["gf180mcu"]["active"]) == 0.005
     )
     report = _gen_mos(
         tmp_path, both_pdk_root, generator, variant="gf180mcuD", w_um=2.317, l_um=0.3

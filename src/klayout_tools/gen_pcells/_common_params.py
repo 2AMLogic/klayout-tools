@@ -47,7 +47,7 @@ def declare_cut_and_metal_params(pcell: Any, kdb: Any) -> None:
         hidden=True,
     )
     # Fixed drawn side of every cut on contact_layer (issue #2585) --
-    # harness-computed by `_cut_fixed_size_um` from the resolved PDK
+    # harness-computed by `cut_fixed_size_um` from the resolved PDK
     # family and layer. `0.0` (no upper size bound) leaves the cuts
     # exactly as laid out; see `gen._clamp_cut_boxes`.
     pcell.param(

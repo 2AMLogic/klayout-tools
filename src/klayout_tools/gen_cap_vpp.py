@@ -31,9 +31,9 @@ _DRAWING_DATATYPE = 20
 
 
 def _gds_path(pdk_info: dict[str, Any]) -> str:
-    from .gen_layer_params import _pdk_family
+    from .gen_layer_params import pdk_family
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     if family not in _SUPPORTED_FAMILIES:
         raise GenError(
             f"generator 'cap_vpp_array': PDK family '{family}' ships no fixed "

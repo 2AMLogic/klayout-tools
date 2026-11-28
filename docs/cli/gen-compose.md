@@ -1381,7 +1381,7 @@ Metal1→TopMetal1/TopMetal2 stacks) now exposes that
 second level as a second `routing.layer_role` (`"metal2"`) plus the via role
 that connects it back to the base `"metal"` role (`"via1"`) — sourced
 directly from the deck's own `metals`/`vias` tuples in
-`klayout_tools.gen._PDK_ROLE_LAYERS`, never a second, private layer map.
+`klayout_tools.gen.PDK_ROLE_LAYERS`, never a second, private layer map.
 sky130's deck now declares a third level too (met2, issue #508): `"metal3"`
 plus `"via2"` (the met1↔met2 via) work the same way one level up. Before
 issue #1567, a `"metal3"` backbone could only via-drop one level down (to a
@@ -1553,7 +1553,7 @@ rather than drawing something that does not connect:
   on `sg13g2`, Metal4/TopMetal1 on `sg13cmos5l`), remain unexposed as
   `routing.layer_role` roles at all (each curated `EXTRACTION_DECK` declares
   the full metals stack for extraction, but `klayout_tools.gen
-  ._PDK_ROLE_LAYERS` stops at `"metal3"` for every family), so a route can
+  .PDK_ROLE_LAYERS` stops at `"metal3"` for every family), so a route can
   never be asked to reach them via `routing.layer_role`/via-drop in the
   first place.
 - A pin on the deck's bare **`poly`** layer — a `mos_array`/`diff_pair` gate

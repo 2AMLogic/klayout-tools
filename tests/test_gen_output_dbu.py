@@ -260,7 +260,7 @@ _PHASE2_GENERATORS = ("mos_array", "res_array", "guard_ring", "diff_pair")
 @pytest.fixture()
 def both_pdk_root(tmp_path):
     """Both PDK families the phase-2 generators support (see
-    `klayout_tools.gen._PDK_ROLE_LAYERS`), under one install root -- the
+    `klayout_tools.gen.PDK_ROLE_LAYERS`), under one install root -- the
     same shape as `tests/test_gen.py`'s fixture of the same name, kept local
     here for the moved tests."""
     root = tmp_path / "pdk_install"

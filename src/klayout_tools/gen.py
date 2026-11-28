@@ -25,11 +25,11 @@ ring), and ``diff_pair`` (differential pair / current mirror cell, composing
 ``mos_array``'s unit-device drawing and ``guard_ring``'s ring drawing). Unlike
 ``resistor_strip``, these four generators are PDK-*aware*: they draw on each
 resolved PDK family's own curated-DRC-deck layers (see
-:data:`_PDK_ROLE_LAYERS`, sourced from ``klayout_tools.decks.sky130``/
+:data:`PDK_ROLE_LAYERS`, sourced from ``klayout_tools.decks.sky130``/
 ``gf180mcu``, never a private layer map) and are sized to pass ``klt drc
 --deck sky130``/``--deck gf180mcu`` clean on their documented default
 ``params``. Only the ``sky130``/``gf180mcu`` PDK families are supported by
-these four generators (see :func:`_pdk_family`); ``resistor_strip`` remains
+these four generators (see :func:`pdk_family`); ``resistor_strip`` remains
 PDK-agnostic as it always was.
 
 PDK resolution goes through the one resolver every other verb uses
@@ -53,6 +53,8 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Callable
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from ._jsonnum import is_int, is_number
@@ -111,7 +113,7 @@ from .gen_diode import resolve_diode_voltage_class
 # to leave behind because it calls `_well_island_isolation`) into
 # `gen_describe.py` -- the third and last slice of this module's per-family
 # split, after `gen_layer_params.py` (#1875) and the `gen_pcells/` package
-# (#1698/#1713). `_GENERATOR_SPECS` below wires them up from there; nothing in
+# (#1698/#1713). `GENERATOR_SPECS` below wires them up from there; nothing in
 # `gen_describe.py` imports this module at load time, so the direction stays
 # one-way.
 from .gen_hbt import bjt_array_describe, bjt_array_layer_params, produce_hbt_array
@@ -196,9 +198,6 @@ from .gen_layer_params import (
     _PDK_RES_FLAVOR_MIN_W_UM as _PDK_RES_FLAVOR_MIN_W_UM,
 )
 from .gen_layer_params import (
-    _PDK_ROLE_LAYERS as _PDK_ROLE_LAYERS,
-)
-from .gen_layer_params import (
     _PDK_SD_IMPLANT_MARGIN_UM as _PDK_SD_IMPLANT_MARGIN_UM,
 )
 from .gen_layer_params import (
@@ -246,6 +245,9 @@ from .gen_layer_params import (
     PAD_TOP_METAL_ENCLOSURE_MIN_UM as PAD_TOP_METAL_ENCLOSURE_MIN_UM,
 )
 from .gen_layer_params import (
+    PDK_ROLE_LAYERS as PDK_ROLE_LAYERS,
+)
+from .gen_layer_params import (
     TAP_PAD_REACH_UM as TAP_PAD_REACH_UM,
 )
 from .gen_layer_params import (
@@ -265,9 +267,6 @@ from .gen_layer_params import (
 )
 from .gen_layer_params import (
     _contact_gate_extra_offset_um as _contact_gate_extra_offset_um,
-)
-from .gen_layer_params import (
-    _cut_fixed_size_um as _cut_fixed_size_um,
 )
 from .gen_layer_params import (
     _device_layer_params as _device_layer_params,
@@ -291,9 +290,6 @@ from .gen_layer_params import (
     _mos_array_well_tap_role_layer as _mos_array_well_tap_role_layer,
 )
 from .gen_layer_params import (
-    _pdk_family as _pdk_family,
-)
-from .gen_layer_params import (
     _reject_deferred_family as _reject_deferred_family,
 )
 from .gen_layer_params import (
@@ -304,9 +300,6 @@ from .gen_layer_params import (
 )
 from .gen_layer_params import (
     _res_flavor_min_width_um_floor as _res_flavor_min_width_um_floor,
-)
-from .gen_layer_params import (
-    _resolve_expected_device_class as _resolve_expected_device_class,
 )
 from .gen_layer_params import (
     _ring_implant_margin_um as _ring_implant_margin_um,
@@ -333,7 +326,16 @@ from .gen_layer_params import (
     _voltage_flavor_mark_margin_um as _voltage_flavor_mark_margin_um,
 )
 from .gen_layer_params import (
+    cut_fixed_size_um as cut_fixed_size_um,
+)
+from .gen_layer_params import (
     mfg_grid_um as mfg_grid_um,
+)
+from .gen_layer_params import (
+    pdk_family as pdk_family,
+)
+from .gen_layer_params import (
+    resolve_expected_device_class as resolve_expected_device_class,
 )
 from .gen_pcells import (
     _build_asap7_pcells,
@@ -375,7 +377,7 @@ SCHEMA_VERSION = 1
 _PCELL_LIBRARY_NAME = "klt_gen_reference"
 
 #: The coarsest grid (um) any generator's geometry is placed on -- the
-#: ``dbu=0.001`` fallback every ``_GENERATOR_SPECS`` entry below declares.
+#: ``dbu=0.001`` fallback every ``GENERATOR_SPECS`` entry below declares.
 #: Used by :func:`_snap_square_box_um` to pre-round a contact's centre to
 #: the manufacturing grid *before* building its box, so the later,
 #: independent per-edge ``int(round(x / dbu))`` conversion in
@@ -1209,7 +1211,7 @@ def _mos_array_well_tap_layout(
     """Well-tie tap pad for ``mos_array``'s ``flavor='pfet'`` well, on a PDK
     family whose curated deck derives a well tie from an implant-covered
     ``"active"`` shape inside the well rather than a distinct tap mask (issue
-    #1473 -- see the ``"well_tap_implant"`` role in :data:`_PDK_ROLE_LAYERS`,
+    #1473 -- see the ``"well_tap_implant"`` role in :data:`PDK_ROLE_LAYERS`,
     e.g. ``sg13cmos5l``'s ``nSD``/``EXTRACTION_DECK.tap_nplus``).
 
     One pad ties the *entire* shared well: :func:`_mos_array_layout`'s own
@@ -2843,10 +2845,10 @@ def _optional_tap_pads(
     )
 
 
-def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:
+def fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:
     """The cut side (um) actually drawn for a generator-sized ``side_um`` cut
     on a layer whose fixed size is ``fixed_size_um`` (issue #2585, see
-    :func:`_cut_fixed_size_um`): ``min(side_um, fixed_size_um)`` when a fixed
+    :func:`cut_fixed_size_um`): ``min(side_um, fixed_size_um)`` when a fixed
     size is declared, else ``side_um`` unchanged.
 
     Clamp *down* only. A fixed size above what the generator already draws is
@@ -3198,13 +3200,13 @@ def list_generators() -> dict[str, Any]:
     pcell_classes = _build_pcell_classes()
 
     generators: list[dict[str, Any]] = []
-    for name in sorted(_GENERATOR_SPECS):
-        spec = _GENERATOR_SPECS[name]
+    for name in sorted(GENERATOR_SPECS):
+        spec = GENERATOR_SPECS[name]
         decl = pcell_classes[name]()
         params = [
             {
                 "name": p.name,
-                "type": _PARAM_TYPE_NAMES.get(p.type, "unknown"),
+                "type": PARAM_TYPE_NAMES.get(p.type, "unknown"),
                 "default": p.default,
                 "description": p.description,
             }
@@ -3332,11 +3334,11 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(generator_name, str) or not generator_name:
         raise GenError("request.generator is required")
 
-    spec = _GENERATOR_SPECS.get(generator_name)
+    spec = GENERATOR_SPECS.get(generator_name)
     if spec is None:
         raise GenError(
             f"unknown generator '{generator_name}' -- available: "
-            f"{', '.join(sorted(_GENERATOR_SPECS))} (see `klt gen --list`)"
+            f"{', '.join(sorted(GENERATOR_SPECS))} (see `klt gen --list`)"
         )
 
     pdk_request = request.get("pdk") or {}
@@ -3443,9 +3445,7 @@ def _resolve_params(
     resolved: dict[str, Any] = {}
     for name, pdecl in declared.items():
         if name in raw_params:
-            resolved[name] = _coerce_param(
-                spec.name, name, raw_params[name], pdecl.type
-            )
+            resolved[name] = coerce_param(spec.name, name, raw_params[name], pdecl.type)
         else:
             resolved[name] = pdecl.default
     if spec.name == "esd_device":
@@ -3461,27 +3461,18 @@ def _resolve_params(
     return resolved
 
 
-def _coerce_param(generator: str, name: str, value: Any, ptype: int) -> Any:
+@cache
+def _param_coercions() -> dict[
+    int, tuple[str, Callable[[Any], bool], Callable[[Any], Any]]
+]:
     import klayout.db as kdb
 
     Decl = kdb.PCellParameterDeclaration
-    if ptype == Decl.TypeDouble:
-        if not is_number(value):
-            raise GenError(f"generator '{generator}': params.{name} must be a number")
-        return float(value)
-    if ptype == Decl.TypeInt:
-        if not is_int(value):
-            raise GenError(f"generator '{generator}': params.{name} must be an integer")
-        return int(value)
-    if ptype == Decl.TypeString:
-        if not isinstance(value, str):
-            raise GenError(f"generator '{generator}': params.{name} must be a string")
-        return value
-    if ptype == Decl.TypeBoolean:
-        if not isinstance(value, bool):
-            raise GenError(f"generator '{generator}': params.{name} must be a boolean")
-        return value
-    if ptype == Decl.TypeList:
+    return {
+        Decl.TypeDouble: ("a number", is_number, float),
+        Decl.TypeInt: ("an integer", is_int, int),
+        Decl.TypeString: ("a string", lambda v: isinstance(v, str), lambda v: v),
+        Decl.TypeBoolean: ("a boolean", lambda v: isinstance(v, bool), lambda v: v),
         # A JSON array passes through as a plain Python list -- KLayout's
         # PCell variant machinery round-trips nested lists unchanged (see
         # `_WellIslandPCell.isolate_from`). Element *shape* is the individual
@@ -3489,13 +3480,22 @@ def _coerce_param(generator: str, name: str, value: Any, ptype: int) -> Any:
         # :func:`_parse_well_regions`), the same division of labour every
         # other param type here follows: this function only enforces the
         # declared JSON type.
-        if not isinstance(value, list):
-            raise GenError(f"generator '{generator}': params.{name} must be an array")
-        return list(value)
-    raise GenError(
-        f"generator '{generator}': params.{name} has an unsupported PCell "
-        "parameter type"
-    )
+        Decl.TypeList: ("an array", lambda v: isinstance(v, list), list),
+    }
+
+
+def coerce_param(generator: str, name: str, value: Any, ptype: int) -> Any:
+    """Coerce request ``value`` to PCell parameter type ``ptype`` or raise GenError."""
+    rule = _param_coercions().get(ptype)
+    if rule is None:
+        raise GenError(
+            f"generator '{generator}': params.{name} has an unsupported PCell "
+            "parameter type"
+        )
+    kind, accept, convert = rule
+    if not accept(value):
+        raise GenError(f"generator '{generator}': params.{name} must be {kind}")
+    return convert(value)
 
 
 def _produce(
@@ -3529,7 +3529,7 @@ def _produce(
 
     from .pdk_output_dbu import resolve_output_dbu
 
-    if spec.name == "bjt_array" and _pdk_family(pdk_info["variant"]) == "sg13g2":
+    if spec.name == "bjt_array" and pdk_family(pdk_info["variant"]) == "sg13g2":
         dbu = resolve_output_dbu(pdk_info) or spec.dbu  # #4850: PDK-authored HBT
         layout, top = produce_hbt_array(cell_name, resolved_params, pdk_info, dbu)
         return layout, top, "pdk-cell-v1"
@@ -3621,7 +3621,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
 #: Maps ``PCellParameterDeclaration`` type constants to the JSON type names
 #: reported by ``klt gen --list``.
-_PARAM_TYPE_NAMES = {
+PARAM_TYPE_NAMES = {
     0: "int",
     1: "double",
     2: "string",
@@ -3629,7 +3629,7 @@ _PARAM_TYPE_NAMES = {
     6: "list",  # PCellParameterDeclaration.TypeList -- a JSON array
 }
 
-_GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
+GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
     "resistor_strip": _GeneratorSpec(
         name="resistor_strip",
         summary=(

@@ -39,7 +39,7 @@ def _isolate(monkeypatch, tmp_path):
 @pytest.fixture()
 def both_pdk_root(tmp_path):
     """Both PDK families the phase-2 generators support (see
-    `klayout_tools.gen._PDK_ROLE_LAYERS`), under one install root -- used by
+    `klayout_tools.gen.PDK_ROLE_LAYERS`), under one install root -- used by
     the DRC-clean-on-both-decks tests below."""
     root = tmp_path / "pdk_install"
     _make_install(root, "sky130A")

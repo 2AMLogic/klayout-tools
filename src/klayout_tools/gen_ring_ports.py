@@ -19,7 +19,7 @@ from typing import Any
 
 from .decks.plain_rules import largest_plain_rule_um
 from .gen_base import RING_SIDE_DIRECTIONS, GenError
-from .gen_layer_params import _pdk_family
+from .gen_layer_params import pdk_family
 
 
 def _min_rule_um_for_layer(
@@ -29,7 +29,7 @@ def _min_rule_um_for_layer(
     if layer is None:
         return None
     try:
-        family = _pdk_family(variant)
+        family = pdk_family(variant)
     except GenError:
         return None
     return largest_plain_rule_um(family, layer, check)
