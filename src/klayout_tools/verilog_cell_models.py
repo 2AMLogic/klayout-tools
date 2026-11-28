@@ -1,10 +1,34 @@
-"""Read gate-level cell models for reset coverage, power intent and initial state."""
+"""Shared gate-level Verilog cell-model loader, sequential-element classifier,
+and flat-netlist helpers (issue #8046).
+
+Used by ``klt reset-coverage``, ``klt power-intent``, and
+``klt functional-verification`` (``options.initial_state``). Each consumer
+supplies its own ``error_cls`` exception class or factory so request-level
+errors preserve each verb's exception type and diagnostic wording without
+cross-verb catch-and-rewrap glue.
+"""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from typing import Any
 
-_POWER_PINS = {"VPWR", "VGND", "VPB", "VNB", "VDD", "VSS", "VCC", "VPP"}
+from .verilog_netlist import VerilogNetlistError, parse_gate_level_verilog
+
+ErrorFactory = Callable[[str], Exception]
+
+POWER_PINS = {"VPWR", "VGND", "VPB", "VNB", "VDD", "VSS", "VCC", "VPP"}
+CONST_NETS = {"__CONST0__": 0, "__CONST1__": 1}
+
+#: Clock/enable pins of a sequential cell.
+CAPTURE_PINS = ("CLK", "GATE", "CLK_N", "GATE_N")
+
+#: Scan pin pairs: a scan cell's D is only captured while its scan enable
+#: is off, which the force-D drive cannot guarantee. sky130 spells the
+#: data/enable pair ``SCD``/``SCE``, ASAP7 ``SI``/``SE``; both pins of a
+#: pair must be present -- a clock gate's lone ``SE`` is not a scan pin.
+SCAN_PIN_PAIRS = (("SCD", "SCE"), ("SI", "SE"))
 
 #: Recognised asynchronous control pins -> (kind, active level).
 _ASYNC_PINS = {
@@ -44,7 +68,7 @@ _KEYWORDS = {
 #: Verilog keywords that can precede a ``(`` without being an
 #: instantiation. Only gates and UDPs may be instantiated without an
 #: instance name (``altos_dff (q, v, clk, d)``); every other ``keyword (``
-#: shape -- ``if (…)`` in an ``always`` block, ``ifnone (…)`` in a ``specify``
+#: shape -- ``if (...)`` in an ``always`` block, ``ifnone (...)`` in a ``specify``
 #: block -- is a statement, not an instance.
 _NON_INSTANCE_TYPES = _KEYWORDS | {
     "always",
@@ -88,7 +112,6 @@ _NON_INSTANCE_TYPES = _KEYWORDS | {
     "while",
 }
 
-
 # Match the whole instance prefix once, including an optional gate/UDP delay
 # and instance name. The name may start on another line. Skip reserved words
 # before matching so a keyword cannot consume an instance on the next line.
@@ -100,16 +123,15 @@ _INSTANCE_RE = re.compile(
     re.M,
 )
 
-
-class ResetCoverageError(Exception):
-    """A request-level problem: unreadable/unparsable inputs or a bad waiver
-    file. Maps to exit code 1; never a coverage finding."""
+#: A net-type keyword in a port declaration (``input wire CLK``), which the
+#: real sky130 cell models carry on every port.
+_NET_TYPE_RE = re.compile(r"^(?:wire|reg|logic|tri)\s+")
 
 
 # --------------------------------------------------------------------- models
 
 
-class _CellModel:
+class CellModel:
     def __init__(self, name: str, inputs: list[str], outputs: list[str]) -> None:
         self.name = name
         self.inputs = inputs
@@ -123,19 +145,12 @@ class _CellModel:
         self.primitives: list[str] = []
 
 
-def _read(path: str, what: str) -> str:
+def read_text(path: str, what: str, *, error_cls: ErrorFactory) -> str:
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
             return handle.read()
     except OSError as exc:
-        raise ResetCoverageError(
-            f"cannot read {what} {path!r}: {exc.strerror or exc}"
-        ) from exc
-
-
-#: A net-type keyword in a port declaration (``input wire CLK``), which the
-#: real sky130 cell models carry on every port.
-_NET_TYPE_RE = re.compile(r"^(?:wire|reg|logic|tri)\s+")
+        raise error_cls(f"cannot read {what} {path!r}: {exc.strerror or exc}") from exc
 
 
 def _names(decl: str) -> list[str]:
@@ -155,21 +170,21 @@ def _is_state_udp(udps: dict[str, bool], primitive: str) -> bool:
     return _SEQ_UDP_RE.search(primitive) is not None
 
 
-def _build_model(name: str, body: str, udps: dict[str, bool]) -> _CellModel:
+def _build_model(name: str, body: str, udps: dict[str, bool]) -> CellModel:
     inputs: list[str] = []
     outputs: list[str] = []
     for direction, decl in _DIR_RE.findall(body):
         (inputs if direction == "input" else outputs).extend(_names(decl))
-    model = _CellModel(name, inputs, outputs)
+    model = CellModel(name, inputs, outputs)
     instances = _INSTANCE_RE.findall(body)
-    model.primitives = [name.lstrip("\\") for name in instances]
+    model.primitives = [inst.lstrip("\\") for inst in instances]
     model.sequential = any(_is_state_udp(udps, t) for t in model.primitives)
     if model.sequential:
         for pin in inputs:
             if pin in _ASYNC_PINS:
                 model.async_pins[pin] = _ASYNC_PINS[pin]
         return model
-    signal_inputs = [p for p in inputs if p not in _POWER_PINS]
+    signal_inputs = [p for p in inputs if p not in POWER_PINS]
     only_wires = instances and all(
         t in _GATE_PRIMS or t.split("$")[0].rsplit("__", 1)[-1] == "udp_pwrgood_pp"
         for t in instances
@@ -216,7 +231,9 @@ def _udp_declarations(texts: list[str]) -> dict[str, bool]:
     return udps
 
 
-def load_cell_models(paths: list[str]) -> dict[str, _CellModel]:
+def load_cell_models(
+    paths: list[str], *, error_cls: ErrorFactory
+) -> dict[str, CellModel]:
     """Scan Verilog cell-model files; the first definition of a cell wins
     (sky130 ships each module several times under ``ifdef`` branches).
 
@@ -232,9 +249,12 @@ def load_cell_models(paths: list[str]) -> dict[str, _CellModel]:
     primitives are indexed across every file before any module is
     classified, so a UDP declared in a different file is recognised
     regardless of source order."""
-    texts = [_COMMENT_RE.sub("", _read(path, "cell-model file")) for path in paths]
+    texts = [
+        _COMMENT_RE.sub("", read_text(path, "cell-model file", error_cls=error_cls))
+        for path in paths
+    ]
     udps = _udp_declarations(texts)
-    models: dict[str, _CellModel] = {}
+    models: dict[str, CellModel] = {}
     for text in texts:
         for match in _MODULE_RE.finditer(text):
             name = match.group(1).lstrip("\\")
@@ -255,5 +275,107 @@ def load_cell_models(paths: list[str]) -> dict[str, _CellModel]:
                 model.inputs = header_ports
             models[name] = model
     if not models:
-        raise ResetCoverageError("no module found in the cell-model file(s)")
+        raise error_cls("no module found in the cell-model file(s)")
     return models
+
+
+# --------------------------------------------------------------- flat netlists
+
+
+def load_flat_modules(
+    netlist_path: str, *, error_cls: ErrorFactory
+) -> list[dict[str, Any]]:
+    text = read_text(netlist_path, "netlist", error_cls=error_cls)
+    try:
+        return parse_gate_level_verilog(text)
+    except VerilogNetlistError as exc:
+        raise error_cls(f"cannot parse netlist {netlist_path!r}: {exc}") from exc
+
+
+def select_top_module(
+    modules: list[dict[str, Any]],
+    top: str | None,
+    *,
+    error_cls: ErrorFactory,
+) -> tuple[dict[str, Any], set[str]]:
+    by_name = {str(m["name"]): m for m in modules}
+    if top is None:
+        if len(modules) != 1:
+            raise error_cls(
+                f"netlist has {len(modules)} modules; name the top with --top "
+                f"(one of {sorted(by_name)})"
+            )
+        return modules[0], set(by_name)
+    if top in by_name:
+        return by_name[top], set(by_name)
+    raise error_cls(f"top module {top!r} not in netlist (have {sorted(by_name)})")
+
+
+def reject_hierarchical_instances(
+    module: dict[str, Any],
+    netlist_modules: set[str],
+    models: dict[str, CellModel],
+    *,
+    error_cls: ErrorFactory,
+) -> None:
+    for inst in module["instances"]:
+        if inst["cell"] not in models and inst["cell"] in netlist_modules:
+            raise error_cls(
+                f"instance {inst['name']!r} is of module {inst['cell']!r} "
+                "defined in the netlist; hierarchical netlists are not "
+                "supported -- flatten first"
+            )
+
+
+def sequential_elements(
+    netlist_path: str,
+    cell_model_paths: list[str],
+    top: str,
+    *,
+    error_cls: ErrorFactory,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Every sequential instance of module ``top`` in the gate-level netlist,
+    with the pins a testbench-independent initial-state drive needs (issue
+    #2998, ``options.initial_state`` of ``klt functional-verification``).
+
+    Returns ``(drivable, unsupported)``. A ``drivable`` entry is
+    ``{"instance", "cell", "d_pin", "d_net", "capture_pin", "capture_net"}``:
+    force ``d_pin`` and let the clock/enable at ``capture_net`` capture it.
+    ``unsupported`` entries (``{"instance", "cell", "reason"}``) are state the
+    force-D drive cannot reach: a hard macro, a sequential cell whose model
+    has no ``D`` pin or no recognised clock/enable pin, or a scan cell.
+    """
+    models = load_cell_models(cell_model_paths, error_cls=error_cls)
+    modules = load_flat_modules(netlist_path, error_cls=error_cls)
+    module, netlist_modules = select_top_module(modules, top, error_cls=error_cls)
+    reject_hierarchical_instances(module, netlist_modules, models, error_cls=error_cls)
+    drivable: list[dict[str, Any]] = []
+    unsupported: list[dict[str, str]] = []
+    for inst in module["instances"]:
+        model = models.get(inst["cell"])
+        if model is None:
+            reason = "hard_macro"
+        elif not model.sequential:
+            continue
+        else:
+            capture = [p for p in model.inputs if p in CAPTURE_PINS]
+            if any(all(p in model.inputs for p in pair) for pair in SCAN_PIN_PAIRS):
+                reason = "scan_cell"
+            elif "D" not in model.inputs or len(capture) != 1:
+                reason = "no_d_or_clock_pin"
+            else:
+                drivable.append(
+                    {
+                        "instance": inst["name"],
+                        "cell": inst["cell"],
+                        "d_pin": "D",
+                        "d_net": inst["connections"].get("D"),
+                        "capture_pin": capture[0],
+                        "capture_net": inst["connections"].get(capture[0]),
+                    }
+                )
+                continue
+        unsupported.append(
+            {"instance": inst["name"], "cell": inst["cell"], "reason": reason}
+        )
+    return drivable, unsupported
