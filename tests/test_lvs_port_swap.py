@@ -43,10 +43,7 @@ def _known_limitation_entries(report: dict) -> list[dict]:
 
 
 def test_port_swap_disclosure_names_the_swap_and_stays_gated_on_mismatch():
-    """Issue #8084: the same mismatch gate as the other kinds -- an unanchored
-    standalone compare of a port-swap master *matches*, so nothing is
-    disclosed -- and a description that says why a cell the corpus calls
-    ``match`` is mismatching here."""
+    """Disclose the port-swap limitation on any mismatching FinFET compare."""
     cell = "AO21x1_ASAP7_75t_R"
     (entry,) = _disclose(True, "mismatch", cell)
     assert entry["category"] == "topology.known_limitation"
@@ -58,6 +55,8 @@ def test_port_swap_disclosure_names_the_swap_and_stays_gated_on_mismatch():
         "series-stack order matches the library CDL only under a commutative "
         "swap of symmetric input ports"
     ) in entry["description"]
+    assert "can contribute to a mismatch when" in entry["description"]
+    assert "expected for the cell" not in entry["description"]
     assert _disclose(True, "match", cell) == []
     assert _disclose(False, "mismatch", cell) == []
 
@@ -97,6 +96,8 @@ def test_port_swap_block_warning_states_the_port_swap_with_per_side_counts():
         "matches the library CDL only under a commutative swap of symmetric "
         "input ports"
     ) in out[0]["description"]
+    assert "can contribute to a mismatch when" in out[0]["description"]
+    assert "expected to mismatch" not in out[0]["description"]
 
 
 # --------------------------------------------------------------------------- #
@@ -484,10 +485,7 @@ def test_port_swap_block_that_still_matches_stays_silent(
 
 
 def test_hierarchical_block_still_swaps_interchangeable_instance_inputs(tmp_path):
-    """The block-level twin of the unanchored standalone match: kept
-    hierarchical, an instance wired to two interchangeable nets is compared
-    with its inputs crossed, which is why only an asymmetric or flattened
-    block exposes a port-swap master."""
+    """The hierarchical compare pairs interchangeable instance inputs crosswise."""
     report = _port_swap_block_lvs(tmp_path, tie_inputs=False, load=False)
     assert report["status"] == "match"
     assert {

@@ -3759,7 +3759,7 @@ DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
   `NAND2xp5`, `AND2x2`, `DFFHQNx2` and `ICGx2`, plus the LVT library's
   model classes.
 - **Corpus survey** (one-off, 2026-10-07): **191 of the 208** RVT cells
-  with a CDL entry match their CDL at net level. That run joined the well
+  that draw devices match their CDL at net level. That run joined the well
   net to `VDD` and `vsubs` to `VSS` by name, which is a comparison-side
   assumption. 11 cells draw parallel series stacks the CDL folds into one
   wider stack. 6 differ from their CDL only in series order. Both groups are

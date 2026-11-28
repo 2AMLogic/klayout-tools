@@ -33,9 +33,9 @@ from test_asap7_finfet import (
 
 #: Layout and CDL differ only in series order across two *commutative* inputs
 #: (issue #8084). Unanchored and standalone the comparer absorbs the
-#: difference by swapping the two ports, so these report `status: "match"` --
-#: but only there: anchor the pins, flatten the cell into a block, or wire the
-#: ports to asymmetric nets and they mismatch like the `_SERIES_ORDER_CELLS`.
+#: difference by swapping the ports. A block can also match, even after
+#: flattening, if the inputs can still exchange. Pin anchors or asymmetric
+#: connections can prevent that swap.
 #: Pinned in `KNOWN_UNSUPPORTED_ASAP7_CELLS` as `"series-order-port-swap"`.
 _PORT_SWAP_SERIES_ORDER_CELLS = frozenset(
     f"{name}_ASAP7_75t_R"
@@ -134,6 +134,29 @@ def test_corpus_port_swap_series_order_cells_match_only_when_unanchored(tmp_path
         m for m in restored["mismatches"] if m["severity"] == "error"
     ][:5]
     assert restored["error_count"] == 0
+
+
+@_needs_corpus
+def test_unanchored_port_swap_with_an_independent_fin_count_error(tmp_path):
+    cell = "AO21x1_ASAP7_75t_R"
+    cdl = _cdl_block(cell)
+    (device,) = [line for line in cdl.splitlines() if line.startswith("MM7 ")]
+    assert "nfin=3" in device
+    reference = tmp_path / "wrong-fin-count.cdl"
+    reference.write_text(cdl.replace(device, device.replace("nfin=3", "nfin=4")))
+
+    report = _corpus_lvs(cell, reference)
+    assert report["status"] == "mismatch"
+    assert _swapped_pins(report, {"A1", "A2"}) == {"A1": "A2", "A2": "A1"}
+    assert "device.unmatched" not in report["category_counts"]
+    (error,) = [m for m in _errors(report) if m["category"] == "device.property"]
+    assert error["property"] == {"name": "nfin", "layout": 3, "reference": 4}
+    (warning,) = [
+        m for m in report["mismatches"] if m["category"] == "topology.known_limitation"
+    ]
+    assert warning["severity"] == "warning"
+    assert warning["details"] == {"cell": cell, "limitation": "series-order-port-swap"}
+    assert "can contribute to a mismatch when" in warning["description"]
 
 
 _ANCHORED_SWEEP_SCRIPT = """

@@ -97,18 +97,25 @@ def count_unsupported_asap7_instances(netlist: Any, top: str | None) -> dict[str
     return dict(unsupported)
 
 
-def _cause(kind: str) -> str:
-    """The mechanism behind ``kind``, for the ``description`` text."""
+def _limitation_description(kind: str, *, block: bool) -> str:
+    """Describe the library difference in a single-cell or block report."""
     if kind == "series-order-port-swap":
         return (
             "its drawn series-stack order matches the library CDL only under a "
-            "commutative swap of symmetric input ports, which an unanchored "
-            "standalone compare absorbs but anchored pins or asymmetric block "
-            "nets do not"
+            "commutative swap of symmetric input ports. This difference can "
+            "contribute to a mismatch when pin anchors or block wiring prevent the swap"
         )
-    return (
+    cause = (
         f"its drawn {kind} transistor topology differs from the library CDL and "
         "klt lvs performs no stack normalisation"
+    )
+    if block:
+        return (
+            f"{cause}, so those instances are expected to mismatch -- a possible "
+            "contributor to this block-level mismatch, not an extraction defect"
+        )
+    return (
+        f"{cause}, so this mismatch is expected for the cell, not an extraction defect"
     )
 
 
@@ -139,8 +146,7 @@ def note_known_limit(
                     CATEGORY_TOPOLOGY_KNOWN_LIMITATION,
                     "warning",
                     f"cell '{cell}' is a known ASAP7 RVT library limitation: "
-                    f"{_cause(kind)}, so this mismatch is expected for the cell, "
-                    "not an extraction defect "
+                    f"{_limitation_description(kind, block=False)} "
                     "(docs/cli/lvs.md, 'Pinned ASAP7 RVT corpus')",
                     "layout",
                     details={"cell": cell, "limitation": kind},
@@ -162,9 +168,7 @@ def note_known_limit(
                 "warning",
                 f"block instantiates {layout_n} layout and {reference_n} "
                 f"reference instance(s) of cell '{cell}', a known ASAP7 RVT "
-                f"library limitation: {_cause(kind)}, so those instances are "
-                "expected to mismatch -- a possible contributor to this "
-                "block-level mismatch, not an extraction defect "
+                f"library limitation: {_limitation_description(kind, block=True)} "
                 "(docs/cli/lvs.md, 'Pinned ASAP7 RVT corpus')",
                 "both",
                 details={

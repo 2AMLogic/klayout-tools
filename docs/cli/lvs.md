@@ -909,24 +909,28 @@ included):
   trade places:
   - With `options.anchor_top_level_pins: true` (or `hints.same_nets` pinning
     each port to itself) exactly these 11 flip to `status: "mismatch"` on
-    their stack devices (2, 4 or 8 `device.unmatched`, plus a
-    `hints.rejected` entry per anchored port), while the other 180
-    device-drawing cells and `TAPCELL` keep matching under identity port
-    correspondence.
-  - A block cannot make the swap either. Once the pins are anchored (a
-    `gate-level-verilog` reference does so by default) or an instance's two
-    inputs are wired to nets the rest of the block already tells apart, those
-    inputs are identified with distinct reference nets and the instance fails
-    on exactly its two stack devices. Issue #8084 found this on a routed block
-    instantiating none of the 17 cells above.
+    their stack devices (2, 4 or 8 `device.unmatched` entries).
+    `hints.rejected` identifies the asserted pairings the comparer could
+    not confirm. For example, `AND4x1` has six anchored pins and two rejected
+    pairings, `A` and `D`. The other 180 device-drawing cells retain their
+    identity port pairings.
+  - A block can preserve the swap even after flattening. A one-instance
+    wrapper that exposes the pins of `AO21x1` matches with both sides
+    flattened and pins unanchored, as does the same wrapper around `FAx1`.
+    Anchoring the wrapper pins gives two `device.unmatched` entries for
+    `AO21x1` and eight for `FAx1`. A `gate-level-verilog` reference enables
+    top-level pin anchoring by default. Asymmetric wiring can also
+    distinguish the inputs and prevent the swap.
+    Issue #8084 reported this on a routed block that used none of the 17
+    folded-stack or series-order masters.
   - Permuting each cell's swapped ports in its CDL body, and nothing else,
     restores `match` with the pins anchored: the difference is series order,
     not an extraction defect. No normalisation is applied. A block that keeps
     the compare matching -- both gates on one net, or a hierarchical instance
     on interchangeable nets -- reports nothing.
-- **`TAPCELL`** has no devices: inline extraction yields no circuit and
-  `klt lvs` exits 1 ("not found in layout netlist"). `FILLER*` and
-  `TAPCELL_WITH_FILLER` have no CDL entry.
+- **`TAPCELL`** has no devices and matches its CDL with anchoring off or on
+  (exit 0). Including it, 192 of the 209 cells match unanchored and 181
+  match anchored. `FILLER*` and `TAPCELL_WITH_FILLER` have no CDL entry.
 
 For these 28 cells (and only when the compare mismatches), `klt lvs` adds one
 `severity: "warning"` `topology.known_limitation` entry to `mismatches[]`
@@ -964,14 +968,10 @@ order:
   contributes no instances and emits nothing.
 - Circuit names are matched case-insensitively (the SPICE reader upper-cases
   every `.subckt`/`X` name) and reported in the canonical library spelling.
-- The warning discloses a **possible contributor** to the block mismatch,
-  nothing more: it does not change `status`, does not suppress or explain away
-  any `device.unmatched`/`net.unmatched` error, and says nothing about *why
-  the rest of the block* mismatches. A matching compare, a non-FinFET compare,
-  or a block containing only supported masters emits none. What the warning
-  establishes is attribution, not a verdict: residual mismatches beyond the
-  named cells are still the reader's to bisect (the cell-level bisect recipe
-  above remains the path).
+- The warning identifies a **possible contributor** to the block mismatch.
+  Use the device and net errors to diagnose the failure, including errors
+  within the named master. A matching compare, a non-FinFET compare, or
+  a block containing only supported masters emits no warning.
 
 Corpus tests live in `tests/test_asap7_finfet.py` and, for the port-swap cells, `tests/test_asap7_port_swap.py` (unit and synthetic report-path tests in `tests/test_lvs_known_limits.py` and `tests/test_lvs_port_swap.py`); they skip with an
 explicit reason when the pinned PDK is not fetched and write only to temp
@@ -4745,13 +4745,11 @@ planar deck):
 - **Single cell (issue #4819):** the compared top itself is one of the 28
   pinned cells. `side` is `"layout"`; `details` is `{"cell", "limitation"}`
   with no count keys. See "Pinned ASAP7 RVT corpus" above for the limitation
-  kinds and why the verdict stays `mismatch`. For the 11
-  `"series-order-port-swap"` cells (issue #8084) the mismatch gate is the
-  whole story: their unanchored standalone compare is a `"match"` and emits
-  nothing, and the entry appears only once anchored pins or a block's wiring
-  takes the commutative swap away. Its `description` then says that the cell's
-  drawn series-stack order matches the CDL only under a commutative swap of
-  symmetric input ports.
+  kinds. The 11 `"series-order-port-swap"` cells (issue #8084) emit the
+  warning on any mismatching FinFET compare involving them, even if the
+  comparer successfully swaps the ports. For example, an unanchored `AO21x1`
+  with an incorrect reference fin count still pairs `A1↔A2` and reports
+  both the `device.property` error and the library warning.
 - **Block level (issue #6931):** one entry per pinned master *instantiated*
   beneath either selected top, in canonical master-name order. `side` is
   `"both"`; `details` adds `layout_count`/`reference_count` — the per-side
@@ -4760,10 +4758,9 @@ planar deck):
   through wrapper placements. A master only declared (never called or placed)
   emits nothing.
 
-The block-level entry attributes a **possible contributor** to the mismatch;
-it never changes `status`, never suppresses an underlying error, and never
-asserts the named cells are the *whole* story — residual mismatches still
-need the cell-level bisect. `category_counts["topology.known_limitation"]`
+The block-level entry identifies a **possible contributor**. The report
+retains its original `status` and errors. Use the cell-level bisect to
+locate the source of a block mismatch. `category_counts["topology.known_limitation"]`
 equals the number of emitted entries of either shape.
 
 #### `topology.hierarchy_mismatch`: the two sides sit at different hierarchy levels (issues #4548, #5756)
