@@ -110,4 +110,4 @@ def test_environment_entry_only_when_adapt(tmp_path):
 
 
 def test_offhost_backends_mirror_sim():
-    assert sim_adapt.OFFHOST_BACKENDS == sim._OFFHOST_BACKENDS
+    assert sim_adapt.OFFHOST_BACKENDS == sim.OFFHOST_BACKENDS

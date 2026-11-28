@@ -80,7 +80,7 @@ def warn_pdk_ambiguity(
     everything but ``"batch"`` gets the default text unchanged. Pass the
     **resolved** backend -- the value the report records as
     ``environment.backend.resolved``, read after the last
-    ``sim._yield_host_default_backend`` call, not the host default a
+    ``sim.yield_host_default_backend`` call, not the host default a
     single-unit run under ``$KLT_SIM_BACKEND=batch`` steps back from. A
     pre-yield value advises ``$PDK_ROOT`` on a run that executes locally,
     where it is neither the only pin nor the one that silences the warning,

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 #: :class:`CornerPoint`-keyed dispatch loop here to gate on a checkpoint, a
 #: deadline, or a calibration probe of *this* host's hardware. Both
 #: ``options.resume`` and the fail-fast probe are refused/skipped for these.
-_OFFHOST_BACKENDS = ("remote", "batch")
+OFFHOST_BACKENDS = ("remote", "batch")
 
 
 def _first_corner_echo_mismatch(
@@ -77,7 +77,7 @@ def _require_dict_axis_echo(
             )
         return None
 
-    if backend not in _OFFHOST_BACKENDS or not any(getattr(p, attr) for p in points):
+    if backend not in OFFHOST_BACKENDS or not any(getattr(p, attr) for p in points):
         return
     problem = _first_corner_echo_mismatch(points, corners, mismatch)
     if problem is not None:
@@ -166,7 +166,7 @@ def _require_supply_echo(
     image and an updated one spell identical IDs, and a gate would refuse
     every older worker for no observable difference.
     """
-    if backend not in _OFFHOST_BACKENDS or not any(
+    if backend not in OFFHOST_BACKENDS or not any(
         _supply_value_needs_full_precision(value)
         for point in points
         for value in point.supply_v.values()
@@ -210,7 +210,7 @@ def _require_nodeset_echo(
     dispatched. Independent of any version check, so it also catches a
     same-release runner image built before the feature landed.
     """
-    if backend not in _OFFHOST_BACKENDS or not any(getattr(p, attr) for p in points):
+    if backend not in OFFHOST_BACKENDS or not any(getattr(p, attr) for p in points):
         return
 
     def mismatch(point: CornerPoint, corner: dict[str, Any]) -> str | None:

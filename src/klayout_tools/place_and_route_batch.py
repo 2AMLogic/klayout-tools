@@ -96,7 +96,7 @@ def resolve_backend(flag: str | None, request: dict[str, Any], *, units: int) ->
             f"unsupported {source} '{backend}' for place-and-route "
             f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
         )
-    backend = sim._yield_host_default_backend(
+    backend = sim.yield_host_default_backend(
         backend, from_host_default, reason_ok=units > 1
     )
     return backend
