@@ -49,7 +49,7 @@ from typing import Any
 
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_finite_number, is_int, is_number
-from ._native import _load_native_extension, native_provenance
+from ._native import load_native_extension, native_provenance
 from .yield_csv_reader import draw_csv_rows
 from .yield_provenance import (
     _attach_spec_rows,
@@ -94,7 +94,7 @@ class YieldError(Exception):
 
 
 def _load_native() -> Any:
-    return _load_native_extension(
+    return load_native_extension(
         "klt_yield_native",
         YieldError,
         "native/yield/",
