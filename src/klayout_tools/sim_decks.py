@@ -90,12 +90,17 @@ from . import (
     sim_batch_plan,
     sim_deck_expand,
     sim_decks_staging,
-    sim_remote,
     sim_staging,
 )
 from ._jsonnum import is_int, is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
 from .sim_errors import SimError, request_options
+from .sim_remote_common import (
+    build_remote_environment,
+    build_remote_launcher,
+    require_remote_config,
+    wait_for_remote_ssh,
+)
 
 #: Top-level request field that marks a deck-list request.
 DECKS_FIELD = "decks"
@@ -1353,29 +1358,6 @@ def _run_decks_local(
 # --------------------------------------------------------------------------- #
 
 
-def _require_remote_config(request: dict[str, Any]) -> tuple[Any, str]:
-    """The two ``remote``-backend requirements the corner path enforces
-    (``models.pdk`` selects the baked AMI; ``remote.ssh_key_path`` pairs
-    with ``remote.key_name``) -- same messages, so a deck request missing
-    them fails exactly like a corner request would."""
-    remote_spec = request.get("remote") or {}
-    pdk = (request.get("models") or {}).get("pdk")
-    if not pdk:
-        raise SimError(
-            "backend 'remote' requires request.models.pdk (selects which "
-            "baked-AMI PDK to provision -- see "
-            "remote_launcher.SUPPORTED_PDKS and docs/cli/sim.md)"
-        )
-    ssh_key_path = remote_spec.get("ssh_key_path")
-    if not ssh_key_path:
-        raise SimError(
-            "backend 'remote' requires request.remote.ssh_key_path (local "
-            "private key matching request.remote.key_name, used to SSH/SCP "
-            "into the provisioned instance)"
-        )
-    return pdk, ssh_key_path
-
-
 def _install_unit_trees(
     units: list[dict[str, Any]], *, outdir: str, source_root: str | None
 ) -> None:
@@ -1434,25 +1416,16 @@ def _run_decks_remote(
     """
     from .remote_launcher import RemoteLaunchError
 
-    remote_spec = request.get("remote") or {}
-    pdk, ssh_key_path = _require_remote_config(request)
-    ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
+    remote_spec, pdk, ssh_key_path, ssh_user = require_remote_config(request)
     units = worker_request[DECKS_FIELD]
 
     job_id = f"klt-sim-decks-{uuid.uuid4().hex[:12]}"
-    launcher = RemoteLauncher(
-        region=remote_spec.get("region"),
+    launcher = build_remote_launcher(
+        RemoteLauncher,
         pdk=pdk,
-        corner_count=len(units),
+        unit_count=len(units),
         job_id=job_id,
-        spot=remote_spec.get("spot", True),
-        max_hourly_cost_usd=remote_spec.get("max_hourly_cost_usd"),
-        launcher_cidr=remote_spec.get("launcher_cidr"),
-        launcher_cidrs=remote_spec.get("launcher_cidrs"),
-        security_group_id=remote_spec.get("security_group_id"),
-        key_name=remote_spec.get("key_name"),
-        subnet_id=remote_spec.get("subnet_id"),
-        manifest_path=remote_spec.get("ami_manifest"),
+        remote_spec=remote_spec,
     )
     job = remote_transport.JobDescription(
         label="klt sim decks",
@@ -1491,15 +1464,11 @@ def _run_decks_remote(
         with launcher:
             info = launcher.provision()
             public_ip = launcher.get_public_ip()
-            remote_transport.wait_for_ssh(
+            wait_for_remote_ssh(
                 public_ip,
-                user=ssh_user,
-                identity_file=ssh_key_path,
-                timeout_s=remote_spec.get(
-                    "ssh_ready_timeout_s",
-                    sim_remote._REMOTE_SSH_READY_TIMEOUT_S,
-                ),
-                poll_interval_s=sim_remote._REMOTE_SSH_POLL_INTERVAL_S,
+                ssh_user=ssh_user,
+                ssh_key_path=ssh_key_path,
+                remote_spec=remote_spec,
             )
             spin_up_s = round(time.monotonic() - started, 3)
             remote_job_dir = remote_transport.job_dir(ssh_user, launcher.job_id)
@@ -1541,17 +1510,7 @@ def _run_decks_remote(
 
     report["outdir"] = os.path.abspath(outdir)
     report["backend"] = "remote"
-    remote_environment = {
-        "provider": info["provider"],
-        "region": info["region"],
-        "instance_type": info["instance_type"],
-        "instance_id": info["instance_id"],
-        "spot": info["spot"],
-        "estimated_hourly_cost_usd": info["estimated_hourly_cost_usd"],
-        "ami_id": info["ami_id"],
-        "pdk_snapshot": info["pdk_snapshot"],
-        "spin_up_s": spin_up_s,
-    }
+    remote_environment = build_remote_environment(info, spin_up_s=spin_up_s)
     report.setdefault("environment", {})["remote"] = remote_environment
     return report
 

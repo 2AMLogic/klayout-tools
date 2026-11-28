@@ -1182,6 +1182,7 @@
         "klayout_tools.sim_regrade",
         "klayout_tools.sim_regrade_run",
         "klayout_tools.sim_remote",
+        "klayout_tools.sim_remote_common",
         "klayout_tools.sim_request_overrides",
         "klayout_tools.sim_save_diagnostic",
         "klayout_tools.sim_search",
