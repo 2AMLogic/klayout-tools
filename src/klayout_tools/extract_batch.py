@@ -27,7 +27,7 @@ extract-specific:
    the caller's root and ``environment.remote`` added.
 4. **The ceiling is honest.** ``timeout_seconds`` is the extract timeout plus
    the batch overhead, never capped client-side; one above the fleet's
-   ``max_job_seconds`` goes through ``sim_batch._assess_job_ceiling`` and is
+   ``max_job_seconds`` goes through ``sim_batch.assess_job_ceiling`` and is
    refused (or warned about) before any S3 write, naming the setting to raise.
 5. **No fallback, ever.** Every batch failure is an :class:`ExtractError`
    (exit 1) naming the job id; nothing here runs the extraction on this host.
@@ -288,7 +288,7 @@ def _check_ceiling(config: sim_batch.BatchConfig, timeout_s: float) -> dict[str,
     unit), acted on before any S3 write: refused under
     ``job_ceiling_check: enforce``, else a stderr warning, as for ``klt sim``.
     The message names what to raise, not ``klt sim``'s ``remote.hosts``."""
-    assessment = sim_batch._assess_job_ceiling(
+    assessment = sim_batch.assess_job_ceiling(
         unit_count=1, per_unit_timeout_s=timeout_s, config=config
     )
     if not assessment["exceeds_ceiling"]:
@@ -455,8 +455,8 @@ def run_extract_batch(
         report = _batch_common.rewrite_runner_paths(report, runner_roots, tree.root)
         report["netlist_path"] = None if no_netlist else output
         remote = {
-            **sim_batch._batch_environment(config, job_id, status),
-            **sim_batch._read_runner_identity(collected),
+            **sim_batch.batch_environment(config, job_id, status),
+            **sim_batch.read_runner_identity(collected),
             "batch_root": tree.root,
             "input_files": len(tree.files),
             "input_bytes": tree.total_bytes,

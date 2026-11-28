@@ -151,7 +151,7 @@ class TestNgspiceInit:
         request = deck_request(tmp_path)
         request["options"]["ngspice_init"] = ["set ngbehavior=hsa"]
         _, worker_request = sd.stage_deck_job(request, request_dir=str(tmp_path))
-        fields = sb._read_runner_identity(str(tmp_path), worker_request)
+        fields = sb.read_runner_identity(str(tmp_path), worker_request)
         features = fields["runner_request_features"]
         assert "options.ngspice_init" in features["required"]
         assert "options.ngspice_init" in features["missing"]
@@ -167,6 +167,6 @@ class TestNgspiceInit:
         request = deck_request(tmp_path)
         request["options"]["ngspice_init"] = ["set ngbehavior=hsa"]
         _, worker_request = sd.stage_deck_job(request, request_dir=str(tmp_path))
-        fields = sb._read_runner_identity(str(tmp_path), worker_request)
+        fields = sb.read_runner_identity(str(tmp_path), worker_request)
         assert "options.ngspice_init" in fields["runner_request_features"]["required"]
         assert fields["runner_request_features"]["missing"] == []

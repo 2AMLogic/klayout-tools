@@ -1626,7 +1626,7 @@ def _deck_batch_command(
     see ``sim_batch._build_batch_job_spec``). Includes the #5328 capture."""
     return (
         sim_batch._job_stderr_capture_prefix()
-        + sim_batch._runner_preflight_script(
+        + sim_batch.runner_preflight_script(
             _provenance._klt_version(),
             enforce=version_check == "enforce",
             capture=sim_batch._worker_capture_command(worker_request, model_names),
@@ -1748,7 +1748,7 @@ def _recover_failed_deck_job(
     runner_error: dict[str, Any] | None = None
     note: str | None = None
     environment: dict[str, Any] = {
-        **sim_batch._batch_environment(config, job_id, status),
+        **sim_batch.batch_environment(config, job_id, status),
         **sim_batch._read_job_identity(None),
     }
     try:
@@ -1762,7 +1762,7 @@ def _recover_failed_deck_job(
                 # its klt error envelope to report.json, so classify that
                 # before falling back to the stderr tee.
                 try:
-                    kind, runner_error = sim_batch._classify_collected_report(
+                    kind, runner_error = sim_batch.classify_collected_report(
                         sim_batch.read_collected_report(collected)
                     )
                 except sim_batch.BatchError:
@@ -1780,7 +1780,7 @@ def _recover_failed_deck_job(
                 report.setdefault("environment", {})["remote"] = environment
                 return report
             if runner_error is None:
-                runner_error, note = sim_batch._read_stderr_envelope(collected)
+                runner_error, note = sim_batch.read_stderr_envelope(collected)
     except (sim_batch.BatchError, OSError) as exc:
         note = str(exc)
     _install_unit_trees(units, outdir=outdir, source_root=None)
@@ -1815,7 +1815,7 @@ def _prepare_decks_batch(
     before any S3 write. The timeout allows for every unit to run in series,
     plus startup slack."""
     serial_worst_s = sim_batch_plan.deck_serial_worst_s(worker_request[DECKS_FIELD])
-    config = sim_batch._resolve_batch_config(
+    config = sim_batch.resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s
     )
     sim_batch._assess_deck_support(request, config)
@@ -1887,7 +1887,7 @@ def _collect_decks_batch(
             },
         )
     if status.get("state") != "done" and (
-        sim_batch._status_exit_code(status)
+        sim_batch.status_exit_code(status)
         not in sim_batch._BATCH_SIM_SUCCESS_EXIT_CODES
     ):
         recovered = _recover_failed_deck_job(
@@ -1899,7 +1899,7 @@ def _collect_decks_batch(
         sim_batch.collect_outputs(config, job_id, collected)
         report = _read_deck_report(collected)
         environment = {
-            **sim_batch._batch_environment(config, job_id, status),
+            **sim_batch.batch_environment(config, job_id, status),
             **sim_batch._read_job_identity(collected, worker_request),
         }
         _install_unit_trees(

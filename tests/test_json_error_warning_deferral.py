@@ -77,7 +77,7 @@ def _fire_sim_unverified_features(tmp_path, monkeypatch) -> None:
 def _fire_extract_ceiling(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         sim_batch,
-        "_assess_job_ceiling",
+        "assess_job_ceiling",
         lambda **kw: {
             "exceeds_ceiling": True,
             "max_job_seconds": 60.0,

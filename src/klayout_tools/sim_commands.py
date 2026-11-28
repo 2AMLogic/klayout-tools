@@ -730,7 +730,7 @@ def _run_batch(
     failure becomes failed units -- never a local run."""
     os.makedirs(outdir, exist_ok=True)
     serial_worst_s = sum(u["timeout_s"] * len(u["steps"]) for u in units)
-    config = sim_batch._resolve_batch_config(
+    config = sim_batch.resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s
     )
     job_id = _batch_common.make_job_id("commands")
@@ -764,7 +764,7 @@ def _run_batch(
                 message=f"batch backend failed: {exc}",
                 environment=environment,
             )
-        environment = sim_batch._batch_environment(config, job_id, status)
+        environment = sim_batch.batch_environment(config, job_id, status)
         collected = os.path.join(scratch, "outputs")
         try:
             sim_batch.collect_outputs(config, job_id, collected)
@@ -776,13 +776,13 @@ def _run_batch(
                 message=f"collecting outputs failed: {exc}",
                 environment=environment,
             )
-        environment.update(sim_batch._read_runner_identity(collected))
+        environment.update(sim_batch.read_runner_identity(collected))
         state = status.get("state")
-        exit_code = sim_batch._status_exit_code(status)
+        exit_code = sim_batch.status_exit_code(status)
         if state != "done" or exit_code not in (0, None):
             message = f"batch job {job_id} finished {state!r} (exit {exit_code})"
             try:
-                kind, error = sim_batch._classify_collected_report(
+                kind, error = sim_batch.classify_collected_report(
                     sim_batch.read_collected_report(collected)
                 )
                 if (

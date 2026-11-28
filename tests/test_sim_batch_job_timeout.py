@@ -112,7 +112,7 @@ def _run_stated(
 
 
 def test_job_ceiling_fields_when_the_bound_fits():
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=UNITS, per_unit_timeout_s=PER_UNIT_TIMEOUT_S, config=_caller_config()
     )
     assert assessment == {
@@ -131,7 +131,7 @@ def test_job_ceiling_fields_when_the_bound_fits():
 
 
 def test_job_ceiling_fields_when_the_bound_exceeds():
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=UNITS,
         per_unit_timeout_s=PER_UNIT_TIMEOUT_S,
         config=_caller_config(job_timeout_s=OVER_CEILING_BOUND_S),
@@ -150,7 +150,7 @@ def test_job_ceiling_fields_when_the_bound_exceeds():
 
 def test_bound_equal_to_the_ceiling_does_not_exceed_it():
     """The existing 'equal does not exceed' rule carries over."""
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=UNITS,
         per_unit_timeout_s=PER_UNIT_TIMEOUT_S,
         config=_caller_config(job_timeout_s=CEILING_S),
@@ -251,7 +251,7 @@ def test_cap_plus_enforce_is_still_refused(tmp_path):
         },
     ):
         with pytest.raises(SimError) as excinfo:
-            sb._resolve_batch_config(
+            sb.resolve_batch_config(
                 _ceiling_request(tmp_path, **batch),
                 corner_count=UNITS,
                 timeout_s=PER_UNIT_TIMEOUT_S,
@@ -317,7 +317,7 @@ def test_bound_over_the_ceiling_is_refused_under_enforce_and_split(
 
 
 def test_poll_budget_defaults_to_the_stated_bound_plus_slack(tmp_path):
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         _ceiling_request(tmp_path, job_timeout_s=STATED_BOUND_S),
         corner_count=UNITS,
         timeout_s=PER_UNIT_TIMEOUT_S,
@@ -327,7 +327,7 @@ def test_poll_budget_defaults_to_the_stated_bound_plus_slack(tmp_path):
 
 
 def test_poll_budget_default_without_the_key_is_unchanged(tmp_path):
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         _ceiling_request(tmp_path),
         corner_count=UNITS,
         timeout_s=PER_UNIT_TIMEOUT_S,
@@ -337,7 +337,7 @@ def test_poll_budget_default_without_the_key_is_unchanged(tmp_path):
 
 
 def test_explicit_poll_timeout_s_still_wins(tmp_path):
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         _ceiling_request(tmp_path, job_timeout_s=STATED_BOUND_S, poll_timeout_s=99.0),
         corner_count=UNITS,
         timeout_s=PER_UNIT_TIMEOUT_S,
@@ -355,13 +355,13 @@ def test_unset_path_assessment_is_the_serial_bound(tmp_path, monkeypatch):
     """No ceiling warning and the serial basis when the serial bound fits
     (8 units x 1500 s unset would warn, so this uses a 100 s timeout)."""
     monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         _ceiling_request(tmp_path),
         corner_count=UNITS,
         timeout_s=100.0,
         check_runner=False,
     )
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=UNITS, per_unit_timeout_s=100.0, config=config
     )
     assert assessment["basis"] == "conservative_serial_bound"
@@ -401,14 +401,14 @@ def test_host_count_does_not_resize_the_stated_bound():
     """Issue #8011: ``remote.hosts`` sizes the *serial* bound per shard. A
     stated bound is one job's wall whatever the shard, so a sharded request
     is assessed exactly like the one-job request, field for field."""
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=UNITS,
         per_unit_timeout_s=PER_UNIT_TIMEOUT_S,
         config=_caller_config(),
         hosts=3,
     )
 
-    assert assessment == sb._assess_job_ceiling(
+    assert assessment == sb.assess_job_ceiling(
         unit_count=UNITS, per_unit_timeout_s=PER_UNIT_TIMEOUT_S, config=_caller_config()
     )
     assert assessment["job_bound_s"] == STATED_BOUND_S
@@ -420,7 +420,7 @@ def test_options_max_workers_does_not_change_anything(tmp_path):
     the stated bound."""
     request = _ceiling_request(tmp_path, job_timeout_s=STATED_BOUND_S)
     request["options"] = {"max_workers": 4}
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         request,
         corner_count=UNITS,
         timeout_s=PER_UNIT_TIMEOUT_S,
@@ -428,7 +428,7 @@ def test_options_max_workers_does_not_change_anything(tmp_path):
     )
     assert config.job_timeout_s == STATED_BOUND_S
     assert config.poll_timeout_s == STATED_BOUND_S + 1800.0
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=UNITS, per_unit_timeout_s=PER_UNIT_TIMEOUT_S, config=config
     )
     assert assessment["basis"] == JOB_CEILING_BASIS_CALLER
@@ -454,7 +454,7 @@ def test_split_plan_refuses_only_when_the_bound_exceeds():
     cases without a special case: fits + no cap -> one job; exceeds -> the
     ceiling refusal (``max_units_per_job == 0``); fits + cap -> balanced
     shards, no warning."""
-    fits = sb._assess_job_ceiling(
+    fits = sb.assess_job_ceiling(
         unit_count=UNITS, per_unit_timeout_s=PER_UNIT_TIMEOUT_S, config=_caller_config()
     )
     assert sb._plan_job_split(fits, _caller_config()) == 1
@@ -462,7 +462,7 @@ def test_split_plan_refuses_only_when_the_bound_exceeds():
     capped = _caller_config(max_units_per_job=4)
     assert sb._plan_job_split(fits, capped) == 2
 
-    exceeds = sb._assess_job_ceiling(
+    exceeds = sb.assess_job_ceiling(
         unit_count=UNITS,
         per_unit_timeout_s=PER_UNIT_TIMEOUT_S,
         config=_caller_config(job_timeout_s=OVER_CEILING_BOUND_S),

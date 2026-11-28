@@ -208,7 +208,7 @@ def _job_timeout_s(request: dict[str, Any]) -> float:
 def _resolve_config(
     request: dict[str, Any], pdk_variant: str | None, timeout_s: float
 ) -> sim_batch.BatchConfig:
-    """:func:`sim_batch._resolve_batch_config` fed a synthetic request, so the
+    """:func:`sim_batch.resolve_batch_config` fed a synthetic request, so the
     fleet config resolves exactly as for ``klt sim``/``klt netlist``."""
     synthetic: dict[str, Any] = {}
     if pdk_variant:
@@ -216,7 +216,7 @@ def _resolve_config(
     if isinstance(request.get("batch"), dict):
         synthetic["batch"] = request["batch"]
     try:
-        return sim_batch._resolve_batch_config(
+        return sim_batch.resolve_batch_config(
             synthetic, corner_count=1, timeout_s=timeout_s, sim_image_profiles=False
         )
     except (sim.SimError, sim_batch.BatchError) as exc:
@@ -269,7 +269,7 @@ def _job_failure(
     message, code, _ = _batch_common.job_failure_parts(
         job_id=job_id,
         state=str(status.get("state") or ""),
-        exit_code=sim_batch._status_exit_code(status),
+        exit_code=sim_batch.status_exit_code(status),
         detail="",
         runner_error=error,
         note="; ".join(item for item in (note, error_note) if item),
@@ -320,7 +320,7 @@ def _completed_open_report(collected: str, status: dict, note: str) -> dict | No
     if (
         note
         or status.get("state") not in {"done", "failed"}
-        or sim_batch._status_exit_code(status) != 1
+        or sim_batch.status_exit_code(status) != 1
     ):
         return None
     try:
@@ -560,9 +560,9 @@ def _finish_unit(
         status = sim_batch.poll_status(config, job_id, runner=runner, sleep=sleep)
     except sim_batch.BatchError as exc:
         raise _transport_failure(job_id, exc) from exc
-    remote = sim_batch._batch_environment(config, job_id, status)
+    remote = sim_batch.batch_environment(config, job_id, status)
     done = status.get("state") == "done" and (
-        sim_batch._status_exit_code(status) in (0, None)
+        sim_batch.status_exit_code(status) in (0, None)
     )
     note = ""
     try:
@@ -583,7 +583,7 @@ def _finish_unit(
     report.setdefault("environment", {}).setdefault("threads", 1)
     for stage in report.get("stages", []):
         stage.setdefault("threads", 1)
-    remote.update(sim_batch._read_runner_identity(collected))
+    remote.update(sim_batch.read_runner_identity(collected))
     artifacts = os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME)
     if os.path.isdir(artifacts):
         os.makedirs(unit_dir, exist_ok=True)

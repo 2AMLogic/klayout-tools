@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     pass
 
 
-def _runner_preflight_script(
+def runner_preflight_script(
     client_version: str,
     *,
     enforce: bool,

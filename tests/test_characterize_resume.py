@@ -174,7 +174,7 @@ def _run_batch_with(tmp_path, monkeypatch, checkpoint):
     monkeypatch.setattr(sim_batch, "new_job_id", lambda: "fresh-job")
     # A real `BatchConfig`, not a bare sentinel: the resumed re-attach copies
     # it with a shortened `interrupted_grace_s` (issues #5371, #5459).
-    monkeypatch.setattr(sim_batch, "_resolve_batch_config", lambda *a, **k: _config())
+    monkeypatch.setattr(sim_batch, "resolve_batch_config", lambda *a, **k: _config())
     from klayout_tools import sim_batch_plan
 
     monkeypatch.setattr(sim_batch_plan, "plan_batch_job", lambda *a, **k: ({}, 1))

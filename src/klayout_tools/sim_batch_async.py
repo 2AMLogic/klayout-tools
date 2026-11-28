@@ -38,12 +38,12 @@ from .sim_batch import (
     _aws_argv,
     _prepare_batch_job_spec,
     _read_status,
-    _resolve_batch_config,
     _submit_batch_shards,
     _write_batch_receipt,
     job_uri,
     launch_job,
     new_job_id,
+    resolve_batch_config,
     submit_job,
 )
 from .sim_batch import (
@@ -156,7 +156,7 @@ def submit_only(
     it submits, as ``--dry-run`` and the ``--batch-set`` preflight do
     (issue #8011).
     """
-    config = _resolve_batch_config(
+    config = resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     job_ceiling, hosts = plan_batch_job(
@@ -427,7 +427,7 @@ def read_job_status(
         )
     # Resolved at call time so a patched default transport is honoured.
     run = runner if runner is not None else sim_batch._run_subprocess
-    config = _resolve_batch_config(
+    config = resolve_batch_config(
         request, corner_count=0, timeout_s=0.0, check_runner=False
     )
     try:

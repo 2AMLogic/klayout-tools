@@ -30,7 +30,7 @@ def _write_report(collected: Path, payload) -> None:
 
 
 def test_job_timeout_adds_the_per_job_overhead():
-    expected = int(sim_batch._default_batch_job_timeout_s(1, 100.0) + 0.999999)
+    expected = int(sim_batch.default_batch_job_timeout_s(1, 100.0) + 0.999999)
     got = _batch_common.job_timeout_seconds(100.0)
     assert isinstance(got, int)
     assert got > 100

@@ -357,7 +357,7 @@ def new_job_id() -> str:
 
 
 def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
-    """:func:`sim_batch._resolve_batch_config` itself, fed a synthetic
+    """:func:`sim_batch.resolve_batch_config` itself, fed a synthetic
     request, so the fleet config resolves exactly as for ``klt sim``
     (``$KLT_BATCH_*``, then ``batch-fleet.env`` beside the provision script).
     Its ``SimError``/``BatchError`` becomes a :class:`NetlistError`."""
@@ -616,8 +616,8 @@ def run_netlist_batch(
         _check_no_unevaluated_expr(data, report["xschem"].get("version"))
         _check_no_unresolved_symbol(data)
         remote = {
-            **sim_batch._batch_environment(config, job_id, status),
-            **sim_batch._read_runner_identity(collected),
+            **sim_batch.batch_environment(config, job_id, status),
+            **sim_batch.read_runner_identity(collected),
             "batch_root": tree.root,
             "input_files": len(tree.files),
             "input_bytes": tree.total_bytes,

@@ -40,7 +40,7 @@ pytestmark = pytest.mark.usefixtures("bare_name_ngspice_resolution")
 def _harvest(tmp_path, request, *, fingerprint="fp-async", known=()):
     return sbr.harvest_resume_shards(
         artifacts_dir=str(tmp_path / "artifacts"),
-        config=sb._resolve_batch_config(request, corner_count=10, timeout_s=120.0),
+        config=sb.resolve_batch_config(request, corner_count=10, timeout_s=120.0),
         corner_points=_corner_points(10),
         request=request,
         netlist_path=str(_write_body(tmp_path)),

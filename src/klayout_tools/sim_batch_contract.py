@@ -254,7 +254,7 @@ _BATCH_PROVISION_SLACK_S = 1800.0
 #: was most likely refused at launch (e.g. ``batch_concurrency_cap``).
 _ATTACH_UNSTARTED_GRACE_S = 120.0
 
-#: Fixed per-job slack :func:`_default_batch_job_timeout_s` adds to the
+#: Fixed per-job slack :func:`default_batch_job_timeout_s` adds to the
 #: fully-serial unit budget for `klt` startup on the job instance.
 _BATCH_JOB_OVERHEAD_S = 120.0
 

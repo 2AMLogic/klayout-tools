@@ -38,7 +38,7 @@ def offline_transport(monkeypatch):
 
 
 def resolve(tmp_path, **knobs):
-    return sb._resolve_batch_config(
+    return sb.resolve_batch_config(
         _ceiling_request(tmp_path, **knobs),
         corner_count=1,
         timeout_s=60,

@@ -96,7 +96,7 @@ def job_timeout_seconds(timeout_s: float) -> int:
     the fleet ceiling is each module's own concern."""
     from . import sim_batch
 
-    return int(math.ceil(sim_batch._default_batch_job_timeout_s(1, timeout_s)))
+    return int(math.ceil(sim_batch.default_batch_job_timeout_s(1, timeout_s)))
 
 
 def rewrite_runner_paths(value: Any, runner_roots: list[str], local_root: str) -> Any:
@@ -271,13 +271,13 @@ def resolve_backend_value(
 def resolve_batch_config(
     pdk: str, timeout_s: float, err_cls: type[_E], no_fallback: str
 ) -> Any:
-    """:func:`sim_batch._resolve_batch_config` fed a synthetic one-unit
+    """:func:`sim_batch.resolve_batch_config` fed a synthetic one-unit
     request, so the fleet config resolves exactly as for ``klt sim``. Its
     ``SimError``/``BatchError`` becomes ``err_cls``."""
     from . import sim_batch
 
     try:
-        return sim_batch._resolve_batch_config(
+        return sim_batch.resolve_batch_config(
             {"models": {"pdk": pdk}},
             corner_count=1,
             timeout_s=timeout_s,
@@ -405,7 +405,7 @@ def build_job_command(
         client_version if client_version is not None else _provenance._klt_version()
     )
     try:
-        preflight = sim_batch._runner_preflight_script(
+        preflight = sim_batch.runner_preflight_script(
             version, enforce=version_check == "enforce"
         )
     except Exception as exc:  # SimError: a client version unsafe to embed

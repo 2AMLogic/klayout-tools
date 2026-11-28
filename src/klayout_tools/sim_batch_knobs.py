@@ -22,7 +22,7 @@ script, which are host config) and raises
 never touches the network -- which is what makes
 :func:`_validate_batch_request_knobs` safe to call twice: once on the dry
 run, before the host-dependent resolution, and again inside
-:mod:`klayout_tools.sim_batch._resolve_batch_config`.
+:mod:`klayout_tools.sim_batch.resolve_batch_config`.
 
 This module does not import :mod:`klayout_tools.sim_batch` at runtime
 (only for typing), so :mod:`klayout_tools.sim_batch` can import it freely.
@@ -210,7 +210,7 @@ def _resolve_runner_version_check(batch_spec: dict[str, Any]) -> str:
 def resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
     """``request.batch.capacity_wait_s``: a finite, non-negative number of
     seconds (default ``0``), else :class:`~klayout_tools.sim.SimError` --
-    raised from :func:`~klayout_tools.sim_batch._resolve_batch_config`,
+    raised from :func:`~klayout_tools.sim_batch.resolve_batch_config`,
     i.e. before any S3 write.
 
     A ``bool`` is refused even though it is an ``int`` subclass: ``true``
@@ -272,12 +272,12 @@ def _validate_batch_request_knobs(batch_spec: dict[str, Any]) -> None:
     These checks can report the same errors as submit preflight even on a
     host without a provision script or bucket. Polling values
     (``poll_interval_s``, ``poll_timeout_s``) are parsed later by
-    :func:`~klayout_tools.sim_batch._resolve_batch_config` once both resolve.
+    :func:`~klayout_tools.sim_batch.resolve_batch_config` once both resolve.
     Check ``max_job_seconds`` here only when the request supplies it, since
     its fallback values come from the environment and the fleet file.
     Keep the resolver calls in the same order as the submit path;
     ``tests/test_sim_dry_run_batch_knobs.py`` fails when a resolver added to
-    ``_resolve_batch_config`` is neither mirrored here nor allowlisted there
+    ``resolve_batch_config`` is neither mirrored here nor allowlisted there
     (issue #6646).
     """
     _resolve_max_launch_attempts(batch_spec)

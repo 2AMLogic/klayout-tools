@@ -124,13 +124,13 @@ def test_bound_is_the_one_the_largest_shard_job_really_carries(tmp_path, units, 
     """Checked against the shard engine's real split, as
     ``test_sim_batch.test_recommended_hosts_keeps_every_shard_within_the_ceiling``
     checks the recommendation."""
-    config = sb._resolve_batch_config(
+    config = sb.resolve_batch_config(
         _ceiling_request(tmp_path),
         corner_count=units,
         timeout_s=TIMEOUT_S,
         check_runner=False,
     )
-    assessment = sb._assess_job_ceiling(
+    assessment = sb.assess_job_ceiling(
         unit_count=units, per_unit_timeout_s=TIMEOUT_S, config=config, hosts=hosts
     )
 
@@ -138,7 +138,7 @@ def test_bound_is_the_one_the_largest_shard_job_really_carries(tmp_path, units, 
     sizes = [len(shard) for shard in shards if shard]
     assert assessment["job_unit_count"] == max(sizes)
     assert assessment["job_bound_s"] == max(
-        sb._default_batch_job_timeout_s(size, TIMEOUT_S) for size in sizes
+        sb.default_batch_job_timeout_s(size, TIMEOUT_S) for size in sizes
     )
     assert assessment["unit_count"] == units
 

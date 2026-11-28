@@ -3,7 +3,7 @@
 
 Split out of ``tests/test_sim_batch_job_timeout.py``, which sits at the 500-line
 file-size ratchet ceiling. Everything here goes through
-``sb._resolve_batch_config`` -- the path a request's ``batch`` object takes --
+``sb.resolve_batch_config`` -- the path a request's ``batch`` object takes --
 so a refusal is the verb's ``SimError`` (the JSON error envelope), never a
 traceback. No transport is involved: nothing here touches the ``aws`` CLI.
 """
@@ -23,7 +23,7 @@ PER_UNIT_TIMEOUT_S = 1500.0
 
 
 def _resolve(tmp_path, **batch):
-    return sb._resolve_batch_config(
+    return sb.resolve_batch_config(
         _ceiling_request(tmp_path, **batch),
         corner_count=UNITS,
         timeout_s=PER_UNIT_TIMEOUT_S,
