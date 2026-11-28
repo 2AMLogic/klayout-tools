@@ -2374,6 +2374,14 @@ below describes).
 > members in its `attestation.checks[]`; `--manifest` grades it
 > `unmet`/`provenance_narrower_than_attested` (issue #5640). The remedy is
 > the same re-attest the pin change above calls for.
+>
+> Checking that envelope with `klt signoff --attest 1 --check` under 0.9.x
+> reports `status: "drifted"` and exits 3 even when all source files still
+> match. Inspect `drift[]` for changes to individual checks as well as the
+> move from `provenance.input.path` to `paths`. To reproduce the old
+> envelope, pin klt to its recorded `provenance.klt_version`. To migrate,
+> regenerate it with the checking version and update the citing manifest's
+> `content_hash` to the regenerated envelope's `provenance.input.content_hash`.
 
 #### Item 10: what belongs in a hygiene inventory, and who re-attests (issue #4839)
 
