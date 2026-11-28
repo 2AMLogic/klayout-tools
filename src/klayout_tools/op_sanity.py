@@ -118,17 +118,17 @@ from .sim import (
     _classify_diagnostics,
     _expand_corners,
     _extract_engine_version,
-    _needs_models_lib,
-    _resolve_corner_section_libs,
-    _resolve_models_lib,
-    _resolve_param_file,
     corner_lib_lines,
+    needs_models_lib,
+    resolve_corner_section_libs,
+    resolve_models_lib,
     resolve_netlist_include,
+    resolve_param_file,
     scale_supply_waveforms,
     supply_alter_lines,
 )
 from .sim_case_names import validate_request_measurements
-from .sim_request_overrides import _with_pdk_root_override
+from .sim_request_overrides import with_pdk_root_override
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1341,7 +1341,7 @@ def _other_corner_entry(
     other_devices = copy.deepcopy(pristine_devices)
     other_log, _, _, other_launch = _run_op(
         netlist_path=netlist_path,
-        models_lib=models_lib if _needs_models_lib(other) else None,
+        models_lib=models_lib if needs_models_lib(other) else None,
         point=other,
         devices=other_devices,
         probe_nodes=probe_nodes,
@@ -1441,7 +1441,7 @@ def run_op_sanity(
     """
     request = load_request(request_path)
     try:
-        request = _with_pdk_root_override(request, pdk_root)
+        request = with_pdk_root_override(request, pdk_root)
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -1486,13 +1486,13 @@ def run_op_sanity(
     try:
         # Issues #2522/#4759: resolve per-section corner libs and
         # `models.param_file`, then `models.lib` iff a section reads it.
-        _resolve_corner_section_libs(biased_points, models, request_dir)
-        _resolve_param_file([point, *biased_points], models, request_dir)
-        if any(_needs_models_lib(biased) for biased in biased_points):
-            models_lib = _resolve_models_lib(models, request_dir)
+        resolve_corner_section_libs(biased_points, models, request_dir)
+        resolve_param_file([point, *biased_points], models, request_dir)
+        if any(needs_models_lib(biased) for biased in biased_points):
+            models_lib = resolve_models_lib(models, request_dir)
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
-    point_models_lib = models_lib if _needs_models_lib(point) else None
+    point_models_lib = models_lib if needs_models_lib(point) else None
 
     provenance_pdk = resolve_lint_pdk(models)  # issue #5751
     options = request.get("options") or {}

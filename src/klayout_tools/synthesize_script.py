@@ -41,7 +41,7 @@ def _script_path_text(path: str, *, repo_root: str | None) -> str:
 #: ``$PDK_ROOT/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib``.
 #: Deliberately the *same* spelling ``klt sim``'s ``request.models.lib``
 #: already accepts for a PDK-anchored path (``sim.py``'s
-#: ``_resolve_models_lib``) and that ``klt pdk env`` exports, so one
+#: ``resolve_models_lib``) and that ``klt pdk env`` exports, so one
 #: convention covers both directions rather than inventing a second token.
 #:
 #: Yosys does **not** expand environment variables in a script file, so a

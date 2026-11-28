@@ -501,8 +501,8 @@ from .sim_request_overrides import (
     _with_max_concurrent_override as _with_max_concurrent_override,
 )
 from .sim_request_overrides import _with_max_units_override as _with_max_units_override
-from .sim_request_overrides import _with_pdk_root_override as _with_pdk_root_override
 from .sim_request_overrides import _with_timeout_override as _with_timeout_override
+from .sim_request_overrides import with_pdk_root_override as with_pdk_root_override
 from .sim_slug import _NON_FILENAME_CHARS_RE as _NON_FILENAME_CHARS_RE
 from .sim_slug import _PARAMS_ID_RE as _PARAMS_ID_RE
 from .sim_slug import _SLUG_HASH_CHARS as _SLUG_HASH_CHARS
@@ -1275,7 +1275,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``analysis`` or -- #2482 -- ``analysis_steps``; which one, and that not
     both are declared, is validated in :func:`run_sim`). ``models`` is
     validated in :func:`run_sim`, only for a ``corners.process`` axis (see
-    ``_resolve_models_lib``). No ``schema`` field is required.
+    ``resolve_models_lib``). No ``schema`` field is required.
     """
     request = _load_request_json(request_path, SimError)
     if not isinstance(request, dict):  # #7720: guard before membership tests
@@ -2491,7 +2491,7 @@ def _prepare_sim_request(
     request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
     request = _with_capacity_retries_override(request, capacity_retries)
-    request = _with_pdk_root_override(request, pdk_root)
+    request = with_pdk_root_override(request, pdk_root)
     request = _with_timeout_override(request, timeout_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
@@ -3021,10 +3021,10 @@ def _prepare_sim_request(
     # -- never joined onto the image's PDK directory. `models.pdk` stays in
     # the request for image identity/provenance; only *resolution* ignores it.
     resolution_models = _model_resolution_models(request, models)
-    corner_section_libs = _resolve_corner_section_libs(
+    corner_section_libs = resolve_corner_section_libs(
         corner_points, resolution_models, request_dir
     )
-    param_file = _resolve_param_file(corner_points, resolution_models, request_dir)
+    param_file = resolve_param_file(corner_points, resolution_models, request_dir)
 
     # Gated on the *actually dispatched* `corner_points`, not `corners_spec`,
     # so a fleet shard reconstructed from `_explicit_points` (which pops
@@ -3032,12 +3032,12 @@ def _prepare_sim_request(
     # model library when its own points carry a `process` value, even though
     # the pushed request's `corners_spec` is empty on the remote box. A bundle
     # whose every section names its own library needs no `models.lib` at all
-    # (see `_needs_models_lib`).
-    if any(_needs_models_lib(point) for point in corner_points):
+    # (see `needs_models_lib`).
+    if any(needs_models_lib(point) for point in corner_points):
         # Only the process axis needs a model library -- supply/temperature
         # are plain netlist/control-block mutations (see this module's
         # docstring and the spike's "Native PVT sweeping" survey row).
-        models_lib = _resolve_models_lib(resolution_models, request_dir)
+        models_lib = resolve_models_lib(resolution_models, request_dir)
 
     # Resumability (issue #473): only active when the caller opts in. The
     # `local`/`local-parallel` backends (including any `hosts > 1` shard
@@ -4444,7 +4444,7 @@ def _model_resolution_models(
     }
 
 
-def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
+def resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
     """Resolve ``request.models`` to an absolute model-library path.
 
     Two supported shapes:
@@ -4471,12 +4471,7 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
     return resolved
 
 
-def _resolve_param_file(points: list[CornerPoint], models: Any, request_dir: str):
-    """``models.param_file`` (#4759); see :mod:`klayout_tools.sim_param_file`."""
-    return resolve_param_file(points, models, request_dir, _resolve_lib_ref)
-
-
-def _resolve_corner_section_libs(
+def resolve_corner_section_libs(
     points: list[CornerPoint], models: dict[str, Any], request_dir: str
 ) -> tuple[str, ...]:
     """Resolve every per-section corner library declared by a
@@ -4488,7 +4483,7 @@ def _resolve_corner_section_libs(
     Resolution is the same rule as ``models.lib``'s
     (:func:`_resolve_lib_ref`), and every ref is existence-checked **here**,
     before any corner is dispatched -- the same posture as
-    :func:`_resolve_models_lib`'s ``model library not found`` and
+    :func:`resolve_models_lib`'s ``model library not found`` and
     :func:`resolve_request_osdi`, rather than left to surface as a
     per-corner ngspice parse error deep inside the run.
 
@@ -4519,7 +4514,7 @@ def _resolve_corner_section_libs(
     return tuple(resolved_by_ref.values())
 
 
-def _needs_models_lib(point: CornerPoint) -> bool:
+def needs_models_lib(point: CornerPoint) -> bool:
     """Whether this corner still needs the request's own ``models.lib``.
 
     ``False`` for a process-less point (nothing selects a model section), and

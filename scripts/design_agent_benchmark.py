@@ -96,7 +96,7 @@ from klayout_tools._paths import _resolve_relative  # noqa: E402
 from klayout_tools._provenance import sha256_file  # noqa: E402
 from klayout_tools._vendor import mutation_variants as _mutation_variants  # noqa: E402
 from klayout_tools.eval import EvalError, _load_json_arg, run_eval  # noqa: E402
-from klayout_tools.sim import SimError, _resolve_models_lib  # noqa: E402
+from klayout_tools.sim import SimError, resolve_models_lib  # noqa: E402
 
 DEFAULT_TASKS_DIR = REPO_ROOT / "benchmarks" / "design-agent" / "tasks"
 DEFAULT_SCHEMA_PATH = (
@@ -895,7 +895,7 @@ def _reference_solution_dependency_files(
         models = request_doc.get("models")
         if isinstance(models, dict):
             try:
-                files.append(Path(_resolve_models_lib(models, request_dir)))
+                files.append(Path(resolve_models_lib(models, request_dir)))
             except SimError:
                 pass
 
@@ -1590,7 +1590,7 @@ def _build_live_agent_descriptor(
         # `models.pdk`/`models.pdk_root` is set (every shipped task's own
         # convention as of #1736), `lib` is deliberately relative to the
         # *resolved PDK variant directory*, per docs/cli/sim.md's
-        # `_resolve_models_lib`, never to this reference directory; rewriting
+        # `resolve_models_lib`, never to this reference directory; rewriting
         # it here would silently point `klt sim` at a nonexistent path under
         # `reference_dir` instead of letting it resolve via $PDK_ROOT.
         if (

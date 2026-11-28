@@ -129,7 +129,7 @@ def resolve_osdi_preload(
     directory. A ``pdk_relative`` reference uses the selected PDK variant
     directory and the same lookup as a corner section library. Each entry
     is existence-checked before a corner is dispatched, as with
-    :func:`_resolve_models_lib`'s ``model library not found`` -- rather than
+    :func:`resolve_models_lib`'s ``model library not found`` -- rather than
     left to surface as a per-corner ngspice error deep inside the run.
 
     ``skip_indices`` (issue #3819) are entries the executing host resolves

@@ -2976,36 +2976,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_needs_models_lib",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_resolve_corner_section_libs",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_resolve_models_lib",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_resolve_param_file",
-        "reason": "Reviewed (issue #4759): op-lint resolves models.param_file with the same models.lib rule as klt sim; sits beside the other grandfathered _resolve_* imports until they move to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim_request_overrides",
-        "symbol": "_with_pdk_root_override",
-        "reason": "Reviewed (issue #5751): op-lint folds a `--pdk-root` pin through the same helper the graded sim path uses so both paths resolve the pin by one rule and cannot drift; promote to a public name when sim_request_overrides is next reworked."
-      },
-      {
         "consumer": "klayout_tools.pdk_pcell",
         "exporter": "klayout_tools.gen",
         "symbol": "_PARAM_TYPE_NAMES",
@@ -3123,12 +3093,6 @@
         "consumer": "klayout_tools.size",
         "exporter": "klayout_tools.sim",
         "symbol": "_expand_corners",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.size",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_resolve_models_lib",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

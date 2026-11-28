@@ -263,7 +263,7 @@ def _resolve_control_request(
 
 def _absolutize_paths(request: dict[str, Any], spec_dir: str) -> dict[str, Any]:
     """Rewrite ``netlist`` (and, when it will be resolved as a literal path
-    rather than through a PDK variant -- see ``sim._resolve_models_lib``)
+    rather than through a PDK variant -- see ``sim.resolve_models_lib``)
     ``models.lib``, to absolute paths anchored at ``spec_dir`` -- the
     campaign spec's own directory.
 

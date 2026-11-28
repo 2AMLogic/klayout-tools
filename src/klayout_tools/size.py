@@ -57,7 +57,7 @@ from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
 from .ngspice_build import engine_version as _ngspice_engine_version
 from .pdk import PdkNotFoundError, find_pdk
-from .sim import CornerPoint, SimError, _expand_corners, _resolve_models_lib
+from .sim import CornerPoint, SimError, _expand_corners, resolve_models_lib
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -565,7 +565,7 @@ def _resolve_size_models(
     """Resolve the library and any available PDK provenance for either sizing mode."""
     models = request.get("models") or {}
     try:
-        models_lib = _resolve_models_lib(models, request_dir)
+        models_lib = resolve_models_lib(models, request_dir)
     except SimError as exc:
         raise SizeError(str(exc)) from exc
 

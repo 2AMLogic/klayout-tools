@@ -1015,7 +1015,7 @@ def test_resolve_models_lib_via_pdk_variant(tmp_path):
     # A minimal libs.tech marker so pdk.find_pdk recognises the variant.
     (install_root / "sky130A" / "libs.tech" / "klayout").mkdir()
 
-    resolved = sim._resolve_models_lib(
+    resolved = sim.resolve_models_lib(
         {
             "pdk": "sky130A",
             "pdk_root": str(install_root),
@@ -1029,7 +1029,7 @@ def test_resolve_models_lib_via_pdk_variant(tmp_path):
 
 def test_resolve_models_lib_via_pdk_missing_install_raises(tmp_path):
     with pytest.raises(sim.SimError):
-        sim._resolve_models_lib(
+        sim.resolve_models_lib(
             {
                 "pdk": "sky130A",
                 "pdk_root": str(tmp_path / "nope"),
@@ -1043,7 +1043,7 @@ def test_resolve_models_lib_env_var_expansion(tmp_path, monkeypatch):
     lib_path = _write_corner_lib(tmp_path)
     monkeypatch.setenv("PDK_ROOT", str(tmp_path))
 
-    resolved = sim._resolve_models_lib(
+    resolved = sim.resolve_models_lib(
         {"lib": "$PDK_ROOT/corner.lib"}, request_dir=str(tmp_path)
     )
 
@@ -1053,19 +1053,19 @@ def test_resolve_models_lib_env_var_expansion(tmp_path, monkeypatch):
 def test_resolve_models_lib_relative_to_request_dir(tmp_path):
     _write_corner_lib(tmp_path)
 
-    resolved = sim._resolve_models_lib({"lib": "corner.lib"}, request_dir=str(tmp_path))
+    resolved = sim.resolve_models_lib({"lib": "corner.lib"}, request_dir=str(tmp_path))
 
     assert resolved == str(tmp_path / "corner.lib")
 
 
 def test_resolve_models_lib_missing_lib_field_raises(tmp_path):
     with pytest.raises(sim.SimError, match="models.lib"):
-        sim._resolve_models_lib({}, request_dir=str(tmp_path))
+        sim.resolve_models_lib({}, request_dir=str(tmp_path))
 
 
 def test_resolve_models_lib_missing_file_raises(tmp_path):
     with pytest.raises(sim.SimError, match="not found"):
-        sim._resolve_models_lib({"lib": "nope.lib"}, request_dir=str(tmp_path))
+        sim.resolve_models_lib({"lib": "nope.lib"}, request_dir=str(tmp_path))
 
 
 # --------------------------------------------------------------------------- #
@@ -10646,7 +10646,7 @@ def test_examples_sim_monte_carlo_statistics_shape():
 
 def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):
     """Guard against a future regression re-introducing a hand-rolled PDK
-    path lookup: `_resolve_models_lib`'s pdk-variant branch must go through
+    path lookup: `resolve_models_lib`'s pdk-variant branch must go through
     `klayout_tools.pdk.find_pdk` (issue #45), not a private reimplementation."""
     calls = []
     original = pdk.find_pdk
@@ -10662,7 +10662,7 @@ def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):
     (variant_dir / "ngspice").mkdir(parents=True)
     (variant_dir / "ngspice" / "sky130.lib.spice").write_text(".lib tt\n.endl tt\n")
 
-    sim._resolve_models_lib(
+    sim.resolve_models_lib(
         {
             "pdk": "sky130A",
             "pdk_root": str(install_root),
@@ -12146,7 +12146,7 @@ def test_expand_corners_bundle_per_section_libs():
     assert point.process_sections == ["mos_tt", "cap_tt"]
     assert point.process_section_libs == ["mos.lib", "cap.lib"]
     # Nothing is resolved at expansion time -- the declared refs are what a
-    # fleet shard is handed (see `_resolve_corner_section_libs`).
+    # fleet shard is handed (see `resolve_corner_section_libs`).
     assert point.process_section_libs_resolved is None
     assert point.corner_id == "tt/novdd/27C"
 
@@ -12287,7 +12287,7 @@ def test_write_corner_deck_per_section_libs_emit_their_own_lib_file(tmp_path):
 def test_write_corner_deck_unresolved_per_section_libs_use_the_declared_ref(
     tmp_path,
 ):
-    """A point that never went through `_resolve_corner_section_libs` (a
+    """A point that never went through `resolve_corner_section_libs` (a
     direct caller, not `run_sim`) still names the declared ref rather than
     silently falling back to `models.lib`."""
     point = sim.CornerPoint(
@@ -12340,7 +12340,7 @@ def test_resolve_corner_section_libs_resolves_relative_to_the_request_dir(tmp_pa
         [],
     )
 
-    libs = sim._resolve_corner_section_libs([point], {}, str(tmp_path))
+    libs = sim.resolve_corner_section_libs([point], {}, str(tmp_path))
 
     assert libs == (str(cap),)
     assert point.process_section_libs_resolved == [str(cap)]
@@ -12365,7 +12365,7 @@ def test_resolve_corner_section_libs_expands_env_vars(tmp_path, monkeypatch):
         [],
     )
 
-    assert sim._resolve_corner_section_libs([point], {}, str(tmp_path)) == (str(cap),)
+    assert sim.resolve_corner_section_libs([point], {}, str(tmp_path)) == (str(cap),)
 
 
 def test_resolve_corner_section_libs_joins_relative_refs_against_the_pdk_variant(
@@ -12397,7 +12397,7 @@ def test_resolve_corner_section_libs_joins_relative_refs_against_the_pdk_variant
         },
         [],
     )
-    libs = sim._resolve_corner_section_libs(
+    libs = sim.resolve_corner_section_libs(
         [point],
         {"pdk": "sky130A", "pdk_root": str(install_root)},
         str(tmp_path),
@@ -12417,7 +12417,7 @@ def test_resolve_corner_section_libs_missing_file_raises(tmp_path):
     )
 
     with pytest.raises(sim.SimError, match="corner section library not found"):
-        sim._resolve_corner_section_libs([point], {}, str(tmp_path))
+        sim.resolve_corner_section_libs([point], {}, str(tmp_path))
 
 
 def test_resolve_corner_section_libs_deduplicates_in_first_appearance_order(tmp_path):
@@ -12442,7 +12442,7 @@ def test_resolve_corner_section_libs_deduplicates_in_first_appearance_order(tmp_
         [],
     )
 
-    assert sim._resolve_corner_section_libs(points, {}, str(tmp_path)) == (
+    assert sim.resolve_corner_section_libs(points, {}, str(tmp_path)) == (
         str(cap),
         str(bjt),
     )
@@ -12453,7 +12453,7 @@ def test_resolve_corner_section_libs_leaves_ordinary_points_alone(tmp_path):
         {"process": ["tt", {"name": "ss", "sections": ["ss", "bjt_ss"]}]}, []
     )
 
-    assert sim._resolve_corner_section_libs(points, {}, str(tmp_path)) == ()
+    assert sim.resolve_corner_section_libs(points, {}, str(tmp_path)) == ()
     assert [p.process_section_libs_resolved for p in points] == [None, None]
 
 

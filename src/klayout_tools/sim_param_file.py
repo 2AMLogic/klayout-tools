@@ -12,18 +12,21 @@ from typing import Any
 
 from ._provenance import sha256_file
 from .sim_errors import SimError
+from .sim_model_paths import resolve_lib_ref
 
 
 def resolve_param_file(
     points: list[Any],
     models: dict[str, Any],
     request_dir: str,
-    resolve_lib_ref: Callable[[str, dict[str, Any], str], str],
+    resolve_lib_ref: Callable[[str, dict[str, Any], str], str] = resolve_lib_ref,
 ) -> str | None:
     """Resolve ``models.param_file`` with ``models.lib``'s own rule
     (``resolve_lib_ref``), existence-check it up front, and record the absolute
     path on every point. ``None`` when the request does not set the field
-    (points and decks are then untouched)."""
+    (points and decks are then untouched). The default ``resolve_lib_ref`` is
+    :func:`klayout_tools.sim_model_paths.resolve_lib_ref`; a caller may pass
+    its own."""
     ref = models.get("param_file")
     if ref is None:
         return None

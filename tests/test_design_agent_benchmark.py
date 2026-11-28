@@ -1931,7 +1931,7 @@ def _write_reference_cache_fixture(
     shipped task's own ``reference/<id>/`` directory uses, and return the
     task dict `check_reference_solutions`/`run_attempt` expect. Uses a
     plain ``{"lib": "models.lib"}`` (no ``pdk``/``pdk_root`` key) so
-    `_resolve_models_lib` resolves it as a local file, never touching the
+    `resolve_models_lib` resolves it as a local file, never touching the
     real PDK discovery path -- these tests must not depend on a PDK being
     installed."""
     ref_dir = repo_root / "ref"

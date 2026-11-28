@@ -139,14 +139,14 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
     from . import sim_commands
     from .sim import (
         _prepare_sim_request,
-        _with_pdk_root_override,
         load_request,
+        with_pdk_root_override,
     )
 
     request = load_request(request_path)
     if "decks" in request:
         return _preflight_decks_request(
-            _with_pdk_root_override(request, overrides.get("pdk_root")), request_path
+            with_pdk_root_override(request, overrides.get("pdk_root")), request_path
         )
     if sim_commands.COMMANDS_FIELD in request:
         # Command-list members (issue #5317) carry no corner grid: one command

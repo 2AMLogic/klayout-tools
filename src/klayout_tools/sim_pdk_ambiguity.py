@@ -4,7 +4,7 @@
 with ``--pdk-root`` or a request's ``models.pdk_root`` -- is a **dead end on
 ``backend: batch``**. Both spellings land in the same field (``--pdk-root`` is
 folded into ``models.pdk_root`` as an absolute path by
-``sim_request_overrides._with_pdk_root_override``), and a host-local
+``sim_request_overrides.with_pdk_root_override``), and a host-local
 ``models.pdk_root`` is refused there before any S3 write with
 ``models_pdk_root_host_path`` (issue #4097): it is forwarded to the runner
 verbatim, where a submitter's path does not exist. A submitter who took the

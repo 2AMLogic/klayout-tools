@@ -68,7 +68,7 @@ def test_xyce_deck_has_include_first(tmp_path):
 def test_resolve_sets_every_point_relative_to_request_dir(tmp_path):
     (tmp_path / "design.ngspice").write_text(".param fnoicor=1\n")
     points = [sim.CornerPoint("tt", {}, 27), sim.CornerPoint("ss", {}, 27)]
-    path = sim._resolve_param_file(
+    path = sim.resolve_param_file(
         points, {"param_file": "design.ngspice"}, str(tmp_path)
     )
     assert path == str(tmp_path / "design.ngspice")
@@ -77,15 +77,43 @@ def test_resolve_sets_every_point_relative_to_request_dir(tmp_path):
 
 def test_resolve_unset_is_none(tmp_path):
     point = sim.CornerPoint("tt", {}, 27)
-    assert sim._resolve_param_file([point], {}, str(tmp_path)) is None
+    assert sim.resolve_param_file([point], {}, str(tmp_path)) is None
     assert point.param_file is None
 
 
 def test_resolve_missing_file_is_a_sim_error(tmp_path):
     with pytest.raises(sim.SimError, match="model parameter file not found"):
-        sim._resolve_param_file(
+        sim.resolve_param_file(
             [sim.CornerPoint("tt", {}, 27)], {"param_file": "nope"}, str(tmp_path)
         )
+
+
+def test_resolve_explicit_resolver_replaces_the_default_rule(tmp_path):
+    """An injected ``resolve_lib_ref`` takes the place of ``models.lib``'s own
+    rule: it is called with ``(ref, models, request_dir)`` and the path it
+    returns is what every point records -- here for a ref the default rule
+    could not have found."""
+    existing = tmp_path / "elsewhere.ngspice"
+    existing.write_text(".param fnoicor=1\n")
+    points = [sim.CornerPoint("tt", {}, 27), sim.CornerPoint("ss", {}, 27)]
+    models = {"param_file": "no-such/design.ngspice"}
+    request_dir = str(tmp_path)
+    calls: list[tuple[str, dict, str]] = []
+
+    def recording_resolver(ref, resolver_models, resolver_request_dir):
+        calls.append((ref, resolver_models, resolver_request_dir))
+        return str(existing)
+
+    with pytest.raises(sim.SimError, match="model parameter file not found"):
+        sim.resolve_param_file(points, models, request_dir)
+
+    path = sim.resolve_param_file(
+        points, models, request_dir, resolve_lib_ref=recording_resolver
+    )
+
+    assert path == str(existing)
+    assert calls == [("no-such/design.ngspice", models, request_dir)]
+    assert [p.param_file for p in points] == [str(existing), str(existing)]
 
 
 # --------------------------------------------------------------------------- #
