@@ -387,6 +387,11 @@ def test_half_grid_limit_is_three_layout_units(
     )
 
 
+# The first marker of each case is the foundry's own region, now listed as a
+# perimeter ring (#7979): the extra vertex the raw enclosing pair carried
+# ((708, 996) / (716, 992)) sits on the straight side between two corners, and
+# the ring walked from ``EdgePair.normalized()`` does not repeat it. The
+# marker's region is unchanged.
 @pytest.mark.parametrize(
     ("rule", "implant", "x", "y", "expected"),
     [
@@ -396,7 +401,7 @@ def test_half_grid_limit_is_three_layout_units(
             867,
             996,
             [
-                [(707, 996), (708, 996), (867, 1095), (867, 996)],
+                [(707, 996), (867, 1095), (867, 996)],
                 [(867, 917), (1000, 850), (867, 996), (1066, 996)],
             ],
         ),
@@ -406,7 +411,7 @@ def test_half_grid_limit_is_three_layout_units(
             735,
             992,
             [
-                [(715, 992), (716, 992), (735, 1005), (735, 992)],
+                [(715, 992), (735, 1005), (735, 992)],
                 [(735, 983), (756, 972), (735, 992), (761, 992)],
             ],
         ),
