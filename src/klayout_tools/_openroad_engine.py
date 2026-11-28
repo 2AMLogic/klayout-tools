@@ -14,7 +14,7 @@ shared file-read/JSON-parse boilerplate (issue #642).
 former copies: ``place_and_route.py`` needs to raise ``PlaceAndRouteError``
 on a launch failure, ``post_route_sta.py`` needs ``PostRouteStaError``. That
 is preserved here via a caller-supplied ``error_cls`` parameter, the same
-parameter ``_openroad_io.py``'s script/metrics/error-text helpers take
+parameter ``_openroad_io.py``'s ``write_script`` and ``read_metrics`` take
 (issue #8051); that module exists because this one is at its ceiling.
 """
 
