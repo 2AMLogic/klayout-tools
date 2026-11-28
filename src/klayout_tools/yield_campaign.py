@@ -28,7 +28,7 @@ already-tested implementation rather than reimplementing any of it:
 1. **Seed management.** If the spec omits ``monte_carlo.seed``, one is
    derived deterministically from the spec's own sampling-relevant content
    (:func:`_default_campaign_seed`, reusing :mod:`sim`'s own
-   :func:`sim._derive_mc_seed` -- the same SHA-256-based, never-``hash()``
+   :func:`sim.derive_mc_seed` -- the same SHA-256-based, never-``hash()``
    derivation :func:`sim._expand_monte_carlo` already uses, so this module
    adds no second hashing scheme). The exact same campaign spec file,
    re-run any number of times, therefore reproduces the exact same sample
@@ -175,13 +175,11 @@ def _default_campaign_seed(spec: dict[str, Any]) -> int:
     sampling-relevant content, so a campaign spec that never declares its
     own seed still reproduces the exact same sample set on every re-run.
 
-    Reuses :func:`sim._derive_mc_seed` (private, same convention
-    :mod:`remote_fleet` already uses to reuse :mod:`remote_launcher`'s own
-    private helpers rather than duplicating them) -- the same SHA-256-based
-    derivation :func:`sim._expand_monte_carlo` itself uses for every
-    per-sample seed, so this module introduces no second hashing scheme.
+    Reuses :func:`sim.derive_mc_seed` -- the same SHA-256-based derivation
+    :func:`sim._expand_monte_carlo` itself uses for every per-sample seed,
+    so this module introduces no second hashing scheme.
     """
-    return sim._derive_mc_seed(0, "yield-campaign", _campaign_identity_json(spec))
+    return sim.derive_mc_seed(0, "yield-campaign", _campaign_identity_json(spec))
 
 
 def _merge_overrides(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
@@ -245,7 +243,7 @@ def _resolve_control_request(
     else:
         identity = dict(request)
         identity["monte_carlo"] = {k: v for k, v in merged_mc.items() if k != "seed"}
-        seed = sim._derive_mc_seed(
+        seed = sim.derive_mc_seed(
             0,
             "yield-campaign-negative-control",
             json.dumps(identity, sort_keys=True, default=str),

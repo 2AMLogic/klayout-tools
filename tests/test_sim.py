@@ -1718,6 +1718,17 @@ def test_seed_scope_default_is_bit_identical_to_pre_2899_seeds():
         ]
 
 
+def test_mc_seed_derivation_is_public_and_bit_identical():
+    # Issue #8068: the derivation yield campaigns share is public through
+    # ``sim``. Concrete integers computed from the private spelling *before*
+    # the rename; base seed, part order, separators and digest conversion
+    # decide whether a saved campaign replays, so they must never change.
+    assert sim.derive_mc_seed(0, "yield-campaign", "{}") == 1725207548
+    assert sim.derive_mc_seed(42, "process", "tt", 0) == 1900618099
+    # Reproduces the first ``rndseed`` of the pre-2899 golden above.
+    assert sim.derive_mc_seed(42, "rndseed", 1973556995, 1917083296) == 1010234817
+
+
 def test_seed_scope_rejects_unknown_value():
     with pytest.raises(sim.SimError, match="monte_carlo.seed_scope"):
         sim._validate_monte_carlo_spec(
