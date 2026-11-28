@@ -3759,15 +3759,21 @@ DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
   `NAND2xp5`, `AND2x2`, `DFFHQNx2` and `ICGx2`, plus the LVT library's
   model classes.
 - **Corpus survey** (one-off, 2026-10-07): **191 of the 208** RVT cells
-  with a CDL entry match their CDL at net level. That run joined the well
+  that draw devices match their CDL at net level. That run joined the well
   net to `VDD` and `vsubs` to `VSS` by name, which is a comparison-side
   assumption. 11 cells draw parallel series stacks the CDL folds into one
   wider stack. 6 differ from their CDL only in series order. Both groups are
   LVS-comparison questions, resolved in #2813: `klt lvs` passes 191 cells with
   an explicit, disclosed bulk policy; the 11 folded-stack cells are listed as
   unsupported and the 6 series-order cells are adjudicated as a
-  reference-vs-layout topology difference (see `docs/cli/lvs.md`, "Pinned
-  ASAP7 RVT corpus").
+  reference-vs-layout topology difference. 11 more of those 191 (#8084) differ
+  from their CDL only in series order across two commutative inputs: they
+  match standalone because the comparer swaps the two ports, and mismatch once
+  the pins are anchored or a block wires them to asymmetric nets, so they are
+  pinned too. The breakdown is 180 port-identity matches + 11
+  `"series-order-port-swap"` = 191 unanchored matches, and 28 masters in
+  `KNOWN_UNSUPPORTED_ASAP7_CELLS` across the three limitation tokens (see
+  `docs/cli/lvs.md`, "Pinned ASAP7 RVT corpus").
 - **Simulation is not verified.** The fleet host's ngspice-46 build rejects
   the ASAP7 `level = 72` BSIM-CMG cards, and no OSDI BSIM-CMG module is
   available. Simulating extracted ASAP7 netlists is tracked in #2814.

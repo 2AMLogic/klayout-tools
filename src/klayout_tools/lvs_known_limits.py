@@ -1,5 +1,5 @@
 """In-band disclosure of pinned ASAP7 library limitations (issues #4819,
-#6931)."""
+#6931, #8084)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ from .lvs_mismatch import _mismatch, _sort_key
 #: unsupported ASAP7 cell (always a warning; never changes ``status``).
 CATEGORY_TOPOLOGY_KNOWN_LIMITATION = "topology.known_limitation"
 
-#: Issue #4819: ASAP7 RVT library cells whose drawn stack topology differs from
-#: the library CDL (11 folded-stack, 6 series-order). They stay
-#: ``status: "mismatch"`` -- nothing is turned green -- and ``klt lvs`` adds a
+#: Issue #4819 / #8084: ASAP7 RVT library cells whose drawn stack topology
+#: differs from the library CDL (11 folded-stack, 6 series-order, 11
+#: series-order-port-swap). Nothing is turned green, and ``klt lvs`` adds a
 #: ``topology.known_limitation`` warning naming the cell so the signal is
-#: in-band. Pinned against the corpus in ``tests/test_asap7_finfet.py``.
+#: in-band. Pinned against the corpus in ``tests/test_asap7_finfet.py`` and
+#: ``tests/test_asap7_port_swap.py``.
 KNOWN_UNSUPPORTED_ASAP7_CELLS: dict[str, str] = {
     **{
         f"{name}_ASAP7_75t_R": "folded-stack"
@@ -28,6 +29,13 @@ KNOWN_UNSUPPORTED_ASAP7_CELLS: dict[str, str] = {
     **{
         f"{name}_ASAP7_75t_R": "series-order"
         for name in "A2O1A1O1Ixp25 AOI211xp5 OAI221xp5 SDFLx1 SDFLx2 SDFLx3".split()
+    },
+    **{
+        f"{name}_ASAP7_75t_R": "series-order-port-swap"
+        for name in (
+            "AND4x1 AO21x1 AO21x2 AOI32xp33 FAx1 OAI31xp33 OAI31xp67 "
+            "OAI322xp33 OAI32xp33 OAI33xp33 XOR2x2"
+        ).split()
     },
 }
 
@@ -89,6 +97,28 @@ def count_unsupported_asap7_instances(netlist: Any, top: str | None) -> dict[str
     return dict(unsupported)
 
 
+def _limitation_description(kind: str, *, block: bool) -> str:
+    """Describe the library difference in a single-cell or block report."""
+    if kind == "series-order-port-swap":
+        return (
+            "its drawn series-stack order matches the library CDL only under a "
+            "commutative swap of symmetric input ports. This difference can "
+            "contribute to a mismatch when pin anchors or block wiring prevent the swap"
+        )
+    cause = (
+        f"its drawn {kind} transistor topology differs from the library CDL and "
+        "klt lvs performs no stack normalisation"
+    )
+    if block:
+        return (
+            f"{cause}, so those instances are expected to mismatch -- a possible "
+            "contributor to this block-level mismatch, not an extraction defect"
+        )
+    return (
+        f"{cause}, so this mismatch is expected for the cell, not an extraction defect"
+    )
+
+
 def note_known_limit(
     mismatches: list[dict[str, Any]],
     finfet_layout: bool,
@@ -115,10 +145,8 @@ def note_known_limit(
                 _mismatch(
                     CATEGORY_TOPOLOGY_KNOWN_LIMITATION,
                     "warning",
-                    f"cell '{cell}' is a known ASAP7 RVT library limitation: its "
-                    f"drawn {kind} transistor topology differs from the library "
-                    "CDL and klt lvs performs no stack normalisation, so this "
-                    "mismatch is expected for the cell, not an extraction defect "
+                    f"cell '{cell}' is a known ASAP7 RVT library limitation: "
+                    f"{_limitation_description(kind, block=False)} "
                     "(docs/cli/lvs.md, 'Pinned ASAP7 RVT corpus')",
                     "layout",
                     details={"cell": cell, "limitation": kind},
@@ -140,12 +168,8 @@ def note_known_limit(
                 "warning",
                 f"block instantiates {layout_n} layout and {reference_n} "
                 f"reference instance(s) of cell '{cell}', a known ASAP7 RVT "
-                f"library limitation: its drawn {kind} transistor topology "
-                "differs from the library CDL and klt lvs performs no stack "
-                "normalisation, so those instances are expected to mismatch "
-                "-- a possible contributor to this block-level mismatch, not "
-                "an extraction defect (docs/cli/lvs.md, 'Pinned ASAP7 RVT "
-                "corpus')",
+                f"library limitation: {_limitation_description(kind, block=True)} "
+                "(docs/cli/lvs.md, 'Pinned ASAP7 RVT corpus')",
                 "both",
                 details={
                     "cell": cell,

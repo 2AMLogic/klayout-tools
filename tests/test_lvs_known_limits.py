@@ -1,6 +1,8 @@
-"""Issues #4819/#6931: ``topology.known_limitation`` disclosure on
+"""Issues #4819/#6931/#8084: ``topology.known_limitation`` disclosure on
 mismatching ASAP7 cells -- single-cell top (4819) and block-level instantiated
-masters (6931)."""
+masters (6931). The ``"series-order-port-swap"`` masters (8084) have their own
+report-path tests in ``test_lvs_port_swap.py`` and corpus pins in
+``test_asap7_port_swap.py``."""
 
 from __future__ import annotations
 
@@ -26,13 +28,18 @@ from test_asap7_finfet import (
     _needs_corpus,
     _write,
 )
+from test_asap7_port_swap import _PORT_SWAP_SERIES_ORDER_CELLS
 
 
 def test_known_unsupported_list_matches_corpus_pins():
-    assert (
-        set(KNOWN_UNSUPPORTED_ASAP7_CELLS) == _FOLDED_STACK_CELLS | _SERIES_ORDER_CELLS
-    )
-    assert len(KNOWN_UNSUPPORTED_ASAP7_CELLS) == 17
+    assert KNOWN_UNSUPPORTED_ASAP7_CELLS == {
+        **dict.fromkeys(_FOLDED_STACK_CELLS, "folded-stack"),
+        **dict.fromkeys(_SERIES_ORDER_CELLS, "series-order"),
+        **dict.fromkeys(_PORT_SWAP_SERIES_ORDER_CELLS, "series-order-port-swap"),
+    }
+    assert (len(_FOLDED_STACK_CELLS), len(_SERIES_ORDER_CELLS)) == (11, 6)
+    assert len(_PORT_SWAP_SERIES_ORDER_CELLS) == 11
+    assert len(KNOWN_UNSUPPORTED_ASAP7_CELLS) == 28
 
 
 def _disclose(finfet, status, top):
