@@ -61,12 +61,11 @@ def test_invalid_limit_stops_before_transport(
         sb, "_run_subprocess", lambda *args: pytest.fail("unexpected transport")
     )
     path = str(_write_request(tmp_path, request))
+    assert main(["sim", path, "--dry-run", "--format", "json"]) == 1
+    code = json.loads(capsys.readouterr().err)["error"]["code"]
     with pytest.raises(sim.SimError) as exc:
         sim.run_sim(path)
-    assert exc.value.code == "batch_launch_attempts_invalid"
-    capsys.readouterr()
-    assert main(["sim", path, "--dry-run", "--format", "json"]) == 1
-    assert json.loads(capsys.readouterr().err)["error"]["code"] == exc.value.code
+    assert exc.value.code == code == "batch_launch_attempts_invalid"
 
 
 def dry_run_json(tmp_path, request, capsys, monkeypatch):
