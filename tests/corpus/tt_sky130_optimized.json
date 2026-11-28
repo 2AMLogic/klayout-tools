@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "shuttle": "tt06",
+  "pins": {
+    "yosys": "Yosys 0.67+post (git sha1 b8e7da6f40ae8f552c116bf6c359b07c6533e159, Release, GNU /usr/bin/c++ 13.3.0)",
+    "abc": "UC Berkeley, ABC 1.01 (compiled Nov 19 2026 03:14:20)",
+    "abc_sha256": "7a05c2739dc522da9ee08bdb2e4c269478ef63d6b36f9a6c1bb62e373320e408",
+    "klt_version": "0.9.3.dev5792+g66333db112d3",
+    "klt_git_commit": "66333db112d3d24abbf4cbb4db5886f661e80709",
+    "pdk": {
+      "name": "sky130A",
+      "version": "open_pdks f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
+    },
+    "deck": {
+      "name": "sky130_fd_sc_hd__tt_025C_1v80",
+      "content_hash": "sha256:8e78e14442062dba34d414fca6490b2f6b96038d4510d1438ca44fee31487135"
+    }
+  },
+  "optimization": {
+    "name": "abc-area-map",
+    "request_difference": {
+      "synthesis": {
+        "abc_script": "area.abc"
+      }
+    },
+    "abc_script": {
+      "path": "area.abc",
+      "sha256": "f7ab4fd5aaa2fca7ecbd4809d8f92a17cfcf543e063b26214e359e5c5bdad191"
+    }
+  },
+  "total": 4,
+  "designs": [
+    {
+      "macro": "tt_um_8bitALU",
+      "repo": "https://github.com/EdricOngKhaiJieh/8bitALU_verilog",
+      "commit": "f9bcfd7d3cb6da2972d1678d9ec5e9402ae9eecb",
+      "license": {
+        "file": "LICENSE",
+        "spdx": "Apache-2.0"
+      },
+      "source_sha256": "6515efa59dccd99c30216fa6c68b32524e0d202597e103442dc93d60d57167ef",
+      "top": "tt_um_8bitALU",
+      "baseline_count": 110,
+      "baseline_sha256": "508df7541928f958de59dd064b7d88502c8a77ba40bbc186924227009d100788",
+      "candidate_sha256": "aff080824a8f49295974fe7fcb3201f14bd83c212e7c02dc58226aa1a3f8aa13",
+      "verdict": "equivalent",
+      "optimized_count": 118,
+      "delta": 8
+    },
+    {
+      "macro": "tt_um_ALU",
+      "repo": "https://github.com/JoseKaisen/ALU_3bits",
+      "commit": "aef5319d47e2f6644e4df935d932ae1136e0cc20",
+      "license": {
+        "file": "LICENSE",
+        "spdx": "Apache-2.0"
+      },
+      "source_sha256": "07a3e743ae2a7ffcee5b555133cd8cc93585ae86c3d65ae16a4675959cd70fac",
+      "top": "tt_um_ALU",
+      "baseline_count": 97,
+      "baseline_sha256": "4744a8ad78bb149fa2f1bd3a5d8043cca91056313576f8f41b9cb7560317debe",
+      "candidate_sha256": "1b6ebecdf372b7cd27ca96bf74a0fad0e0dd59bd56edac91ce4cb86d5975d1a4",
+      "verdict": "equivalent",
+      "optimized_count": 127,
+      "delta": 30
+    },
+    {
+      "macro": "tt_um_CKPope_top",
+      "repo": "https://github.com/CKPope/tt06-verilog-template",
+      "commit": "c93539faf09c864f1e4ed1ac31a8b16fcb5d7b73",
+      "license": {
+        "file": "LICENSE",
+        "spdx": "Apache-2.0"
+      },
+      "source_sha256": "46d56fbeecad7dc5abc6550a688cde112e8ac64b89c997b4a51620c0d06013fa",
+      "top": "tt_um_CKPope_top",
+      "baseline_count": 169,
+      "baseline_sha256": "10c9d2cf839159f52c23500fb24820fcfb58f0af1ca99fbcb98c4bce2394e004",
+      "candidate_sha256": "9ec690626fb392633ace60725833abc4dc6061fdb64af7b769d7b39c45464038",
+      "verdict": "unestablished",
+      "exclusion_reason": "stage 1 re-ran equiv_make 2x with 400 internal wire(s) blacklisted -- same-named gold/gate wires that could not be proven equivalent and so were dropped as cut points (no top-level port is ever dropped; see artifacts.stage1_blacklist_path for the exact list); re-running the solver's counterexample trace through the flattened netlists via iverilog/vvp did not reproduce a diverging output on any replayed cycle -- treat this counterexample with suspicion"
+    },
+    {
+      "macro": "tt_um_LFSR_shivam",
+      "repo": "https://github.com/beaprog/tt06-LFSR",
+      "commit": "6bffe5f606707446700dc5dc43db8fa4d6a74394",
+      "license": {
+        "file": "LICENSE",
+        "spdx": "Apache-2.0"
+      },
+      "source_sha256": "23ecc4527a933f891b73f6fa6ba46dd33cafd1d97e61cc9e0df117f13d873c21",
+      "top": "tt_um_LFSR_shivam",
+      "baseline_count": 38,
+      "baseline_sha256": "e19d1a496bd3757f8a2299b73495016a8851301cc11969ff4036e6917a07ca82",
+      "candidate_sha256": "c28a1be53592a5bc2b0d8dd35087307491f99e686c68b5e332e6c782d6d94756",
+      "verdict": "equivalent",
+      "optimized_count": 46,
+      "delta": 8
+    }
+  ],
+  "reported": 3,
+  "excluded": 1
+}
