@@ -307,25 +307,23 @@ are always the real, unmodified DRM values:
   their ``PP.*`` mirrors) publish the same 0.16um where the opposite COMP
   sits within 0.43um of an ``LVPWELL``/``Nwell`` edge but a looser 0.08um
   further away, selected by a ``DNWELL``/``LVPWELL`` boolean our engine
-  cannot evaluate. Approximated by applying the stricter 0.16um everywhere
-  (the conservative direction: a 0.08-0.16um gap in the far context is
-  over-flagged, no real violation is missed) -- note this is the *opposite*
-  choice from ``nwell.space.1``/``via*.space.1`` above, which take the less
-  strict value of their own splits, because here the geometric context that
-  selects the looser value is the rarer one. Both also drop the PDK deck's
-  own butted-COMP exclusion (``nplus.not_interacting(ncomp_butted)``, the
-  zero-space ``NP.3d``/``NP.3e`` cases), so a deliberately butted NCOMP/
-  PCOMP pair is flagged here where the official rule permits it. The
-  *checked region* is the real ``PCOMP``/``NCOMP`` boolean via
-  :class:`~klayout_tools.decks.DerivedLayer`, not raw ``Comp`` -- see the
-  rules' own comments for why an unscoped version would be actively wrong.
-  **Well-distance split (issue #3484):** the ``PCOMP`` side of ``NP.3`` is no
-  longer collapsed -- ``nplus.space.pcomp.1`` is the near-well half (a
-  ``PCOMP`` within 0.429um of an ``Nwell``, or touching a ``Dnwell``, at
-  0.16um) and ``nplus.space.pcomp.far.1`` (``NP.3cii``, 0.08um) the exact
-  complement, selected with ``DerivedLayer.context``. The ``Dnwell``/
-  ``LVPWELL`` relaxation ``NP.3bii`` is still not expressed (strict). The
-  mirrored ``pplus.space.ncomp.1`` keeps the flat 0.16um.
+  cannot evaluate. The *checked region* is the real ``PCOMP``/``NCOMP``
+  boolean via :class:`~klayout_tools.decks.DerivedLayer`, not raw ``Comp``
+  -- see the rules' own comments for why an unscoped version would be
+  actively wrong. **Well-distance split (issue #3484):** the ``PCOMP`` side
+  of ``NP.3`` is the near-well half (``nplus.space.pcomp.1``, a ``PCOMP``
+  within 0.429um of an ``Nwell`` or touching a ``Dnwell``, at 0.16um) and
+  ``nplus.space.pcomp.far.1`` (``NP.3cii``, 0.08um) the exact complement,
+  selected whole-polygon with ``DerivedLayer.context``. On the ``NCOMP``
+  side (issue #7970) ``pplus.space.ncomp.1`` follows the pinned deck's own
+  boolean selection through ``band_spec``. In a pure Nwell only Pplus inside
+  the well is measured, at 0.08um in the interior and 0.16um in the band.
+  PP.3a measures the full implant for NCOMP outside pure wells or under LVPWELL.
+  The DNWELL branches (``NP.3bii``, ``PP.3b``) stay strict. All three rules measure
+  against the implant polygons the foundry rules do
+  (``other_layer_selection="not_butted"``, issue #7970): the implant of a
+  butted NCOMP/PCOMP pair (``ncomp_butted``, ``pcomp_butted``; zero-space
+  ``NP.3d``/``NP.3e``) is excluded whole, where it used to be flagged.
 - ``nplus.enclosing.poly2.1``/``pplus.enclosing.poly2.1``: the official
   ``NP.5a``/``PP.5a`` scope to ``ngate``/``pgate``, which the PDK deck's own
   ``main.drc`` derives from four drawn layers plus two well/marker
@@ -348,21 +346,20 @@ are always the real, unmodified DRM values:
   (issue #7955) ``nplus.enclosing.comp.1``'s NCOMP edges, per edge by
   ``band_spec`` -- strict within 0.429um of the boundary of a pure ``Nwell``
   (``NP.5di``; no ``DNWELL`` contact), 0.02um deeper inside (``NP.5dii``).
-  Butted edges and the ``DNWELL``/``LVPWELL`` splits (``NP.5c``, ``PP.5ci``)
-  stay unexpressed (strict), as does the ``euclidian``-for-``projection``
-  metric outside ``NP.5di``'s band -- conservative: a corner distance the
-  official rule ignores can be reported, never the reverse). **Unlike
-  ``NP.5b``, whose two sub-cases both resolve to the same 0.16um regardless
-  of well context, ``PP.5b`` itself only ever applies to a PCOMP shape
-  "(1) Inside NWELL (2) outside LVPWELL but inside DNWELL"** -- a PCOMP
-  shape with no ``Nwell``/``Dnwell`` context anywhere instead falls under
-  ``PP.5di``/``PP.5dii`` at the much looser 0.02-0.16um range above,
-  structurally incapable of being correctly checked at a flat 0.16um (issue
-  #2634, a confirmed false positive on real ``ppolyf_u_*`` P+ substrate taps).
-  ``pplus.enclosing.comp.1`` therefore also carries
+  (issue #7970) ``NP.5b`` and ``PP.5di`` measure with the deck's own edge
+  selection and ``projection`` metric (``butted_spec``): a ``Nplus`` edge
+  coincident with a PCOMP edge, or a PCOMP edge coincident with a ``Nplus``
+  edge, is not measured. The ``DNWELL``/``LVPWELL`` splits (``NP.5c``,
+  ``PP.5ci``) stay unexpressed (strict), as do ``PP.5b``'s butted edges and
+  ``euclidian``-for-``projection`` metric on ``pplus.enclosing.comp.1``
+  (issue #7969). **Unlike ``NP.5b``, whose two sub-cases both resolve to the
+  same 0.16um, ``PP.5b`` only applies to a PCOMP shape "(1) Inside NWELL (2)
+  outside LVPWELL but inside DNWELL"** -- one with no such context anywhere
+  falls under ``PP.5di``/``PP.5dii`` instead and cannot be checked at a flat
+  0.16um (issue #2634, a false positive on real ``ppolyf_u_*`` P+ substrate
+  taps). ``pplus.enclosing.comp.1`` therefore also carries
   ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``): a layout
-  drawing neither anywhere skips the whole rule rather than misapplying it,
-  while a layout drawing either keeps the approximations above unchanged.
+  drawing neither anywhere skips the rule rather than misapplying it.
   ``nplus.enclosing.comp.1`` needs no equivalent gate.
 - ``comp.coverage.1`` (``DF.12``): evaluated flat (no deep/hierarchical
   mode) on merged regions, as the upstream ``comp.rb`` expression
@@ -527,6 +524,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from ..drc_butted_diffusion import ButtedEdgeSpec
 from ..drc_edge_band import EdgeBandSpec
 from . import (
     BipolarDevice,
@@ -670,6 +668,34 @@ def _tap_distance_spec(
         dualgate=(55, 0),
         v5_xtor=(112, 1),
     )
+
+
+def _routing_metal_rules() -> list[DrcRule]:
+    # DRM 7.13 Metaln gives the same minimum for width (Mn.1) and spacing (Mn.2a).
+    scope = "7.13 Metaln"
+    metals = (
+        ("metal1", 34, 230),
+        ("metal2", 36, 280),
+        ("metal3", 42, 280),
+        ("metal4", 46, 280),
+        ("metal5", 81, 280),
+    )
+    return [
+        DrcRule(
+            id=f"{metal}.{check}.1",
+            description=f"minimum {metal} {measurement}",
+            layer=(gds_layer, 0),
+            check=check,
+            threshold_dbu=threshold_dbu,
+            scope=scope,
+            provenance=_gf180mcu_provenance(scope, rule_id),
+        )
+        for metal, gds_layer, threshold_dbu in metals
+        for check, measurement, rule_id in (
+            ("width", "width", "Mn.1"),
+            ("space", "spacing", "Mn.2a"),
+        )
+    ]
 
 
 # D1 and D3 from the module's known approximations, disclosed per checked rule.
@@ -1187,106 +1213,7 @@ DECK: list[DrcRule] = [
         # (Metal5 as the conductor above Via4).
         provenance=_gf180mcu_klayout_deck_provenance("via", "V4.4a"),
     ),
-    DrcRule(
-        id="metal1.width.1",
-        description="minimum metal1 width",
-        layer=(34, 0),  # Metal1
-        check="width",
-        threshold_dbu=230,  # 0.23 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.23 (n = 1)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal1.space.1",
-        description="minimum metal1 spacing",
-        layer=(34, 0),  # Metal1
-        check="space",
-        threshold_dbu=230,  # 0.23 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.23 (n = 1)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
-    DrcRule(
-        id="metal2.width.1",
-        description="minimum metal2 width",
-        layer=(36, 0),  # Metal2
-        check="width",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal2.space.1",
-        description="minimum metal2 spacing",
-        layer=(36, 0),  # Metal2
-        check="space",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
-    DrcRule(
-        id="metal3.width.1",
-        description="minimum metal3 width",
-        layer=(42, 0),  # Metal3
-        check="width",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal3.space.1",
-        description="minimum metal3 spacing",
-        layer=(42, 0),  # Metal3
-        check="space",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
-    DrcRule(
-        id="metal4.width.1",
-        description="minimum metal4 width",
-        layer=(46, 0),  # Metal4
-        check="width",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal4.space.1",
-        description="minimum metal4 spacing",
-        layer=(46, 0),  # Metal4
-        check="space",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
-    DrcRule(
-        id="metal5.width.1",
-        description="minimum metal5 width",
-        layer=(81, 0),  # Metal5
-        check="width",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
-    ),
-    DrcRule(
-        id="metal5.space.1",
-        description="minimum metal5 spacing",
-        layer=(81, 0),  # Metal5
-        check="space",
-        threshold_dbu=280,  # 0.28 um
-        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
-        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
-    ),
+    *_routing_metal_rules(),
     DrcRule(
         id="metaltop.width.1",
         description="minimum metaltop width (standard 6K angstrom thickness)",
@@ -1618,20 +1545,12 @@ DECK: list[DrcRule] = [
         # zero-distance violation on every single NMOS in any layout -- the
         # "actively wrong, not merely conservative" class of approximation
         # `mim.enclosing.via4.1`'s own note describes, not an acceptable one.
-        # Two approximations remain, both documented in the module
-        # docstring's "known approximations" list: (a) the well context is
-        # collapsed -- NP.3b/NP.3c publish the same 0.16 for PCOMP near a
-        # well edge but a looser 0.08 further away, and our engine cannot
-        # evaluate the `lvpwell`/`dnwell` boolean context that selects
-        # between them, so the stricter 0.16 is applied everywhere
-        # (conservative: over-flags a 0.08-0.16 gap in the far context,
-        # never misses a real violation); (b) the PDK deck excludes `Nplus`
-        # interacting with a butted NCOMP (`np3_nplus =
-        # nplus.not_interacting(ncomp_butted)`, the NP.3d/NP.3e zero-space
-        # butting cases), which needs a three-layer boolean our engine has
-        # no vocabulary for -- so a deliberately butted NCOMP/PCOMP pair is
-        # flagged here where the official rule permits it. Threshold value
-        # unmodified.
+        # The near-well half of NP.3 (`NP.3a`/`NP.3ci`; the far half is
+        # `nplus.space.pcomp.far.1` below), measured against the deck's
+        # `nplus.not_interacting(ncomp_butted)`: the implant of a butted NCOMP/
+        # PCOMP pair is excluded whole (NP.3d/NP.3e permit zero space there) --
+        # `not_butted` (#7970). `Dnwell`/`LVPWELL` unexpressed. Threshold unmodified.
+        other_layer_selection="not_butted",
         derived_layer=DerivedLayer(
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
@@ -1674,8 +1593,9 @@ DECK: list[DrcRule] = [
         # Errs strict: the DNWELL branches (`NP.3bii`, inside LVPWELL) are not
         # relaxed (any PCOMP within reach of a `Dnwell` stays on the 0.16
         # near rule), and selection is whole-polygon, so a PCOMP only partly
-        # within reach stays on the near rule. Same butting approximation as
-        # the near rule.
+        # within reach stays on the near rule. Same butted-pair exclusion as
+        # the near rule (`not_butted`, issue #7970).
+        other_layer_selection="not_butted",
         derived_layer=DerivedLayer(
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
@@ -1751,12 +1671,18 @@ DECK: list[DrcRule] = [
         # `band_spec` (issue #7955) adds the deck's `NP.5di`/`NP.5dii` split
         # per edge: within 0.429um of the boundary of a pure Nwell (one
         # touching no DNWELL) this 0.16 stands, deeper inside only 0.02 is
-        # required; the remaining approximations are in this module's docstring.
+        # required. `butted_spec` (issue #7970) gives `NP.5b` its operand and
+        # metric on the edges outside that split: `Nplus` edges coincident
+        # with a PCOMP edge are not measured, the rest is measured by
+        # `projection`. Remaining approximations: this module's docstring.
         band_spec=EdgeBandSpec(
             context_layers=((21, 0),),  # Nwell
             exclude_layers=((12, 0),),  # DNWELL
             band_width_um=0.429,
             inner_threshold_dbu=20,  # 0.02 um, NP.5dii
+        ),
+        butted_spec=ButtedEdgeSpec(  # NP.5b: `nplus.edges.not(nplus_butted_edges)`
+            side="other", mask_layers=((31, 0),), mask_intersect=(22, 0)
         ),
         derived_layer=DerivedLayer(
             base=(32, 0),  # Nplus, unsized -- `ncomp = comp AND nplus`
@@ -1818,10 +1744,20 @@ DECK: list[DrcRule] = [
         # mirror is *not* a pure transposition of the Nplus table: PP.3b/
         # PP.3c order their sub-cases the other way round from NP.3b/NP.3c,
         # which is why each side is transcribed from its own DRM table.
-        # Same two approximations as its Nplus twin (collapsed well context,
-        # butting cases PP.3d/PP.3e not excluded) -- see that rule's comment
-        # and the module docstring's "known approximations" list. Threshold
-        # value unmodified.
+        # `PP.3ci` holds an NCOMP part at least 0.429um inside a pure `Nwell`
+        # to 0.08; PP.3cii measures the outer band at 0.16. Both clip the
+        # selected Pplus to the pure well. PP.3a measures the full selected
+        # implant against NCOMP under LVPWELL or outside pure wells at 0.16.
+        # The separate DNWELL statements (PP.3b) remain unexpressed.
+        other_layer_selection="not_butted",
+        band_spec=EdgeBandSpec(
+            context_layers=((21, 0),),  # Nwell
+            exclude_layers=((12, 0),),  # DNWELL
+            band_width_um=0.429,
+            inner_threshold_dbu=80,  # 0.08 um, PP.3ci
+            band_metrics="euclidian",
+            strict_layers=((204, 0),),  # LVPWELL
+        ),
         derived_layer=DerivedLayer(
             base=(32, 0),  # Nplus, unsized -- `ncomp = comp AND nplus`
             sized_by_um=0.0,
@@ -1891,21 +1827,13 @@ DECK: list[DrcRule] = [
         # a pure (non-`Dnwell`-overlapping) `Nwell` -- exactly the ordinary
         # poly-resistor P+ substrate-tap case gf180-ldo's `divider`/
         # `passives` cells hit, each already DRC-clean on the PDK's own
-        # deck. (`nplus.enclosing.comp.1`'s mirror, `NP.5b`, has no such
-        # split: its own two sub-cases -- "(1) inside LVPWELL (2) outside
-        # Nwell and DNWELL" -- both resolve to the same 0.16um, verified
-        # directly against a real fetched `rule_decks/{nplus,pplus}.drc`:
-        # the identical 0.11um-extension geometry reports 0 `PP.5b` findings
-        # but 4 `NP.5b` findings.) Modelling `PP.5di`/`PP.5dii`'s own
-        # 0.429um-proximity split needs a three-input derivation this
-        # engine's `DerivedLayer` has no mode for (see its docstring), so
-        # `requires_any_layer` below narrows scope instead: a layout that
-        # draws neither `Nwell` nor `Dnwell` anywhere has no PCOMP shape
-        # `PP.5b` can apply to, so the whole rule is skipped rather than
-        # misapplied at this flat, too-strict threshold. A layout that
-        # draws either layer anywhere keeps this rule's pre-#2634 behaviour
-        # unchanged (still approximate per the two approximations above,
-        # just no longer firing on well-free layouts).
+        # deck -- `pplus.enclosing.comp.far.1` below (issue #3484).
+        # (`nplus.enclosing.comp.1`'s mirror, `NP.5b`, has no such split:
+        # see `DrcRule.requires_any_layer`'s docstring.) This rule keeps the
+        # near-well half, whole-polygon; `requires_any_layer` below skips it
+        # entirely on a layout that draws neither `Nwell` nor `Dnwell`
+        # anywhere, which has no PCOMP shape `PP.5b` can apply to, rather
+        # than misapply it at this flat, too-strict threshold.
         requires_any_layer=((21, 0), (12, 0)),  # Nwell, Dnwell
         derived_layer=DerivedLayer(
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
@@ -1941,8 +1869,9 @@ DECK: list[DrcRule] = [
         # (`DerivedLayer.context`; the strict `PP.5dii`/`PP.5b` 0.16 stays
         # there). Errs strict exactly like `nplus.space.pcomp.far.1`: PCOMP
         # within reach of any `Dnwell` (the `PP.5ci`/`PP.5cii` branches) is
-        # not relaxed, and selection is whole-polygon. Euclidian metric where
-        # the official rule is `projection`, as for the near rule.
+        # not relaxed, and selection is whole-polygon. `butted_spec` (issue
+        # #7970) adds the deck's own edge selection and `projection` metric.
+        butted_spec=ButtedEdgeSpec(side="checked", mask_layers=((32, 0),)),
         derived_layer=DerivedLayer(
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,

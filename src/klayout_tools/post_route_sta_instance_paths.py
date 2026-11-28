@@ -37,8 +37,9 @@ from __future__ import annotations
 from typing import Any
 
 from ._sta_request_diag import extract_block as _extract_block
+from ._sta_request_diag import validate_name_list
 from ._tcl import tcl_literal as _tcl_literal
-from .post_route_sta_errors import PostRouteStaError
+from .post_route_sta_errors import PostRouteStaError as PostRouteStaError
 from .post_route_sta_path_groups import (
     _empty_path_record,
     _worst_path_record,
@@ -65,27 +66,7 @@ def _validate_report_instances(constraints: dict[str, Any]) -> list[str] | None:
     (nothing is emitted, so the generated Tcl is byte-identical to a request
     without it). Existence is verified inside the engine session
     (:func:`_instance_check_lines`)."""
-    field = "request.constraints.report_instances"
-    value = constraints.get("report_instances")
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        raise PostRouteStaError(f"{field} must be a list of instance names")
-    seen: set[str] = set()
-    for name in value:
-        if not isinstance(name, str) or not name or name != name.strip():
-            raise PostRouteStaError(
-                f"{field} entries must be non-empty instance-name strings "
-                f"without leading/trailing whitespace (got {name!r})"
-            )
-        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
-            raise PostRouteStaError(
-                f"{field} entry {name!r} contains a control character"
-            )
-        if name in seen:
-            raise PostRouteStaError(f"{field} must not repeat an instance ({name!r})")
-        seen.add(name)
-    return list(value) or None
+    return validate_name_list(constraints, "report_instances", list_kind="instance")
 
 
 def _instance_check_lines(report_instances: list[str] | None) -> list[str]:

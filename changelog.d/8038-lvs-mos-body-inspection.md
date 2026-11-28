@@ -1,0 +1,1 @@
+- Deck-backed `klt lvs` comparisons now inspect each eligible MOS body terminal once for both warnings and the body-verification report (#8038).

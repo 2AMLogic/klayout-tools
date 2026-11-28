@@ -54,6 +54,7 @@ from klayout_tools.gen import (
     CONTACT_SIZE_UM,
     ENCLOSURE_MARGIN_UM,
     UNIT_MIN_W_UM,
+    _cut_fixed_size_um,
     _sd_implant_margin_um,
     generate,
 )
@@ -140,7 +141,10 @@ def _box(x0_um: float, y0_um: float, x1_um: float, y1_um: float) -> kdb.Box:
 
 
 def _dogbone_boxes_um(
-    w_channel_um: float, l_um: float, endcap_um: float = 0.0
+    w_channel_um: float,
+    l_um: float,
+    endcap_um: float = 0.0,
+    contact_um: float = CONTACT_SIZE_UM,
 ) -> tuple[dict[str, list[tuple[float, float, float, float]]], float]:
     """Per-role box lists (um) for one dog-bone unit device, plus its total
     footprint length along the source-to-drain axis.
@@ -180,7 +184,7 @@ def _dogbone_boxes_um(
         boxes["active"].append((x0_um, y0_pad_um, x1_um, y1_pad_um))
         boxes["metal"].append((x0_um, y0_pad_um, x1_um, y1_pad_um))
         cx_um = (x0_um + x1_um) / 2.0
-        c_half_um = CONTACT_SIZE_UM / 2.0
+        c_half_um = contact_um / 2.0
         boxes["contact"].append(
             (
                 cx_um - c_half_um,
@@ -226,7 +230,13 @@ def _draw_dogbone(layout: kdb.Layout, cell: kdb.Cell, family: str) -> float:
     """Draw one dog-bone unit device into `cell` and return its footprint
     length (um) along the source-to-drain axis."""
     layers = _ROLE_LAYERS[family]
-    boxes, total_len_um = _dogbone_boxes_um(W_CHANNEL_UM, L_UM, _GATE_ENDCAP_UM[family])
+    # A fixed-size cut layer (sky130 licon1, 0.17um; issue #2835) is drawn at
+    # its fixed size, exactly as `klt gen` clamps it; others keep the generic
+    # contact size.
+    contact_um = _cut_fixed_size_um(family, layers["contact"]) or CONTACT_SIZE_UM
+    boxes, total_len_um = _dogbone_boxes_um(
+        W_CHANNEL_UM, L_UM, _GATE_ENDCAP_UM[family], contact_um
+    )
     for role, box_list in boxes.items():
         layer_index = layout.layer(*layers[role])
         for x0_um, y0_um, x1_um, y1_um in box_list:

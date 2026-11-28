@@ -46,6 +46,9 @@ from .sim_batch import (
     new_job_id,
     submit_job,
 )
+from .sim_batch import (
+    refuse_hosts_over_units as refuse_hosts_over_units,
+)
 from .sim_batch_plan import plan_batch_job
 from .sim_batch_shards import (  # noqa: F401
     ShardFingerprint,
@@ -148,15 +151,17 @@ def submit_only(
     ``manifest_path`` -- the ``batch-shards.json`` shard map under
     ``artifacts_dir`` that ``--attach`` takes -- and has no single
     ``job_id``. It needs ``artifacts_dir`` and ``shard_fingerprint``.
-    An explicit host count above one also selects the sharded path.
+    An explicit host count above one also selects the sharded path, and the
+    ceiling assessment (``job_ceiling``) then describes the largest shard
+    it submits, as ``--dry-run`` and the ``--batch-set`` preflight do
+    (issue #8011).
     """
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
-    job_ceiling, planned_hosts = plan_batch_job(
-        config, unit_count=len(corner_points), timeout_s=timeout_s
+    job_ceiling, hosts = plan_batch_job(
+        config, unit_count=len(corner_points), timeout_s=timeout_s, hosts=hosts or 1
     )
-    hosts = max(planned_hosts, hosts or 1)
     if hosts > 1:
         return _submit_sharded(
             request=request,
@@ -198,16 +203,6 @@ def submit_only(
         artifacts_dir=artifacts_dir,
         runner=runner,
     )
-
-
-def refuse_hosts_over_units(hosts: int, unit_count: int) -> None:
-    """Refuse more hosts than units (#5281): an idle member is still billed."""
-    if hosts > unit_count:
-        raise SimError(
-            f"remote.hosts ({hosts}) exceeds the number of units to dispatch "
-            f"({unit_count}) -- an idle fleet member would still be billed; "
-            "use hosts <= corner/sample count"
-        )
 
 
 def refuse_sharded_deck_submit(hosts: int | None) -> None:

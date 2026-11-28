@@ -397,6 +397,24 @@ def test_explicit_multi_hosts_shards_each_carry_the_stated_timeout(
     assert "warning" not in capsys.readouterr().err
 
 
+def test_host_count_does_not_resize_the_stated_bound():
+    """Issue #8011: ``remote.hosts`` sizes the *serial* bound per shard. A
+    stated bound is one job's wall whatever the shard, so a sharded request
+    is assessed exactly like the one-job request, field for field."""
+    assessment = sb._assess_job_ceiling(
+        unit_count=UNITS,
+        per_unit_timeout_s=PER_UNIT_TIMEOUT_S,
+        config=_caller_config(),
+        hosts=3,
+    )
+
+    assert assessment == sb._assess_job_ceiling(
+        unit_count=UNITS, per_unit_timeout_s=PER_UNIT_TIMEOUT_S, config=_caller_config()
+    )
+    assert assessment["job_bound_s"] == STATED_BOUND_S
+    assert assessment["basis"] == JOB_CEILING_BASIS_CALLER
+
+
 def test_options_max_workers_does_not_change_anything(tmp_path):
     """``options.max_workers`` changes the job command, not the sizing of
     the stated bound."""

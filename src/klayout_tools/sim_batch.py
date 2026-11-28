@@ -936,13 +936,25 @@ def _enforce_published_runner_features(
     )
 
 
-def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
+def refuse_hosts_over_units(hosts: int, unit_count: int) -> None:
+    """Refuse more hosts than units (#5281): an idle member is still billed."""
+    if hosts > unit_count:
+        raise SimError(
+            f"remote.hosts ({hosts}) exceeds the number of units to dispatch "
+            f"({unit_count}) -- an idle fleet member would still be billed; "
+            "use hosts <= corner/sample count"
+        )
+
+
+def _plan_job_split(
+    assessment: dict[str, Any], config: BatchConfig, hosts: int = 1
+) -> int:
     """The effective ``remote.hosts`` for an opted-in split (issue #3446).
 
     The shard cap is ``config.max_units_per_job`` when given, else the
     largest shard the ceiling allows (``assessment["max_units_per_job"]``),
-    and the answer is the fewest balanced shards that respect it; ``1``
-    when nothing needs splitting. Raises before any S3 write with
+    and the answer is the fewest balanced shards respecting it and the
+    requested host count. Raises before any S3 write with
     :data:`BATCH_JOB_CEILING_CODE` when even one unit exceeds the ceiling
     (no split can help; lower ``options.timeout_s``). An explicit cap whose
     shards exceed the (serial upper-bound) ceiling is honored with a stderr
@@ -952,14 +964,14 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
     per_job = assessment["max_units_per_job"]
     requested = config.max_units_per_job
     if requested is None and not assessment["exceeds_ceiling"]:
-        return 1
+        return hosts
     if per_job == 0:
         raise SimError(
             f"backend 'batch' refused before submission: {assessment['warning']}",
             code=BATCH_JOB_CEILING_CODE,
         )
     cap = requested if requested is not None else per_job
-    hosts = math.ceil(units / cap)
+    hosts = max(hosts, math.ceil(units / cap))
     largest = math.ceil(units / hosts)
     if largest > per_job:
         # An explicit cap is the caller's call; the bound is serial (#4982).
@@ -968,31 +980,29 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
 
 
 def _assess_job_ceiling(
-    *, unit_count: int, per_unit_timeout_s: float, config: BatchConfig
+    *, unit_count: int, per_unit_timeout_s: float, config: BatchConfig, hosts: int = 1
 ) -> dict[str, Any]:
     """Deterministic pre-submit runtime-risk assessment of **one** batch job
     against the fleet's whole-job ceiling (issue #2833).
 
     The bound is :func:`_default_batch_job_timeout_s` -- every unit burning
     its full ``options.timeout_s`` one after another, plus
-    :data:`_BATCH_JOB_OVERHEAD_S`. It is derived from the request alone and
-    is a conservative *upper bound*, never a measured or predicted ngspice
-    runtime (``basis`` says so); a job whose units finish well inside their
-    ``timeout_s`` can run far below it. It is compared with
-    ``config.max_job_seconds``: a bound *equal* to the ceiling does not
-    exceed it.
+    :data:`_BATCH_JOB_OVERHEAD_S`: a conservative *upper bound* derived from
+    the request alone, never a runtime estimate (``basis`` says so).
+    ``hosts`` (the resolved ``remote.hosts``, issue #8011) shards the units
+    first, as :func:`sim_remote._shard_corner_points` balances them, so the
+    bound describes the largest shard, ``ceil(unit_count / hosts)`` units
+    (``job_unit_count``); ``unit_count`` stays the request's total, and a
+    bound *equal* to ``config.max_job_seconds`` does not exceed it.
 
     ``max_units_per_job`` is the largest shard whose own bound stays within
-    the ceiling (``0`` when even one unit's bound exceeds it), and
-    ``recommended_hosts`` the smallest ``remote.hosts`` whose largest shard
-    -- :func:`sim_remote._shard_corner_points` balances shards to at most
-    ``ceil(units / hosts)`` -- fits it, or ``None`` when no ``hosts`` value
-    can (lower ``options.timeout_s`` instead). When the bound exceeds the
-    ceiling the result carries a human-readable ``warning``.
+    the ceiling (``0`` when even one unit's exceeds it), ``recommended_hosts``
+    the smallest ``remote.hosts`` whose largest shard fits it, else ``None``
+    (lower ``options.timeout_s``). An exceeded ceiling adds a ``warning``.
 
-    ``config.job_timeout_s`` (issue #5544) replaces the whole assessment:
-    :func:`sim_batch_job_timeout.assess_caller_job_timeout` defines every
-    field from the caller's stated bound instead of this serial formula.
+    ``config.job_timeout_s`` (issue #5544) replaces the whole assessment with
+    :func:`sim_batch_job_timeout.assess_caller_job_timeout`'s caller-stated
+    bound; ``hosts`` changes nothing there.
     """
     if getattr(config, "job_timeout_s", None) is not None:
         return assess_caller_job_timeout(
@@ -1001,8 +1011,9 @@ def _assess_job_ceiling(
             config=config,
         )
     units = max(1, unit_count)
+    largest = math.ceil(units / max(1, hosts))
     ceiling = config.max_job_seconds
-    bound = _default_batch_job_timeout_s(units, per_unit_timeout_s)
+    bound = _default_batch_job_timeout_s(largest, per_unit_timeout_s)
     if per_unit_timeout_s > 0:
         per_job = max(0, int((ceiling - _BATCH_JOB_OVERHEAD_S) // per_unit_timeout_s))
         # Settle float rounding against the bound function itself, so the
@@ -1020,6 +1031,7 @@ def _assess_job_ceiling(
     assessment: dict[str, Any] = {
         "basis": JOB_CEILING_BASIS,
         "unit_count": units,
+        "job_unit_count": largest,
         "per_unit_timeout_s": per_unit_timeout_s,
         "overhead_s": _BATCH_JOB_OVERHEAD_S,
         "job_bound_s": bound,
@@ -1033,7 +1045,7 @@ def _assess_job_ceiling(
     if exceeds:
         message = (
             f"batch job bound {bound:g}s (options.timeout_s {per_unit_timeout_s:g}s "
-            f"x {units} units + {_BATCH_JOB_OVERHEAD_S:g}s; a conservative "
+            f"x {largest} units + {_BATCH_JOB_OVERHEAD_S:g}s; a conservative "
             "fully-serial upper bound, not a runtime estimate) exceeds the "
             f"fleet's whole-job ceiling of {ceiling:g}s (max_job_seconds from "
             f"{config.max_job_seconds_source}); a job still running at the "
@@ -1237,7 +1249,7 @@ def launch_job(
     regression.
 
     **Capacity wait (issues #2721, #2917).** A launch the provisioner refuses
-    for lack of Spot capacity, or because the shared fleet is at
+    for lack of Spot capacity, a vCPU ceiling, or because the fleet is at
     ``BATCH_MAX_CONCURRENT_INSTANCES``, raises :class:`BatchError` with
     ``code == "batch_no_capacity"`` / ``"batch_concurrency_cap"``
     (:func:`_classify_launch_failure`). With
@@ -1940,11 +1952,10 @@ def _read_worker_environment(
             ),
             "stamp_text": _bounded_str(pdk_in.get("stamp_text"), 1000),
             "models_staged": pdk_in.get("models_staged") is True,
-            # Issue #4020: ``stamp_*`` always describes the worker image's
-            # tree; under staged models that is not what the job executed.
-            "stamp_scope": "image"
-            if pdk_in.get("models_staged") is True
-            else "executed",
+            # Issue #4020/#7981: ``stamp_*`` always describes the worker
+            # image's tree, which staged models or a deck executing a
+            # declared input make differ from the model bytes that ran.
+            "stamp_scope": sim_batch_pdk.stamp_scope(pdk_in, request),
             **sim_batch_pdk.bounded_store_evidence(pdk_in),  # issue #8007
         }
         manifest_in = doc.get("image_manifest")
@@ -3101,32 +3112,24 @@ def _poll_and_collect(
 
 
 def _apply_job_split(
-    job_ceiling: dict[str, Any], config: BatchConfig
+    job_ceiling: dict[str, Any], config: BatchConfig, hosts: int = 1
 ) -> tuple[dict[str, Any], int]:
-    """Decide whether the request is split into several batch jobs (issues
-    #3446, #4620): returns the assessment annotated with ``split`` /
-    ``effective_hosts`` and the shard count (``1`` = one job, in which case an
-    ``enforce`` ceiling is applied here). Shared by the blocking backend and
-    ``--submit-only``, so both split identically."""
-    effective_hosts = 1
+    """Apply the split and ceiling policy and return the assessed job count."""
     if config.job_ceiling_check == "split" or config.max_units_per_job is not None:
-        effective_hosts = _plan_job_split(job_ceiling, config)
-        job_ceiling = {
-            **job_ceiling,
-            "split": effective_hosts > 1,
-            "effective_hosts": effective_hosts,
-        }
-        if effective_hosts > 1:
+        hosts = _plan_job_split(job_ceiling, config, hosts)
+        if hosts > 1:
             print(
                 f"klt sim: notice: splitting {job_ceiling['unit_count']} units "
-                f"into {effective_hosts} batch jobs of at most "
-                f"{math.ceil(job_ceiling['unit_count'] / effective_hosts)} units "
+                f"into {hosts} batch jobs of at most "
+                f"{math.ceil(job_ceiling['unit_count'] / hosts)} units "
                 "each (request.batch.job_ceiling_check / max_units_per_job)",
                 file=sys.stderr,
             )
     else:
         _enforce_job_ceiling(job_ceiling)
-    return job_ceiling, effective_hosts
+        if hosts == 1:
+            return job_ceiling, hosts
+    return {**job_ceiling, "split": hosts > 1, "effective_hosts": hosts}, hosts
 
 
 def _run_batch(
@@ -3757,12 +3760,7 @@ def _run_batch_fleet(
     instead of waiting: terminal shards merge, the rest are lost units listed
     in ``environment.remote.unfinished_shards``.
     """
-    if hosts > len(corner_points):
-        raise SimError(
-            f"remote.hosts ({hosts}) exceeds the number of units to "
-            f"dispatch ({len(corner_points)}) -- an idle fleet member would "
-            "still be billed; use hosts <= corner/sample count"
-        )
+    refuse_hosts_over_units(hosts, len(corner_points))
 
     if config is None:
         config = _resolve_batch_config(

@@ -1,14 +1,8 @@
 """The ``klt lvs`` MOS body-verification determination (issues #281, #1983,
 #5749).
 
-Split out of ``lvs_mismatch.py``/``lvs_power.py`` (issue #5749) -- both
-debt-baselined past growth -- so the whole determination lives in one place,
-which is where its one-source-of-truth invariant actually lives:
-:func:`_body_net_warnings` renders the determination as the
-``device.body_unverified`` ``mismatches[]`` prose and
-:func:`_body_verification_report` renders the same counts as the
-machine-checkable ``body_verification`` block (issue #1983) -- so the warning
-a reader sees and the field a grader reads can never disagree.
+Each deck-backed comparison tallies MOS body terminals once for its
+``device.body_unverified`` warnings and structured ``body_verification`` report.
 
 Issue #5749 widened the determination along two axes:
 
@@ -154,14 +148,8 @@ def _body_inspected_and_unverified_counts(
     ``compare_mos_flavour`` run inspected nothing yet still read
     ``verified``).
 
-    The single source of truth for the determination:
-    :func:`_body_net_warnings` renders the unverified counts as its
-    ``device.body_unverified`` ``mismatches[]`` prose, and
-    :func:`_body_verification_report` renders *both* tallies as the
-    machine-checkable ``body_verification`` block (issue #1983) -- so the
-    warning a reader sees and the field a grader reads can never disagree.
-    See :func:`_body_net_warnings` for the full rationale on *which* devices
-    count as unverified on which decks.
+    Only the top circuit's own devices contribute, matching
+    ``run_lvs``'s ``counts.devices.layout`` convention.
 
     The unverified map is empty when every MOS body terminal resolved to a
     real net (a layout that drew its substrate/well ties on a deck that has
@@ -200,7 +188,7 @@ def _body_inspected_and_unverified_counts(
     return inspected, unverified
 
 
-def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
+def _body_net_warnings(unverified: dict[str, int], deck: Any) -> list[dict[str, Any]]:
     """Issue #281 (narrowed to real-tap-drawn layouts by #490): flag, as
     non-blocking ``severity: "warning"`` entries, the MOS body terminals
     that ``extract.py``'s inline extraction ties to a deck-synthesized net
@@ -241,15 +229,8 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     PMOS body demonstrably landed on a named net (e.g. ``VPB``), not because
     the deck declared a mechanism.
 
-    Since issue #5749 there is one warning **per unverified device class**
-    (still one per class in practice on decks without flavours, where only
-    the two generic classes can appear): a flavoured class
-    (``nfet__nvt``-style) is its own entry, naming the class the
-    ``body_verification`` block's ``findings[]`` names, so the prose and the
-    block keep agreeing on class names and counts now that flavoured names
-    can be keys (aggregating through :func:`_device_deck_arm` -- the
-    pre-#5749 ``counts.get(deck.nfet_class, 0)`` lookup would silently read
-    ``0`` for a flavoured-only class and fire no warning at all).
+    Emit one warning per unverified class, including each flavoured class
+    (e.g. ``nfet__nvt``), in class-name order.
 
     Neither warning fires for the pre-extracted ``layout.netlist`` request
     form *without* a ``layout.deck`` -- callers only reach this helper when a
@@ -259,19 +240,9 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     back from disk: names there are upper-cased and anonymous nets are
     spelled ``\\$<n>``, so the compares are case-insensitive and accept both
     anonymous spellings (issue #3177).
-
-    Counts only the layout's top circuit's own devices (``each_device()``,
-    not recursive), matching ``run_lvs``'s own ``counts.devices.layout``
-    convention -- curated-deck extraction never nests MOS devices inside a
-    subcircuit.
     """
 
     entries: list[dict[str, Any]] = []
-
-    # Issue #1983: both this prose warning and the machine-checkable
-    # `body_verification` block are rendered from one determination, so a
-    # reader and a grader can never see different answers.
-    _, unverified = _body_inspected_and_unverified_counts(layout_circuit, deck)
 
     for device_class in sorted(unverified):
         count = unverified[device_class]
@@ -343,16 +314,12 @@ def _body_verification_unchecked(reason: str) -> dict[str, Any]:
     }
 
 
-def _body_verification_report(layout_circuit: Any, deck: Any) -> dict[str, Any]:
-    """The ``body_verification`` block for an inline-extraction compare
+def _body_verification_report(
+    inspected: dict[str, int], unverified: dict[str, int], deck: Any
+) -> dict[str, Any]:
+    """The ``body_verification`` block for a deck-backed comparison
     (issue #1983) -- the machine-checkable form of the
     ``device.body_unverified`` warning (issue #281).
-
-    Rendered from :func:`_body_inspected_and_unverified_counts`, the *same*
-    determination :func:`_body_net_warnings` renders its prose
-    ``mismatches[]`` entries from, so the warning a human reads and the
-    field a grader reads can never disagree about how many devices are
-    affected or which classes they belong to.
 
     Why this needs to exist at all, given the warning already did: a
     ``mismatches[]`` entry is not gradeable. Answering "were this layout's
@@ -382,7 +349,6 @@ def _body_verification_report(layout_circuit: Any, deck: Any) -> dict[str, Any]:
     left to the consumer (see ``docs/design-evidence-tiers.md`` item 7).
     """
 
-    inspected, unverified = _body_inspected_and_unverified_counts(layout_circuit, deck)
     inspected_count = sum(inspected.values())
     if not inspected:
         return _body_verification_unchecked(

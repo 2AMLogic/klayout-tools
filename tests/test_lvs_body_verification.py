@@ -218,8 +218,9 @@ def _mixed_arms_circuit():
         classes[name] = cls
     substrate = circuit.create_net("vsubs")
     named = circuit.create_net("VPB")
-    m1 = circuit.create_device(classes["nfet"], "M1")
+    # Encounter the flavoured class first so class ordering is observable.
     m2 = circuit.create_device(classes["nfet__nvt"], "M2")
+    m1 = circuit.create_device(classes["nfet"], "M1")
     m3 = circuit.create_device(classes["pfet"], "M3")
     m1.connect_terminal("B", substrate)
     m2.connect_terminal("B", substrate)
@@ -292,9 +293,7 @@ def test_body_unverified_message_names_unlabeled_tap_cause():
     from klayout_tools import lvs_body
 
     deck = _gf180mcu_like_deck()
-    _netlist, circuit = _one_device_circuit(body_net_name=None)
-
-    (entry,) = lvs_body._body_net_warnings(circuit, deck)
+    (entry,) = lvs_body._body_net_warnings({deck.pfet_class: 1}, deck)
     message = entry["description"]
     assert "no drawn or derived well-tap geometry exists" in message
     assert "carries no name label" in message
@@ -306,13 +305,7 @@ def test_body_unverified_message_nmos_names_both_causes():
     from klayout_tools import lvs_body
 
     deck = _gf180mcu_like_deck()
-    _netlist, circuit = _one_device_circuit(body_net_name="vsubs")
-    device = next(iter(circuit.each_device()))
-    # reuse the pfet-shaped stub as the deck's nfet class
-    deck.nfet_class = device.device_class().name
-    deck.pfet_class = "unused"
-
-    (entry,) = lvs_body._body_net_warnings(circuit, deck)
+    (entry,) = lvs_body._body_net_warnings({deck.nfet_class: 1}, deck)
     message = entry["description"]
     assert "no substrate-tap geometry is drawn" in message
     assert "carries no name label" in message
@@ -337,7 +330,7 @@ def test_body_check_inspects_flavoured_and_generic_arms_together():
     assert inspected == {"nfet": 1, "nfet__nvt": 1, "pfet": 1}
     assert unverified == {"nfet": 1, "nfet__nvt": 1}
 
-    report = lvs_body._body_verification_report(circuit, deck)
+    report = lvs_body._body_verification_report(inspected, unverified, deck)
     assert report["status"] == lvs.BODY_STATUS_UNVERIFIED
     assert report["device_classes"] == ["nfet", "nfet__nvt"]
     assert report["device_count"] == 2
@@ -347,11 +340,8 @@ def test_body_check_inspects_flavoured_and_generic_arms_together():
         {"class": "nfet__nvt", "device_count": 1},
     ]
 
-    warnings = {
-        entry["device"]["class"]: entry
-        for entry in lvs_body._body_net_warnings(circuit, deck)
-    }
-    assert set(warnings) == {"nfet", "nfet__nvt"}
+    warnings = lvs_body._body_net_warnings(unverified, deck)
+    assert [entry["device"]["class"] for entry in warnings] == ["nfet", "nfet__nvt"]
 
 
 def test_unchecked_block_always_carries_inspected_count_zero():

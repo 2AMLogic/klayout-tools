@@ -136,7 +136,9 @@ this document (and the code) win.
   report also carries `job_ceiling` -- the submit path's own whole-job
   ceiling assessment, under the `environment.remote.job_ceiling` name and
   shape, including `split` / `effective_hosts` when a split mode is active
-  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674)); the planned job count it
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674)) or when
+  `remote.hosts` / `--hosts` shards the request (the bound is then the largest
+  shard's, [#8011](https://github.com/2AMLogic/klayout-tools/issues/8011)); the planned job count it
   reports never redefines `hosts` (still the request's `remote.hosts`), and
   a `--format text` dry run prints a `batch plan:` line with the unit count
   and planned job count. `exclude` is a top-level request key, not a `corners` key: nested
@@ -1266,7 +1268,7 @@ fails before the simulator writes a report, inspect the per-corner
 | `batch.poll_timeout_s` | number ≥ 0 | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack -- or, when `batch.job_timeout_s` states the whole-job wall bound ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)), to that stated bound plus the same 1800s; `0` is accepted (give up on the first poll). On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). A negative, non-finite, non-numeric or `bool` value is rejected before any S3 write with `error.code: "batch_poll_knob_invalid"` ([#7543](https://github.com/2AMLogic/klayout-tools/issues/7543)). |
 | `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`, which also harvests the retained shard map; for the non-blocking form, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the batch image pointer's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
-| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot capacity, vCPU budget, or fleet concurrency-cap refusal ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.image_profile` | `"sim"` or `"simlong"` | Selects the fleet profile for this simulation. Omitting it or selecting `"sim"` preserves default job selection. With `"simlong"`, the fleet runs the sim image with its longer whole-job ceiling. The client requires `BATCH_SIMLONG_MAX_JOB_SECONDS` in the provision script’s adjacent `batch-fleet.env` and sends `image_profile` in every job. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then the selected profile’s fleet setting (`BATCH_SIMLONG_MAX_JOB_SECONDS` for `simlong`, otherwise `BATCH_MAX_JOB_SECONDS`) in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). A split reports `environment.remote` as a `fleet[]` array (one block per job, even with `remote.hosts: 1`) plus the top-level `job_ids` / `runner_compatibility` roll-ups, so per-job fields must be read from `fleet[]` -- see "Fleet sharding" below. Any other value is rejected before any S3 write. |
@@ -1274,6 +1276,10 @@ fails before the simulator writes a report, inspect the per-corner
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
 | `batch.job_timeout_s` | number > 0 | The caller's stated **whole-job wall bound** for one batch job ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)). A job's units run **concurrently** on the job instance, so covering per-unit contention means raising `options.timeout_s` -- and the serial bound formula (`options.timeout_s x units + 120`) then multiplies that inflated number by the unit count again. This key breaks that coupling: it replaces the serial bound everywhere it is used -- `job.json`'s `timeout_seconds` (the harness still clamps *down* to the fleet's ceiling, never up), the pre-submit ceiling assessment (`environment.remote.job_ceiling` then reports `basis: "caller_job_timeout"`; every field is defined by the stated bound -- see the field table in "Three budgets, and the fleet's whole-job ceiling"), and the default `batch.poll_timeout_s`. `options.timeout_s` keeps its single meaning, the per-unit engine timeout, and every shard of a split run carries the same stated bound. A stated bound that exceeds `max_job_seconds` behaves like any over-ceiling request (warn, or refuse under `"enforce"` / `"split"` -- splitting cannot help, because every shard would carry the same over-ceiling bound), and the warning names `batch.job_timeout_s` as the value to lower. **The trade-off is the bound's honesty**: a stated bound that turns out too low kills the whole job at that age, and units that had finished inside it are lost with it, exactly like a fleet-ceiling kill -- state the wall you actually want the job killed at. Rejected before any S3 write when not a positive, finite number (a `bool` is refused). Unset, everything is sized from the serial bound exactly as before. |
 | `batch.max_launch_attempts` | integer from 1 through 999,999,999 | Maximum paid launches per fleet job ID. Omit for unlimited launches. A limit of two permits the initial launch and one replacement, including an unattended replacement after the submitter exits. A refusal that starts no instance consumes zero attempts. |
+
+For batch corner and deck-list requests, `klt sim --dry-run --format json`
+reports an explicit per-job limit at `batch.max_launch_attempts`. It omits
+the field when the request omits the limit or uses another backend.
 
 For capped corner and deck-list jobs, `klt sim` uploads the limit in each
 `job.json` and asks the provisioner for a report-only launch before spending
@@ -1324,7 +1330,7 @@ collects:
 | `launched_at` | UTC time the launch returned |
 | `request_sha256` | Digest of the request document, to tie a later read back to it |
 | `unit_count` | Corners × Monte Carlo samples in the job (the number of `decks` for a deck-list request) |
-| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`); `null` for a deck-list request, which does not assess one |
+| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`), sized by the largest shard when `remote.hosts` / `--hosts` shards the request ([#8011](https://github.com/2AMLogic/klayout-tools/issues/8011)); `null` for a deck-list request, which does not assess one |
 
 Anything it cannot represent fails **before any S3 write** with
 `error.code: "submit_only_unsupported"`: a non-`batch` backend, `--resume`,
@@ -1609,24 +1615,17 @@ under `--format json`, an error envelope carrying a stable
 }
 ```
 
-A capacity refusal is a fleet-wide condition that usually clears within
-minutes, so the code marks it as **retryable**, unlike a request error.
-The same code also covers the provisioner's shared vCPU-budget refusal
-(`N vCPU already running + ... exceeds BATCH_MAX_VCPU=M ... the spot quota is
-shared with ci-spot`, [#4103](https://github.com/2AMLogic/klayout-tools/issues/4103)),
-so `--capacity-retries` and `batch.capacity_wait_s` wait it out too.
-The shared-fleet concurrency-cap refusal (`N instance(s) already running + 1
-requested exceeds BATCH_MAX_CONCURRENT_INSTANCES=M`,
-[#2917](https://github.com/2AMLogic/klayout-tools/issues/2917)) is the other
-transient case; it carries its own **`error.code: "batch_concurrency_cap"`**,
-so a caller can tell slot contention from a Spot shortage, and is retryable
-the same way. Every other launch failure (the diversification floors, a
-missing `job.json`, an IAM denial) carries no `error.code` and is never
-retried. The classification is a match on the provisioner's
-refusal text, because the script exits `1` for every refusal and exposes no
-distinct exit code; it lives in one helper
-(`sim_batch._classify_launch_failure`) so a wording change on the 2am side is
-a one-line fix here.
+A full [shared vCPU budget](https://github.com/2AMLogic/klayout-tools/issues/4103)
+(`BATCH_MAX_VCPU`) or a full profile slice such as `BATCH_SIMLONG_MAX_VCPU`
+produces provisioner exit `75` and client code `batch_no_capacity`. A refusal
+naming the [fleet instance cap](https://github.com/2AMLogic/klayout-tools/issues/2917)
+(`BATCH_MAX_CONCURRENT_INSTANCES`) keeps its own code, `batch_concurrency_cap`.
+Other exit-`75` launch refusals receive `batch_no_capacity` even if their
+wording changes. Both codes support the same retry options.
+
+The client also recognizes the Spot pool shortage message shown above and
+the older exit-`1` vCPU and concurrency refusal messages. Unrecognized
+exit-`1` failures stop immediately.
 
 `batch.capacity_wait_s` opts into waiting instead of failing. With a positive
 budget, a `batch_no_capacity` or `batch_concurrency_cap` refusal re-invokes `launch` for the **same
@@ -1804,7 +1803,10 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   Before anything is submitted, every member is resolved (with
   `--max-units-per-job` / `--max-concurrent-jobs` applied) and run through the
   same whole-job ceiling / split check a real submit does
-  (`batch_job_ceiling_exceeded`, `batch_max_units_per_job_invalid`). If any
+  (`batch_job_ceiling_exceeded`, `batch_max_units_per_job_invalid`). A member's
+  bound is its largest shard's, sized by its resolved `remote.hosts` (its own,
+  or `--hosts`; [#8011](https://github.com/2AMLogic/klayout-tools/issues/8011)).
+  If any
   member fails, nothing is submitted, no `set-manifest.json` is written, and the
   command exits `1` with error code `batch_set_preflight_failed` naming every
   failing member (path and code). Capacity refusals (`--capacity-retries`) can
@@ -2125,7 +2127,16 @@ job_bound_s = options.timeout_s × units + 120
 This assumes every unit uses its full `options.timeout_s`, one after another.
 It is derived from the request alone and is an upper bound, **not** a measured
 or predicted ngspice runtime. A job whose units finish quickly can run far
-below it. The bound is compared with `max_job_seconds`. A bound equal to the
+below it. A request that `remote.hosts` (or `--hosts`) shards is sized by its
+largest shard ([#8011](https://github.com/2AMLogic/klayout-tools/issues/8011)):
+`units` is `ceil(units / remote.hosts)`, the size of the biggest job the shard
+path submits, so `--dry-run`, the `--batch-set` preflight and `--submit-only`
+warn or refuse on the bound of *that* job, never on the whole request as one
+job. Three corners at `options.timeout_s: 1800` with `remote.hosts: 3` are
+three 1,920 s jobs and draw no warning against the 3600 s ceiling; with
+`remote.hosts: 2` the largest job holds two corners, is bound at 3,720 s, and
+is warned (or refused under `"enforce"`) with a recommendation of three hosts.
+The bound is compared with `max_job_seconds`. A bound equal to the
 ceiling passes. When the bound exceeds the ceiling:
 
 - under `batch.job_ceiling_check: "warn"` (the default), the client prints
@@ -2154,6 +2165,7 @@ field is additive:
 "job_ceiling": {
   "basis": "conservative_serial_bound",
   "unit_count": 63,
+  "job_unit_count": 63,
   "per_unit_timeout_s": 120,
   "overhead_s": 120.0,
   "job_bound_s": 7680.0,
@@ -2172,7 +2184,12 @@ field is additive:
 (the selected profile’s ceiling in `batch-fleet.env`), or `"default"` (`3600`,
 the value 2am's harness falls back to when the instance's `MaxJobSeconds`
 tag is absent). `warning` is present only when `exceeds_ceiling` is `true`.
-`recommended_hosts` is `null` when no `hosts` value fits.
+`recommended_hosts` is `null` when no `hosts` value fits. `unit_count` is
+always the request's total; `job_unit_count` is the number of units behind
+`job_bound_s` and the warning -- `ceil(unit_count / remote.hosts)`, so
+`unit_count` itself for a one-job request. When `remote.hosts` / `--hosts`
+shards the request, the assessment a dry run or `--submit-only` reports also
+carries `split: true` and `effective_hosts`, the number of jobs it runs as.
 
 The fleet sets the `simlong` ceiling to 7,200 seconds and the ordinary sim ceiling
 to 3,600 seconds. With one corner at `options.timeout_s: 4000`, the 4,120-second
@@ -2210,6 +2227,7 @@ every field defined by the stated bound, which is unit-count-independent:
 | `recommended_hosts` | `1` when the bound fits, `null` when it exceeds (no `hosts` value changes a per-job bound) |
 | `warning` | present only when `exceeds_ceiling`; names `batch.job_timeout_s` as the value to lower -- never more hosts, never a lower `options.timeout_s` |
 | `split`, `effective_hosts` | unchanged: added whenever a split mode is active |
+| `job_unit_count` | absent: the stated bound does not depend on how many units a shard holds, so `remote.hosts` changes nothing in this mode |
 
 Behavior under the check modes follows the same rules as the serial bound,
 with two consequences worth spelling out. When the stated bound fits, the
@@ -2248,8 +2266,11 @@ bound is `120 × 21 + 120 = 2640 s`, within the ceiling:
 
 `remote.hosts > 1` submits one independent job per shard and merges them in
 global unit order (see "Fleet sharding" below). An explicit `remote.hosts > 1`
-is honored as given: the check, and the split below, never apply to it, and its
-shards are not assessed. Each extra shard is one more
+is honored as given: the split below never applies to it, and a blocking
+submit launches its shards without a ceiling check. The assessments made
+before a submit -- `--dry-run`, the `--batch-set` preflight and
+`--submit-only` -- do assess it, by its largest shard ([#8011](https://github.com/2AMLogic/klayout-tools/issues/8011),
+under "Pre-submit check" above). Each extra shard is one more
 launch against the fleet's shared concurrency cap. Because the bound is
 conservative, a tighter `options.timeout_s` that still covers each unit (see
 "Timeout-budget preflight" below) often needs far fewer shards than a
@@ -3012,7 +3033,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). Regular ngspice batch captures include `binary_sha256` when the worker resolves the executable. It is a lowercase SHA-256 digest, or `null` if hashing failed. Older captures, unresolved executables, deck-list requests and Xyce requests omit the key. |
 | `ngspice_init` | Issue #6045. Corner-mode worker report's `{source, lines, sha256}`: path-free `source` is `request`, `thread_pin`, `home` or `none`; `lines` is retained only for klt-written `request`/`thread_pin` files, never home contents. Digest is `sha256:<hex>` (`null` for `none`). Missing/legacy, Xyce or malformed observations are `null`. Collected from the worker's simulation report after execution, independently of preflight `capture`, including recovered failed jobs and each fleet shard. Init lines are bounded to 256 entries, 2000 characters per entry and 32768 characters total including newlines; oversized content is rejected as `null`, never truncated beside its full-file digest. The client's `environment.ngspice_init.source` remains `runner`; SSH and deck-mode provenance are outside this field's scope. |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
-| `pdk` | `variant` is the requested PDK and `root` is the worker’s `$PDK_ROOT`. The worker probes `$PDK_ROOT/<variant>/SOURCES` for the revision stamp. It reports `stamp_scheme: "sources-sha256"`, the digest in `stamp_sha256`, and bounded text in `stamp_text`. If that file is unreadable, a bundle marker in the parent of the real path of `$PDK_ROOT/<variant>` can supply `stamp_scheme: "store-version-sha256"`, the SHA-256 of its version string, and `stamp_text: "store:<version>"`. Stamp fields are `null` when neither probe yields a revision. Under `options.stage_model_inputs`, `models_staged` is true and `stamp_scope` is `image` because the executed models came from the request. Otherwise `stamp_scope` is `executed`. The worker also reports `install` and `store_layout` for the PDK it discovers. |
+| `pdk` | `variant` is the requested PDK and `root` is the worker’s `$PDK_ROOT`. The worker probes `$PDK_ROOT/<variant>/SOURCES` for the revision stamp. It reports `stamp_scheme: "sources-sha256"`, the digest in `stamp_sha256`, and bounded text in `stamp_text`. If that file is unreadable, a bundle marker in the parent of the real path of `$PDK_ROOT/<variant>` can supply `stamp_scheme: "store-version-sha256"`, the SHA-256 of its version string, and `stamp_text: "store:<version>"`. Stamp fields are `null` when neither probe yields a revision. Under `options.stage_model_inputs`, `models_staged` is true. The worker reports `stamp_scope` as `image` when models are staged or when a deck’s `.include` or `.lib` closure stages one of that unit’s declared `inputs[]` (issue #7981). Otherwise `stamp_scope` is `executed`. The worker also reports `install` and `store_layout` for the PDK it discovers. |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
 | `omp_num_threads` | The worker's ambient `OMP_NUM_THREADS` at preflight, before klt launches ngspice. A successful capture reports `null` when unset. |
 | `threads_per_worker` | Positive integer launch pin from the worker's corner-mode simulation report. An unpinned run, missing report, legacy field omission or malformed value gives `null`. |
@@ -3223,6 +3244,14 @@ staged files than the bounded worker list). `client_stamp` carries the
 submitter's own `SOURCES` stamp (`variant`, `stamp_scheme`, `stamp_sha256`)
 when readable, so a caller can pin the PDK revision. klt does not fail the run
 on a mismatch; the caller decides.
+A deck-list job that reads a declared input reports `stamp_scope: "image"`
+with `models_staged: false` (issue #7981). The scope alone does not switch
+`pdk_stamp_comparison` to the digest basis -- only `options.stage_model_inputs`
+does, on corner-mode runs -- so a deck job's comparison still compares the
+worker image's stamp with the submitter's local PDK stamp. To confirm the bytes
+a deck unit ran, read the `key.inputs` and `key.includes` hashes in its
+`<outdir>/<id>/unit.json`, which cover every declared input and staged include
+by unit-relative name.
 The text summary prints `pdk_stamp: <status> (<reason>)` (plus the `mismatch`
 warning) and `models_staged: <bool>` for batch runs; set
 `options.stage_model_inputs` to execute the submitter's model files
@@ -12100,11 +12129,13 @@ version. `klt sim --check <report>` diagnoses exactly this case — every raw
 
 ## Peak memory and timeout progress (issue #4867)
 
-Each unit report gains an optional, additive `peak_rss_bytes` (engine peak
-resident set size). It is best effort, read from the harness's
-`RUSAGE_CHILDREN` high-water mark, so it appears only when this unit raised
-that mark; it is omitted (never `null`) when it cannot be attributed, e.g. a
-unit beside a larger sibling, or a platform without `resource`.
+Each unit report includes `runtime_s`. On platforms with `resource`, a unit
+that runs alone and raises the harness's `RUSAGE_CHILDREN` high-water mark
+also reports `peak_rss_bytes` (engine peak resident set size). Local workers
+and local shards share that mark. When a dispatch can run multiple corners
+at once, every corner omits `peak_rss_bytes` from its checkpoint and final
+report. A single corner or a sweep limited to one corner at a time can still
+report the estimate.
 
 **Simulated-time-reached on timeout is not available.** Measured on
 ngspice 46 in `-b` mode: no periodic progress output is emitted to the log or

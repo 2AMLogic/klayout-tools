@@ -6,8 +6,62 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+## Entries
+
+### 2026-11-27
+
+- **PR #8017**: feat: record sky130A synthesis counts for four pinned tt06 designs
+- **PR #7977**: fix(sim): retry temporary fleet capacity exits across profiles
+- **PR #8009**: refactor(sta): share literal constraint name validation
+- **PR #8006**: docs: shorten the PEX module introduction
+- **PR #7997**: Prepare waveform annotations once per plotted simulation
+- **PR #8004**: refactor: handle a cancelled probe before local corner scheduling
+- **PR #7999**: Report image stamp scope for batch decks that read declared model inputs
+- **PR #8002**: Document how sizing consumes the design-centering ranking
+- **PR #8001**: perf(sim): reuse graded groups for derived coverage
+- **PR #7964**: fix(drc): split gf180mcu nplus.enclosing.comp.1 by Nwell depth
+- **PR #7995**: perf: build the derive rollup's observed axis set once per group
+- **PR #7994**: fix(drc): subtract SRAMCORE from gf180mcu CO.3's contact operand
+- **PR #7990**: docs(sim): document the closure-only deck shape stamp_scope does not flag
+- **PR #7988**: docs: guide shared-worker Loom resyncs with the user-scope opt-out
+- **Issue #8012** (closed): [Epic #520] Measure baseline cell counts for pinned Tiny Tapeout designs
+- **Issue #7975** (closed): Profile-slice vCPU refusals (exit 75) are not classified as retryable capacity
+- **Issue #8008** (closed): Share STA constraint name-list validation across false_path_from, report_ports, and report_instances
+- **Issue #8005** (closed): Shorten the PEX module docstring and point callers to the CLI guide
+- **Issue #7978** (closed): Prepare waveform plot annotations once per simulation
+- **Issue #8003** (closed): Handle a probe-cancelled sweep before local corner scheduling
+- **Issue #7981** (closed): klt sim decks[]: worker_environment.pdk reports stamp_scope "executed" when the deck's model files were client-staged inputs
+- **Issue #7998** (closed): Condense the design-centering docs and correct the sizing integration limitation
+- **Issue #7996** (closed): Reuse graded simulation groups when building derived measurement coverage
+- **Issue #7955** (closed): GF180 Nplus enclosure flags an 80 nm tap extension deep inside Nwell
+- **Issue #7993** (closed): Build the observed axis set once per derived measurement group
+- **Issue #7960** (closed): GF180 CO.3 flags poly2 contacts inside SRAMCORE
+- **Issue #7985** (closed): klt sim decks[]: stamp_scope still reports "executed" when a staged include not declared in inputs[] supplies the models
+- **Issue #7984** (closed): Document the user-scope opt-out for Loom resyncs on shared workers
+- **PR #7976**: refactor(sim): resolve model paths without loading the runner
+- **PR #7971**: docs: record the full GF180 Tiny Tapeout corpus run on Spot
+- **Issue #7973** (closed): Resolve model-library paths without importing the simulation runner
+
 ### 2026-11-26
 
+- **PR #7972**: fix(artifact): create missing parent directories for get output
+- **PR #7968**: fix: stream config tiers to jq on stdin to avoid argv limit
+- **PR #7965**: feat: add binary digest result to engine_build_comparison
+- **PR #7963**: fix: reject gen-compose routes on non-metal layers to metal pins
+- **PR #7961**: fix(drc): subtract SRAMCORE from gf180mcu CO.4's contact operand
+- **PR #7958**: refactor: share one deck_vars validator between the runset engines
+- **PR #7951**: feat: verify per-job paid launch limits before batch simulation
+- **PR #7929**: Keep the ordered Xyce request checks in the refusal module
+- **PR #6254**: fix: kill the openroad docker container when the wrapper dies; record launch-time engine evidence
+- **Issue #7967** (closed): klt artifact get: -o under a missing parent directory fails with a raw FileNotFoundError traceback
+- **Issue #7966** (closed): create-pr.sh aborts with exit 126 when the host's private Loom defaults exceed 128 KiB (config-resolver passes a tier as one jq --argjson argument)
+- **Issue #7959** (closed): klt sim batch report: engine_build_comparison reads match while the worker and client ngspice digests differ
+- **Issue #7957** (closed): gen-compose can report an uncontacted poly backbone as routed to metal terminals
+- **Issue #7954** (closed): GF180 CO.4 flags contacts inside SRAMCORE
+- **Issue #7952** (closed): Share JSON deck_vars validation between the LVS and extraction runset engines
+- **Issue #7950** (closed): Carry a paid launch-attempt limit into klt sim batch job contracts
+- **Issue #7928** (closed): Consolidate the Xyce request gate in the existing refusal module
+- **Issue #5726** (closed): openroad docker wrapper leaks the container when klt is killed, so an orphaned route writes unattributable artefacts into the caller's repo hours later
 - **PR #7949**: fix: preserve independent root clocks through place and route
 - **PR #7948**: fix: share batch approval validation and reject rooted generator paths
 - **PR #7944**: Check substrate ties derived from sparse drawn wells
@@ -5297,13 +5351,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #2580** (closed): gen: mos_array draws no source/drain implant on ihp-sg13g2, and no rule or hint reports the omission
 - **Issue #2577** (closed): klt gen --help still says every generator but resistor_strip is sky130/gf180mcu-only, and that an 'other' family is an application error — sg13g2 invocations succeed
 - **Issue #2560** (closed): klt pdk stackup: substrate entry lacks resistivity/thickness fields
-
-### 2026-09-27
-
-- **PR #2566**: fix(sim): case-fold spice-form measurement name lookup for ngspice
-- **PR #2548**: fix(loom): unpin merge-pr.sh/forge-helpers.sh so repo-aware merge-method detection lands
-- **Issue #2557** (closed): [curator probe, safe to close] testing cross-repo issue-filing access from gf180-parasynth Curator session
-- **Issue #2546** (closed): bug: an upper- or mixed-case measurements[].spice name never harvests, because ngspice lower-cases the .meas name in its own report
-- **Issue #2543** (closed): merge-pr.sh hardcodes squash merge; fails on repos with squash disabled (klayout-tools)
-- **Issue #2498** (closed): klt characterize: no verb emits a Liberty model from SPICE — the last stage of a cell flow with no open answer
 

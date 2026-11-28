@@ -374,19 +374,6 @@ def test_attribute_to_instance_straddling_and_top_level_are_null():
 # ---------------------------------------------------------------------------
 
 
-def _sky130_deck_layer_tuples() -> set[tuple[int, int]]:
-    tuples: set[tuple[int, int]] = set()
-    for rule in get_deck("sky130"):
-        tuples.add(rule.layer)
-        if rule.other_layer is not None:
-            tuples.add(rule.other_layer)
-    return tuples
-
-
-def _fmt_layer(layer_tuple: tuple[int, int]) -> str:
-    return f"{layer_tuple[0]}/{layer_tuple[1]}"
-
-
 def test_run_drc_coverage_empty_for_layout_using_only_covered_layers(tmp_path):
     """A layout drawn entirely on a layer the sky130 deck has rules for
     reports an empty `layers_in_stream_without_rules` -- nothing was drawn
@@ -442,28 +429,6 @@ def test_run_drc_coverage_rules_skipped_matches_absent_layers(tmp_path):
     assert report["coverage"]["rules_skipped"] == expected_skipped
 
 
-def test_run_drc_coverage_empty_stream(tmp_path):
-    """A layout with no layers registered at all (degenerate empty stream)
-    has empty `layers_checked` and `layers_in_stream_without_rules`, and
-    does not raise -- every deck rule is skipped."""
-    layout = kdb.Layout()
-    layout.create_cell("TOP")
-    path = tmp_path / "empty.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sky130")
-
-    assert report["status"] == "not_checked"
-    assert report["coverage"]["layers_checked"] == []
-    assert report["coverage"]["layers_in_stream_without_rules"] == []
-    assert set(report["coverage"]["deck_layers"]) == {
-        _fmt_layer(t) for t in _sky130_deck_layer_tuples()
-    }
-    assert report["coverage"]["rules_skipped"] == sorted(
-        rule.id for rule in get_deck("sky130")
-    )
-
-
 def test_run_drc_coverage_empty_stream_reports_nothing_checked(tmp_path):
     """Known zero work is explicit and non-successful even without violations."""
     layout = kdb.Layout()
@@ -496,30 +461,6 @@ def test_run_drc_coverage_rules_checked_is_the_complement_of_rules_skipped(tmp_p
     assert set(checked) | set(skipped) == {rule.id for rule in get_deck("sky130")}
     assert report["coverage"]["nothing_checked"] is False
     assert report["coverage"]["nothing_checked_reasons"] == []
-
-
-def test_run_drc_coverage_fully_covered_stream(tmp_path):
-    """A layout drawing a shape on every layer the sky130 deck's rules
-    reference reports `layers_checked` == `deck_layers`, an empty
-    `layers_in_stream_without_rules`, and no rules skipped."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    # A GDS write drops layers with no shapes (empty layers do not round-trip
-    # through the stream format), so every deck layer needs at least one
-    # shape to be findable via `Layout.find_layer(...)` after re-reading.
-    for layer_num, datatype in _sky130_deck_layer_tuples():
-        layer_index = layout.layer(layer_num, datatype)
-        top.shapes(layer_index).insert(kdb.Box(0, 0, 10, 10))
-    path = tmp_path / "fully_covered.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sky130")
-
-    assert report["coverage"]["layers_in_stream_without_rules"] == []
-    assert set(report["coverage"]["layers_checked"]) == set(
-        report["coverage"]["deck_layers"]
-    )
-    assert report["coverage"]["rules_skipped"] == []
 
 
 def test_run_drc_coverage_deck_scope_matches_sky130_rule_scopes(tmp_path):
@@ -3368,7 +3309,7 @@ def test_run_drc_sky130_tap_enclosing_licon_escaped_cut_violation(tmp_path):
         tmp_path,
         "tap_enclosing_licon_violation",
         [kdb.Box(0, 0, 2000, 1000)],  # tap ring segment
-        [kdb.Box(1900, 400, 2100, 600)],  # cut hangs 100 dbu out the right edge
+        [kdb.Box(1930, 400, 2100, 570)],  # 170 dbu cut hangs 100 dbu out the right edge
     )
 
     report = run_drc(str(path), "sky130")
@@ -3391,7 +3332,7 @@ def test_run_drc_sky130_tap_enclosing_licon_clean(tmp_path):
         tmp_path,
         "tap_enclosing_licon_clean",
         [kdb.Box(0, 0, 2000, 1000)],  # tap ring segment
-        [kdb.Box(400, 400, 600, 600)],  # 400 dbu clear of every tap edge
+        [kdb.Box(400, 400, 570, 570)],  # 170 dbu cut, clear of every tap edge
     )
 
     report = run_drc(str(path), "sky130")

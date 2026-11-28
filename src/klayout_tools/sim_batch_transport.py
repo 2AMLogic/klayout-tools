@@ -80,15 +80,15 @@ _VCPU_BUDGET_MARKER = "exceeds BATCH_MAX_VCPU"
 
 
 def _classify_launch_failure(stderr: str, returncode: int) -> str | None:
-    """Exit 76 means the fleet recorded terminal launch exhaustion. Capacity
-    and concurrency refusals use stderr markers across provisioner versions."""
+    """Exit 76 is terminal. Known refusals keep their stderr-based codes,
+    and exit 75 covers temporary capacity refusals with unfamiliar wording."""
     if returncode == 76:
         return LAUNCH_LIMIT_EXHAUSTED
     if _CAPACITY_REFUSAL_MARKER in stderr:
         return BATCH_NO_CAPACITY_CODE
     if _CONCURRENCY_CAP_MARKER in stderr:
         return BATCH_CONCURRENCY_CAP_CODE
-    if _VCPU_BUDGET_MARKER in stderr:
+    if _VCPU_BUDGET_MARKER in stderr or returncode == 75:
         return BATCH_NO_CAPACITY_CODE
     return None
 

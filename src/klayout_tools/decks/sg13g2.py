@@ -469,6 +469,8 @@ diffed sky130's compiled deck against ``sky130.lvs``.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from . import (
     CapacitorDevice,
     DerivedLayer,
@@ -563,6 +565,103 @@ def _sg13g2_mom_provenance(source_file: str, rule_id: str) -> RuleProvenance:
 _FEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/feol"
 _MAXIMAL_RUNSET = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_maximal.drc"
 _BEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/beol"
+
+# IHP sections 5.16 and 5.17 use sg13g2_tech_default.json keys M1_a/M1_b
+# and Mn_a/Mn_b. Stack level -> (drawing layer, width DBU, spacing DBU, source).
+_ROUTING_METAL_ROWS = {
+    1: ((8, 0), 160, 180, "5_16_metal1.drc"),
+    2: ((10, 0), 200, 210, "5_17_metaln.drc"),
+    3: ((30, 0), 200, 210, "5_17_metaln.drc"),
+    4: ((50, 0), 200, 210, "5_17_metaln.drc"),
+    5: ((67, 0), 200, 210, "5_17_metaln.drc"),
+}
+
+# Sections 5.19 and 5.20 use V1_a/V1_b/V1_c and Vn_a/Vn_b/Vn_c.
+# Lower metal level -> (via drawing layer, lower enclosure DBU, source).
+_INTERMETAL_VIA_ROWS = {
+    1: ((19, 0), 10, "5_19_via1.drc"),
+    2: ((29, 0), 5, "5_20_vian.drc"),
+    3: ((49, 0), 5, "5_20_vian.drc"),
+    4: ((66, 0), 5, "5_20_vian.drc"),
+}
+
+
+def _sg13g2_routing_beol_rules() -> Iterator[DrcRule]:
+    """Emit each routing metal's rules followed by the via to the next metal."""
+    for level, (metal_layer, width, space, metal_file) in _ROUTING_METAL_ROWS.items():
+        metal_scope = f"M{level}"
+        metal_source = f"{_BEOL}/{metal_file}"
+        yield DrcRule(
+            id=f"metal{level}.width.1",
+            description=f"minimum Metal{level} width",
+            layer=metal_layer,
+            check="width",
+            threshold_dbu=width,
+            scope=metal_scope,
+            provenance=_sg13g2_drc_provenance(metal_source, f"{metal_scope}.a"),
+        )
+        yield DrcRule(
+            id=f"metal{level}.space.1",
+            description=f"minimum Metal{level} space or notch",
+            layer=metal_layer,
+            check="space",
+            threshold_dbu=space,
+            scope=metal_scope,
+            provenance=_sg13g2_drc_provenance(metal_source, f"{metal_scope}.b"),
+        )
+
+        if level not in _INTERMETAL_VIA_ROWS:
+            continue
+        via_layer, lower_enclosure, via_file = _INTERMETAL_VIA_ROWS[level]
+        via_scope = f"V{level}"
+        via_source = f"{_BEOL}/{via_file}"
+        yield DrcRule(
+            id=f"via{level}.width.1",
+            description=f"min/max Via{level} size (fixed 0.19 x 0.19 um square)",
+            layer=via_layer,
+            check="width",
+            threshold_dbu=190,
+            threshold_max_dbu=190,  # #2388: enforce both bounds of the fixed size
+            scope=via_scope,
+            provenance=_sg13g2_drc_provenance(via_source, f"{via_scope}.a"),
+        )
+        yield DrcRule(
+            id=f"via{level}.space.1",
+            description=f"minimum Via{level} spacing",
+            layer=via_layer,
+            check="space",
+            threshold_dbu=220,
+            scope=via_scope,
+            provenance=_sg13g2_drc_provenance(via_source, f"{via_scope}.b"),
+        )
+        yield DrcRule(
+            id=f"metal{level}.enclosing.via{level}.1",
+            description=f"minimum Metal{level} enclosure of Via{level}",
+            layer=metal_layer,
+            other_layer=via_layer,
+            check="enclosing",
+            threshold_dbu=lower_enclosure,
+            require_containment=True,
+            scope=via_scope,
+            provenance=_sg13g2_drc_provenance(via_source, f"{via_scope}.c"),
+        )
+        # Each cut also lands on the upper metal (#2726, #5916). Upstream gives
+        # a lower enclosure margin. The zero-margin upper containment is curated.
+        upper_level = level + 1
+        yield DrcRule(
+            id=f"metal{upper_level}.enclosing.via{level}.1",
+            description=(
+                f"every Via{level} must lie fully inside Metal{upper_level} "
+                "(upper landing)"
+            ),
+            layer=_ROUTING_METAL_ROWS[upper_level][0],
+            other_layer=via_layer,
+            check="enclosing",
+            threshold_dbu=0,
+            require_containment=True,
+            scope=f"Via{level} upper-landing containment (curated)",
+        )
+
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), matching sky130.py/gf180mcu.py's own
@@ -1142,381 +1241,7 @@ DECK: list[DrcRule] = [
         # transcribed, but a contact bar lands inside Metal1 like a square.
         scope="Cont upper-landing containment (curated)",
     ),
-    # --- 5.16 Metal1 (beol/5_16_metal1.drc) ---------------------------
-    DrcRule(
-        id="metal1.width.1",
-        description="minimum Metal1 width",
-        layer=(8, 0),  # Metal1.drawing
-        check="width",
-        threshold_dbu=160,  # 0.16 um
-        # 5_16_metal1.drc rule "M1.a": metal1_drw.width(0.16um, euclidian)
-        # -> "5.16. M1.a: Min. Metal1 width: 0.16 um."
-        # (sg13g2_tech_default.json: drc_rules.M1_a == 0.16)
-        scope="M1",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_16_metal1.drc", "M1.a"),
-    ),
-    DrcRule(
-        id="metal1.space.1",
-        description="minimum Metal1 space or notch",
-        layer=(8, 0),  # Metal1.drawing
-        check="space",
-        threshold_dbu=180,  # 0.18 um
-        # 5_16_metal1.drc rule "M1.b": metal1_drw.space(0.18um, euclidian)
-        # -> "5.16. M1.b: Min. Metal1 space or notch: 0.18 um."
-        # (sg13g2_tech_default.json: drc_rules.M1_b == 0.18)
-        scope="M1",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_16_metal1.drc", "M1.b"),
-    ),
-    # --- 5.19 Via1 (beol/5_19_via1.drc) --------------------------------
-    DrcRule(
-        id="via1.width.1",
-        description="min/max Via1 size (fixed 0.19 x 0.19 um square)",
-        layer=(19, 0),  # Via1.drawing
-        check="width",
-        threshold_dbu=190,  # 0.19 um
-        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
-        # 5_19_via1.drc rule "V1.a": via1_nseal.without_bbox_min/max(0.19um)
-        # -> "5.19. V1.a : Min. and max. Via1 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.V1_a == 0.19).
-        # Both halves enforced (issue #2388, after the #2585 generator clamp);
-        # see cont.width.1 above for the min/max-half mechanics.
-        scope="V1",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_19_via1.drc", "V1.a"),
-    ),
-    DrcRule(
-        id="via1.space.1",
-        description="minimum Via1 spacing",
-        layer=(19, 0),  # Via1.drawing
-        check="space",
-        threshold_dbu=220,  # 0.22 um
-        # 5_19_via1.drc rule "V1.b": via1_nseal.space(0.22um, euclidian)
-        # -> "5.19. V1.b : Min. Via1 space: 0.22 um"
-        # (sg13g2_tech_default.json: drc_rules.V1_b == 0.22)
-        scope="V1",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_19_via1.drc", "V1.b"),
-    ),
-    DrcRule(
-        id="metal1.enclosing.via1.1",
-        description="minimum Metal1 enclosure of Via1",
-        layer=(8, 0),  # Metal1.drawing
-        other_layer=(19, 0),  # Via1.drawing
-        check="enclosing",
-        require_containment=True,  # #2726: every cut must land on this conductor
-        threshold_dbu=10,  # 0.01 um
-        # 5_19_via1.drc rule "V1.c": via1_nseal.enclosed(metal1_drw, 0.01um,
-        # euclidian) -> "5.19. V1.c : Min. Metal1 enclosure of Via1 is 0.01 um"
-        # (sg13g2_tech_default.json: drc_rules.V1_c == 0.01)
-        scope="V1",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_19_via1.drc", "V1.c"),
-    ),
-    DrcRule(
-        id="metal2.enclosing.via1.1",
-        description="every Via1 must lie fully inside Metal2 (upper landing)",
-        layer=(10, 0),  # Metal2.drawing
-        other_layer=(19, 0),  # Via1.drawing
-        check="enclosing",
-        threshold_dbu=0,  # pure geometric containment, no margin
-        require_containment=True,
-        # Curated topology assertion (#2726, #5916): a Via1 cut connects
-        # Metal1 to Metal2, so it must always sit on both; no upstream
-        # Metal2-side margin was verified, so none is invented.
-        scope="Via1 upper-landing containment (curated)",
-    ),
-    # --- 5.17 Metaln, Metal2 instance (beol/5_17_metaln.drc) -----------
-    DrcRule(
-        id="metal2.width.1",
-        description="minimum Metal2 width",
-        layer=(10, 0),  # Metal2.drawing
-        check="width",
-        threshold_dbu=200,  # 0.20 um
-        # 5_17_metaln.drc rule "M2.a" (met_no=2 instance of the templated
-        # "Mn.a" rule): metal2_drw.width(0.20um, euclidian)
-        # -> "5.17. M2.a: Min. Metal2 width: 0.20 um."
-        # (sg13g2_tech_default.json: drc_rules.Mn_a == 0.2, shared by every
-        # Metal2-Metal5 level)
-        scope="M2",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M2.a"),
-    ),
-    DrcRule(
-        id="metal2.space.1",
-        description="minimum Metal2 space or notch",
-        layer=(10, 0),  # Metal2.drawing
-        check="space",
-        threshold_dbu=210,  # 0.21 um
-        # 5_17_metaln.drc rule "M2.b": metal2_drw.space(0.21um, euclidian)
-        # -> "5.17. M2.b: Min. Metal2 space or notch: 0.21 um."
-        # (sg13g2_tech_default.json: drc_rules.Mn_b == 0.21)
-        scope="M2",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M2.b"),
-    ),
-    # --- 5.20 Vian, Via2 instance (beol/5_20_vian.drc) ------------------
-    DrcRule(
-        id="via2.width.1",
-        description="min/max Via2 size (fixed 0.19 x 0.19 um square)",
-        layer=(29, 0),  # Via2.drawing
-        check="width",
-        threshold_dbu=190,  # 0.19 um
-        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
-        # 5_20_vian.drc rule "V2.a" (via_no=2 instance of the templated
-        # "Vn.a" rule): via2_nseal.without_bbox_min/max(0.19um)
-        # -> "5.20. V2.a : Min. and max. Via2 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19, shared by
-        # Via2-Via4)
-        # Both halves enforced (issue #2388, after the #2585 generator clamp);
-        # see cont.width.1 above for the min/max-half mechanics.
-        scope="V2",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.a"),
-    ),
-    DrcRule(
-        id="via2.space.1",
-        description="minimum Via2 spacing",
-        layer=(29, 0),  # Via2.drawing
-        check="space",
-        threshold_dbu=220,  # 0.22 um
-        # 5_20_vian.drc rule "V2.b": via2_nseal.space(0.22um, euclidian)
-        # -> "5.20. V2.b : Min. Via2 space: 0.22 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_b == 0.22)
-        scope="V2",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.b"),
-    ),
-    DrcRule(
-        id="metal2.enclosing.via2.1",
-        description="minimum Metal2 enclosure of Via2",
-        layer=(10, 0),  # Metal2.drawing
-        other_layer=(29, 0),  # Via2.drawing
-        check="enclosing",
-        require_containment=True,  # #2726: every cut must land on this conductor
-        threshold_dbu=5,  # 0.005 um
-        # 5_20_vian.drc rule "V2.c": via2_nseal.enclosed(metal2_drw, 0.005um,
-        # euclidian) -> "5.20. V2.c : Min. Metal2 enclosure of Via2 is 0.005 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
-        scope="V2",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.c"),
-    ),
-    DrcRule(
-        id="metal3.enclosing.via2.1",
-        description="every Via2 must lie fully inside Metal3 (upper landing)",
-        layer=(30, 0),  # Metal3.drawing
-        other_layer=(29, 0),  # Via2.drawing
-        check="enclosing",
-        threshold_dbu=0,  # pure geometric containment, no margin
-        require_containment=True,
-        # Curated topology assertion (#2726, #5916): a Via2 cut connects
-        # Metal2 to Metal3, so it must always sit on both; no upstream
-        # Metal3-side margin was verified, so none is invented.
-        scope="Via2 upper-landing containment (curated)",
-    ),
-    # --- 5.17 Metaln, Metal3 instance (beol/5_17_metaln.drc) -----------
-    # Issue #1243: extending the connectivity/DRC stack past Metal2, up
-    # through Metal5/TopMetal1/TopMetal2 -- the prerequisite #1233 (MIM
-    # capacitors) and #1235 (metal resistors) both block on (see the module
-    # docstring's own "MIM capacitors" section). `metaln.drc`'s templated
-    # "Mn.a"/"Mn.b" rule iterates `mets_lay = [metal2_drw, metal3_drw,
-    # metal4_drw, metal5_drw]` from `metal_start_index = 2` -- Metal2's own
-    # instance is transcribed above; Metal3/Metal4/Metal5 below share the
-    # identical `Mn_a`/`Mn_b` JSON-table values (0.20/0.21 um) that
-    # `metal2.width.1`/`metal2.space.1` already cite.
-    DrcRule(
-        id="metal3.width.1",
-        description="minimum Metal3 width",
-        layer=(30, 0),  # Metal3.drawing
-        check="width",
-        threshold_dbu=200,  # 0.20 um
-        # 5_17_metaln.drc rule "M3.a" (met_no=3 instance of "Mn.a"):
-        # metal3_drw.width(0.20um, euclidian)
-        # -> "5.17. M3.a: Min. Metal3 width: 0.20 um."
-        # (sg13g2_tech_default.json: drc_rules.Mn_a == 0.2)
-        scope="M3",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M3.a"),
-    ),
-    DrcRule(
-        id="metal3.space.1",
-        description="minimum Metal3 space or notch",
-        layer=(30, 0),  # Metal3.drawing
-        check="space",
-        threshold_dbu=210,  # 0.21 um
-        # 5_17_metaln.drc rule "M3.b": metal3_drw.space(0.21um, euclidian)
-        # -> "5.17. M3.b: Min. Metal3 space or notch: 0.21 um."
-        # (sg13g2_tech_default.json: drc_rules.Mn_b == 0.21)
-        scope="M3",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M3.b"),
-    ),
-    # --- 5.20 Vian, Via3 instance (beol/5_20_vian.drc) ------------------
-    # `vian.drc`'s templated table iterates `vias_lay = [via2_drw, via3_drw,
-    # via4_drw]` zipped with `metals_lay = [metal2_drw, metal3_drw,
-    # metal4_drw]` from `via_start_index = 2` -- so Via3's own "Vn.c"
-    # enclosure instance checks against **Metal3** (the metal *below* it,
-    # the same "enclosure checked against the lower metal only" convention
-    # `via1.width.1`'s docstring documents; Via3 physically also lands on
-    # Metal4 above, but the upstream rule only constrains the landing pad
-    # below it, exactly like Via1/Via2 above).
-    DrcRule(
-        id="via3.width.1",
-        description="min/max Via3 size (fixed 0.19 x 0.19 um square)",
-        layer=(49, 0),  # Via3.drawing
-        check="width",
-        threshold_dbu=190,  # 0.19 um
-        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
-        # 5_20_vian.drc rule "V3.a" (via_no=3 instance of "Vn.a"):
-        # via3_nseal.without_bbox_min/max(0.19um)
-        # -> "5.20. V3.a : Min. and max. Via3 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19).
-        # Both halves enforced (issue #2388, after the #2585 generator clamp);
-        # see cont.width.1 above for the min/max-half mechanics.
-        scope="V3",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.a"),
-    ),
-    DrcRule(
-        id="via3.space.1",
-        description="minimum Via3 spacing",
-        layer=(49, 0),  # Via3.drawing
-        check="space",
-        threshold_dbu=220,  # 0.22 um
-        # 5_20_vian.drc rule "V3.b": via3_nseal.space(0.22um, euclidian)
-        # -> "5.20. V3.b : Min. Via3 space: 0.22 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_b == 0.22)
-        scope="V3",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.b"),
-    ),
-    DrcRule(
-        id="metal3.enclosing.via3.1",
-        description="minimum Metal3 enclosure of Via3",
-        layer=(30, 0),  # Metal3.drawing
-        other_layer=(49, 0),  # Via3.drawing
-        check="enclosing",
-        require_containment=True,  # #2726: every cut must land on this conductor
-        threshold_dbu=5,  # 0.005 um
-        # 5_20_vian.drc rule "V3.c": via3_nseal.enclosed(metal3_drw, 0.005um,
-        # euclidian) -> "5.20. V3.c : Min. Metal3 enclosure of Via3 is 0.005 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
-        scope="V3",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.c"),
-    ),
-    DrcRule(
-        id="metal4.enclosing.via3.1",
-        description="every Via3 must lie fully inside Metal4 (upper landing)",
-        layer=(50, 0),  # Metal4.drawing
-        other_layer=(49, 0),  # Via3.drawing
-        check="enclosing",
-        threshold_dbu=0,  # pure geometric containment, no margin
-        require_containment=True,
-        # Curated topology assertion (#2726, #5916): a Via3 cut connects
-        # Metal3 to Metal4, so it must always sit on both; no upstream
-        # Metal4-side margin was verified, so none is invented.
-        scope="Via3 upper-landing containment (curated)",
-    ),
-    # --- 5.17 Metaln, Metal4 instance (beol/5_17_metaln.drc) -----------
-    DrcRule(
-        id="metal4.width.1",
-        description="minimum Metal4 width",
-        layer=(50, 0),  # Metal4.drawing
-        check="width",
-        threshold_dbu=200,  # 0.20 um
-        # 5_17_metaln.drc rule "M4.a" (met_no=4 instance of "Mn.a"):
-        # metal4_drw.width(0.20um, euclidian)
-        # -> "5.17. M4.a: Min. Metal4 width: 0.20 um."
-        # (sg13g2_tech_default.json: drc_rules.Mn_a == 0.2)
-        scope="M4",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M4.a"),
-    ),
-    DrcRule(
-        id="metal4.space.1",
-        description="minimum Metal4 space or notch",
-        layer=(50, 0),  # Metal4.drawing
-        check="space",
-        threshold_dbu=210,  # 0.21 um
-        # 5_17_metaln.drc rule "M4.b": metal4_drw.space(0.21um, euclidian)
-        # -> "5.17. M4.b: Min. Metal4 space or notch: 0.21 um."
-        # (sg13g2_tech_default.json: drc_rules.Mn_b == 0.21)
-        scope="M4",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M4.b"),
-    ),
-    # --- 5.20 Vian, Via4 instance (beol/5_20_vian.drc) ------------------
-    DrcRule(
-        id="via4.width.1",
-        description="min/max Via4 size (fixed 0.19 x 0.19 um square)",
-        layer=(66, 0),  # Via4.drawing
-        check="width",
-        threshold_dbu=190,  # 0.19 um
-        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
-        # 5_20_vian.drc rule "V4.a" (via_no=4 instance of "Vn.a"):
-        # via4_nseal.without_bbox_min/max(0.19um)
-        # -> "5.20. V4.a : Min. and max. Via4 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19).
-        # Both halves enforced (issue #2388, after the #2585 generator clamp);
-        # see cont.width.1 above for the min/max-half mechanics.
-        scope="V4",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.a"),
-    ),
-    DrcRule(
-        id="via4.space.1",
-        description="minimum Via4 spacing",
-        layer=(66, 0),  # Via4.drawing
-        check="space",
-        threshold_dbu=220,  # 0.22 um
-        # 5_20_vian.drc rule "V4.b": via4_nseal.space(0.22um, euclidian)
-        # -> "5.20. V4.b : Min. Via4 space: 0.22 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_b == 0.22)
-        scope="V4",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.b"),
-    ),
-    DrcRule(
-        id="metal4.enclosing.via4.1",
-        description="minimum Metal4 enclosure of Via4",
-        layer=(50, 0),  # Metal4.drawing
-        other_layer=(66, 0),  # Via4.drawing
-        check="enclosing",
-        require_containment=True,  # #2726: every cut must land on this conductor
-        threshold_dbu=5,  # 0.005 um
-        # 5_20_vian.drc rule "V4.c": via4_nseal.enclosed(metal4_drw, 0.005um,
-        # euclidian) -> "5.20. V4.c : Min. Metal4 enclosure of Via4 is 0.005 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
-        scope="V4",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.c"),
-    ),
-    DrcRule(
-        id="metal5.enclosing.via4.1",
-        description="every Via4 must lie fully inside Metal5 (upper landing)",
-        layer=(67, 0),  # Metal5.drawing
-        other_layer=(66, 0),  # Via4.drawing
-        check="enclosing",
-        threshold_dbu=0,  # pure geometric containment, no margin
-        require_containment=True,
-        # Curated topology assertion (#2726, #5916): a Via4 cut connects
-        # Metal4 to Metal5, so it must always sit on both; no upstream
-        # Metal5-side margin was verified, so none is invented.
-        scope="Via4 upper-landing containment (curated)",
-    ),
-    # --- 5.17 Metaln, Metal5 instance (beol/5_17_metaln.drc) -----------
-    # Metal5 is the top of `metaln.drc`'s own templated table
-    # (`mets_lay = [metal2_drw, metal3_drw, metal4_drw, metal5_drw]`) --
-    # everything above it (TopVia1/TopMetal1/TopVia2/TopMetal2) is its own,
-    # differently-thresholded "Top*" rule-deck file below.
-    DrcRule(
-        id="metal5.width.1",
-        description="minimum Metal5 width",
-        layer=(67, 0),  # Metal5.drawing
-        check="width",
-        threshold_dbu=200,  # 0.20 um
-        # 5_17_metaln.drc rule "M5.a" (met_no=5 instance of "Mn.a"):
-        # metal5_drw.width(0.20um, euclidian)
-        # -> "5.17. M5.a: Min. Metal5 width: 0.20 um."
-        # (sg13g2_tech_default.json: drc_rules.Mn_a == 0.2)
-        scope="M5",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M5.a"),
-    ),
-    DrcRule(
-        id="metal5.space.1",
-        description="minimum Metal5 space or notch",
-        layer=(67, 0),  # Metal5.drawing
-        check="space",
-        threshold_dbu=210,  # 0.21 um
-        # 5_17_metaln.drc rule "M5.b": metal5_drw.space(0.21um, euclidian)
-        # -> "5.17. M5.b: Min. Metal5 space or notch: 0.21 um."
-        # (sg13g2_tech_default.json: drc_rules.Mn_b == 0.21)
-        scope="M5",
-        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M5.b"),
-    ),
+    *_sg13g2_routing_beol_rules(),
     # --- 5.21 TopVia1 (beol/5_21_topvia1.drc) ---------------------------
     # TopVia1 connects Metal5 to TopMetal1 -- the level issue #1233's
     # `cap_cmim`/`rfcmim` MIM caps land their `vmim_drw`/`topvia1_drw` via

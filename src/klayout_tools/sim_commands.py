@@ -45,7 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from . import _batch_approvals, _batch_common, _provenance, netlist_batch, sim_batch
+from . import _batch_approvals, _batch_common, _batch_tree, _provenance, sim_batch
 from ._jsonnum import is_number
 from .sim_errors import SimError, request_options
 
@@ -595,12 +595,12 @@ def _package_tree(units: list[dict[str, Any]], tarball: str) -> int:
     total = sum(
         os.path.getsize(item["source"]) for unit in units for item in unit["inputs"]
     )
-    if total > netlist_batch.MAX_BATCH_TREE_BYTES:
+    if total > _batch_tree.MAX_BATCH_TREE_BYTES:
         raise _error(
             f"command inputs total {total} bytes, above the "
-            f"{netlist_batch.MAX_BATCH_TREE_BYTES}-byte cap; ship fewer or "
+            f"{_batch_tree.MAX_BATCH_TREE_BYTES}-byte cap; ship fewer or "
             "smaller inputs",
-            netlist_batch.BATCH_INPUT_TOO_LARGE_CODE,
+            _batch_tree.BATCH_INPUT_TOO_LARGE_CODE,
         )
     with tarfile.open(tarball, "w:gz") as archive:
         for unit in units:

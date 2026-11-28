@@ -24,7 +24,7 @@ import lvs_tmp_repo
 from helpers import lvs_runset_fixtures as fx
 from helpers.lvs_runset_fixtures import SPICE_ONE
 from helpers.lvs_runset_fixtures import request as _request
-from klayout_tools import lvs_runset
+from klayout_tools import lvs_runset, runset_launch
 from klayout_tools.coverage import coverage_validation_error
 from klayout_tools.env_provenance import find_absolute_path_fields
 from klayout_tools.lvs import LvsError, check_lvs_report, run_lvs
@@ -318,21 +318,21 @@ def test_unreadable_app_version_does_not_mask_error(
     fake_klayout["write_db"] = False  # crashed before writing a db
     fake_klayout["returncode"] = 1
     fake_klayout["stdout"] = "ERROR: bad"
-    monkeypatch.setattr(lvs_runset, "_application_version", lambda binary: None)
+    monkeypatch.setattr(runset_launch, "application_version", lambda binary: None)
     with pytest.raises(LvsError, match="klayout application unknown"):
         run_lvs(_request(tmp_path, 1))
 
 
 def test_runset_runs_in_temp_work_dir(tmp_path, monkeypatch, fake_klayout):
     seen = {}
-    inner = lvs_runset.subprocess.run
+    inner = subprocess.run
 
     def spy(cmd, *a, **kw):
         if "-b" in cmd[1:]:
             seen["cwd"] = kw.get("cwd")
         return inner(cmd, *a, **kw)
 
-    monkeypatch.setattr(lvs_runset.subprocess, "run", spy)
+    monkeypatch.setattr(subprocess, "run", spy)
     caller = tmp_path / "caller"
     caller.mkdir()
     monkeypatch.chdir(caller)
@@ -352,7 +352,7 @@ def test_timeout_is_an_error(tmp_path, monkeypatch, fake_klayout):
     def boom(cmd, *a, **kw):
         raise subprocess.TimeoutExpired(cmd, 1)
 
-    monkeypatch.setattr(lvs_runset.subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "run", boom)
     with pytest.raises(LvsError, match="did not complete within"):
         run_lvs(_request(tmp_path, 1))
 
@@ -405,7 +405,7 @@ def test_check_names_missing_runset_deck(tmp_path, fake_klayout):
 
 @pytest.mark.skipif(shutil.which("klayout") is None, reason="klayout binary absent")
 def test_real_binary_version_probe():
-    assert lvs_runset._application_version(shutil.which("klayout")) is not None
+    assert runset_launch.application_version(shutil.which("klayout")) is not None
 
 
 def _spice_netlist(text: str) -> kdb.Netlist:
