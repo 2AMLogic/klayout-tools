@@ -7,6 +7,8 @@ import re
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]*")
 _LIBRARY_NAME_RE = re.compile(r"\blibrary\s*\([^)]*\)")
 _CELL_NAME_RE = re.compile(r"\(\s*\"?([^\")\s]+)\"?\s*\)")
+#: Characters that may open a quoted string or a comment (both skipped).
+_SKIPPABLE = '"/'
 
 
 def _scan_cells(text: str) -> tuple[int | None, list[str], int | None, int]:
@@ -35,17 +37,38 @@ def _scan_cells(text: str) -> tuple[int | None, list[str], int | None, int]:
 
 def _starts_group(text: str, end: int) -> bool:
     """Whether the identifier ending here opens a named Liberty group."""
-    pos, char = _next_significant(text, end)
-    if char != "(":
-        return False
-    close = _find_matching(text, pos, "(", ")")
-    return _next_significant(text, close + 1)[1] == "{"
+    return _group_opener(text, end) is not None
 
 
 def _skip_ws(text: str, index: int) -> int:
     while index < len(text) and text[index].isspace():
         index += 1
     return index
+
+
+def _skip_comment(text: str, i: int) -> int | None:
+    """Index just past the comment opening at ``i``, or ``None`` when none
+    does; an unclosed comment runs to the end of ``text``."""
+    if text.startswith("/*", i):
+        stop = text.find("*/", i + 2)
+        return len(text) if stop < 0 else stop + 2
+    if text.startswith("//", i):
+        stop = text.find("\n", i)
+        return len(text) if stop < 0 else stop
+    return None
+
+
+def _skip_string_or_comment(text: str, i: int) -> int | None:
+    """Index just past the quoted string (backslash escapes honoured) or the
+    comment opening at ``i``, or ``None`` when neither does; an unterminated
+    one runs to the end of ``text``."""
+    if text[i] == '"':
+        close = i + 1
+        n = len(text)
+        while close < n and text[close] != '"':
+            close += 2 if text[close] == "\\" else 1
+        return close + 1
+    return _skip_comment(text, i)
 
 
 def _next_significant(text: str, start: int) -> tuple[int, str]:
@@ -56,12 +79,8 @@ def _next_significant(text: str, start: int) -> tuple[int, str]:
         ch = text[i]
         if ch.isspace():
             i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
+        elif ch == "/" and (stop := _skip_comment(text, i)) is not None:
+            i = stop
         else:
             return i, ch
     return n, ""
@@ -74,17 +93,8 @@ def _find_matching(text: str, start: int, open_ch: str, close_ch: str) -> int:
     i, n = start, len(text)
     while i < n:
         ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
+        if ch in _SKIPPABLE and (skip := _skip_string_or_comment(text, i)) is not None:
+            i = skip
         elif ch == open_ch:
             depth += 1
             i += 1
@@ -108,17 +118,8 @@ def _find_terminator(text: str, start: int) -> int:
     i, n = start, len(text)
     while i < n:
         ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
+        if ch in _SKIPPABLE and (skip := _skip_string_or_comment(text, i)) is not None:
+            i = skip
         elif ch == ";":
             return i
         else:
@@ -132,17 +133,8 @@ def _tokens(text: str):
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
+        if ch in _SKIPPABLE and (skip := _skip_string_or_comment(text, i)) is not None:
+            i = skip
         elif ch in "{}":
             yield ch, i, i + 1
             i += 1
@@ -160,24 +152,84 @@ def _normalize_header(header: str) -> str:
     parts: list[str] = []
     i, n = 0, len(header)
     while i < n:
-        if header[i] == '"':
-            j = i + 1
-            while j < n and header[j] != '"':
-                j += 2 if header[j] == "\\" else 1
-            parts.append(header[i : j + 1])
-            i = j + 1
-        elif header.startswith("/*", i):
-            stop = header.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
+        ch = header[i]
+        if ch == '"' and (close := _skip_string_or_comment(header, i)) is not None:
+            parts.append(header[i:close])
+            i = close
+        elif ch == "/" and (stop := _skip_comment(header, i)) is not None:
+            i = stop
             parts.append(" ")
-        elif header.startswith("//", i):
-            stop = header.find("\n", i)
-            i = n if stop < 0 else stop
         else:
-            parts.append(header[i])
+            parts.append(ch)
             i += 1
     text = _LIBRARY_NAME_RE.sub("library ()", "".join(parts), count=1)
     return " ".join(text.split())
+
+
+def _unquote(value: str) -> str:
+    """``value`` without one pair of surrounding double quotes."""
+    return value[1:-1] if value[:1] == '"' and value[-1:] == '"' else value
+
+
+def _colon_attr(text: str, ident_end: int) -> tuple[int, int] | None:
+    """``(colon, terminator)`` of the ``: value ;`` statement following the
+    identifier ending at ``ident_end`` -- the value is
+    ``text[colon + 1 : terminator]`` -- or ``None`` when none follows."""
+    colon, char = _next_significant(text, ident_end)
+    if char != ":":
+        return None
+    return colon, _find_terminator(text, colon + 1)
+
+
+def _group_opener(text: str, ident_end: int) -> tuple[int, int, int] | None:
+    """``(open paren, close paren, open brace)`` of the ``name (args) {``
+    group following the name ending at ``ident_end``, or ``None`` when none
+    follows."""
+    opening, char = _next_significant(text, ident_end)
+    if char != "(":
+        return None
+    closing = _find_matching(text, opening, "(", ")")
+    brace, char = _next_significant(text, closing + 1)
+    return (opening, closing, brace) if char == "{" else None
+
+
+def _depth1_groups(
+    header: str, kinds: tuple[str, ...]
+) -> list[tuple[str, str, int, int]]:
+    """``(kind, name, start, stop)`` for every ``kind (name) { ... }`` group at
+    library level whose ``kind`` is in ``kinds``, in source order: ``name`` is
+    the normalised, unquoted argument list and ``header[start : stop]`` the
+    group's raw text."""
+    found: list[tuple[str, str, int, int]] = []
+    depth = resume = 0
+    for kind, pos, end in _tokens(header):
+        if pos < resume:
+            continue  # inside a group already consumed below
+        if kind == "{":
+            depth += 1
+        elif kind == "}":
+            depth -= 1
+        elif depth == 1 and header[pos:end] in kinds:
+            if opener := _group_opener(header, end):
+                opening, closing, brace = opener
+                stop = _find_matching(header, brace, "{", "}")
+                name = _unquote(_normalize_header(header[opening + 1 : closing]))
+                found.append((header[pos:end], name, pos, stop + 1))
+                resume = stop + 1
+    return found
+
+
+def _find_attr_reference(text: str, attrs: set[str], names: set[str]) -> str | None:
+    """The first of ``names`` that an ``attr : name ;`` statement in ``text``
+    refers to, for any ``attr`` in ``attrs``, or ``None``."""
+    for kind, start, end in _tokens(text):
+        if kind != "ident" or text[start:end] not in attrs:
+            continue
+        if attr := _colon_attr(text, end):
+            value = _normalize_header(text[attr[0] + 1 : attr[1]])
+            if (name := _unquote(value)) in names:
+                return name
+    return None
 
 
 def _pin_tokens(text: str):
@@ -189,14 +241,13 @@ def _pin_tokens(text: str):
         word = text[start:end]
         if word not in ("cell", "pin", "direction", "max_transition"):
             continue
-        offset, char = _next_significant(text, end)
-        if word in ("cell", "pin") and char == "(":
-            name = _CELL_NAME_RE.match(text, offset)
-            if name and _next_significant(text, name.end())[1] == "{":
-                yield word, name.group(1)
-        elif word in ("direction", "max_transition") and char == ":":
-            end_value = _find_terminator(text, offset + 1)
-            yield word, _normalize_header(text[offset + 1 : end_value]).strip('"')
+        if word in ("cell", "pin"):
+            opening, char = _next_significant(text, end)
+            if char == "(" and (name := _CELL_NAME_RE.match(text, opening)):
+                if _next_significant(text, name.end())[1] == "{":
+                    yield word, name.group(1)
+        elif attr := _colon_attr(text, end):
+            yield word, _unquote(_normalize_header(text[attr[0] + 1 : attr[1]]))
 
 
 def _uncovered_output(text: str) -> tuple[str, str] | None:
@@ -286,14 +337,11 @@ def _candidate_tables(text: str, templates: dict[str, set[str]]):
     for kind, start, end in _tokens(text):
         if kind != "ident":
             continue
-        opening, ch = _next_significant(text, end)
-        if ch != "(":
+        opener = _group_opener(text, end)
+        if opener is None:
             continue
-        closing = _find_matching(text, opening, "(", ")")
-        brace, ch = _next_significant(text, closing + 1)
-        if ch != "{":
-            continue
-        name = _normalize_header(text[opening + 1 : closing]).strip('"')
+        opening, closing, brace = opener
+        name = _unquote(_normalize_header(text[opening + 1 : closing]))
         if name in templates and text[start:end] not in _TEMPLATE_KINDS:
             yield (
                 text[start:end],
