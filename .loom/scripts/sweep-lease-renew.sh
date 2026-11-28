@@ -386,7 +386,32 @@ usage() {
 # `gh api` has no -R flag (#9552), so the repo goes in the endpoint path.
 gh_repo_path() {
     local placeholder='{owner}/{repo}'
+    # #14941: Gitea has no `{owner}/{repo}` placeholder expansion; name the repo.
+    if ((LEASE_GITEA)); then
+        printf '%s' "${LOOM_REPO:-$(_forge_nwo_from_remote || true)}"
+        return 0
+    fi
     printf '%s' "${LOOM_REPO:-$placeholder}"
+}
+
+# --- Gitea checkouts (#14941) -------------------------------------------------
+# `gh` cannot reach a Gitea forge, so on a Gitea checkout (forge_detect's own
+# answer) the lease's reads and its one PATCH go through `gitea_api`
+# (forge-helpers.sh) -- the request shapes are the GitHub ones -- and `gh` is
+# never run. LEASE_GITEA is decided once per process.
+LEASE_GITEA=0
+forge_detect > /dev/null 2>&1 || true
+[[ "${FORGE_TYPE:-}" != gitea ]] || LEASE_GITEA=1
+
+# lease_trusted_comments -- stdin: a comment listing; stdout: its trusted
+# subset (`forge trusted-comments`). Gitea comments carry no
+# `author_association`, so the credential's own login is the self identity
+# the filter believes there (comment-trust's "this daemon's own identity").
+# requires-daemon: forge optional   Without the verb the listing cannot be authenticated; the caller exits 1.
+lease_trusted_comments() {
+    local self_login=""
+    if ((LEASE_GITEA)); then self_login="$(forge_gitea_self_login 2> /dev/null || true)"; fi
+    "${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments ${self_login:+--self-login "$self_login"} 2> /dev/null
 }
 
 # --- Opaque host id (Issue #6322, ported verbatim from sweep-lease-fence.sh
@@ -798,8 +823,16 @@ cmd_renew_once() {
     # activity instead of everything since the claim, and no longer fills a
     # page (the `full-window` fallback) on a long-lived, busy issue.
     local comments_json endpoint="repos/${repo_path}/issues/${issue}/comments" paginate="--paginate"
+    # Gitea's comment list has no `per_page` window (#14941): always the full
+    # listing, so the cached-lease window is not used there.
+    ((LEASE_GITEA == 0)) || cached=""
     [[ -z "$cached" ]] || { endpoint+="?since=${cached#*@}&per_page=100"; paginate=""; }
-    if ! comments_json="$(lease_gh read api "$endpoint" ${paginate:+"$paginate"})"; then
+    if ((LEASE_GITEA)); then
+        if ! comments_json="$(forge_gitea_issue_comments "$repo_path" "$issue")"; then
+            echo "ERROR: Gitea comment listing for issue #${issue} failed" >&2
+            exit 1
+        fi
+    elif ! comments_json="$(lease_gh read api "$endpoint" ${paginate:+"$paginate"})"; then
         echo "ERROR: 'gh api .../issues/${issue}/comments${paginate:+ $paginate}' failed (escalation ladder exhausted)" >&2
         exit 1
     fi
@@ -810,7 +843,7 @@ cmd_renew_once() {
     # #9548: renew only a TRUSTED author's lease, and honour only a trusted
     # yield record; an outsider's copy of either is prose.
     # requires-daemon: forge optional   Without the `trusted-comments` verb the listing cannot be authenticated: exit 1, the same transient failure as an unreadable listing (nothing is patched).
-    comments_json="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments <<< "$comments_json" 2> /dev/null)" \
+    comments_json="$(lease_trusted_comments <<< "$comments_json")" \
         || { echo "ERROR: lease comments on issue #${issue} could not be authenticated (loom-daemon forge trusted-comments unavailable)" >&2; exit 1; }
 
     # Prints "<id>@<updated_at as listed>" (the next window's cursor, #10229;
@@ -897,8 +930,15 @@ cmd_renew_once() {
     write_repo="$(loom_write_repo "${LOOM_REPO:-}")" || { echo "ERROR: not renewing lease comment ${candidate_id} on issue #${issue}: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 1; }
     patch_body_file="$(mktemp)"
     printf '%s' "$new_body" > "$patch_body_file"
-    patch_err="$(lease_gh write api --method PATCH "repos/${write_repo}/issues/comments/${candidate_id}" \
-        -F "body=@${patch_body_file}" 2>&1 > /dev/null)" || patch_rc=$?
+    if ((LEASE_GITEA)); then
+        # #14941: PATCH /repos/{o}/{r}/issues/comments/{id} with the vetted
+        # repo; a non-2xx answer is a failed renewal (gitea_api returns 1).
+        patch_err="$(gitea_api PATCH "repos/${write_repo}/issues/comments/${candidate_id}" \
+            -d "$(jq -Rs '{body: .}' < "$patch_body_file")" 2>&1 > /dev/null)" || patch_rc=$?
+    else
+        patch_err="$(lease_gh write api --method PATCH "repos/${write_repo}/issues/comments/${candidate_id}" \
+            -F "body=@${patch_body_file}" 2>&1 > /dev/null)" || patch_rc=$?
+    fi
     rm -f "$patch_body_file"
     [[ -z "$patch_err" ]] || printf '%s\n' "$patch_err" >&2
     if ((patch_rc != 0)) && [[ -n "$cached" && "$patch_err" == *"HTTP 404"* ]]; then
@@ -1134,7 +1174,7 @@ cmd_start() {
             sleep "$interval"
             pid_is_live "$watch_pid" "$watch_ident" || break
             ! max_age_exceeded "$loop_started_at" "$max_age" || { terminal_reason=age-cap; echo "$cap_msg" >&9; break; }
-            gate_rc=0; issue_state="$( ((have_renewer)) && [[ "${LOOM_SWEEP_LEASE_RENEW_SOURCE:-}" != "dispatch" ]] || { echo open; exit 0; }; export LOOM_ROLE=sweep-lease-renew; [[ -z "$sweep_id" ]] || export LOOM_SWEEP_ID="$sweep_id"; lease_gh read api "repos/$(gh_repo_path)/issues/${issue}" --jq .state 2>&9)" || issue_state=""
+            gate_rc=0; issue_state="$( ((have_renewer)) && [[ "${LOOM_SWEEP_LEASE_RENEW_SOURCE:-}" != "dispatch" ]] || { echo open; exit 0; }; export LOOM_ROLE=sweep-lease-renew; [[ -z "$sweep_id" ]] || export LOOM_SWEEP_ID="$sweep_id"; if ((LEASE_GITEA)); then forge_gitea_issue_state "$(gh_repo_path)" "$issue" 2>&9; else lease_gh read api "repos/$(gh_repo_path)/issues/${issue}" --jq .state 2>&9; fi)" || issue_state=""
             gate_receipt=""
             if ((report_receipt)); then
                 gate_receipt="$("${LOOM_DAEMON_BIN:-loom-daemon}" lease renewer check "${owner_args[@]}" --issue-state "$issue_state" --report-receipt 2>&9)" || gate_rc=$?

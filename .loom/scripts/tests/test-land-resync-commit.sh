@@ -87,6 +87,9 @@
 #        whole `.loom/tokens.shadow-           reaches origin; the legitimate
 #        disabled-<ts>/` pool copy beside     resync surface beside it lands
 #        a real resync surface, no .gitignore
+#   (r)  the rate card (.loom/pricing.json) -> both land in one commit on
+#        modified, plus tracked scripts      origin; neither is "non-resync
+#        a release retired (deleted)         dirt" any more (#15519)
 #
 # Usage:
 #   ./.loom/scripts/tests/test-land-resync-commit.sh
@@ -977,6 +980,73 @@ if grep -qxF ".loom/install-metadata.json" <<< "$ORIGIN_TREE_Q2" && \
     pass "the legitimate resync surface beside it still landed"
 else
     fail "the legitimate resync surface beside it still landed (tree=$ORIGIN_TREE_Q2)"
+fi
+
+echo ""
+echo "=== (r) the rate card alongside tracked retirements lands; neither is non-resync dirt (#15519) ==="
+gh_stub_reset
+make_origin origin-r
+make_primary origin-r primary-r
+R="$WORKDIR/primary-r"
+# A local defaults/ tree keeps IS_LOOM_SOURCE_REPO=1, so the script's
+# missing-counterpart filter (#6613) is live: it must still tell a tracked
+# retirement apart from the untracked stray of case (i).
+mkdir -p "$R/defaults/hooks" "$R/defaults/scripts" "$R/.loom/scripts/tests"
+printf 'placeholder\n' > "$R/defaults/hooks/placeholder.sh"
+# What an earlier release installed: a rate card and two scripts that a later
+# release changes and retires.
+printf 'OLD CARD\n' > "$R/.loom/pricing.json"
+printf 'retired tool\n' > "$R/.loom/scripts/generate-agents-md.sh"
+printf 'retired test\n' > "$R/.loom/scripts/tests/test-guide-unblock-merged-blocker.sh"
+git -C "$R" add -A
+git -C "$R" commit -q -m "scaffold: defaults/ tree, an old rate card, two scripts later retired"
+git -C "$R" push -q origin main
+# What resync-installed.sh leaves behind when only the rate card changed:
+# before #15519 this alone was refused, the card named as non-resync dirt.
+printf 'NEW CARD\n' > "$R/.loom/pricing.json"
+OUT="$(cd "$R" && "$SCRIPT" --dry-run 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && grep -q "Would commit 1 resync-managed path(s)" <<< "$OUT" && \
+   ! grep -qi "non-resync dirt" <<< "$OUT"; then
+    pass "a tracked rate-card update alone is resync dirt, not a refusal"
+else
+    fail "a tracked rate-card update alone is resync dirt, not a refusal (rc=$RC, out=$OUT)"
+fi
+# The same run once the release also retired both scripts: tracked deletions.
+rm "$R/.loom/scripts/generate-agents-md.sh" "$R/.loom/scripts/tests/test-guide-unblock-merged-blocker.sh"
+OUT="$(cd "$R" && "$SCRIPT" --dry-run 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && grep -q "Would commit 3 resync-managed path(s)" <<< "$OUT" && \
+   ! grep -qi "non-resync dirt" <<< "$OUT" && \
+   [[ -z "$(git -C "$R" diff --cached --name-only)" ]]; then
+    pass "--dry-run accepts the rate card alongside both tracked retirements, and stages nothing"
+else
+    fail "--dry-run accepts the rate card alongside both tracked retirements, and stages nothing (rc=$RC, out=$OUT)"
+fi
+OUT="$(cd "$R" && "$SCRIPT" 2>&1)"; RC=$?
+ORIGIN_R="$WORKDIR/origin-r.git"
+LANDED_R="$(git --git-dir="$ORIGIN_R" show --format= --name-status main | tr '\t' ' ')"
+if [[ $RC -eq 0 ]] && grep -q "pushed" <<< "$OUT" && \
+   [[ "$(git --git-dir="$ORIGIN_R" log -1 --format='%s' main)" == "chore: resync installed Loom surfaces" ]]; then
+    pass "the resync lands on origin under the resync subject"
+else
+    fail "the resync lands on origin under the resync subject (rc=$RC, out=$OUT)"
+fi
+EXPECTED_R=$'M .loom/pricing.json\nD .loom/scripts/generate-agents-md.sh\nD .loom/scripts/tests/test-guide-unblock-merged-blocker.sh'
+if [[ "$LANDED_R" == "$EXPECTED_R" ]]; then
+    pass "the landed commit is exactly the rate card and the two retirements"
+else
+    fail "the landed commit is exactly the rate card and the two retirements (got='$LANDED_R')"
+fi
+if [[ "$(git --git-dir="$ORIGIN_R" show main:.loom/pricing.json)" == "NEW CARD" ]] && \
+   ! git --git-dir="$ORIGIN_R" cat-file -e main:.loom/scripts/generate-agents-md.sh 2>/dev/null && \
+   ! git --git-dir="$ORIGIN_R" cat-file -e main:.loom/scripts/tests/test-guide-unblock-merged-blocker.sh 2>/dev/null; then
+    pass "origin carries the new rate card and no longer carries either retired script"
+else
+    fail "origin does not carry the new rate card and both retirements"
+fi
+if [[ -z "$(git -C "$R" status --porcelain)" ]]; then
+    pass "the primary checkout is clean afterwards (nothing was left behind as dirt)"
+else
+    fail "the primary checkout is clean afterwards (status=$(git -C "$R" status --porcelain))"
 fi
 
 echo ""

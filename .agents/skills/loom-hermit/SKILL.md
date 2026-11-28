@@ -415,6 +415,10 @@ fi
 - **Bad line range**: re-derive the line numbers against current `origin/main`, or drop the specific range and describe the region in prose.
 - **False tracked claim**: re-run the count against `git ls-files` and use the real number, or drop the claim.
 
+### `cargo doc -D warnings` Is Not a Usable Criterion for `loom-daemon` (#15675)
+
+> **Never write `RUSTDOCFLAGS="-D warnings" cargo doc` as an acceptance criterion for `loom-daemon`.** That command already fails on `origin/main` (the lib doc carries over a thousand warnings, #14990), so it is red on every branch and the Builder meets an AC no change of theirs can satisfy. Hermit proposals skip Curator ("Verify References" above), so nothing downstream is guaranteed to catch it. For a proposal that touches `loom-daemon` doc comments, write the criterion as **"introduces no new rustdoc warning in the touched files (diff vs `origin/main`)"** and cite `.loom/docs/verification-recipes.md` §7 ("A doc-comment change"), which holds the before/after script. The only exception is a proposal whose own scope is zero rustdoc warnings for the crate.
+
 ### Emit a Premise Record With the Proposal (#8420)
 
 `loom:hermit` puts every issue you file inside the premise gate's scope:

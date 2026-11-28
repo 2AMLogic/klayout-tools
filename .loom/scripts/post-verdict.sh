@@ -649,12 +649,48 @@ source "$SCRIPT_DIR/lib/forge-helpers.sh"
 # an approval on a red head.
 if [[ -n "$MISSING_VERBS" ]]; then
   if [[ "$VERDICT" == "approved" ]]; then
-    LEGACY_LABELS=(--add-label loom:pr --remove-label loom:review-requested --remove-label loom:reviewing)
+    LEGACY_ADD=(loom:pr)
+    LEGACY_REMOVE=(loom:review-requested loom:reviewing)
   else
-    LEGACY_LABELS=(--add-label loom:changes-requested --remove-label loom:pr --remove-label loom:review-requested --remove-label loom:reviewing)
+    LEGACY_ADD=(loom:changes-requested)
+    LEGACY_REMOVE=(loom:pr loom:review-requested loom:reviewing)
   fi
+  LEGACY_LABELS=()
+  for l in "${LEGACY_ADD[@]}"; do LEGACY_LABELS+=(--add-label "$l"); done
+  for l in "${LEGACY_REMOVE[@]}"; do LEGACY_LABELS+=(--remove-label "$l"); done
   forge_gh_comment_rl_safe "$REPO" "$PR" "$FULL_BODY" 1 || exit 1
-  forge_gh_perm_safe pr edit "$PR" --repo "$REPO" "${LEGACY_LABELS[@]}" >/dev/null && exit 0
+  if forge_gh_perm_safe pr edit "$PR" --repo "$REPO" "${LEGACY_LABELS[@]}" >/dev/null; then
+    # #15185: the edit's exit 0 is not evidence the transition held — a
+    # removal lost inside gh's own sequencing leaves the verdict label beside
+    # loom:review-requested, which re-dispatches Judge onto a reviewed PR.
+    # Read the labels back and check both sides; the unique verify= component
+    # keeps any URL-keyed cache layer from answering for the forge. An
+    # unreadable label set is an unverified transition, never a pass.
+    VL_RC=0
+    VL_NAMES="$(_bounded_gh_run gh api "repos/$REPO/issues/$PR/labels?per_page=100&verify=$RANDOM-$RANDOM-$$" --jq '.[].name' 2>/dev/null)" || VL_RC=$?
+    if [[ "$VL_RC" -eq 0 ]]; then
+      VL_OK=1
+      for l in "${LEGACY_ADD[@]}"; do
+        if ! grep -Fxq "$l" <<<"$VL_NAMES"; then
+          echo "post-verdict.sh: after the $VERDICT verdict on PR #$PR, label $l is missing." >&2
+          VL_OK=0
+        fi
+      done
+      for l in "${LEGACY_REMOVE[@]}"; do
+        if grep -Fxq "$l" <<<"$VL_NAMES"; then
+          echo "post-verdict.sh: after the $VERDICT verdict on PR #$PR, label $l is still present." >&2
+          VL_OK=0
+        fi
+      done
+      if [[ "$VL_OK" -eq 1 ]]; then
+        exit 0
+      fi
+    else
+      echo "post-verdict.sh: the labels of PR #$PR could not be read back to verify the $VERDICT label transition." >&2
+    fi
+    echo "post-verdict.sh: the $VERDICT verdict on PR #$PR is posted, but its label transition did not verify. Repair: gh pr edit $PR --repo $REPO ${LEGACY_LABELS[*]}" >&2
+    exit 8
+  fi
   echo "post-verdict.sh: the $VERDICT verdict on PR #$PR is posted, but its label transition did not complete. Repair: gh pr edit $PR --repo $REPO ${LEGACY_LABELS[*]}" >&2
   exit 8
 fi

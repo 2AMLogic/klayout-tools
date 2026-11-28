@@ -100,15 +100,15 @@ error()   { echo "ERROR: $*" >&2; exit 1; }
 source "$HELPERS_DIR/lib/forge-helpers.sh"
 
 # --- Extract the functions under test from merge-pr.sh and source them ---
-# Two spans, each bounded by an anchor line that is NOT part of the span:
+# One span, bounded by an anchor line that is NOT part of the span:
 #   1. `_mp_refs() {` .. `_check_partial_increment_close_conflict || true` —
 #      the #4569 pre-merge guard and the loom-daemon-backed ref extractor it
 #      depends on.
 #      Stopping at the INVOCATION line keeps the top-level call out of the
 #      sourced file (we drive the guard explicitly from the tests).
-#   2. `_reset_one_partial_issue() {` .. `# Handle auto-merge mode` — the
-#      post-merge reset/reopen pass.
-# Both spans contain only function definitions plus comments (harmless when
+#   (The post-merge reset/reopen pass was a second span until #14905 retired it:
+#   it is the daemon's merge-observation pass now.)
+# The span contains only function definitions plus comments (harmless when
 # sourced).
 #
 # Two lines are pulled in from OUTSIDE both spans: the one-line
@@ -127,14 +127,11 @@ awk '
   /^_mp_daemon_roll_hint\(\) \{/                         { print; next }
   /^_mp_refs\(\) \{/                                     { capture=1 }
   /^_check_partial_increment_close_conflict \|\| true/   { capture=0 }
-  /^_post_merge_bookkeeping\(\) \{/                    { capture=1 }
-  /^# Handle auto-merge mode/                           { capture=0 }
   capture { print }
 ' "$MERGE_PR_SRC" > "$FUNCS_FILE"
 
 for _fn in _mp_refs _partial_increment_refs \
-           _pr_commit_messages _check_partial_increment_close_conflict \
-           _post_merge_bookkeeping _reset_partial_increment_labels; do
+           _pr_commit_messages _check_partial_increment_close_conflict; do
     if ! grep -q "^${_fn}() {" "$FUNCS_FILE"; then
         echo -e "${RED}FATAL${NC}: could not extract $_fn from $MERGE_PR_SRC" >&2
         exit 2
@@ -311,89 +308,26 @@ run_capturing_stderr() {
 }
 read_stderr() { cat "$STUB_DIR/stderr.log" 2>/dev/null || true; }
 
-echo "Testing _reset_partial_increment_labels behavior..."
-
-# T1: Part of #123, open + loom:building -> swap to loom:issue + comment.
-reset_log
-PR_JSON='{"body":"Implements a slice.\n\nPart of #123"}'
-_reset_partial_increment_labels
-log="$(read_log)"
-assert_contains "$log" "issue edit 123 --repo owner/repo --remove-label loom:building --add-label loom:issue" \
-  "Part of #123 (open, building) -> swaps loom:building to loom:issue (repo-scoped)"
-assert_contains "$log" "issue comment 123 --repo owner/repo" \
-  "Part of #123 -> posts an auditable comment (repo-scoped)"
-
-# T2: Closes #123 -> NOT a partial ref -> no mutation (existing behavior preserved).
-reset_log
-PR_JSON='{"body":"All done.\n\nCloses #123"}'
-_reset_partial_increment_labels
-assert_eq "" "$(read_log)" "Closes #123 -> no label mutation (auto-close path untouched)"
-
-# T2b: Fixes / Resolves also untouched.
-reset_log
-PR_JSON='{"body":"Fixes #123 and Resolves #456"}'
-_reset_partial_increment_labels
-assert_eq "" "$(read_log)" "Fixes/Resolves -> no label mutation"
-
-# T3: Part of #777 but issue is CLOSED -> no-op.
-reset_log
-PR_JSON='{"body":"Part of #777"}'
-_reset_partial_increment_labels
-assert_eq "" "$(read_log)" "Part of #777 (closed) -> no-op, no mutation"
-
-# T4: Part of #888 but issue lacks loom:building -> no-op (idempotent).
-reset_log
-PR_JSON='{"body":"Part of #888"}'
-_reset_partial_increment_labels
-assert_eq "" "$(read_log)" "Part of #888 (not loom:building) -> no-op, idempotent"
-
-# T5: Contributes to #456 (open, building) -> swap.
-reset_log
-PR_JSON='{"body":"Contributes to #456"}'
-_reset_partial_increment_labels
-assert_contains "$(read_log)" "issue edit 456 --repo owner/repo --remove-label loom:building --add-label loom:issue" \
-  "Contributes to #456 (open, building) -> swaps to loom:issue (repo-scoped)"
-
-# T6: case-insensitive keyword + multiple refs -> both swapped.
-reset_log
-PR_JSON='{"body":"part of #123\ncontributes TO #456"}'
-_reset_partial_increment_labels
-log="$(read_log)"
-assert_contains "$log" "issue edit 123 --repo owner/repo --remove-label loom:building --add-label loom:issue" \
-  "Case-insensitive 'part of #123' matched"
-assert_contains "$log" "issue edit 456 --repo owner/repo --remove-label loom:building --add-label loom:issue" \
-  "Multiple refs: #456 also matched"
-
-# T7: reference target is actually a PR (has .pull_request) -> skip.
-reset_log
-PR_JSON='{"body":"Part of #321"}'
-_reset_partial_increment_labels
-assert_eq "" "$(read_log)" "Part of #321 (is a PR, has .pull_request) -> skipped"
-
-# T8: FORGE_TYPE != github -> no-op (v1 is GitHub-only).
-reset_log
-FORGE_TYPE="gitea"
-PR_JSON='{"body":"Part of #123"}'
-_reset_partial_increment_labels
-assert_eq "" "$(read_log)" "FORGE_TYPE=gitea -> no-op (GitHub-only v1)"
-FORGE_TYPE="github"
-
-# T9: empty / null body -> no-op.
-reset_log
-PR_JSON='{"body":null}'
-_reset_partial_increment_labels
-assert_eq "" "$(read_log)" "null PR body -> no-op"
-
-# T10: closing keyword AND a partial ref in the same body -> only the partial
-# ref's issue is reset; the Closes issue is left to GitHub auto-close.
-reset_log
-PR_JSON='{"body":"Closes #888\n\nPart of #123"}'
-_reset_partial_increment_labels
-log="$(read_log)"
-assert_contains "$log" "issue edit 123 --repo owner/repo --remove-label loom:building" \
-  "Mixed body: Part of #123 is reset"
-assert_not_contains "$log" "issue edit 888" \
-  "Mixed body: Closes #888 is NOT touched"
+echo "Testing the post-merge partial-increment reset (RETIRED by #14905)..."
+# merge-pr.sh no longer runs the reset (#14905, cutover of #14900/#14902): the
+# daemon's merge-observation pass does, for every observed merge. T1-T10 drove
+# the shell wrapper against a stub gh; the same decisions are pinned below.
+retired "T1/T5/T6: Part of / Contributes to #N, open + loom:building -> swap to loom:issue + one comment (repo-scoped; case-insensitive; several refs)" \
+    "a still-open partial-increment issue returns to the ready queue with an audit comment" \
+    "the wrapper that ran the reset is gone from merge-pr.sh; the stub-gh transcript cannot be produced by a script that no longer makes the calls" \
+    "partial_reset::tests::t1_open_and_building_swaps and post_merge_bookkeeping::tests::partial_reset_swaps_and_comments (decision + order), merge_observation_tests::an_open_partial_increment_is_swapped_and_commented_once (the daemon tick, one comment), and tests/merge_pr_partial_reset_differential.rs (Rust plan == frozen shell on the whole corpus)"
+retired "T2/T2b/T10: Closes/Fixes/Resolves #N is not a partial ref; a mixed body resets only the partial ref" \
+    "the auto-close path is untouched and only declared partial increments are reset" \
+    "same: no script-side call remains" \
+    "merge_pr::refs tests (closing vs partial vocabulary, tests/merge_pr_refs_differential.rs) feed partial_reset::plan; merge_observation_tests::a_preventive_reopens_only_what_this_merge_closed covers the closing-reference side"
+retired "T3/T4/T7/T9: closed issue, issue without loom:building, a PR target, an empty/null body -> no mutation" \
+    "every no-op case stays a no-op (idempotent re-run)" \
+    "same: no script-side call remains" \
+    "partial_reset::tests::t3_t20_closed_and_untracked_is_a_logged_skip, t4_open_without_building_is_an_idempotent_skip, t7_a_pull_request_is_skipped_silently; post_merge_bookkeeping::tests::partial_reset_empty_body_does_nothing and partial_reset_never_touches_a_pull_request"
+retired "T8: FORGE_TYPE != github -> no-op" \
+    "the reset is GitHub-only" \
+    "the FORGE_TYPE guard lived in the removed wrapper; the daemon's merge-observation pass is the GitHub reconciliation tick and reads only GitHub" \
+    "no Gitea path exists on the daemon side, so there is nothing to assert; the shell never acted on Gitea either"
 
 # ---------------------------------------------------------------------------
 # #4569: closing-keyword conflict detection + premature-close revert.
@@ -940,12 +874,10 @@ assert_eq "456" "$PARTIAL_CONFLICT_ISSUES" \
 cat > "$STUB_DIR/issue-456.json" <<'EOF'
 {"state":"closed","labels":[{"name":"loom:building"}]}
 EOF
-run_capturing_stderr _reset_partial_increment_labels
-e2e_log="$(read_log)"
-assert_contains "$e2e_log" "issue reopen 456 --repo owner/repo" \
-  "End-to-end: #456 auto-closed by the commit-message keyword is reopened post-merge"
-assert_contains "$e2e_log" "issue edit 456 --repo owner/repo --remove-label loom:building --add-label loom:issue" \
-  "End-to-end: reopened #456 falls through to the loom:building -> loom:issue swap"
+retired "T27 (post-merge half): the commit-message conflict recorded pre-merge drives the post-merge reopen + swap of #456" \
+    "an issue a stray commit-message \`close #N\` closed against a declared partial increment is reopened and returned to the queue" \
+    "the script no longer runs a post-merge pass, and the daemon cannot read this script's globals; it re-derives the pre-merge facts from the issue's close events and the PR's closing references" \
+    "merge_observation_tests::a_preventive_reopens_only_what_this_merge_closed and missing_attribution_skips_the_dependent_reopen (re-derived facts, fail direction), partial_reset::tests::t18_t27_conflicted_and_closed_reopens_then_swaps (the decision)"
 # Restore the shared fixture for any later case.
 cat > "$STUB_DIR/issue-456.json" <<'EOF'
 {"state":"open","labels":[{"name":"loom:building"}]}
@@ -991,178 +923,21 @@ assert_contains "$(read_stderr)" "[dry-run] Would BLOCK merge of PR #999" \
   "#8191: --dry-run phrases the refusal as conditional"
 
 echo ""
-echo "Testing the post-merge premature-close revert..."
+echo "Testing the post-merge premature-close revert (RETIRED by #14905)..."
+retired "T18/T19/T20: conflicted + closed after the merge -> reopen, comment, then swap; open-before but unattributed -> warn only; closed before the merge -> untouched" \
+    "only an issue THIS merge closed against its declared intent is reopened; a deliberate human close inside the window is never reverted" \
+    "the wrapper is gone; the daemon re-derives 'closed by THIS merge' from close events instead of reading script globals" \
+    "partial_reset::tests::t18_t27_conflicted_and_closed_reopens_then_swaps, t19_open_before_but_unattributed_warns_and_does_not_reopen, t3_t20_closed_and_untracked_is_a_logged_skip; merge_observation_tests::a_preventive_reopens_only_what_this_merge_closed (closed_by_merge verdicts)"
+retired "T29/T30/T31(audit bodies)/T31b/T32: daemon-verb absent or off-protocol -> nothing mutated + manual remedy; a failed reopen stops the pass; comment bodies rendered by partial-comment; a held remainder swaps to loom:operator" \
+    "the pass is fail-closed, stops after a failed reopen, posts the byte-frozen audit bodies, and honors loom:remainder-hold" \
+    "the 'daemon without the verb' wrapper warning is gone with the wrapper; the old-daemon case is now the advisory _warn_if_daemon_lacks_merge_observation (asserted in test-merge-pr-daemon-version-floor.sh)" \
+    "post_merge_bookkeeping::tests::partial_reset_stops_when_the_reopen_fails, partial_reset_failed_swap_warns_and_posts_no_comment, partial_reset_comment_failure_is_a_warning_after_the_swap; partial_reset::tests::a_marker_swaps_to_operator_and_quotes_the_reason, a_conflicted_close_with_a_marker_reopens_then_holds; merge_observation_tests::a_held_remainder_swaps_to_the_operator_label; tests/merge_pr_partial_comment_differential.rs (bodies byte-for-byte)"
 
-# T18: conflicted + closed after the merge -> reopen, comment, THEN the normal
-# label swap (the issue re-enters the ready queue in the same pass).
-reset_log
-PARTIAL_OPEN_BEFORE_MERGE="777"
-PARTIAL_CONFLICT_ISSUES="777"
-PR_JSON='{"body":"Verify, then close #777.\n\nContributes to #777"}'
-run_capturing_stderr _reset_partial_increment_labels
-revert_err="$(read_stderr)"
-log="$(read_log)"
-assert_contains "$log" "issue reopen 777 --repo owner/repo" \
-  "Conflicted + auto-closed #777 -> reopened (repo-scoped)"
-assert_contains "$log" "issue edit 777 --repo owner/repo --remove-label loom:building --add-label loom:issue" \
-  "Reopened #777 falls through to the normal loom:building -> loom:issue swap"
-assert_contains "$log" "issue comment 777 --repo owner/repo" \
-  "Reopened #777 -> posts an auditable comment"
-assert_contains "$revert_err" "was auto-closed by PR #999's merge" \
-  "Reopen path warns with the attribution"
-
-# T19: EDGE CASE — open before the merge, closed after it, but NO closing
-# reference on this PR (e.g. a human closed it deliberately in the same window):
-# warn loudly, but do NOT reopen.
-reset_log
-PARTIAL_OPEN_BEFORE_MERGE="777"
-PARTIAL_CONFLICT_ISSUES=""
-PR_JSON='{"body":"Contributes to #777"}'
-run_capturing_stderr _reset_partial_increment_labels
-edge_err="$(read_stderr)"
-assert_eq "" "$(read_log)" \
-  "Deliberate close in the merge window (no closing reference) -> no reopen, no label mutation"
-assert_contains "$edge_err" "NOT reopening automatically" \
-  "Deliberate-close case still warns so the coincidence is investigable"
-
-# T20: closed BEFORE the merge and untracked -> byte-for-byte the pre-#4569
-# skip (already asserted by T3; re-asserted here with the globals in play).
-reset_log
-PR_JSON='{"body":"Part of #777"}'
-_reset_partial_increment_labels 2>/dev/null
-assert_eq "" "$(read_log)" \
-  "Untracked closed #777 -> unchanged log-and-skip behavior"
-
-# T29 (#8191): the reset's decision moved to `loom-daemon merge-pr
-# partial-reset`. A daemon that cannot answer (missing, or predating the verb)
-# must degrade to a loud warning naming the manual swap -- never a guessed
-# mutation, and never a silent skip that leaves loom:building orphaned unseen.
-reset_log
-fake_no_reset="$STUB_DIR/fake-loom-daemon-no-partial-reset"
-cat > "$fake_no_reset" <<'FAKEDAEMON'
-#!/usr/bin/env bash
-echo "error: unrecognized subcommand 'post-merge-bookkeeping'" >&2
-exit 2
-FAKEDAEMON
-chmod +x "$fake_no_reset"
-saved_bin="${LOOM_DAEMON_BIN:-}"
-export LOOM_DAEMON_BIN="$fake_no_reset"
-PR_JSON='{"body":"Part of #123"}'
-run_capturing_stderr _reset_partial_increment_labels
-no_reset_err="$(read_stderr)"
-export LOOM_DAEMON_BIN="$saved_bin"
-assert_eq "" "$(read_log)" \
-  "#8191: daemon without 'merge-pr post-merge-bookkeeping' -> no label mutation is guessed"
-assert_contains "$no_reset_err" "Post-merge issue bookkeeping (partial-reset) for PR #999 did not run" \
-  "#8191: daemon without 'merge-pr post-merge-bookkeeping' -> the skipped reset is reported"
-assert_contains "$no_reset_err" "gh issue edit <N> --repo owner/repo --remove-label loom:building --add-label loom:issue" \
-  "#8191: the report names the manual swap"
-
-# T30 (#8191): a failed reopen stops the pass -- the plan's later SWAP must not
-# run against an issue that is still closed. (The forge's reopen call is made
-# to fail through the gh stub; the gh call log is on disk, so the assertion still sees it.)
-reset_log
-PARTIAL_OPEN_BEFORE_MERGE="777"
-PARTIAL_CONFLICT_ISSUES="777"
-PR_JSON='{"body":"Verify, then close #777.\n\nContributes to #777"}'
-( export LOOM_TEST_REOPEN_FAIL=1; _reset_partial_increment_labels ) 2>"$STUB_DIR/stderr.log" || true
-reopen_fail_err="$(read_stderr)"
-assert_not_contains "$(read_log)" "issue edit 777" \
-  "#8191: failed reopen of #777 -> no label swap follows it"
-assert_contains "$reopen_fail_err" "Could not reopen issue #777 after its premature auto-close" \
-  "#8191: failed reopen of #777 -> warns with the manual reopen command"
-
-# T31 (#8191): the audit-comment BODIES are rendered in-process by
-# `merge-pr post-merge-bookkeeping`, so "a daemon that cannot render one" is no
-# longer a state that exists (the former fake-daemon seam is retired below). The
-# property that survives is the one that mattered: when the POST of the comment
-# fails, the label swap it merely describes has already happened and stays, and
-# the lost note is reported rather than swallowed.
-retired "T31: a daemon without 'merge-pr partial-comment' still performs the swap" \
-    "a missing comment renderer must not disturb the mutation the comment describes, nor post an empty body over the audit trail" \
-    "the bodies are rendered in-process now; there is no separate verb a half-rolled host can lack, so the fake-daemon seam cannot be reached" \
-    "T31 below (a failed comment POST keeps the swap and warns) and post_merge_bookkeeping::tests::partial_reset_comment_failure_is_a_warning_after_the_swap; a body is never empty because partial_comment's unit tests and byte-for-byte differential pin it."
-reset_log
-PARTIAL_OPEN_BEFORE_MERGE=""
-PARTIAL_CONFLICT_ISSUES=""
-PR_JSON='{"body":"Part of #123"}'
-( export LOOM_TEST_COMMENT_FAIL=1; _reset_partial_increment_labels ) 2>"$STUB_DIR/stderr.log" || true
-no_comment_err="$(read_stderr)"
-no_comment_log="$(read_log)"
-assert_contains "$no_comment_log" "issue edit 123 --repo owner/repo --remove-label loom:building --add-label loom:issue" \
-  "#8191: a failed comment POST still leaves the label swap performed"
-assert_not_contains "$no_comment_log" "issue comment 123" \
-  "#8191: ...and no comment is recorded as posted"
-assert_contains "$no_comment_err" "Could not post partial-increment comment on issue #123 (label swap still applied)" \
-  "#8191: the lost audit comment is reported, not swallowed"
-
-# T31b (#9264): a held remainder (the issue body declares
-# `<!-- loom:remainder-hold -->`) makes the swap add loom:operator and NOT
-# loom:issue. Driven through the real decision now that the plan is in-process.
-reset_log
-cat > "$STUB_DIR/issue-124.json" <<'EOF'
-{"state":"open","body":"Remainder needs a release.\n<!-- loom:remainder-hold reason=\"needs the fleet on a release\" -->","labels":[{"name":"loom:building"}]}
-EOF
-PARTIAL_OPEN_BEFORE_MERGE=""
-PARTIAL_CONFLICT_ISSUES=""
-PR_JSON='{"body":"Part of #124"}'
-_reset_partial_increment_labels 2>/dev/null
-held_log="$(read_log)"
-assert_contains "$held_log" "issue edit 124 --repo owner/repo --remove-label loom:building --add-label loom:operator" \
-  "#9264: a held remainder adds loom:operator"
-assert_not_contains "$held_log" "--add-label loom:issue" \
-  "#9264: ...and does not return the issue to the ready queue"
-assert_contains "$held_log" "needs the fleet on a release" \
-  "#9264: ...and the held comment quotes the declared reason"
-
-# T32 (#8191): on the happy path the posted body is the one the daemon
-# rendered, in both arms of its single conditional -- the plain swap, and the
-# swap that follows a #4569 reopen.
-reset_log
-PARTIAL_OPEN_BEFORE_MERGE=""
-PARTIAL_CONFLICT_ISSUES=""
-PR_JSON='{"body":"Part of #123"}'
-_reset_partial_increment_labels 2>/dev/null
-plain_comment_log="$(read_log)"
-assert_contains "$plain_comment_log" "## Partial Increment Merged" \
-  "#8191: the plain swap posts the daemon-rendered partial-increment body"
-assert_contains "$plain_comment_log" "*Reset by merge-pr.sh (#3667) at " \
-  "#8191: ...with its attribution sign-off intact"
-assert_not_contains "$plain_comment_log" "**Reopened** this issue" \
-  "#8191: ...and without the reopen bullet, which nothing reopened"
-assert_not_contains "$plain_comment_log" "LOOM-MERGE-PR-COMMENT" \
-  "#8191: the protocol sentinel is stripped before the body is posted"
-# ...and the sentinel's TERMINATING NEWLINE goes with it. Asserting only the
-# sentinel's absence would still pass if the strip removed the marker but left
-# its newline, which would post a body whose first line is blank. `--body` is
-# immediately followed by the heading in the stub's `echo "$*"` transcript only
-# when nothing was left behind. This is the half of the `${out#…$nl}` /
-# `[[ … == "…$nl"* ]]` pair that a wrong ANSI-C quote breaks off-Linux (see the
-# `$nl` note in merge-pr.sh) -- on bash 3.2 a literal `$'\n'` in those patterns
-# fails the match outright, which T31's "posts NO comment" assertion would read
-# as healthy; this one would not.
-assert_contains "$plain_comment_log" "--body ## Partial Increment Merged" \
-  "#8191: the body starts AT the heading -- the sentinel's newline is stripped too, not left as a blank first line"
-
-reset_log
-PARTIAL_OPEN_BEFORE_MERGE="777"
-PARTIAL_CONFLICT_ISSUES="777"
-PR_JSON='{"body":"Verify, then close #777.\n\nContributes to #777"}'
-run_capturing_stderr _reset_partial_increment_labels
-reopen_comment_log="$(read_log)"
-assert_contains "$reopen_comment_log" "## Premature Auto-Close Reverted" \
-  "#8191: the reopen posts the daemon-rendered premature-close body"
-assert_contains "$reopen_comment_log" "instead of \`close #777\`" \
-  "#8191: ...naming the offending issue in the advice it gives the Builder"
-assert_contains "$reopen_comment_log" "- **Reopened** this issue" \
-  "#8191: the follow-on swap's body leads with the reopen bullet"
-
-# --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
 echo "Testing merge-pr.sh source guards..."
 src="$(cat "$MERGE_PR_SRC")"
-assert_contains "$src" "_reset_partial_increment_labels" \
-  "merge-pr.sh defines and calls _reset_partial_increment_labels"
+assert_not_contains "$src" "_reset_partial_increment_labels ||" \
+  "merge-pr.sh no longer calls the retired post-merge partial-increment reset (#14905)"
 retired "merge-pr.sh's source contains the (Part of|Contributes to) alternation" \
     "the non-closing partial-increment vocabulary must not be silently narrowed or dropped by a refactor -- a dropped keyword means a declared partial increment is read as a plain close" \
     "the alternation is no longer in this file; it is a Rust pattern in loom-daemon/src/merge_pr/refs.rs, so no grep of merge-pr.sh can pass" \

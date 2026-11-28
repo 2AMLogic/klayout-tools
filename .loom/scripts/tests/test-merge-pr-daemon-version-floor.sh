@@ -489,6 +489,96 @@ assert_eq "0" "$(grep -c '_mp_warn_reverify_floor\|_MP_REVERIFY_FLOOR' "$MERGE_P
   "merge-pr.sh no longer carries the re-verify floor warning (the feature it guarded is deleted)"
 
 echo ""
+echo "Testing the post-merge reconciliation advisory…"
+_obs_fn="$(awk '/^_warn_if_daemon_lacks_merge_observation\(\) \{/{c=1} c{print} c&&/^}/{exit}' "$MERGE_PR_SRC")"
+assert_contains "$_obs_fn" "0.20.29" "the advisory names the overlap-release floor it checks"
+_obs_run() { # <version-line> [forge]
+    local bin="$WORKDIR/obs-daemon"
+    printf '#!/usr/bin/env bash\n[[ "$1" == "--version" ]] && echo "%s" && exit 0\nexit 2\n' "$1" >"$bin"; chmod +x "$bin"
+    # shellcheck disable=SC2034  # globals are read by the eval'd function
+    ( warning() { echo "WARN: $*"; }
+      info() { echo "INFO: $*"; }
+      eval "$_obs_fn"
+      FORGE_TYPE="${2:-github}" PR_NUMBER=7 REPO_NWO=o/r PR_BRANCH=feature/issue-7 SCRIPT_DIR=.loom/scripts LOOM_DAEMON_BIN="$bin"
+      _warn_if_daemon_lacks_merge_observation ) 2>&1
+}
+
+for _version in "0.20.20" "unparseable" "0.20.29" "0.21.0" "0.20.100"; do
+    _obs_out="$(_obs_run "loom-daemon $_version")"; _rc=$?
+    assert_eq "0" "$_rc" "$_version -> advisory returns success"
+    assert_eq "${_obs_out%%$'\n'*}" "$_obs_out" "$_version -> one line"
+    assert_contains "$_obs_out" "reconciliation tick" "$_version -> follow-up is asynchronous"
+    assert_contains "$_obs_out" "running loom-daemon watching this workspace" "$_version -> names the required daemon"
+    assert_contains "$_obs_out" "reconciliation enabled" "$_version -> names the required setting"
+    assert_contains "$_obs_out" "another host" "$_version -> allows a remote daemon"
+    case "$_version" in
+        0.20.20)
+            assert_contains "$_obs_out" "WARN: loom-daemon $_version predates the merge-observation pass" "old version warns"
+            assert_contains "$_obs_out" "loom-daemon-update.sh --fetch" "old version names the roll command"
+            assert_contains "$_obs_out" "reconcile-stack.sh <child-pr> feature/issue-7" "old version names the manual stack remedy"
+            ;;
+        unparseable) assert_contains "$_obs_out" "WARN: Could not read" "unreadable version warns" ;;
+        *) assert_contains "$_obs_out" "INFO: " "$_version -> informational advisory" ;;
+    esac
+done
+
+_obs_out="$(_obs_run "loom-daemon 0.20.20" gitea)"; _rc=$?
+assert_eq "0" "$_rc" "non-GitHub merge returns success"
+assert_eq "" "$_obs_out" "non-GitHub merge skips the advisory"
+assert_eq "0" "$(grep -c '^# requires-daemon: merge-pr .*merge-observation' "$MERGE_PR_SRC")" \
+  "the observation pass does not raise the fail-closed requires-daemon floor"
+
+echo ""
+echo "Testing the default cleanup gate is forge-aware (#14905)…"
+
+# Extract the REAL gate block from merge-pr.sh and run it with stubs.
+GATE_FILE="$WORKDIR/cleanup-gate.sh"
+awk '
+  /^if \[\[ "\$\{FORGE_TYPE:-github\}" != "github" \|\|/ { on = 1 }
+  on { print }
+  on && /^fi$/ { exit }
+' "$MERGE_PR_SRC" >"$GATE_FILE"
+assert_contains "$(cat "$GATE_FILE")" "_post_merge_cleanup" "the cleanup gate block was extracted from merge-pr.sh"
+
+# The sourced gate block consumes FORGE_TYPE / WORKTREE_PATH_OVERRIDE /
+# REMOVE_IGNORED / CLEANUP_WORKTREE; shellcheck cannot follow the dynamic
+# `source "$GATE_FILE"` and sees dead assignments. A directive placed before the
+# function covers its whole body. The two opt-outs ($4 / $5, defaulting to
+# merge-pr.sh's own defaults) are always assigned, so an ambient value can never
+# stand in for a flag a case did not pass.
+# shellcheck disable=SC2034
+_gate_run() { # <FORGE_TYPE|-> <WORKTREE_PATH_OVERRIDE> <REMOVE_IGNORED> [CLEANUP_WORKTREE] [CLEANUP_PRIMARY_CHECKOUT]
+    (
+        if [[ "$1" == "-" ]]; then unset FORGE_TYPE; else FORGE_TYPE="$1"; fi
+        WORKTREE_PATH_OVERRIDE="$2"; REMOVE_IGNORED="$3"
+        CLEANUP_WORKTREE="${4:-true}"; CLEANUP_PRIMARY_CHECKOUT="${5:-true}"
+        _post_merge_cleanup() { echo "INLINE-CLEANUP"; }
+        info() { echo "DAEMON-HANDLED"; }
+        # shellcheck disable=SC1090
+        source "$GATE_FILE"
+    )
+}
+assert_eq "INLINE-CLEANUP" "$(_gate_run gitea "" false)" "gitea: default cleanup stays inline (no daemon pass on that forge)"
+assert_eq "DAEMON-HANDLED" "$(_gate_run github "" false)" "github: default cleanup is left to the daemon pass"
+assert_eq "DAEMON-HANDLED" "$(_gate_run - "" false)" "unset FORGE_TYPE defaults to github"
+assert_eq "INLINE-CLEANUP" "$(_gate_run github /tmp/x false)" "github: explicit --worktree-path still cleans inline"
+assert_eq "INLINE-CLEANUP" "$(_gate_run github "" true)" "github: --remove-ignored still cleans inline"
+
+# #15258: the two opt-outs on the DEFAULT GitHub path pin CURRENT behaviour, so
+# that a later change to either arm is deliberate rather than accidental. The
+# gate block reads only CLEANUP_WORKTREE and on this path never reaches
+# _post_merge_cleanup, so neither opt-out is honoured: the daemon's
+# merge-observation pass owns cleanup (#14905) and has no channel for them.
+# --no-cleanup-worktree: CLEANUP_WORKTREE=false makes the elif false too, so
+# the gate is silent -- neither arm runs.
+assert_eq "" "$(_gate_run github "" false false true)" \
+  "github: --no-cleanup-worktree alone reaches neither arm (pins current behaviour, #15258)"
+# --no-cleanup-primary: CLEANUP_WORKTREE is still true, so the daemon-handled
+# advisory still fires; the primary opt-out itself changes nothing.
+assert_eq "DAEMON-HANDLED" "$(_gate_run github "" false true false)" \
+  "github: --no-cleanup-primary alone still prints the daemon-handled advisory (pins current behaviour, #15258)"
+
+echo ""
 echo "Testing the CI gate agrees merge-pr.sh's dependencies are declared…"
 
 if [[ -x "$CHECKER" || -f "$CHECKER" ]]; then

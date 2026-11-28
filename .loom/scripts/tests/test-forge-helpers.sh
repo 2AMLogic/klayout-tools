@@ -637,6 +637,152 @@ assert_no_grep "graphql" "$FB_STUB_DIR/calls.log" "a timed-out REST read is NOT 
 
 rm -rf "$FB_STUB_DIR"
 
+# --- Test forge_get_pr_conversation_comments GraphQL fallback (#15025) -------
+# The comment-verdict read (issues/<n>/comments) was the gate's second
+# single-transport REST read. A FAILED REST read now retries through a
+# paginated GraphQL pullRequest.comments query, mapped onto REST-shaped
+# objects (Bot identity carried as user.type) so `forge trusted-comments` and
+# the verdict jq consume one shape. 124 is never retried; every incomplete
+# read fails closed with no output.
+echo ""
+echo "Testing forge_get_pr_conversation_comments GraphQL fallback (#15025)..."
+
+FC_STUB_DIR=$(mktemp -d)
+cat > "$FC_STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+FC="${FC_STUB_DIR_ENV:?}"
+echo "$*" >> "$FC/calls.log"
+if [[ "${1:-}" == "api" && "${2:-}" == "graphql" ]]; then
+  [[ -n "${FC_FAIL_GRAPHQL:-}" ]] && exit 1
+  query="" cursor=""
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f) [[ "$2" == query=* ]] && query="$2"; shift 2 ;;
+      -F) [[ "$2" == cursor=* ]] && cursor="${2#cursor=}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ "$query" == *"comments(first"* ]] || exit 1
+  if [[ -z "$cursor" ]]; then
+    [[ -f "$FC/gql-page-1.json" ]] || exit 1
+    cat "$FC/gql-page-1.json"
+    exit 0
+  fi
+  for page in "$FC"/gql-page-*.json; do
+    [[ -f "$page" ]] || continue
+    [[ "$page" =~ -page-([0-9]+)\.json$ ]] || continue
+    if [[ "$cursor" == "$(jq -r '.data.repository.pullRequest.comments.pageInfo.endCursor // empty' "$page")" ]]; then
+      next="${page%-page-*}-page-$((BASH_REMATCH[1] + 1)).json"
+      [[ -f "$next" ]] || exit 1
+      cat "$next"
+      exit 0
+    fi
+  done
+  exit 1
+fi
+if [[ -n "${FC_HANG_REST:-}" ]]; then sleep 30; exit 0; fi
+if [[ -n "${FC_FAIL_REST:-}" ]]; then
+  echo "stub gh: simulated REST comments failure" >&2
+  exit 1
+fi
+cat "$FC"/rest-page-*.json
+exit 0
+STUB
+chmod +x "$FC_STUB_DIR/gh"
+
+cat > "$FC_STUB_DIR/rest-page-1.json" <<'JSON'
+[{"id":11,"user":{"login":"carol","type":"User"},"author_association":"MEMBER","body":"rest note"}]
+JSON
+cat > "$FC_STUB_DIR/gql-page-1.json" <<'JSON'
+{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"GQLC1"},"nodes":[
+  {"databaseId":31,"author":{"login":"alice","__typename":"User"},"authorAssociation":"MEMBER","body":"verdict one","createdAt":"2026-11-23T03:00:00Z"},
+  {"databaseId":32,"author":{"login":"loom-fleet-dispatch","__typename":"Bot"},"authorAssociation":"NONE","body":"bot verdict","createdAt":"2026-11-23T03:01:00Z"},
+  {"databaseId":33,"author":null,"authorAssociation":"NONE","body":"ghost","createdAt":null}
+]}}}}}
+JSON
+cat > "$FC_STUB_DIR/gql-page-2.json" <<'JSON'
+{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":"GQLC2"},"nodes":[
+  {"databaseId":34,"author":{"login":"mallory","__typename":"User"},"authorAssociation":"NONE","body":"outsider","createdAt":"2026-11-23T03:02:00Z"}
+]}}}}}
+JSON
+
+fc_run() {
+  set +e
+  fc_out=$(FC_STUB_DIR_ENV="$FC_STUB_DIR" "$@" 2>/dev/null)
+  fc_rc=$?
+  set -e
+}
+fc_fail_closed() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$fc_rc" -ne 0 && -z "$fc_out" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: $1"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: $1 (rc=$fc_rc, out=${fc_out:-<empty>})"
+  fi
+}
+
+# REST success: served as-is, no GraphQL call.
+rm -f "$FC_STUB_DIR/calls.log"
+fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+assert_eq "0" "$fc_rc" "REST success: read succeeds"
+assert_eq "11" "$(printf '%s\n' "$fc_out" | jq -r '.[0].id')" "REST success: the REST listing is served unchanged"
+assert_no_grep "graphql" "$FC_STUB_DIR/calls.log" "REST success: no GraphQL call is made"
+
+# REST failure + GraphQL serving: ONE array of REST-shaped objects, both pages.
+FC_FAIL_REST=1 fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+assert_eq "0" "$fc_rc" "REST fail + GraphQL serving: the fallback read succeeds"
+assert_eq "4" "$(printf '%s\n' "$fc_out" | jq 'length')" "records from BOTH GraphQL pages are returned in one array"
+assert_eq "number" "$(printf '%s\n' "$fc_out" | jq -r '.[0].id | type')" "id stays numeric (databaseId)"
+assert_eq "alice|User|MEMBER|verdict one|2026-11-23T03:00:00Z" "$(printf '%s\n' "$fc_out" | jq -r '.[] | select(.id == 31) | [.user.login, .user.type, .author_association, .body, .created_at] | join("|")')" "fields map onto the REST shape"
+assert_eq "loom-fleet-dispatch|Bot" "$(printf '%s\n' "$fc_out" | jq -r '.[] | select(.id == 32) | [.user.login, .user.type] | join("|")')" "__typename Bot is carried as user.type Bot (the App trust signal)"
+assert_eq "null|NONE" "$(printf '%s\n' "$fc_out" | jq -r '.[] | select(.id == 33) | [.user, .author_association] | join("|")' | sed 's/^|/null|/')" "a deleted (null) author maps to user:null, association NONE"
+assert_eq "34" "$(printf '%s\n' "$fc_out" | jq -r '.[3].id')" "the cursor-paginated page-2 record is served"
+
+# A complete, genuinely empty list is [] with rc 0 — distinct from a failed read.
+cp "$FC_STUB_DIR/gql-page-1.json" "$FC_STUB_DIR/gql-page-1.json.keep"
+cat > "$FC_STUB_DIR/gql-page-1.json" <<'JSON'
+{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}
+JSON
+FC_FAIL_REST=1 fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+assert_eq "0" "$fc_rc" "an empty-but-complete GraphQL list succeeds"
+assert_eq "[]" "$fc_out" "...and is an empty JSON array, not empty output"
+mv "$FC_STUB_DIR/gql-page-1.json.keep" "$FC_STUB_DIR/gql-page-1.json"
+
+# Both transports failing: non-zero, no output.
+FC_FAIL_REST=1 FC_FAIL_GRAPHQL=1 fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+fc_fail_closed "both transports failing -> non-zero with no output"
+
+# Truncated pagination.
+mv "$FC_STUB_DIR/gql-page-2.json" "$FC_STUB_DIR/gql-page-2.json.aside"
+FC_FAIL_REST=1 fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+fc_fail_closed "an advertised follower page that never arrives -> non-zero, no partial output"
+mv "$FC_STUB_DIR/gql-page-2.json.aside" "$FC_STUB_DIR/gql-page-2.json"
+
+# Missing pageInfo, errors payload.
+cp "$FC_STUB_DIR/gql-page-1.json" "$FC_STUB_DIR/gql-page-1.json.keep"
+echo '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[]}}}}}' > "$FC_STUB_DIR/gql-page-1.json"
+FC_FAIL_REST=1 fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+fc_fail_closed "a page missing pageInfo -> non-zero (never guessed complete)"
+echo '{"errors":[{"message":"boom"}],"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}' > "$FC_STUB_DIR/gql-page-1.json"
+FC_FAIL_REST=1 fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+fc_fail_closed "a GraphQL errors payload -> non-zero with no output"
+echo '{"data":{"repository":{"pullRequest":null}}}' > "$FC_STUB_DIR/gql-page-1.json"
+FC_FAIL_REST=1 fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+fc_fail_closed "a null pullRequest -> non-zero (never an empty list)"
+mv "$FC_STUB_DIR/gql-page-1.json.keep" "$FC_STUB_DIR/gql-page-1.json"
+
+# A timed-out REST read (124) is never retried through the fallback.
+rm -f "$FC_STUB_DIR/calls.log"
+LOOM_FORGE_REVIEW_READ_TIMEOUT=1 FC_HANG_REST=1 \
+  fc_run forge_get_pr_conversation_comments "owner/repo" "15025" "$FC_STUB_DIR/gh"
+assert_eq "124" "$fc_rc" "a hung REST read returns 124 (the #13927 bound)"
+assert_no_grep "graphql" "$FC_STUB_DIR/calls.log" "a timed-out REST read is NOT retried through the fallback"
+
+rm -rf "$FC_STUB_DIR"
+
 # --- Test gitea_api auth-mode selection (issue #3297) ---
 # Use a `curl` shim on PATH that records its argv and returns a fake 200.
 echo ""
@@ -1192,6 +1338,44 @@ assert_eq "gh: Not Found (HTTP 404)" "$_fec_err" "forge_get_pr_nocache passes gh
 _fec_err="$( (FORGE_TYPE=github; forge_get_pr o/r 1 "$_FEC_SHIM/gh" 2>&1 >/dev/null) || true)"
 assert_eq "gh: Not Found (HTTP 404)" "$_fec_err" "forge_get_pr passes gh's stderr through instead of discarding it"
 rm -rf "$_FEC_SHIM"
+
+# --- _forge_nwo_from_url: strict remote-URL contract (#15628) ---
+echo ""
+echo "Testing _forge_nwo_from_url (#15628)..."
+nfu() { local out rc=0; out="$(_forge_nwo_from_url "$1")" || rc=$?; printf '%s|%s' "$out" "$rc"; }
+for _u in 'https://github.com/o/r' 'https://github.com/o/r.git' 'https://github.com/o/r/' \
+          'https://github.com/o/r.git/' 'HTTPS://GitHub.com/o/r' 'http://host/o/r' \
+          'git@github.com:o/r.git' 'git@github.com:o/r' 'deploy@host:o/r.git' \
+          'ssh://git@host/o/r.git' 'ssh://git@host:2222/o/r' 'git://host/o/r.git' \
+          'https://gitea.example.com/o/r'; do
+  assert_eq "o/r|0" "$(nfu "$_u")" "_forge_nwo_from_url resolves $_u"
+done
+for _u in '/srv/git/widgets.git' 'https://github.com/only-owner' 'https://host/gitea/o/r' \
+          'https://github.com' 'https://github.com/' 'ftp://host/o/r' 'file:///srv/o/r' \
+          'git@host:only-owner' 'git@host:/o/r' 'git@host:a/b/c' 'o/r' '' '   '; do
+  assert_eq "|1" "$(nfu "$_u")" "_forge_nwo_from_url fails closed on '$_u'"
+done
+
+# forge_get_repo_nwo / _forge_nwo_from_remote use the same contract, so a remote
+# the Rust parser rejects never yields an invented owner on either forge.
+_NFU_REPO="$(mktemp -d)"
+git -C "$_NFU_REPO" init -q
+git -C "$_NFU_REPO" remote add origin '/srv/git/widgets.git'
+_NFU_GH_SHIM="$(mktemp -d)"; printf '#!/usr/bin/env bash\nexit 1\n' > "$_NFU_GH_SHIM/gh"; chmod +x "$_NFU_GH_SHIM/gh"
+for _ft in github gitea; do
+  _nfu_out="$( (cd "$_NFU_REPO" && FORGE_TYPE=$_ft forge_get_repo_nwo "$_NFU_GH_SHIM/gh") 2>/dev/null; echo "rc=$?")"
+  assert_eq "rc=1" "$_nfu_out" "forge_get_repo_nwo ($_ft) fails closed on a local-path remote"
+done
+_nfu_out="$( (cd "$_NFU_REPO" && _forge_nwo_from_remote) 2>/dev/null; echo "rc=$?")"
+assert_eq "rc=1" "$_nfu_out" "_forge_nwo_from_remote fails closed on a local-path remote"
+git -C "$_NFU_REPO" remote set-url origin 'git@github.com:o/r.git'
+for _ft in github gitea; do
+  _nfu_out="$( (cd "$_NFU_REPO" && FORGE_TYPE=$_ft forge_get_repo_nwo "$_NFU_GH_SHIM/gh") 2>/dev/null)"
+  assert_eq "o/r" "$_nfu_out" "forge_get_repo_nwo ($_ft) resolves a scp-form remote"
+done
+_nfu_out="$( (cd "$_NFU_REPO" && _forge_nwo_from_remote) 2>/dev/null)"
+assert_eq "o/r" "$_nfu_out" "_forge_nwo_from_remote resolves a scp-form remote"
+rm -rf "$_NFU_REPO" "$_NFU_GH_SHIM"
 
 # --- Summary ---
 echo ""

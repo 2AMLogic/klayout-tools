@@ -79,6 +79,17 @@ transcript archival.
 
 A Claude-orchestrated sweep can run only its Builder and Doctor phases on
 another runtime (e.g. `opencode:zai-flash`) via `runtimes.rolePreference`.
+
+**Scope (#15299).** This applies only to a sweep that was *dispatched* to a
+native-runtime lane: a daemon-dispatched child, marked by `LOOM_SWEEP_CLAIM_OWNED`
+or `--claim-owned N` (`sweep-backend-detection.md` Stage -1 rule 3, the same marker
+`forge_check_claim.rs` reads). An **attended in-session sweep** (neither present)
+never calls `loom-daemon worker run`: Builder and Doctor are dispatched as Claude
+Task subagents directly, like Curator and Judge, so a host's `roleDraw` /
+`rolePreference` cannot route the operator's session to another runtime. A
+hand-run `claude -p "/loom:sweep N"` has no marker either and likewise stays on
+Claude. For a marker-bearing sweep nothing below changes, including exits 75/78.
+
 Before each such phase the orchestrator calls
 `loom-daemon worker run --role builder --issue N --json` (Doctor:
 `--role doctor --pr N`; a stacked Builder adds `--base feature/issue-<parent>`).

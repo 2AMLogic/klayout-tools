@@ -6,6 +6,12 @@ disable-model-invocation: true
 Load only when a Doctor phase is about to dispatch AND `runtimes.rolePreference.doctor`
 (or the fleet `runtimes.preference`) can resolve a GLM tap. Applies identically to
 Modes A/B (`sweep-wave-lifecycle.md` §6) and Mode C (`sweep-mode-c-lifecycle.md` C1b).
+**Scope (#15299):** this file's `worker run --role doctor` routes apply only to a
+marker-bearing sweep (`LOOM_SWEEP_CLAIM_OWNED` set or `--claim-owned N`,
+`sweep-backend-detection.md` Stage -1 rule 3). An attended in-session sweep never
+calls `worker run`: skip the `doctor-route` table and dispatch the Doctor as a Claude
+Task directly, with the `sweep.escalation` model resolution unchanged (see
+`sweep-execution-model.md` "Per-phase runtime").
 It is a retry policy on the **existing** Doctor cycle and the **existing**
 `sweep.escalation` ladder; it adds no ladder and never changes `sweep.max_doctor_cycles`.
 

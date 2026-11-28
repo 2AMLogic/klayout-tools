@@ -84,6 +84,7 @@ fi
 # closing `}` is the first line starting at column 0 after the opening line
 # (its nested `section()`/`count()` helpers are indented).
 RPB_BODY="$(awk '/^render_plan_body\(\) \{/{flag=1} flag{print} /^\}/{if(flag){exit}}' "$GUIDE_MD")"
+HELPERS_BODY="$(awk -f "$SCRIPT_DIR/lib/guide-plan-helpers.awk" "$GUIDE_MD")" || exit 1
 
 if [[ -z "$RPB_BODY" ]]; then
     fail "could not extract render_plan_body() body from guide.md"
@@ -284,7 +285,7 @@ printf '#!/usr/bin/env bash\n[ "$1 $2 $3 ${5:-}" = "labels list --property --wit
     "$TMPROOT" >"$TMPROOT/bin/loom-daemon"
 chmod +x "$TMPROOT/bin/loom-daemon"
 
-RENDER="$(PATH="$TMPROOT/bin:$PATH" LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+RENDER="$(PATH="$TMPROOT/bin:$PATH" LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
 
 if [[ -z "$RENDER" ]]; then
     fail "render_plan_body() produced no output against the fixtures (harness broken)"
@@ -398,7 +399,7 @@ mkdir -p "$TMPROOT/bin-fail"
 printf '#!/usr/bin/env bash\nexit 2\n' >"$TMPROOT/bin-fail/loom-daemon"
 chmod +x "$TMPROOT/bin-fail/loom-daemon"
 
-RENDER_FALLBACK="$(PATH="$TMPROOT/bin-fail:$PATH" LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+RENDER_FALLBACK="$(PATH="$TMPROOT/bin-fail:$PATH" LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" HELPERS_SRC="$HELPERS_BODY" RPB_SRC="$RPB_BODY" bash -c 'eval "$HELPERS_SRC"; eval "$RPB_SRC"; render_plan_body')"
 REVIEW_FALLBACK="$(awk '/^## PRs Awaiting Review/{flag=1; next} /^## /{flag=0} flag' <<<"$RENDER_FALLBACK")"
 IMP_FALLBACK="$(awk '/^## Important/{flag=1; next} /^## /{flag=0} flag' <<<"$RENDER_FALLBACK")"
 

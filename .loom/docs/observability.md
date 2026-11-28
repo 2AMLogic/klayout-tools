@@ -971,7 +971,17 @@ cadence. Two more per-account gauges ride the same pass:
 `loom.codex_session.record{account,kind,container}` (`hold`, `drift_removal`:
 1 while that on-disk record stands) and
 `loom.codex_session.mount_drift{account,kind,container}` (`missing`, `extra`,
-`denied`: path counts). `loom-daemon status` shows the same per-account view
+`denied`: path counts). Seat signals (#15292) ride the same pass:
+`loom.codex_session.login` (1 signed in, 0 signed out), `hold_age` (seconds,
+`reason` ∈ `operator_stop`, `other`), `hook_trust` (`state` ∈ `recorded`,
+`sealed`, `missing`), and the latest rate limits (`quota_used` as a 0-1
+fraction and `quota_resets_at` by `kind` ∈ `5h`, `7d`, `quota_observed_at`,
+`reset_credits`). Login and live limits come from one bounded in-container
+`codex app-server` round trip per running seat; hold, hook trust and the local
+rollout snapshot are files and still export while docker is down. A source that
+cannot be read emits nothing for its field, never a false value, so a held or
+signed-out seat with weekly quota left is a join of `record{kind=hold}` or
+`login=0` with `quota_used{kind=7d}`. `loom-daemon status` shows the same per-account view
 (state, mounts, posture, hold, removal record, the reconciler's last action)
 under `Session containers:`. If docker cannot be queried at all
 (CLI missing, Docker daemon unreachable, timeout), nothing about any container
@@ -1384,7 +1394,6 @@ transition.
 | `fleet.<condition>` (`dispatch-halted`, `roles-persistent`, `output-missing`; `star-backlog` retired by #11510, `capacity-limited` by #12406) | `fleet_alert` | condition started (and each reminder) / cleared |
 | `daemon.down` (critical) | the watchdog, a separate process | recovery exhausted / any tick ending the outage |
 | `watchdog.peer-coord-degraded` (critical) | the watchdog (see note below) | coordination degraded / green |
-| `safehouse.unreachable` (critical) | narration sink state | unreachable over 5 minutes / reconnected |
 | `fleet.floor-unsatisfiable` | `auto_update` | the floor ERROR line / floor met |
 | `fleet.floor-malformed` | fleet-sync pass | `loom_min_version` malformed / a valid (or no) floor |
 | `fleet.sync-error` | fleet-sync pass | 3 erroring passes in a row / a clean pass |
@@ -1423,7 +1432,7 @@ an upgraded daemon finds them), so a restarted daemon resolves one
 the previous process opened once it finds the condition gone, and keeps one
 open (and its heartbeat going) while its failure count (process memory)
 builds up again; a daemon that finds the output off removes those files. The
-single-key watches (safehouse, breaker, llm-monitor) send one `resolved` on
+single-key watches (breaker, llm-monitor) send one `resolved` on
 their first healthy sample instead. Alerts raised before the output starts
 (credential preflight, the fleet-sync startup pass) are held (at most 256) and
 go out once the exporters are up. llm-monitor's quota step-change alert is not
@@ -1467,7 +1476,7 @@ Guards: `kind_producer.rs` fails when a kind loses its last producer; `kind_expo
 | `roster.change` | fleet_sync/roster_clone.rs | daemon | logs |  |
 | `issue.estimate` | telemetry/kinds/issue_estimate/observe.rs | daemon | logs | Observed from curated issues by the intake pass (#12118). |
 | `stage.work_started` | observability/work_started.rs | daemon | logs |  |
-| `completion.narrated` | safehouse/completion_runtime.rs | daemon | logs |  |
+| `completion.narrated` | *(none: no longer emitted since #13946)* | daemon | logs |  |
 | `write_scope.refused` | write_scope.rs | daemon | logs |  |
 | `daemon.exit` | observability/daemon_exit.rs | daemon | logs |  |
 | `daemon.run_state_request` | observability/run_state_request.rs | daemon | logs |  |

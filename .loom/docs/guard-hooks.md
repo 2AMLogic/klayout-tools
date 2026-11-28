@@ -1858,6 +1858,10 @@ The config read is best-effort: a missing, empty, or malformed `.loom/config.jso
 - Anything under the **worktree root** — resolved with the same precedence as `loom_worktree_root()`: `LOOM_WORKTREE_ROOT` env → `.loom/config.json → worktree.root` → the default `<repo>/.loom/worktrees`. This admits an external scratch volume (e.g. `worktree.root: "/Volumes/scratch/wt"`).
 - The **ephemeral allowlist**: system temp roots and the Claude scratchpad.
 
+**Relative targets and `cd` (#15112):** a relative `rm` target is resolved against the directory in effect at that point of the command — a preceding `cd <literal path>` (unquoted `~/…` / `$HOME/…` also resolve) wins over the session cwd, but only while every operator between the `cd` and the `rm` is `&&`; after a `;`, newline, `|`, `||` or `&` the `cd` is not trusted and the target keeps the session-cwd verdict (this also holds when a later literal `cd` follows the break, e.g. `cd build ; cd src && rm -rf x`; this never denies by itself).
+
+When the guard denies a relative target because it cannot establish the working directory, it uses the rule `rm-scope-unresolved-var` (#15218). The message identifies a non-literal `cd` argument (a variable, command substitution, glob, `cd -`, bare `cd`, or a path with whitespace), unsupported `cd` syntax such as a redirection with a separate operand, or a relative `cd` that needs a plain absolute session working directory. For an `rm` inside an unquoted heredoc’s `$( … )`, the guard cannot establish the substitution’s working directory when the command text contains the word `cd` anywhere. If the scanner has no more specific reason, the message advises using an absolute `rm` target.
+
 **Ephemeral allowlist prefixes**. `normalize_abs_path()` is **lexical only** — it does **not** resolve symlinks — so on macOS each temp root is listed in **both** its symlink form and its `/private` target:
 
 | Symlink form | `/private` target |
@@ -2153,13 +2157,24 @@ Builder and Doctor work in `.loom/worktrees/issue-<N>`.
   `git commit`, `git switch <x>`/`-c`, `git checkout -b|-B <x>`, `--detach`,
   and `git checkout <branch|sha>`. The message names
   `./.loom/scripts/worktree.sh <issue-number>` and this toggle.
+- **Denied, #14973** (review sessions parking primary checkouts on PR heads):
+  `git fetch origin pull/N/head:prN && git checkout prN` and the
+  `refs/review/prN` variant — a `git checkout <target>` whose target is no ref
+  git can name and no path at hook time (the ref is created by the same
+  compound command, or does not exist at all, as with a `FETCH_HEAD` chained
+  after a fetch) — and `gh pr checkout <N>`, which fetches the PR head and
+  moves the checkout onto it. git errors on a pathspec matching no tracked
+  file, so denying these costs no working invocation.
 - **Allowed**: everything inside a linked worktree; checkout/switch whose target
   is `main`/`master` (the Auditor's `git checkout -B main origin/main`);
-  `git checkout -- <path>` and `git checkout <path>` file restores; `-h/--help`;
+  `git checkout -- <path>` and `git checkout <path>` file restores (a path
+  present in the working tree, or tracked — including one deleted from the
+  worktree); `-h/--help`;
   read-only git. `worktree.sh`, `check-main-clean.sh --quarantine`,
   `resync-installed.sh`, `merge-pr.sh` and `scripts/version.sh` are unaffected:
   the hook only sees the top-level command text, not their internal git calls.
-- **Decision-log tag**: `primary-checkout-mutation:<commit|switch|checkout>`.
+- **Decision-log tag**:
+  `primary-checkout-mutation:<commit|switch|checkout|gh-pr-checkout>`.
 - **Toggle**: `LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION=0` (env, agent's own
   environment) or `"guards": {"primaryCheckoutMutation": false}` in
   `.loom/config.json`. Default on.
@@ -2647,14 +2662,16 @@ A headless sweep runs under `--dangerously-skip-permissions`, where the guard `P
 If you are a dispatched agent and you are about to trust a test suite's output — especially one that exercises guard-hook / force-push / reset-hard behavior — check first:
 
 ```bash
-env | grep -E '^LOOM_(FORCE_SCOPE|GUARD_DECISION_LOG)='
+env | grep -E '^LOOM_(FORCE_SCOPE|GUARD_DECISION_LOG|SWEEP_ID|WORKTREE_PATH|WORKSPACE)='
 ```
 
-If either is set and the suite under test asserts guard defaults, re-run it with the ambient overrides stripped before drawing any conclusion from the result:
+If any is set and the suite under test asserts guard defaults, re-run it with them all stripped before drawing any conclusion from the result:
 
 ```bash
-env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <test-suite-command>
+env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG -u LOOM_SWEEP_ID -u LOOM_WORKTREE_PATH -u LOOM_WORKSPACE <test-suite-command>
 ```
+
+The last three are read by the primary-checkout mutation guard, not as behaviour overrides: `LOOM_SWEEP_ID` and `LOOM_WORKTREE_PATH` mark an agent step, `LOOM_WORKSPACE` names the workspace (#15483). With a marker ambient the guard denies `git commit` in a primary checkout — which is what a guard suite's fixture repository typically is — so a suite's `git commit -m <prose>` allow-assertions there are denied instead (#15496).
 
 This is also called out directly in the dispatched agent's own brief — see `defaults/roles/builder.md` → "Build Verification During Implementation" — rather than left as a fact an agent has to already know to look up here.
 

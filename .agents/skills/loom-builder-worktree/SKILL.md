@@ -144,6 +144,51 @@ The worktree helper script prevents common errors:
 
 This on-demand approach prevents worktree clutter and reduces resource usage.
 
+## Shelving work and recovering edits
+
+Linked worktrees share `refs/stash`. Two Builders using raw `git stash` can
+pop or drop each other's edits (#4821).
+
+- **Save a patch.** Run `./.loom/scripts/worktree.sh snapshot <issue-number>`.
+  It writes staged and unstaged tracked changes to
+  `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch` and leaves your
+  edits in place. Add `--include-untracked` to capture new text files too.
+  A `Binary files … differ` line contains no bytes for `git apply` to restore.
+  Keep a separate, verified copy of each such file before removing the worktree.
+- **Compare against a clean baseline.** Run
+  `./.loom/scripts/worktree.sh stash-push <issue-number>`. It saves tracked
+  edits under `refs/loom/stash-baseline/issue-<N>` and resets that worktree
+  to HEAD. Add `--include-untracked` to move new files aside too. Run the
+  baseline check in the issue worktree, then run
+  `./.loom/scripts/worktree.sh stash-pop <issue-number>` to restore the edits
+  and any files moved aside, even if the check failed (#5217).
+- **Compare against a baseline in the main checkout.** Use
+  `./.loom/scripts/worktree.sh stash-push main` and
+  `./.loom/scripts/worktree.sh stash-pop main`. This pair uses
+  `refs/loom/stash-baseline/main` and leaves the shared stack alone (#6076).
+
+Inside a managed worktree with a second managed worktree active, the guard
+denies raw stash creation (`git stash`, `git stash push`, `git stash save`)
+before anything changes. Its message gives the helper commands for your issue.
+Raw `git stash pop`, `drop`, and `clear` ask for confirmation when the stack
+is at risk, including in main. A headless Builder cannot answer that prompt (#5754).
+
+### Replay quarantined edits
+
+`check-main-clean.sh --quarantine` uses the shared stash to rescue edits from
+the main checkout. On exit 4, use the **commit SHA** printed on the
+`Rescue ref` line so another stash cannot change which edits you replay.
+Inspect the paths. If they all belong to the issue, apply the patch in its
+worktree.
+
+```bash
+git -C "<MAIN_ROOT>" stash show --include-untracked --name-status "<rescue-sha>"
+git -C "<MAIN_ROOT>" stash show --include-untracked --binary -p "<rescue-sha>" |
+  git -C "<WORKTREE_ABS>" apply -
+```
+
+A raw `git stash pop` in main would put the edits back in the checkout you just cleaned.
+
 ## Handling Merge Conflicts in Worktrees
 
 When your feature branch has conflicts with main, you have two options depending on the severity of divergence.
@@ -186,7 +231,7 @@ if [ "$BRANCH_UPDATE" = rebase ]; then git push "$LEASE" origin "HEAD:$BRANCH"; 
 If conflicts are too complex or main has changed significantly:
 
 ```bash
-git diff HEAD > ~/my-changes.patch            # 1. optional: save your work as a patch
+git diff --binary HEAD > ~/my-changes.patch   # 1. save tracked changes (copy untracked files separately)
 cd /path/to/main/repo                         # 2. back to the main repository
 git worktree remove .loom/worktrees/issue-XX --force   # 3. remove the stale worktree
 git branch -D feature/issue-XX                # 4. delete the old branch
@@ -216,22 +261,6 @@ cd .loom/worktrees/issue-XX                   # 7. re-apply: cherry-pick, patch,
 **Don't create branches directly in main**
 - Always use `./.loom/scripts/worktree.sh` to create branches
 - Prevents nested worktree issues
-
-**Don't use `git stash` for ad-hoc WIP handling in a worktree**
-- Stash (`refs/stash`) is **shared across every linked worktree**: parallel
-  builders can pop each other's WIP, silently swapping or overwriting it
-  (kicad-tools PRs #4524/#4526).
-- Use `./.loom/scripts/worktree.sh snapshot <issue-number>` instead — a patch
-  under `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch`, scoped to
-  your worktree.
-- For a "clean baseline vs. my diff" comparison — temporarily clearing your
-  fix to re-run a lint/test baseline, then restoring it — `snapshot` is *not*
-  enough (it captures a patch but does not reset the working tree). Use
-  `./.loom/scripts/worktree.sh stash-push <issue-number>`, run the baseline
-  check, then `./.loom/scripts/worktree.sh stash-pop <issue-number>` (#5217).
-  It anchors your WIP to a **per-issue** ref
-  (`refs/loom/stash-baseline/issue-<N>`), never `refs/stash`, so no concurrent
-  builder's stash can land between your push and pop.
 
 **Don't leave a detached process running after your session ends**
 - It outlives the sweep, holds files open in a worktree that is auto-removed on

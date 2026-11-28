@@ -27,6 +27,7 @@ binary instead of trusting `$PATH`.
 - [Stage results and the failure table](#stage-results-and-the-failure-table)
 - [Pinning runtime, model profile and effort](#pinning-runtime-model-profile-and-effort)
 - [Telemetry: keeping a qualification run out of a fleet store](#telemetry-keeping-a-qualification-run-out-of-a-fleet-store)
+- [Live Builder lease qualification on 2026-11-25](#live-builder-lease-qualification-on-2026-11-25)
 - [Related](#related)
 <!-- toc:end -->
 
@@ -185,7 +186,7 @@ What the rest of the Builder chain does on Gitea when driven by hand
 
 | Step | Result |
 |---|---|
-| `worktree.sh 1` | **Works** — branch `feature/issue-1` + worktree created; **lease publish fails** (`publish gh call failed`, exit 2) so the lease is local-only — #14941 |
+| `worktree.sh 1` | **Works** — branch `feature/issue-1` + worktree created; **lease publish fails** (`publish gh call failed`, exit 2) so the lease is local-only — #14941 *(fixed since: publish and renewal use the Gitea API, see `lease-record.md` § "Builder leases on a Gitea checkout")* |
 | commit + `git push -u origin feature/issue-1` | **Works** with the out-of-repo credential store |
 | `create-pr.sh` | **Exits 2 by design** ("GitHub App permission-window fallback is GitHub-specific; on gitea open the PR with your forge's own CLI") — raw API below |
 | label swap `loom:issue → loom:building` | No script surface on Gitea (`forge_gh_swap_label_rl_safe` is gh-backed) — raw API |
@@ -300,6 +301,76 @@ Two facts, both **observed**, one per direction:
    telemetry change is needed for either direction; that is the answer to
    "how is such a run marked": by the caller's `OTEL_RESOURCE_ATTRIBUTES`,
    not by anything in the repo.
+
+## Live Builder lease qualification on 2026-11-25
+
+On Gitea 1.24.6, a second user read the lease that `worktree.sh` published,
+renewal advanced the comment's timestamp, and a second host yielded to the
+fresh lease. This run qualifies the Builder publish and renewal paths from
+[#15120](https://github.com/2AMLogic/loom/pull/15120).
+
+The disposable server ran the amd64 image `gitea/gitea:1.24.6`
+(tag digest `sha256:2edc102cbb636ae1ddac5fa0c715aa5b03079dee13ac6800b2cef6d4e912e718`).
+`GET /api/v1/version` returned `1.24.6`. Both clients used scripts from
+Loom `5689b92fa905e8224e52a5bc143bb87cf08a1e05` and pinned
+`LOOM_DAEMON_BIN` to the matching 0.20.36 binary from
+[main CI run 45703285467](https://github.com/2AMLogic/loom/actions/runs/45703285467).
+
+Host A was the Linux worker. Host B was a separate Ubuntu VM with its own
+kernel, hostname, clone and Gitea login. Its non-admin user `lease-b` had
+write access to the private `lease-a/lease-check` repository and posted an
+ordinary comment on disposable issue 2. B's workspace set
+`forge.trustedCommenters` to `["lease-a"]`. Issue numbers below are local
+to that repository. All timestamps are UTC.
+
+**Publish and renewal.** A ran `.loom/scripts/worktree.sh 1` (exit 0).
+Both users independently listed issue 1's comments. A then allowed a server
+clock tick and ran the following command using the published identity.
+
+```sh
+.loom/scripts/sweep-lease-renew.sh renew-once 1 \
+  --host host-8e7497b9 --sweep-id sweep-insession-s461085-32580946
+```
+
+| Authenticated read | Rows | Comment ID | Author | Gitea `updated_at` |
+|---|---:|---:|---|---|
+| A after publish | 1 | 2 | `lease-a` | `2026-11-25T21:45:35Z` |
+| B before renewal | 1 | 2 | `lease-a` | `2026-11-25T21:45:35Z` |
+| B after renewal (exit 0) | 1 | 2 | `lease-a` | `2026-11-25T21:45:45Z` |
+
+All three reads returned this literal first line. The server advanced
+`updated_at` by 10 seconds on the same comment.
+
+```text
+<!-- loom:lease host=host-8e7497b9 sweep=sweep-insession-s461085-32580946 -->
+```
+
+**Fresh peer.** From its own clone B ran
+`.loom/scripts/sweep-lease-publish.sh publish 1 --sweep-id qual-b`.
+It exited 4 with the diagnostic below (excerpt). A subsequent listing
+contained only lease ID `2`.
+
+```text
+SKIP: issue #1 carries a FRESH lease held by a different host (host=host-8e7497b9 sweep=sweep-insession-s461085-32580946, updated_at=2026-11-25T21:45:45Z, within the 15m TTL).
+```
+
+**Comment listing.** `GET /api/v1/settings/api` reported
+`default_paging_num=30` and `max_response_items=50`. On each fresh issue
+we posted the ordinary comments first. A then ran
+`sweep-lease-publish.sh publish <issue> --sweep-id <id>` and recorded the
+comment ID from its output. We made the same single request as the
+publisher, `GET /api/v1/repos/lease-a/lease-check/issues/<issue>/comments`,
+without query parameters.
+
+| Issue | Ordinary comments before lease | Published lease ID | Known total | Rows returned | `X-Total-Count` | Lease ID in response |
+|---|---:|---:|---:|---:|---:|---:|
+| 2 | 31 | 33 | 32 | 32 | 32 | 33 |
+| 3 | 51 | 85 | 52 | 52 | 52 | 85 |
+
+The endpoint returned the complete list in both cases, including the lease
+past the advertised 50-item maximum. These measurements also cover the
+endpoint used by the Rust claim reader tracked in
+[#15160](https://github.com/2AMLogic/loom/issues/15160).
 
 ## Related
 

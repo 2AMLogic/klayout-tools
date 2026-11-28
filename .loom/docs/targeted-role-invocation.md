@@ -66,7 +66,8 @@ Why each gate sits where it does:
   mechanical on every launch path:
   - daemon sweep (Task subagent or `worker run`): the daemon exports
     `LOOM_SWEEP_CLAIM_OWNED=<N>` and every child inherits it;
-  - attended sweep, `worker run --role builder --issue <N>`: the worker is
+  - a hand-run `worker run --role builder --issue <N>` (an attended in-session
+    sweep's orchestrator never takes this path, #15299): the worker is
     launched with `LOOM_SWEEP_CLAIM_OWNED=<N>` when none is inherited
     (`worker_spawn/claim_owned.rs`). Its other readers agree for a
     sweep-owned Builder: `build-gate.sh` arms the dispatch backoff for `<N>`,

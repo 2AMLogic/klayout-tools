@@ -319,12 +319,59 @@ EX_REVIEW_GATE_COLLISION=6
 # Builder actually claimed, which is what the review gate and the
 # superseded-target check should consult. With no such branch, or a branch
 # number absent from the body's references, the last match applies as above.
+#
+# Both guards ignore examples in fenced blocks, inline code and quoted prose
+# (#15404, #15415). Mask each span with punctuation so removing evidence
+# between a keyword and a number cannot manufacture a reference.
 _cpr_body_ref_issue() {
   # $1 = keyword alternation, e.g. 'close[sd]?|closing|fix(e[sd])?|resolve[sd]?'
-  local refs branch_n
+  local refs branch_n body
+  body="$(awk -v quote="'" '
+    # Pair straight quotes within a line. An apostrophe inside a word can
+    # neither open nor close a citation. Keep unmatched quotes verbatim.
+    function mask_quotes(line,    parts, count, i, result, opening) {
+      count = split(line, parts, quote)
+      result = parts[1]
+      for (i = 2; i <= count; i++) {
+        if (opening && parts[i-1] ~ /[^[:space:]]$/ && parts[i] !~ /^[[:alnum:]_]/) {
+          result = substr(result, 1, opening - 1) " ; "
+          opening = 0
+        } else {
+          if (parts[i-1] !~ /[[:alnum:]_]$/ && parts[i] ~ /^[^[:space:]]/)
+            opening = length(result) + 1
+          result = result quote
+        }
+        result = result parts[i]
+      }
+      return result
+    }
+    # Fence lines allow up to three leading spaces. A backtick in a
+    # backtick info string instead makes this an ordinary line
+    # (e.g. a same-line inline code span).
+    match($0, /^ ? ? ?(```+|~~~+)/) {
+      run = substr($0, 1, RLENGTH)
+      rest = substr($0, RLENGTH + 1)
+      sub(/^ */, "", run)
+      if (fence && index(run, fence) == 1 && rest ~ /^[[:space:]]*$/) {
+        fence = ""
+        print " ; "
+        next
+      }
+      if (!fence && (run ~ /^~/ || rest !~ /`/))
+        fence = run
+    }
+    fence { print " ; "; next }
+    {
+      gsub(/```([^`]|`[^`]|``[^`])*```/, " ; ")
+      gsub(/``([^`]|`[^`])*``/, " ; ")
+      gsub(/`[^`]*`/, " ; ")
+      gsub(/"[^"]*"/, " ; ")
+      print mask_quotes($0)
+    }
+  ' <<< "$BODY")"
   # One number per match: each match ends in `#<digits>`, so the trailing
   # digit run is the reference itself (never an earlier digit-token prefix).
-  refs="$(grep -ioE "((^[[:space:]]*)|((^|[[:space:]])[^#[:space:]]*[0-9][[:space:]]+)|([^#0-9][[:space:]]+)|([^[:alnum:]_#[:space:]]))($1)[[:space:]]+#[0-9]+" <<< "$BODY" \
+  refs="$(grep -ioE "((^[[:space:]]*)|((^|[[:space:]])[^#[:space:]]*[0-9][[:space:]]+)|([^#0-9][[:space:]]+)|([^[:alnum:]_#[:space:]]))($1)[[:space:]]+#[0-9]+" <<< "$body" \
     | grep -oE '[0-9]+$' || true)"
   [[ -n "$refs" ]] || return 0
   if [[ "$HEAD_BRANCH" =~ ^feature/issue-([0-9]+)($|[^0-9]) ]]; then
@@ -422,13 +469,21 @@ if [[ -n "$CLOSES_ISSUE" ]]; then
     # If the closing PR IS this branch (re-running after our own PR already
     # merged the issue closed), this is not a supersede -- fall through.
     if [[ -z "$SUPERSEDING_PR_NUMBER" || "$SUPERSEDING_HEAD" != "$HEAD_BRANCH" ]]; then
+      # #15404: the recovery advice must be survivable on a false positive.
+      # A body whose reference is quoted evidence (a citation of another PR's
+      # closing line) should be corrected and retried, not discarded -- and
+      # "discard this branch's work" steered a builder with a perfectly good
+      # branch toward deleting it. Keep the branch, inspect the matched
+      # reference, fix it if it cited another issue, re-run.
       echo "create-pr.sh: target issue #$CLOSES_ISSUE is already CLOSED\
 ${SUPERSEDING_PR_NUMBER:+ by #$SUPERSEDING_PR_NUMBER}\
 ${SUPERSEDING_PR_URL:+ ($SUPERSEDING_PR_URL)} -- refusing to open a \
 duplicate PR for $HEAD_BRANCH. Your commits are already pushed; do NOT push \
-further and do NOT delete the branch. Rebase onto the superseding PR, \
-retarget this PR at a different issue, or discard this branch's work as \
-redundant." >&2
+further and keep the branch (do NOT delete it). Inspect the PR body's \
+reference to #$CLOSES_ISSUE: if it merely cites another PR's closing line \
+as evidence rather than declaring this PR's own target, correct that \
+reference and re-run this script to retry; otherwise rebase onto the \
+superseding PR or retarget this PR at a different issue." >&2
       exit 1
     fi
   fi

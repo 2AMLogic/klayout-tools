@@ -123,7 +123,10 @@ extract_lock_functions() {
     start=$(awk '/^_worktree_locks_dir\(\) \{/{print NR; exit}' .loom/scripts/worktree.sh)
     end=$(awk '/^release_worktree_lock\(\) \{/{f=1} f && /^}/{print NR; exit}' .loom/scripts/worktree.sh)
     out=$(mktemp /tmp/loom-wt-lockfns.XXXXXX)
-    sed -n "${start},${end}p" .loom/scripts/worktree.sh > "$out"
+    # The mkdir fallback calls loom_atomic_mkdir (#15287), which worktree.sh
+    # sources from lib/ above the extracted range — so source it here too.
+    printf 'source %q\n' "$PWD/.loom/scripts/lib/atomic-mkdir.sh" > "$out"
+    sed -n "${start},${end}p" .loom/scripts/worktree.sh >> "$out"
     echo "$out"
 }
 

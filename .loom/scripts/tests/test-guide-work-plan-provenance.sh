@@ -33,11 +33,8 @@ extract() { awk -v re="^$1\\\\(\\\\) \\\\{" '$0 ~ re {f=1} f{print} /^\}/{if(f) 
 
 VPP="$(extract verify_plan_provenance)"
 SPB="$(extract splice_plan_body)"
-HELPERS="$(extract open_pr_linkage_rows; extract open_pr_annotation)"
+HELPERS="$(awk -f "$SCRIPT_DIR/lib/guide-plan-helpers.awk" "$GUIDE_MD")" || exit 1
 [[ -n "$VPP" && -n "$SPB" && -n "$HELPERS" ]] || { echo "FATAL: helpers not found in guide.md"; exit 1; }
-# #14785: verify_plan_provenance() gates the open-PR listing through the
-# same open_pr_linkage_rows()/open_pr_annotation() helpers the render uses,
-# so they must be in scope wherever the gate runs.
 eval "$HELPERS"
 pass "helpers extracted from $GUIDE_MD"
 
@@ -274,7 +271,10 @@ PATH="$JQ16_DIR:$PATH" WS_REFS=1 no "$BARE_ROW" "whitespace-only refs lookup acc
 VERIFY_PRS="$(jq -c 'map(if .number == 1 then .closingIssuesReferences = [] else . end)' <<<"$APPROVED_PRS")" \
   ok "$BARE_ROW" "explicit empty closingIssuesReferences accepted for a bare row"
 # A held PR may appear in both sections, with refs only in Approved.
-ok "$approved_body"$'\n## Operator Attention: Merge-Risk-Hold Pileup\n- **#1**: Add widget' "same PR in Approved and operator hold sections"
+held_sections=$'## Approved (Awaiting Merge)\n- **#1**: Add widget — closes #7, #42 *(held)*'
+held_sections+=$'\n## Operator Attention: Merge-Risk-Hold Pileup\n- **#1**: Add widget *(held)*'
+VERIFY_PRS="$(jq 'map(if .number == 1 then .labels += [{"name":"loom:operator"}] else . end)' <<<"$APPROVED_PRS")" \
+  ok "$held_sections" "same held PR in Approved and Operator Attention, with closing refs only in Approved"
 no $'## Ready\n- **#1**: Add widget — closes #7, #42'
 
 echo "Test 3: splice_plan_body"

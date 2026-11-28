@@ -50,9 +50,11 @@ FIXTURE_DIR="$TEST_DIR/fixtures/champion-workflows"
 # The shell shard has no daemon build. Rust tests cover the native parser;
 # LOOM_TEST_REAL_DAEMON opts into running the same cases against that parser.
 workflow_permission_check() {
-    [ "$*" = "forge workflow-write-all-check" ] || return 2
-    cat >/dev/null
-    return "${WORKFLOW_WRITE_ALL_RC:-0}"
+    case "$*" in
+        "forge workflow-write-all-check") cat >/dev/null; return "${WORKFLOW_WRITE_ALL_RC:-0}" ;;
+        "forge workflow-secrets-check") cat >/dev/null; return "${WORKFLOW_SECRETS_RC:-0}" ;;
+        *) return 2 ;;
+    esac
 }
 
 # entry <filename> <patch> [previous_filename] -> one files-API object
@@ -135,7 +137,7 @@ for name in release.yml publish-pypi.yml deploy.yaml merge-group-check.yml Relea
     assert_eq green "$(run "[$(entry ".github/workflows/$name" "$P")]" green "loom:pr")" "$name, unprivileged contents -> green"
 done
 for name in release.yml ci.yml deploy.yaml; do
-    assert_eq red "$(CONTENT=ci-with-cloudflare-secret.yml run "[$(entry ".github/workflows/$name" "$P")]" green "loom:pr")" "$name with a secrets.CLOUDFLARE_API_TOKEN deploy step -> red"
+    assert_eq red "$(CONTENT=ci-with-cloudflare-secret.yml WORKFLOW_SECRETS_RC=1 run "[$(entry ".github/workflows/$name" "$P")]" green "loom:pr")" "$name with a secrets.CLOUDFLARE_API_TOKEN deploy step -> red"
 done
 assert_eq red "$(CONTENT=FAIL run "[$CI_WF]" green "loom:pr")" "head contents unreadable -> red"
 for name in champion.yml Loom-Champion.yml JUDGE.yml guard-check.yml; do
@@ -147,17 +149,28 @@ assert_eq green "$(run "[$REMOVED]" green "loom:pr")" "removing an unprivileged 
 
 echo "Shared fixtures with #12958 (cases.tsv)"
 # Every row of the standing-authorization fixture set must agree: covered -> green, held -> red.
+# The shell shard cannot classify secret use structurally; fixtures whose head
+# carries a real ${{ secrets.* }} reference pin the stubbed classifier to hold.
 while IFS=$'\t' read -r id pr_path fixture line expected note; do
     case "$id" in "" | \#*) continue ;; esac
     patch=$(printf '@@ -1 +1,2 @@\n name: x\n%s' "$line")
     case "$expected" in covered) want=green ;; *) want=red ;; esac
-    assert_eq "$want" "$(CONTENT="$fixture" run "[$(entry "$pr_path" "$patch")]" green "loom:pr")" "fixture $id ($pr_path, $fixture): $expected -- $note"
+    sec_rc=0
+    [ "$fixture" = ci-with-cloudflare-secret.yml ] && sec_rc=1
+    assert_eq "$want" "$(WORKFLOW_SECRETS_RC=$sec_rc CONTENT="$fixture" run "[$(entry "$pr_path" "$patch")]" green "loom:pr")" "fixture $id ($pr_path, $fixture): $expected -- $note"
 done <"$FIXTURE_DIR/cases.tsv"
 
 echo "Workflow write-all capability (#14648)"
 assert_eq green "$(CONTENT=ci-write-all-test-name.yml run "[$CI_WF]" green "loom:pr")" "a harmless write-all test name and command are clear"
 assert_eq red "$(CONTENT=ci-write-all-permission.yml WORKFLOW_WRITE_ALL_RC=1 run "[$CI_WF]" green "loom:pr")" "a write-all job permission is held even when the diff does not touch it"
 assert_eq red "$(LOOM_TEST_REAL_DAEMON="$FIXTURE_DIR/missing-daemon" run "[$CI_WF]" green "loom:pr")" "an unavailable permission check fails closed"
+
+echo "Workflow secrets classification (#14915)"
+assert_eq green "$(CONTENT=ci-pathfilter-deploy-secrets.yml run "[$CI_WF]" green "loom:pr")" "an existing deploy_secrets.py path filter is literal text -> green"
+assert_eq green "$(CONTENT=ci-stepname-secrets-tests.yml run "[$CI_WF]" green "loom:pr")" "an existing secrets.sh tests step name is literal text -> green"
+assert_eq green "$(CONTENT=ci-github-token-only.yml run "[$CI_WF]" green "loom:pr")" "an evaluated secrets.GITHUB_TOKEN stays exempt"
+assert_eq red "$(CONTENT=ci-with-cloudflare-secret.yml WORKFLOW_SECRETS_RC=1 run "[$CI_WF]" green "loom:pr")" "a real secrets.CLOUDFLARE_API_TOKEN reference at head is held even when the diff does not touch it"
+assert_eq red "$(CONTENT=ci-unreadable-workflow.yml WORKFLOW_SECRETS_RC=2 run "[$CI_WF]" green "loom:pr")" "an indeterminate secrets classification fails closed"
 
 echo "Forbidden lines"
 # shellcheck disable=SC2016  # literal workflow text
@@ -208,6 +221,8 @@ assert_eq green "$(run "[$CI_WF,{\"filename\":\"img.png\"}]" green "loom:pr")" "
 echo "Doc wiring"
 DOCTXT=$(cat "$CHAMPION_MD")
 assert_contains "$DOCTXT" "classification is by capability, never by file name" "vetted-change prose states the capability rule"
+assert_contains "$DOCTXT" "workflow-secrets-check" "the structural secrets check is wired (#14915)"
+assert_contains "$DOCTXT" '`checkWorkflowSecrets` (#14915' "champion-pr-merge.md documents checkWorkflowSecrets"
 # shellcheck disable=SC2016  # literal backticks
 assert_contains "$DOCTXT" 'CI workflows (unless `WF_BLAST=green`, #12677)' "blast-radius row names the exception"
 # shellcheck disable=SC2016  # literal backticks

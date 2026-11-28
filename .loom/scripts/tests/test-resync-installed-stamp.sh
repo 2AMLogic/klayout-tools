@@ -448,8 +448,8 @@ if [[ "$REMOTE14" == "https://github.com/NewOrg/loom.git" ]]; then
 else
     fail "(#14222) redirected remote stamped '$REMOTE14'"
 fi
-if grep -q "api repos/OldOrg/loom" <<<"$CALLS14"; then
-    pass "(#14222) the lookup is a REST 'gh api repos/<o>/<r>' call"
+if [[ "$CALLS14" == "api repos/OldOrg/loom --jq .full_name" ]]; then
+    pass "(#14222) the real resync makes exactly one canonical remote lookup"
 else
     fail "(#14222) unexpected gh calls: $CALLS14"
 fi
@@ -457,6 +457,37 @@ if [[ "$(grep -c 'origin remote is stale' <<<"$OUT14")" == 1 ]]; then
     pass "(#14222) exactly one stale-remote warning is printed"
 else
     fail "(#14222) expected one stale-remote warning; out=$OUT14"
+fi
+
+# Keep the synchronized surface and valid stamp from the real-write control,
+# but restore the previously recorded URL while the source origin still redirects.
+META14="$WORKDIR/remote-moved/.loom/install-metadata.json"
+STALE14="$WORKDIR/remote-moved-stale-metadata.json"
+BIN14="$WORKDIR/gh-remote-moved"
+sed 's|https://github.com/NewOrg/loom.git|https://github.com/OldOrg/loom.git|' "$META14" > "$STALE14"
+cp "$STALE14" "$META14"
+: > "$BIN14/gh.calls"
+OUT14_NOOP="$(cd "$WORKDIR/remote-moved" && PATH="$BIN14:$PATH" bash "$SCRIPT" 2>&1)"
+RC14_NOOP=$?
+if [[ "$RC14_NOOP" == 0 ]] && grep -qF 'nothing to re-stamp (#11680)' <<<"$OUT14_NOOP"; then
+    pass "(#14712) the stale URL fixture takes the no-op stamp path"
+else
+    fail "(#14712) expected a no-op resync (rc=$RC14_NOOP); out=$OUT14_NOOP"
+fi
+if cmp -s "$STALE14" "$META14"; then
+    pass "(#14712) a no-op leaves the stale stamp byte-identical"
+else
+    fail "(#14712) a no-op rewrote install-metadata.json"
+fi
+if [[ ! -s "$BIN14/gh.calls" ]]; then
+    pass "(#14712) a no-op skips the canonical remote lookup"
+else
+    fail "(#14712) a no-op called gh: $(cat "$BIN14/gh.calls")"
+fi
+if ! grep -qE 'origin remote is stale|Stamping the canonical URL' <<<"$OUT14_NOOP"; then
+    pass "(#14712) a no-op does not claim to stamp the canonical remote"
+else
+    fail "(#14712) a no-op claimed to stamp the canonical remote"
 fi
 
 run_remote_case remote-portable "https://github.com/OldOrg/loom.git" "NewOrg/loom" 0 1
@@ -554,6 +585,55 @@ if [[ "$(grep -cF "tr '[:upper:]' '[:lower:]'" "$SCRIPT")" -ge 2 ]]; then
     pass "(#14222) bash-3.2 guard: canonicalize_source_remote lower-cases both sides via tr"
 else
     fail "(#14222) bash-3.2 guard: expected >=2 tr '[:upper:]' '[:lower:]' lower-casings in resync-installed.sh, found $(grep -cF "tr '[:upper:]' '[:lower:]'" "$SCRIPT")"
+fi
+
+# --- #14434: a blocked run records held_back + exits 3; a clean run clears it -
+echo ""
+echo "Test group: held_back is recorded when a file is blocked, cleared by a clean run (#14434)"
+REPO_HB="$(make_dogfood_fixture repo-held-back)"
+# Land a direct local fix on the installed copy (not a resync commit) while
+# defaults/ still has the old content, so the local-divergence guard blocks it.
+printf 'A\nLOCAL-FIX-LINE\n' > "$REPO_HB/.loom/hooks/guard.sh"
+git -C "$REPO_HB" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO_HB" commit -qm "fix(guard): direct local hotfix" >/dev/null 2>&1
+META_HB="$REPO_HB/.loom/install-metadata.json"
+(cd "$REPO_HB" && bash "$SCRIPT" >/dev/null 2>&1)
+RC_HB=$?
+if [[ $RC_HB -eq 3 ]]; then
+    pass "(#14434) a run that held a file back exits 3, distinct from 1 (errors)"
+else
+    fail "(#14434) held-back run expected exit 3 (got $RC_HB)"
+fi
+if [[ "$(read_field "$META_HB" loom_version)" == "9.9.9" ]]; then
+    pass "(#14434) the stamp still advances on a blocked run (lineage rung relies on it)"
+else
+    fail "(#14434) loom_version did not advance on a blocked run: $(read_field "$META_HB" loom_version)"
+fi
+if grep -q '"held_back"' "$META_HB" && grep -q 'hooks/guard.sh' "$META_HB"; then
+    pass "(#14434) install-metadata.json records the held-back path under held_back"
+else
+    fail "(#14434) held_back missing or incomplete: $(cat "$META_HB")"
+fi
+(cd "$REPO_HB" && bash "$SCRIPT" --force >/dev/null 2>&1)
+RC_HB=$?
+if [[ $RC_HB -eq 0 ]]; then
+    pass "(#14434) a following --force run exits 0"
+else
+    fail "(#14434) a following --force run expected exit 0 (got $RC_HB)"
+fi
+if ! grep -q '"held_back"' "$META_HB"; then
+    pass "(#14434) the --force run clears held_back"
+else
+    fail "(#14434) held_back survived a clean run: $(cat "$META_HB")"
+fi
+
+# --dry-run still exits 2 and a clean run never writes the key.
+REPO_HB2="$(make_dogfood_fixture repo-held-back-clean)"
+(cd "$REPO_HB2" && bash "$SCRIPT" >/dev/null 2>&1)
+if [[ $? -eq 0 ]] && ! grep -q '"held_back"' "$REPO_HB2/.loom/install-metadata.json"; then
+    pass "(#14434) a clean run exits 0 and writes no held_back key"
+else
+    fail "(#14434) a clean run wrote held_back or did not exit 0"
 fi
 
 # --- summary -----------------------------------------------------------------

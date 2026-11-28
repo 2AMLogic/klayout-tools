@@ -393,7 +393,10 @@ printf '%s' "$REVIEW_SUMMARY" | jq -r '(.current_findings + .older_findings + .u
 # `forge trusted-comments` exits 1 on the empty stdin a timed-out `gh` leaves
 # it, so a piped read surfaced a timeout as rc 1: a generic UNKNOWN with
 # REVIEW_FEEDBACK_TIMED_OUT=0, which --reviews-reconciled may still override.
-VERDICT_COMMENTS_RAW=$(_forge_review_read_run gh api "repos/$NWO/issues/$NUMBER/comments?per_page=100" --paginate 2> /dev/null)
+# A FAILED (non-zero, non-124) REST read falls back to a paginated GraphQL
+# pullRequest.comments read inside the helper (#15025), so a REST reader shed
+# (#14739) no longer turns every approval into UNKNOWN while GraphQL serves.
+VERDICT_COMMENTS_RAW=$(forge_get_pr_conversation_comments "$NWO" "$NUMBER" gh 2> /dev/null)
 VERDICT_READ_RC=$?
 if [[ "$VERDICT_READ_RC" -eq 124 ]]; then
     _fail_timeout "the comment-verdict read (issues/$NUMBER/comments) timed out after ${_LOOM_FORGE_REVIEW_READ_TIMEOUT}s (LOOM_FORGE_REVIEW_READ_TIMEOUT, #13927) — verdict state could not be established"

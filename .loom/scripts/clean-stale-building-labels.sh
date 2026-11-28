@@ -82,7 +82,7 @@ forge_detect
 if [[ -n "$REPO_NWO_ARG" ]]; then
   REPO_NWO="$REPO_NWO_ARG"
 else
-  REPO_NWO="$(forge_get_repo_nwo gh)"
+  REPO_NWO="$(forge_get_repo_nwo gh)" || REPO_NWO=""
 fi
 
 if [[ -z "$REPO_NWO" ]]; then

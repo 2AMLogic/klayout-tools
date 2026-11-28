@@ -88,13 +88,9 @@
 # the scan cannot run: each pool reports "incomplete" and the script exits 2
 # (create-issue.sh fails open on that, as it always has on a broken check).
 #
-# Degraded-coverage marker lines (#4526), appended after the match list when
-# GraphQL rate-limiting forced a degraded search. Both are informational: they
-# are not matches, and the --json parser reports them as `search_incomplete`
-# rather than as entries in `matches`.
-#   SEARCH_INCOMPLETE: <pools> -- that pool could not be searched at all
-#                                 (GraphQL rate-limited AND REST fallback
-#                                 failed), so the match list is partial
+# Degraded-coverage markers follow the match list (#4526).
+#   SEARCH_INCOMPLETE: <pools> -- the listed pools could not be searched,
+#                                 setting `search_incomplete` in JSON
 #   REST_FALLBACK: <pools>     -- that pool was answered by the REST fallback,
 #                                 whose similarity ranking basis differs
 #
@@ -350,6 +346,22 @@ get_repo_nwo() {
     echo "$nwo"
 }
 
+# A large Bash here-string needs a temp file. Stream the pool and check both
+# ends of the pipe: exit 1 from the open-issue scanner is a match only when
+# the writer delivered the candidates successfully.
+scan_fetched_pool() {
+    local candidates="$1" pool="$2"
+    shift 2
+    local -a pipe_status
+    printf '%s\n' "$candidates" | (loom_exec_script_helper duplicate-scan --pool "$pool" "$@")
+    pipe_status=("${PIPESTATUS[@]}")
+    if (( pipe_status[0] != 0 )); then
+        print_error "Could not deliver the $pool candidates to duplicate-scan"
+        return 2
+    fi
+    return "${pipe_status[1]}"
+}
+
 # Search for similar issues. The fetch (with its #4526 REST fallback) stays
 # here; the scan is `loom-daemon duplicate-scan` (#8360), exec'd through
 # script-helper's standard resolution so the subcommand's stdout/exit code
@@ -388,7 +400,7 @@ search_similar_issues() {
         fi
     fi
 
-    local scan_args=(--pool open-issues --title "$title" --body "$body" --threshold "$threshold")
+    local scan_args=(--title "$title" --body "$body" --threshold "$threshold")
     [[ -n "$self_issue" ]] && scan_args+=(--self-issue "$self_issue")
     if [[ -n "$warn_threshold" ]] && (( warn_threshold > 0 )) && (( warn_threshold < threshold )); then
         scan_args+=(--warn-threshold "$warn_threshold")
@@ -402,7 +414,7 @@ search_similar_issues() {
     if $rest_fallback; then
         scan_args+=(--rest-fallback)
     fi
-    loom_exec_script_helper duplicate-scan "${scan_args[@]}" <<< "$issues"
+    scan_fetched_pool "$issues" open-issues "${scan_args[@]}"
 }
 
 # Search for similar recently merged PRs. Fetch here, scan in the daemon
@@ -437,12 +449,12 @@ search_merged_prs() {
         fi
     fi
 
-    local scan_args=(--pool merged-prs --title "$title" --body "$body" --threshold "$threshold")
+    local scan_args=(--title "$title" --body "$body" --threshold "$threshold")
     [[ -n "$self_issue" ]] && scan_args+=(--self-issue "$self_issue")
     if $rest_fallback; then
         scan_args+=(--rest-fallback)
     fi
-    loom_exec_script_helper duplicate-scan "${scan_args[@]}" <<< "$prs"
+    scan_fetched_pool "$prs" merged-prs "${scan_args[@]}"
 }
 
 # Search for similar closed issues. The pool is ONE daemon-side issue search
@@ -450,12 +462,12 @@ search_merged_prs() {
 search_closed_issues() {
     local title="$1"
     local body="${2:-}"
-    local scan_args=(--pool closed-issues --title "$title" --body "$body" --threshold "${3:-18}")
+    local scan_args=(--title "$title" --body "$body" --threshold "${3:-18}")
     [[ -n "${4:-}" ]] && scan_args+=(--self-issue "$4")
 
     # Any non-zero exit (search refused or unsupported, window 0, a daemon
     # predating the flag) prints no rows and falls through to the recency list.
-    (loom_exec_script_helper duplicate-scan "${scan_args[@]}" --closed-window-days "${5:-90}" </dev/null) && return 0
+    (loom_exec_script_helper duplicate-scan --pool closed-issues "${scan_args[@]}" --closed-window-days "${5:-90}" </dev/null) && return 0
 
     # Recently created closed issues; GraphQL rate-limited -> REST (#4526),
     # where `gh api` resolves "{owner}/{repo}" locally (#4659).
@@ -475,7 +487,7 @@ search_closed_issues() {
             return 0
         fi
     fi
-    loom_exec_script_helper duplicate-scan "${scan_args[@]}" <<< "$issues"
+    scan_fetched_pool "$issues" closed-issues "${scan_args[@]}"
 }
 
 # Probe for OPEN issues/PRs whose bodies or comments cross-reference the given
@@ -712,8 +724,7 @@ main() {
     # found by another: `exit_code` is derived from both, once, below.
     #
     #   duplicate_found  -> any pool produced a match/NON_DISCRIMINATIVE line
-    #   incomplete_pools -> human-readable list of pools where GraphQL was
-    #                       rate-limited AND the REST fallback also failed
+    #   incomplete_pools -> pools that could not be fetched or scanned
     #   fallback_pools   -> pools that were answered by the REST fallback
     #
     # Comma-joined strings rather than arrays: this script runs under
@@ -740,7 +751,8 @@ main() {
     result=$(search_similar_issues "$title" "$body" "$threshold" "$issue" "$warn_threshold") || exit_code=$?
     if [[ $exit_code -eq 1 ]]; then
         duplicate_found=true
-    elif [[ $exit_code -eq 2 ]]; then
+    elif [[ $exit_code -ne 0 ]]; then
+        result=""
         incomplete_pools="open issues"
     fi
 
@@ -753,15 +765,14 @@ main() {
         merged_result=$(search_merged_prs "$title" "$body" "$threshold" "$issue") || merged_exit_code=$?
         closed_result=$(search_closed_issues "$title" "$body" "$threshold" "$issue" "$closed_window_days") || closed_exit_code=$?
 
-        # #4526: a GraphQL rate-limit that ALSO fails via REST means this
-        # pool genuinely could not be checked. Record it; the final verdict
-        # below turns that into exit 2 ("could not run at all") rather than
-        # silently reporting "no duplicates" the way a plain `return 0` used
-        # to -- but only when no other pool found a real duplicate.
-        if [[ $merged_exit_code -eq 2 ]]; then
+        # These two scanners return 0 even for matches. Discard output from
+        # failed scans before interpreting their rows as confirmed matches.
+        if [[ $merged_exit_code -ne 0 ]]; then
+            merged_result=""
             incomplete_pools="${incomplete_pools:+${incomplete_pools}, }merged PRs"
         fi
-        if [[ $closed_exit_code -eq 2 ]]; then
+        if [[ $closed_exit_code -ne 0 ]]; then
+            closed_result=""
             incomplete_pools="${incomplete_pools:+${incomplete_pools}, }closed issues"
         fi
 
@@ -843,7 +854,7 @@ main() {
         result+=$'\n'
     fi
     if [[ -n "$incomplete_pools" ]] && $duplicate_found; then
-        result+="SEARCH_INCOMPLETE: ${incomplete_pools} -- GraphQL rate-limited and REST fallback also failed; matches below are partial"$'\n'
+        result+="SEARCH_INCOMPLETE: ${incomplete_pools} -- match list is partial"$'\n'
     fi
     # REST_FALLBACK covers the interleaving the umbrella header above cannot:
     # the open-issues search already matched via ordinary GraphQL (so its own
@@ -919,8 +930,7 @@ main() {
             fi
 
             # Degraded-coverage flag (#4526): true when at least one search
-            # pool could not be checked at all (GraphQL rate-limited and its
-            # REST fallback also failed) while another pool still produced
+            # pool could not be checked while another pool still produced
             # matches. Surfaced separately from `matches` so a caller can tell
             # "no other duplicates exist" from "we could not look everywhere".
             local search_incomplete=false
@@ -964,7 +974,7 @@ main() {
                     matches=$(echo "$matches" | jq --arg n "$num" --arg t "$title_part" --arg s "$sim" --arg type "$match_type" \
                         '. + [{"number": ($n | tonumber), "title": $t, "similarity": ($s | tonumber), "type": $type}]')
                 fi
-            done <<< "$result"
+            done < <(printf '%s\n' "$result")
 
             if [[ "$related_count" -gt 0 ]]; then
                 local cross_matches

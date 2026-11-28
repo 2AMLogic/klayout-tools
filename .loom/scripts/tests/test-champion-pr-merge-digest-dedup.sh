@@ -73,11 +73,19 @@ chmod +x "$WORK/.loom/scripts/post-comment.sh" "$WORK/.loom/scripts/create-issue
 
 # ---- forge stubs ------------------------------------------------------------
 # FIX_LIST    the $GH_READ `issue list` payload Step 0 reads (cached side)
-# FIX_VIEW    per-issue `issue view` payloads, keyed by number
+# FIX_VIEW    per-issue `issue view` payloads, keyed by number: one
+#             FIX_VIEW_<number> scalar per key, read and written only through
+#             fix_view_set / fix_view_get
 # GH_LIST     the plain-gh `issue list` payload Step 2's recheck reads
 #             (uncached side — the concurrent pass's create must appear HERE)
 # GH_UNPIN_FAIL=1 makes `gh issue unpin` fail once (best-effort edge).
-declare -A FIX_VIEW
+fix_view_set() { # <number> <payload>
+    printf -v "FIX_VIEW_$1" '%s' "$2"
+}
+fix_view_get() { # <number>
+    local var="FIX_VIEW_$1"
+    printf '%s' "${!var-}"
+}
 gh() {
     local filter="" a
     local -a args=("$@")
@@ -115,7 +123,7 @@ gh_read() {
             # NB: no brace-bearing :- default here — inside ${var:-word} the
             # default's own '}' would terminate the expansion and append a
             # stray '}' to the payload.
-            payload="${FIX_VIEW[$3]-}"
+            payload="$(fix_view_get "$3")"
             [[ -z "$payload" ]] && payload='{"comments": []}'
             jq -r "$filter" <<<"$payload"
             ;;
@@ -178,8 +186,8 @@ echo
 
 echo "Test 1: two tagged matches -> loser pointed at the winner once, unpinned, closed; winner untouched"
 FIX_LIST="[$(tagged 100), $(tagged 107)]"
-FIX_VIEW[100]=$(jq -n --arg m "$MARK" '{"body": ($m + "\nold body")}')
-FIX_VIEW[107]='{"comments": []}'
+fix_view_set 100 "$(jq -n --arg m "$MARK" '{"body": ($m + "\nold body")}')"
+fix_view_set 107 '{"comments": []}'
 OUT=$(run_step0)
 assert_contains "$OUT" "DIGEST_ISSUE=100 WINNER=100" "min_by(.number) selects the winner"
 assert_contains "$OUT" "POST 107 --body <!-- champion:digest-duplicate-of:100 -->" "loser gets the one-time pointer at the winner"
@@ -208,8 +216,8 @@ echo
 
 echo "Test 3: loser already carries the pointer -> not re-commented, still unpinned and closed"
 FIX_LIST="[$(tagged 100), $(tagged 107)]"
-FIX_VIEW[100]=$(jq -n --arg m "$MARK" '{"body": ($m + "\nold body")}')
-FIX_VIEW[107]='{"comments": [{"body": "<!-- champion:digest-duplicate-of:100 -->\n dup"}]}'
+fix_view_set 100 "$(jq -n --arg m "$MARK" '{"body": ($m + "\nold body")}')"
+fix_view_set 107 '{"comments": [{"body": "<!-- champion:digest-duplicate-of:100 -->\n dup"}]}'
 OUT=$(run_step0)
 assert_lacks "$OUT" "POST" "marker guard suppresses the repeat pointer"
 assert_contains "$OUT" "UNPIN issue unpin 107" "loser still unpinned"
@@ -218,8 +226,8 @@ echo
 
 echo "Test 4: unpin fails -> best-effort, the close still happens"
 FIX_LIST="[$(tagged 100), $(tagged 107)]"
-FIX_VIEW[100]=$(jq -n --arg m "$MARK" '{"body": ($m + "\nold body")}')
-FIX_VIEW[107]='{"comments": []}'
+fix_view_set 100 "$(jq -n --arg m "$MARK" '{"body": ($m + "\nold body")}')"
+fix_view_set 107 '{"comments": []}'
 GH_UNPIN_FAIL=1
 OUT=$(run_step0)
 assert_contains "$OUT" "CLOSE issue close 107 --reason not planned" "a failed unpin does not abort the reconcile"

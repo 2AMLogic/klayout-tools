@@ -80,9 +80,7 @@ fi
 # closing `}` is the first line starting at column 0 after the opening line
 # (its nested `section()`/`count()` helpers are indented).
 RPB_BODY="$(awk '/^render_plan_body\(\) \{/{flag=1} flag{print} /^\}/{if(flag){exit}}' "$GUIDE_MD")"
-# #14785: render_plan_body() calls the shared open-PR linkage helpers, so
-# they ride along in every eval of the extracted body.
-HELPERS_BODY="$(awk '/^open_pr_linkage_rows\(\) \{/{f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD"; awk '/^open_pr_annotation\(\) \{/{f=1} f{print} /^\}/{if(f) exit}' "$GUIDE_MD")"
+HELPERS_BODY="$(awk -f "$SCRIPT_DIR/lib/guide-plan-helpers.awk" "$GUIDE_MD")" || exit 1
 
 if [[ -z "$RPB_BODY" ]]; then
     fail "could not extract render_plan_body() body from guide.md"

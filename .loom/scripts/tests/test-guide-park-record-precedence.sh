@@ -138,6 +138,7 @@ for copy in "defaults/.claude/commands/loom/guide.md" "defaults/.agents/skills/l
     STUB_PARK_OUT=''
 
     # No `loom:park` text at all: the daemon is not consulted.
+    assert_eq "$(parse_dependencies 'Depends on #962')" "962" "ordinary Depends on declaration is parsed"
     assert_eq "$(parse_dependencies "$AC")" "100" "no park record: checkbox dep still parsed"
     assert_eq "$(parse_dependencies $'- [ ] example-org/tool-repo#55: x')" "example-org/tool-repo#55" "cross-repo ref keeps owner prefix"
 
@@ -253,6 +254,69 @@ RESOLVED='#104 #105 #106 #107 #108'"
         fail "control: all five resolved: no Unblocked comment: $(cat "$CALLS")"
     fi
     STUB_PARK_OUT=''; STUB_PARK_RC=2
+
+    # #15528: #8698's shape. Two reason-only park records (`Blocked by:
+    # (unstated)`) whose `reason=` text cites closed #8674, plus a CHECKED
+    # `## Dependencies` item for it. The unblock sweep lifted this issue twice
+    # (2026-11-19, 2026-11-26) naming #8674. No park record declares a blocker,
+    # so `parse_dependencies` prints nothing and the sweep must write no label
+    # and post no comment — even when the daemon would call #8674 resolved.
+    BODY_8698="$(printf '%s\n' \
+        'Needs the prerequisite before it can be built.' \
+        '' \
+        '## Dependencies' \
+        '- [x] #8674: the earlier prerequisite' \
+        '' \
+        '<!-- loom:park Blocked by: (unstated) by=champion at=2026-10-27T05:21:27Z reason="waits on #8674, which has not landed" -->' \
+        '<!-- loom:park Blocked by: (unstated) by=human at=2026-11-19T08:19:17Z reason="operator hold: #8674 was not enough" -->')"
+    BODY_8698_JSON="$(jq -nc --arg body "$BODY_8698" \
+        '[{number:8698, title:"#8698-shaped fixture", body:$body, labels:[{name:"loom:blocked"}]}]')"
+    # Asserted on its own first: this is what the unblock decision hangs on.
+    STUB_PARK_OUT=''; STUB_PARK_RC=0
+    assert_eq "$(parse_dependencies "$BODY_8698")" "" "#15528: #8698-shaped body prints no dependency"
+    for state in CLOSED OPEN; do
+        DEP_558="$state"; STUB_COMMENTS='[]'
+        # The misread-verdict shape: a resolver answer naming the closed #8674.
+        DEP_STATES_RAW="ALL_RESOLVED=true
+RESOLVED='#8674'"
+        STUB_PARK_OUT=''; STUB_PARK_RC=0
+        BLOCKED_JSON="$BODY_8698_JSON"
+        : > "$CALLS"
+        check_and_unblock >/dev/null 2>&1
+        DEP_STATES_RAW=''; BLOCKED_JSON="$INCIDENT_JSON"
+        if grep -q -- '--remove-label loom:blocked' "$CALLS"; then
+            fail "#15528 regression: #8698-shaped body lifted loom:blocked: $(cat "$CALLS")"
+        else
+            pass "#15528: #8698-shaped body keeps loom:blocked (resolver says #8674 closed)"
+        fi
+        if grep -q -- '--add-label loom:issue' "$CALLS"; then
+            fail "#15528 regression: #8698-shaped body got loom:issue restored"
+        else
+            pass "#15528: #8698-shaped body: no loom:issue restored"
+        fi
+        if grep -q 'Unblocked' "$CALLS"; then
+            fail "#15528 regression: #8698-shaped body got an Unblocked announcement"
+        else
+            pass "#15528: #8698-shaped body: no Unblocked comment"
+        fi
+        if [[ "$state" == CLOSED ]]; then
+            if [[ -s "$CALLS" ]]; then
+                fail "#15528: unexpected calls: $(cat "$CALLS")"
+            else
+                pass "#15528: no gh/comment call at all"
+            fi
+        fi
+    done
+    STUB_PARK_OUT=''; STUB_PARK_RC=2
+
+    # The prompt itself must state the rule (the by-hand Guide path, #15528).
+    # shellcheck disable=SC2016  # Match the literal command in the prompt.
+    if grep -Fq 'run `parse_dependencies "$body"`' "$f" \
+        && grep -Fq 'skip the dependency-based label edit' "$f"; then
+        pass "#15528: $copy states the issue dependency rule for a manual sweep"
+    else
+        fail "#15528: $copy lacks the issue dependency rule for a manual sweep"
+    fi
 done
 echo "Tests run: $TESTS_RUN"
 [[ $TESTS_FAILED -eq 0 ]] && echo "All tests passed" || { echo "Tests failed: $TESTS_FAILED"; exit 1; }

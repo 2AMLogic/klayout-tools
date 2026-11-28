@@ -17,6 +17,8 @@
 # stubbed via $LOOM_DAEMON_SELF_BIN -- so this
 # suite pins create-pr.sh's OWN logic (parsing, exit code, message, fail-open
 # posture) without depending on a real daemon build or live network calls.
+# Quoted evidence (#15404) -- a body citing another PR's closing line in
+# inline code or double quotes -- supplies no reference for this guard.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-create-pr-review-gate.sh
@@ -377,6 +379,109 @@ run_create_pr --title "fix: something" --body "Closes #14059
 Closes #14052" --head "docs/other-branch"
 assert_eq "6" "$EXIT_CODE" "Two Closes, non-issue branch -> last-match #14052"
 assert_not_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "14059" "Guard never consulted the earlier #14059 on a non-issue branch"
+
+# T20 (#15404): an evidence-table cell citing another PR's closing line in
+# inline code is quoted evidence, not a declaration. With the real closing
+# footer `Closes #1378` the guard consults the declared #1378, never the
+# cited #396.
+reset_fixtures
+run_create_pr --title "fix: something" --body '| Evidence | PR #414 body says `Closes #396`. |
+| --- | --- |
+
+Closes #1378' --head "feature/issue-1378"
+assert_eq "0" "$EXIT_CODE" "Quoted citation + Closes #1378 -> exits 0"
+assert_eq "1" "$(created_count)" "Quoted citation + closing footer -> PR is created"
+assert_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "check-open-pr 1378" "Guard consulted the declared #1378"
+assert_not_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "396" "Guard never consulted the cited #396"
+
+# T21 (#15404): partial footer -- the citation supplies no closing candidate,
+# so TARGET_ISSUE is the partial #1378 (pre-fix the quoted #396 won and the
+# guard consulted the closed issue instead of the declared target).
+reset_fixtures
+run_create_pr --title "feat: slice" --body '| Evidence | PR #414 body says `Closes #396`. |
+| --- | --- |
+
+Part of #1378' --head "feature/issue-1378"
+assert_eq "0" "$EXIT_CODE" "Quoted citation + Part of #1378 -> exits 0"
+assert_eq "1" "$(created_count)" "Quoted citation + partial footer -> PR is created"
+assert_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "check-open-pr 1378" "Guard consulted the partial #1378"
+assert_not_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "396" "Guard never consulted the cited #396 (partial footer)"
+
+# T22 (#15404): the citation alone supplies no reference at all -- the guard
+# never runs (no daemon call).
+reset_fixtures
+run_create_pr --title "fix: something" --body '| Evidence | PR #414 body says `Closes #396`. |
+| --- | --- |' --head "feature/issue-1378"
+assert_eq "0" "$EXIT_CODE" "Quoted citation alone -> no reference, exits 0"
+assert_eq "1" "$(created_count)" "Quoted citation alone -> PR is created"
+assert_eq "" "$(cat "$STUB_DIR/daemon-forge-calls.log" 2>/dev/null || true)" "Quoted citation alone -> guard never consulted"
+
+# T23 (#15404): past-tense quoted spelling (`closed #396`) with a partial
+# footer -- same class, same answer.
+reset_fixtures
+run_create_pr --title "feat: slice" --body '| Evidence | PR #414 body says `closed #396`. |
+| --- | --- |
+
+Part of #1378' --head "feature/issue-1378"
+assert_eq "0" "$EXIT_CODE" "Quoted past-tense citation + Part of #1378 -> exits 0"
+assert_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "check-open-pr 1378" "Guard consulted the partial #1378 (past-tense citation)"
+assert_not_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "396" "Guard never consulted the cited #396 (past-tense)"
+
+# T24 (#15404): a double-quoted citation ("Closes #396") -- the other quoted
+# shape from the original report -- supplies no candidate either.
+reset_fixtures
+run_create_pr --title "fix: something" --body '| Evidence | PR #414 body says "Closes #396". |
+| --- | --- |' --head "feature/issue-1378"
+assert_eq "0" "$EXIT_CODE" "Double-quoted citation alone -> exits 0"
+assert_eq "" "$(cat "$STUB_DIR/daemon-forge-calls.log" 2>/dev/null || true)" "Double-quoted citation alone -> guard never consulted"
+
+# T25 (#15404, judge round 1): a double-backtick span is one span (matching
+# run lengths), so the cited #396 never reaches the guard.
+reset_fixtures
+run_create_pr --title "feat: slice" --body '| Evidence | PR #414 says ``Closes #396``. |
+
+Part of #1378' --head "feature/issue-1378"
+assert_eq "0" "$EXIT_CODE" "Double-backtick citation + Part of #1378 -> exits 0"
+assert_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "check-open-pr 1378" "Guard consulted the partial #1378 (double-backtick)"
+assert_not_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "396" "Guard never consulted the cited #396 (double-backtick)"
+
+# T26 (#15404, judge round 1): a removed span must not splice a keyword onto a
+# number across the gap, for backtick and double-quote spans.
+for shape in 'The worker closes `socket` #396 after each request.' 'The worker closes "socket" #396 after each request.'; do
+  reset_fixtures
+  run_create_pr --title "feat: slice" --body "$shape
+
+Part of #1378" --head "feature/issue-1378"
+  assert_eq "0" "$EXIT_CODE" "Span between keyword and number ($shape) -> exits 0"
+  assert_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "check-open-pr 1378" "Guard consulted the partial #1378 (span gap)"
+  assert_not_contains "$(cat "$STUB_DIR/daemon-forge-calls.log")" "396" "Guard never consulted #396 across a span gap"
+done
+
+# Fences and bounded single quotes can cite a closing line (#15415).
+check_review_target() {
+  local description="$1" body="$2" expected="${3:+forge check-open-pr $3}"
+  reset_fixtures
+  run_create_pr --title "fix: something" --body "$body" --head "feature/issue-1378"
+  assert_eq "$expected" "$(cat "$STUB_DIR/daemon-forge-calls.log")" "$description: review lookup"
+  assert_eq "0" "$EXIT_CODE" "$description: exit status"
+  assert_eq "1" "$(created_count)" "$description: created PR"
+}
+
+for citation in $'Reproduction:\n```\nCloses #396\n```' "| Evidence | PR #414 says 'Closes #396'. |"; do
+  check_review_target "$citation alone" "$citation" ""
+  check_review_target "$citation with partial footer" "$citation"$'\nPart of #1378' 1378
+  check_review_target "$citation with closing footer" "$citation"$'\nCloses #1378' 1378
+done
+
+for example in $'````md\n```\n~~~~\nCloses #396\n````' $'~~~~md\n~~~\n````\nCloses #396\n~~~~'; do
+  check_review_target "shorter runs and opposite markers in $example" "$example"$'\nPart of #1378' 1378
+done
+
+check_review_target "word-internal apostrophes" "The worker's patch closes #1378 in today's build." 1378
+check_review_target "unmatched quote" "The log says 'pending. This closes #1378." 1378
+check_review_target "apostrophe inside citation" "The log says 'the worker's patch closes #396'." ""
+check_review_target "single-quoted span between keyword and number" "Worker closes 'socket' #396." ""
+check_review_target "inline code at line start" $'```Closes #396```\nPart of #1378' 1378
 
 # --- Summary ---
 echo ""

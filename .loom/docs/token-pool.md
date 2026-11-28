@@ -284,11 +284,15 @@ mark, so its row is `blocked`, not a frozen `exhausted` one (#14317).
 #14265, #14317).** `tokens check --ranking` (the probe path) does not blindly
 overwrite the file. When an account's previous row was `exhausted` and this
 round's row carries no probe evidence — `error` (timeout, connection, 5xx) or
-`blocked` (empty token, credential-shape mismatch, `401`), or a codex `unknown`
-while the held reset is still in the future — the previous `exhausted` row is
-written back unchanged, so one failed probe cannot shorten an active weekly
-hold to the 6h fixed cooldown. Positive evidence (`available`, `rate_limited`,
-a fresh `exhausted`) overwrites as before. Two consequences for an operator
+`blocked` (empty token, credential-shape mismatch, `401`), or an `available`
+with no 5h-utilization header (#14195), or a codex `unknown` — the last two only
+while the held reset is still in the future and within the eight-day credibility
+horizon (`MAX_WEEKLY_RESET_HORIZON_SECS`) — the previous `exhausted` row is
+written back unchanged, so one failed or header-less probe cannot shorten an
+active weekly hold to the 6h fixed cooldown. Once that reset has passed (or is
+missing, unparseable or beyond the horizon) the fresh row overwrites. Measured
+evidence (`available` with a 5h utilization, `rate_limited`, a fresh
+`exhausted`) overwrites as before. Two consequences for an operator
 reading `.ranking` directly:
 
 - **A row may be a previous round's record, and nothing on disk marks it as
@@ -297,12 +301,22 @@ reading `.ranking` directly:
   measurement view: its `probed` field says whether a request was sent in *this*
   run, and a failed round's `status`/`error` show what this round saw even when
   `.ranking` kept the older `exhausted` row.
-- **A carried row is re-measured only by a round that gets evidence.** It stays
-  until a probe of that account returns a real answer, so while a probe keeps
-  failing the `exhausted` row (with its recorded reset) persists, and the
-  selector's `exhausted` hard exclusion keeps applying to it. Carrying never
-  widens the selectable set: `error` and `blocked` are excluded or ranked after
-  every selectable status anyway.
+- **What releases a carried row depends on why it was carried.** For `error` /
+  `blocked`, the row stays until a round gets evidence for that account, so
+  while a probe keeps failing the `exhausted` row (with its recorded reset)
+  persists. For a codex `unknown` or a header-less `available`, a later probe
+  that answers the same way does **not** release it — a header-less 2xx is a
+  real answer but carries no 5h-utilization evidence — so the release is the
+  carried reset elapsing (or being missing, unparseable or beyond the eight-day
+  horizon), not the next answered probe. A round that measures (`available`
+  with a 5h utilization, `rate_limited`, a fresh `exhausted`) overwrites at
+  any time.
+  Throughout, the selector's `exhausted` hard exclusion keeps applying to the
+  carried row. Carrying never widens the selectable set, for all four carried
+  statuses: `error` and `blocked` are excluded or ranked after every selectable
+  status anyway, and for `unknown` / header-less `available` the fresh row
+  would have been selectable, so carrying the `exhausted` row can only narrow
+  the set.
 
 The carry-forward does **not** apply to an account with a standing `auth` or
 `malformed-timestamp` mark: that account's `blocked` row comes from the mark,
@@ -537,6 +551,15 @@ non-exported `LOOM_TOKEN_MODE=...`) so callers `eval` the output directly
 instead of round-tripping through a JSON parser; `--auto-unpin` runs the
 pinned-account auto-recovery pre-flight (see below) before selecting, and
 `--role <name>` supplies the prompt-cache affinity key described next.
+`--pin-account <name>` (#14981) replaces the draw with exactly that Claude
+account and fails closed (exit 78, nothing selected) when it is missing, empty,
+bad-marked or ranked exhausted/blocked: a seat-stored session resume only works
+in the account whose config dir holds the transcript. The daemon exports
+`LOOM_RESUME_ACCOUNT` / `LOOM_RESUME_SESSION_STORE` for such a resume;
+`spawn-claude.sh` passes the former as `--pin-account` (refusing a daemon that
+lacks the flag, unlike the degrading `--auto-unpin` / `--model` probes) and
+refuses a launch whose account or store differs. The flag is not env-backed, so
+`claude-wrapper.sh`'s post-failure rotation is never re-pinned.
 
 ### Prompt-cache affinity: a preference tier, off by default (issue #8146)
 

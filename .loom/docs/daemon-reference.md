@@ -22,6 +22,7 @@
 - [Delegated daemon administration (`daemon.delegatedTo`, #5345)](#delegated-daemon-administration-daemondelegatedto-5345)
 - [Fleet — operator-triggered multi-host worker fanout (`fleet`, #4340)](#fleet--operator-triggered-multi-host-worker-fanout-fleet-4340)
 - [Fleet store — `fleet-config` (`fleet.repo`)](#fleet-store--fleet-config-fleetrepo)
+- [Changing a bundled model profile's model (`runtimes.modelProfileOverrides`, #15252)](#changing-a-bundled-model-profiles-model-runtimesmodelprofileoverrides-15252)
 - [Fleet model A/B — `sweep-experiment plan` (#8055 phase 1)](#fleet-model-ab--sweep-experiment-plan-8055-phase-1)
 - [Token pool provisioning for managed repos (#3938)](#token-pool-provisioning-for-managed-repos-3938)
 - [Per-repo status breakdown + per-repo main-health gate (#3930 — phase d)](#per-repo-status-breakdown--per-repo-main-health-gate-3930--phase-d)
@@ -290,10 +291,9 @@ delivery half of #9244/#9301). Its first publisher, the star-liveness pass,
 was removed by #11104; today it is published by the
 [fleet-degraded operator alert](#fleet-degraded-operator-alert-autonomousfleetalert-10164)
 (issue `0`, one event per condition key, a `resolved: true` event when it
-clears). Consumer: the Safehouse narration sink, which renders it as a
-`handoff` envelope into the signal room. Room routing, the
-`safehouse.operatorMention` ping and the rendered line are documented in
-[`safehouse.md` → Operator escalations](safehouse.md#operator-escalations-9321).
+clears). It is no longer rendered into Matrix: the Safehouse narration sink
+that did so (#9321) was retired by #13946, so the ask reaches the human as the
+forge comment and the pinned hold digest.
 
 **`Generic`-topic rule.** A `Generic` topic is allowed only while it (a) is
 listed in this inventory, (b) carries a `source` field naming its producing
@@ -1299,7 +1299,7 @@ cancel`'s SIGTERM→grace→SIGKILL), plus the three deltas teardown needs:
    normally in the meantime (no longer `loom:building`) is left alone.
 3. **Safehoused flush verification is a documented stub pending #3998.** No
    invocable key-backup steady-state check exists in this repo yet (only the
-   narration-sink/completion-dedup client seams in `safehouse.rs`) — rather than block
+   merged-PR reporter's client in `safehouse.rs`) — rather than block
    every drain on #3998, this phase degrades honestly: `safehouse.enabled ==
    false` skips cleanly (no room keys in play); `safehouse.enabled == true`
    still lets the drain complete (workspace/roster cleanup proceed — loom never
@@ -2576,9 +2576,13 @@ blocker is Loom-owned:
   back on the default branch (`checkout`, with a `refs/loom/rescue/<ts>` ref at
   the old HEAD, kind `rehomed`); the ordinary rules then fast-forward it. It
   qualifies only when every commit on HEAD is on `origin/<default>`, or HEAD
-  is the head of a pull request the forge reports as merged. The lookup is
-  `gh api repos/{owner}/{repo}/commits/<sha>/pulls`; no network, an open
-  breaker or any failure means "not merged" and the hold stays (fail closed).
+  is the head of a pull request the forge reports — **open or merged**
+  (#14973: the checkout a reviewer leaves behind is parked on an OPEN PR's
+  head, and `refs/pull/N/head` keeps the commits on the forge either way; a
+  rescue ref is written first regardless). The lookup is
+  `gh api repos/{owner}/{repo}/commits/<sha>/pulls --jq 'any(.[]; .head.sha == "<sha>")'`;
+  no network, an open breaker or any failure means "not known" and the hold
+  stays (fail closed).
   It is the **last** question the rule asks (#13835), after the clean-tree,
   `detached=keep`, six-hour and live-`git` checks, so a checkout any of those
   refuses costs no forge read at all; only one they all pass pays for it.
@@ -2599,7 +2603,9 @@ blocker is Loom-owned:
   A stranded checkout that is not repaired stays `wrong-branch`, and is said
   again as a `still-held` transition (log line plus an event on the checkout
   topic) every hour (`LOOM_CHECKOUT_REREPORT_AFTER_MINUTES`) so it can be
-  counted, instead of once.
+  counted, instead of once. Since #14973 that line names why this pass's
+  self-heal declined the rehome (`not repaired: … (self-heal: stays off
+  \`main\`: HEAD moved recently)`), where the reason used to be `debug`-only.
 - **Repair, in order.** `refs/loom/rescue/<UTC ts>` at HEAD (and `<ts>-branch`
   at the branch tip when an operation moved HEAD); the lock; `stash push` of
   the dirty paths as `loom-rescue-<ts>` (not during an operation, whose abort
@@ -2978,7 +2984,7 @@ deciding the workspace needs a `Skip`:
 | Loom-owned transient paths (#3778/#3950) | `.loom/sweep-checkpoint/`, `.loom/tokens/`, `.loom/logs/`, `.loom/worktrees/`, … — the daemon's own runtime bookkeeping |
 | Regenerable lockfiles (#3950) | `package-lock.json`, `Cargo.lock`, `pnpm-lock.yaml`, `yarn.lock`, `uv.lock` (matched by basename anywhere in the tree) |
 | Re-stamped install manifest (#4239, #4332) | `.loom/install-metadata.json` exactly — generated + re-stamped by every `resync-installed.sh` run, no `defaults/` source to byte-match against |
-| Installed-surface byte-match (#4332) | `.loom/hooks/`, `.loom/scripts/`, `.loom/roles/`, `.loom/docs/`, `.loom/bin/`, `.claude/commands/loom/` — ignorable **iff** the dirty file's content byte-matches its tracked `defaults/` counterpart in the same worktree (loom-repo-scoped; a consumer repo has no local `defaults/` tree, so this class never applies there) |
+| Installed-surface byte-match (#4332) | `.loom/hooks/`, `.loom/scripts/`, `.loom/roles/`, `.loom/docs/`, `.loom/runtimes/`, `.loom/bin/`, `.claude/commands/loom/` and `.agents/skills/` by directory prefix, plus the single files `.loom/pricing.json` ← `defaults/pricing.json` (#15554), `.claude/README.md` ← `defaults/.claude/README.md`, `.github/CONFIGURATION.md` ← `defaults/.github/CONFIGURATION.md`, `.loom/biome.jsonc` ← `defaults/.loom/biome.jsonc` and `.claude/biome.jsonc` ← `defaults/.claude/biome.jsonc` by exact path (#15566) — ignorable **iff** the dirty file's content byte-matches its tracked `defaults/` counterpart in the same worktree (loom-repo-scoped; a consumer repo has no local `defaults/` tree, so this class never applies there) |
 
 The installed-surface class exists because this repo dogfoods its own install:
 `resync-installed.sh` (`.loom/docs/troubleshooting.md` → *Overnight / long-running
@@ -2992,7 +2998,12 @@ copy cannot byte-match content it was never copied from, so it still reports
 `dirty-tree` as before; only provable resync output is ignored. A `defaults/…`
 SOURCE-side edit is never in this class's domain either way (only the *installed*
 copy maps to its source, not the reverse), so editing `defaults/docs/x.md`
-directly and then resyncing still correctly skips the gate on that edit.
+directly and then resyncing still correctly skips the gate on that edit. The
+marker-gated `.agents/skills/` surface follows the same rule: a skill that was
+hand-edited, or detached from generation by stripping its marker, no longer
+byte-matches its source and stays `dirty-tree`. This repo tracks
+`.agents/skills` as a symlink, so only a checkout carrying a real directory
+there can leave dirt under that prefix.
 
 `resync-installed.sh` also recommends `./.loom/scripts/land-resync-commit.sh`
 in its summary when a run leaves the tree dirty with nothing but this kind of
@@ -6198,8 +6209,8 @@ concurrency ceiling 5" and share it with the team:
 > **Operational tunables have their own surface (#9683/#9768).** The knobs that
 > govern *how fast and how much* the engine runs — tick cadence, concurrency,
 > admission ramps, lease TTL, review-debt backoff — live in the validated
-> [`hyperparameters`](hyperparameters.md) block (with the `$LOOM_HYPERPARAMS`
-> optimizer vector and the `loom.hyperparams.digest` run-provenance stamp), not
+> [`hyperparameters`](hyperparameters.md) block (with the
+> `loom.hyperparams.digest` run-provenance stamp), not
 > in the `autonomous` feature block below. The two compose: the
 > `hyperparameters` layer wins per-field where both set the same knob.
 
@@ -6433,10 +6444,8 @@ knobs not yet audited here.
 | `autonomous.watchdog.staleSweep` | `LOOM_SWEEP_STALE_SWEEP` | `true` | Stale-untracked-sweep backstop on/off (#7529). Runs in the same tick as the other three, but acts only on entries none of them can reach (see below) |
 | `autonomous.watchdog.staleSweepAgeSecs` | `LOOM_SWEEP_STALE_AGE_SECS` | `10800` (3h, 4× `reviewStallTimeoutSecs`) | Age sanity ceiling before an untracked, log-silent sweep is reaped |
 | `autonomous.collisionDetection.enabled` | `LOOM_DETECT_COLLISIONS` | `false` | Cross-host dispatch-collision detection and enforcement (#4085, upgraded from detection-only by #5789). Off by default — adds one extra `gh issue view --json labels` round-trip per dispatch. When enabled, a confirmed pre-flip collision backs off the dispatch instead of only logging/counting it |
-| `safehouse.enabled` | `LOOM_SAFEHOUSE_ENABLED` | `false` | Enables safehouse fleet-comms (#3997) **and** cross-host soft-claim coordination (#4028). Off by default — a byte-for-byte no-op (no socket, no coordination task) when unset |
-| `safehouse.rooms.signal` | `LOOM_SAFEHOUSE_ROOM_SIGNAL` | *(falls back to `safehouse.room`)* | Attention-class routing (#4225): the **signal** room id (`loom-fleet`) — operator conversation, every `handoff`, terminal `ack`/`completion`. Absent **and** no `byRepo` ⇒ single-room mode, byte-identical to pre-#4225 |
-| `safehouse.rooms.byRepo` | `LOOM_SAFEHOUSE_ROOMS_BY_REPO` (`repo=room,…`) | `{}` | Attention-class routing (#4225): per-repo **firehose** room ids keyed by workspace-root basename — `task`/`chat` narration. A repo absent from the map is created lazily as `fleet-<repo>`; a refused creation degrades that repo to the signal room with one `warn!`. The env form replaces the whole map |
-| `safehouse.rooms.alerts` | `LOOM_SAFEHOUSE_ROOM_ALERTS` | *(unset)* | Optional alerts room (#13070): when set, `handoff` envelopes (fleet-degraded edges and `Cleared`, BLOCKED, crashed) go only here; dispatch, phase, ack and completion stay in the main room. Unset ⇒ behavior unchanged. Does not enable attention-class routing |
+| `safehouse.enabled` | `LOOM_SAFEHOUSE_ENABLED` | `false` | Enables the safehouse merged-PR report (#13946): one line per merged PR in the fleet room. Off by default — a byte-for-byte no-op (no socket, no bus subscription) when unset |
+| `safehouse.rooms.signal` | `LOOM_SAFEHOUSE_ROOM_SIGNAL` | *(falls back to `safehouse.room`)* | The fleet room id (`loom-fleet`) the merged-PR line is posted to and read back from |
 | `safehouse.claimReconcileIntervalSecs` | `LOOM_CLAIM_RECONCILE_INTERVAL_SECS` | `1800` when `safehouse.enabled`, else `600` | Periodic `loom:building`/PR-claim reconciliation cadence (#4431). The 30-minute safehouse default dates from when peer claims carried the fast in-flight signal (retired in #13945; the cadence is unchanged). Env wins on any host; floored at 60s |
 | `fleet.hostId` (machine tier only) | `LOOM_HOST_ID` | the persisted `~/.loom/host-id` → `unknown-host` | This host's identity string (`host.id`), used in telemetry, collision log records (#4085) **and** self-recognition in the completion dedup (#6352). **Config wins over env** here, and there is no hostname fallback (#11530); see [Host identity](#host-identity-loom-daemon-host-id-11530) |
 | `autonomous.autoUpdate.enabled` | `LOOM_AUTO_UPDATE` | `false` | Autonomous self-update loop on/off (#4055) **on a host with no fleet store only**. **Opt-in** there (it rebuilds + restarts the daemon process). On a fleet host (`fleet.repo` set) it governs nothing: the loop runs whatever it says, for the fleet floor and for a workspace that needs a newer daemon, and never chases the newest release (#10954, see [The fleet floor drives rolls](#the-fleet-floor-drives-rolls-no-roll-windows-10885)). Exactly one loop per daemon, not a per-workspace fan-out. See [Autonomous self-update loop](#autonomous-self-update-loop-4055) below |
@@ -6735,6 +6744,51 @@ the `fleet add-worker` step 9 above — that is the one an operator needs a wake
 path for (provider console/CLI restart, tailnet-identity survival,
 re-registration), documented in full at that step, along with the #4697
 `fleet status` "expected power-off" classification.
+
+### Docker CLI lookup and the `LOOM_DOCKER_BIN` override (#14885)
+
+Every daemon path that launches `docker` — session-container startup and
+teardown, the accounts `check --live` probes, private-workspace exports,
+image cleanup, native containment — resolves the CLI through one shared
+lookup (`loom-daemon/src/docker_bin.rs`), never a bare
+`Command::new("docker")`. Before #14885, a daemon started by launchd (or a
+minimal systemd unit) inherited `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which
+names none of the directories Docker Desktop installs its CLI into, and
+every docker launch failed at spawn with not-found.
+
+Resolution order:
+
+1. `LOOM_DOCKER_BIN` when set (trimmed; empty/whitespace counts as unset).
+2. Each `$PATH` entry, in order.
+3. Absolute fallback directories, in order: `/usr/local/bin`,
+   `/opt/homebrew/bin`, `~/.docker/bin` (expanded from the process's home),
+   `/Applications/Docker.app/Contents/Resources/bin`, `/usr/bin`.
+
+A candidate qualifies only if it is an existing regular file (symlinks
+followed — how Docker Desktop links its CLI) with an execute bit. The
+caller's `$PATH` is never modified: the child gets the resolved absolute
+path.
+
+**`LOOM_DOCKER_BIN` is fail-closed, fleet-wide.** An override that does not
+name an executable file is a hard error at the call site — it never falls
+through to a working `docker` elsewhere — so a broken explicit override
+fails even when another docker exists. That is deliberate (#14885): an
+operator who points the daemon at a moved CLI wants the misconfiguration to
+surface, not be masked by an incidental fallback. Practically, a stale
+`LOOM_DOCKER_BIN` left on one host disables every daemon Docker launch on
+that host (sessions read `unknown`/`session_probe_error`, containment
+refuses to start), which is the blast radius to check when clearing one.
+
+**The one exception: the sweep reaper's `container_stop::docker_program()`.**
+It takes `LOOM_DOCKER_BIN` verbatim (trimmed, non-empty) with no
+executability check, and only falls back to the shared lookup when the
+override is unset. There the spawn failure itself is the fail-safe: a
+container stop that cannot spawn its docker logs and skips (the teardown
+must never block a cancel), exactly as it did before #14885.
+
+A scoped `--docker` CLI argument (or `LOOM_CODEX_SESSION_DOCKER`) still wins
+verbatim over all of the above at its call sites; the literal `docker`
+default value means "resolve through this shared lookup".
 
 ### Daemon log path override (`LOOM_DAEMON_LOG`, #4010)
 
@@ -7494,11 +7548,10 @@ The machine is **Closed ⇄ Cooldown**, with no sustain counter, because a rate-
   safehouse's forge lookups, report rate-limited failures too (#8997), so the
   first authoritative failure trips the breaker; their probe runs off-thread.
 - While cooling, the work-finder, claim/quarantine reconciliation, epic
-  supervisor, role-runner ticks and safehouse lookups (title enrichment,
-  merge verification, merge reconciliation) **skip entirely** — zero gh
-  calls, zero doomed role spawns; safehouse keeps narrating with what it has,
-  and an unverified completion is reconciled after release. Running sweeps
-  are never touched.
+  supervisor, role-runner ticks and safehouse lookups (merge verification,
+  the captain's catch-up scan) **skip entirely** — zero gh calls, zero doomed
+  role spawns; a merge the reporter could not verify is picked up by the
+  captain's catch-up scan after release. Running sweeps are never touched.
 - The breaker **releases itself** on the first tick past the reset. Edges are
   logged once each way and published as `daemon.rate_limit_breaker.state`
   events; `loom-daemon status` shows the phase, the tripping loop, the resume
@@ -8545,38 +8598,17 @@ collisions. Enabling roster mode must not raise that counter above its
 static-ring baseline; if it does, the fence is not holding and the fleet
 should fall back to the static env pair while it is investigated.
 
-### Completion narration → public fleet feed (#4426)
+### Merged-PR report in the fleet room (#13946)
 
-When a sweep exits, the narration sink additionally asks the forge whether that
-issue's PR actually **merged** (`gh pr list --head feature/issue-N --state
-merged`, in the event's workspace root). If it did, the sink emits a second
-envelope of type **`completion`** carrying a `completion-v1` `meta`
-(`{schema, agent, repo, ref, result, started_at, completed_at, issue,
-tokens?, title?, additions?, deletions?}`) alongside the human `ack`.
-safehoused's egress mirrors well-formed `completion` envelopes out of allowlisted
-rooms to its `sink_url` — that is what fills the public fleet feed. Notes:
-
-- **`repo` is the forge `owner/repo` slug** (`gh repo view --json nameWithOwner`,
-  cached per workspace), not the path-basename narration convention (#4201);
-  `ref` is the PR URL.
-- **Display fields (#4497)** back the feed's
-  `<repo>#<issue>: <title> +A −D · <dur> · <tokens> tok` rows.
-  `title`/`additions`/`deletions` come from the *same* `gh pr list` call that
-  verifies the merge (zero extra round-trips) and degrade per-field; `tokens` is
-  a best-effort input+output total from the in-process activity DB's per-issue
-  rollup, whose attribution is knowingly imperfect (bare issue number, no repo
-  column; only linked samples counted) but consistent enough for a cost trend.
-  All four are optional — absent, the envelope is identical to the pre-#4497 one.
-- **Exit 0 ≠ merged.** No merged PR ⇒ no completion, so `result: "success"` is
-  never claimed for unmerged work. `result: "failure"` is not emitted in v1 —
-  `completion-v1` requires a `ref`, and a sweep with no merged PR has no
-  meaningful one (the wire support exists for a follow-up).
-- **At most one per merge**, deduped on `(workspace, issue)` for the daemon's
-  lifetime; downstream ingest is additionally idempotent on `event_id`.
-- **No new config and no new event-bus topic** — this rides the existing
-  `SweepExited` event and the `safehouse.*` block. Same degradation contract as
-  all narration: a failed/absent/slow `gh`, invalid `meta`, or an unreachable
-  safehoused drops the completion silently and never touches the sweep.
+Safehouse carries exactly one thing from the daemon: a slim
+`merged ✓ owner/repo#N · <title> · <url>` line per merged PR. The host that ran
+the merge posts it after confirming the PR named by the sweep merge phase or
+Champion merge verdict, and on the fleet captain a bounded catch-up scan
+posts the merges no host reported. Delivery is best effort: a lost reply is
+followed by a room read-back and a re-send only when the PR's line is absent.
+The `completion-v1` envelope, its token/title/diffstat payload and the
+completion-ad dedup were removed. Tuning, the delivery rule and the retired keys:
+[`safehouse.md` → What gets reported](safehouse.md#what-gets-reported).
 
 ### Cross-host soft claim over safehouse (retired, #13945)
 
@@ -8586,8 +8618,9 @@ the `loom-daemon peer-claims` command — was removed (operator ruling
 2026-11-15, #13920). The fleet runs on captain assignment plus forge leases; the
 local ledgers stay as the fallback path's own. A leftover `rooms.claims`,
 `peerClaimTtlSecs`, `LOOM_SAFEHOUSE_ROOM_CLAIMS` or `LOOM_PEER_CLAIM_TTL_SECS`
-is ignored and named in one startup warning. What remains on the room is the
-completion dedup: [`safehouse.md` → Completion dedup](safehouse.md#completion-dedup-the-one-cross-host-ad-left-6352).
+is ignored and named in one startup warning. The completion dedup that outlived
+it was removed by #13946; the room now carries only the
+[merged-PR report](safehouse.md#what-gets-reported).
 
 ### Prerequisite: a fresh token ranking (#3894, self-refreshed by the daemon since #3969)
 
@@ -11177,7 +11210,7 @@ naming a runtime that never launches is simply never matched.
   `allowedEfforts` list that does not contain the value, the daemon drops
   the override and the child launches with the profile's own `effort`
   instead of the launch being refused before the CLI starts
-  (`profile_selection`, exit 78). The drop is logged, and the per-tick
+  (`profile_selection_effort`, exit 78). The drop is logged, and the per-tick
   header's source names it, e.g.
   `effort=<runtime CLI default> (source=autonomous.roleRunner.roleEfforts.builder (profile default for opencode:zai-flash))`.
   A runtime-qualified `roleEfforts.<role>@<runtime>` entry is an explicit
@@ -11241,7 +11274,7 @@ default, so it may name a model the native pick the draw landed on does not
 run: an `opencode:<profile>` candidate pins a *profile*, and
 `worker_spawn::profiles::select` refuses a launch whose `--model` differs
 from that profile's own `model` (`bare model differs from the selected
-profile`, `profile_selection`, exit 78) — before #14962 this lost whole
+profile`, `profile_selection_model`, exit 78) — before #14962 this lost whole
 Judge/Guide steps whose `roleModels.<role>` was aimed at the Claude picks.
 Both launch sites (the sweep step spawn and the role runner's invocation) now
 resolve the model through `resolve_role_runner_model_for_launch`: when the
@@ -13738,11 +13771,16 @@ loom-daemon restart --abort-drain                 # cancel an in-progress drain,
   only a one-shot note: `status --json`'s `drain.roll` object (`null` when no
   drain is active) carries `roll_pending`, `started_at`, `paused_secs`,
   `budget_secs`, `refusals`, `in_flight`, `target`, `then_exit`, `origin`,
-  `timed_out`, `startup_hold` and `pause`. **Since #10831** `roll_pending` is
-  always `false` and `refusals` always `0` (no roll is retained across a
-  deadline; both stay in the object so older readers still parse it),
+  `timed_out`, `startup_hold`, `fleet_hold` and `pause`. **Since #10831**
+  `roll_pending` is always `false` and `refusals` always `0` (no roll is
+  retained across a deadline; both stay in the object so older readers still
+  parse it),
   `budget_secs` is the pause budget for a `pause-roll` drain and `0` otherwise,
-  and `origin` reads `operator` or `pause-roll`. `pause` is `null` except during
+  and `origin` reads `operator` or `pause-roll`. **Since #15300** `fleet_hold`
+  is `true` when the hold came from the fleet store's `paused` state (#9598)
+  rather than a local operator stop (#9588) or a drain; always accompanied by
+  `startup_hold`. It is `#[serde(default)]`, so a current reader defaults the
+  field to `false` when an older daemon omits it. `pause` is `null` except during
   a pause roll, when it carries the H4 `step` (1-10), `stopped` (whether an
   abort is still possible), `budget_secs`, `min_resumable_age_secs`,
   `manifest_id`, `target_source`, `to_version`, `items`, `paused`, `exited`,
@@ -14703,7 +14741,7 @@ wiring in `main.rs`:
 - **Collector** (`observability::collector`) — a pure [`EventBus`](#event-taxonomy-frozen-for-v0100)
   subscriber (`sweep.global.dispatch` + `sweep.issue.*`, adding **no new emit
   call sites** anywhere else in the daemon, the same design
-  [safehouse](#completion-narration--public-fleet-feed-4426) narration
+  [safehouse](#merged-pr-report-in-the-fleet-room-13946)'s merged-PR reporter
   uses) that maps lifecycle events to the versioned
   `loom-daemon/src/telemetry/` schema (#4703) — `sweep.started` /
   `sweep.phase` / `sweep.completed` / `sweep.outcome` — resolves the emitting

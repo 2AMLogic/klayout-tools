@@ -190,6 +190,44 @@ recording run needs the terminal on stdin for its confirmation.
 `--effect` apply to the whole batch (`--release` still requires
 `--effect proceed`).
 
+After a confirmed batch, `resolve --from` prints `BATCH_RECORDED=` (items with
+a verified receipt, including matching prior receipts), `BATCH_FAILED=` (items
+with an incomplete operation), and a `BATCH_SUMMARY` table in input order with
+one row per input — including any item refused at review, and separating a
+verified receipt from a failed hold release (#15385). The first failed attempt
+sets the exit code. Once an attempt verifies the receipt and completes any
+requested release, it clears earlier failures for the same repository, issue
+and option from the retry file. All reviews happen before recording, so this
+also clears a review failure for a duplicate further down the input file. The
+command prints any remaining retries in input order in a delimited block and
+omits the block when none remain. All comment and delimiter lines start with
+`#`, so `resolve --from` reads the block verbatim.
+
+```text
+BATCH_RECORDED=4
+BATCH_FAILED=2
+BATCH_SUMMARY
+ITEM               STATUS  RECEIPT     RELEASE   REASON
+owner/repo-a#12=a  ok      verified    released  -
+owner/repo-b#34=a  ok      verified    released  -
+owner/repo-c#56=a  failed  unverified  skipped   record: recording the resolution on #56 failed: HTTP 403
+owner/repo-c#57=a  failed  verified    failed    release: removing loom:operator from #57 failed: HTTP 500
+owner/repo-d#78=a  ok      verified    released  -
+# --- BEGIN RETRY --from ---
+# Save this block as retry.txt and rerun:
+#   loom-daemon operator-decision resolve --from retry.txt --effect proceed --release
+owner/repo-c#56=a
+owner/repo-c#57=a
+# --- END RETRY --from ---
+```
+
+Save the block between (or including) `# --- BEGIN RETRY --from ---` and
+`# --- END RETRY --from ---` to a file such as `retry.txt` and run the printed
+command to reuse the original `--effect` and `--release` flags. Items whose
+receipt already verified (such as `owner/repo-c#57=a` above) record
+`RECORDED=already` without posting a second comment and finish removing the
+hold.
+
 ### What the resolution binds
 
 | Bound to | Changes when |

@@ -5107,11 +5107,13 @@ resolve_stash_cwd() {
 }
 
 # List every `git checkout|switch|commit` segment of a command with the cwd it
-# would run in (#13589). One line per segment: "<cwd>\x1f<subcmd>\x1f<args>".
-# Threads `cd <dir>` across segments (same as resolve_stash_cwd) and a
-# `git -C <dir>` global option (relative -C joins the running cwd). Leading
-# `(`/`{`, `sudo`, and `VAR=val` env prefixes are stripped; only a segment that
-# STARTS with `git` counts, so quoted text mentioning `git commit` is inert.
+# would run in (#13589), plus `gh pr checkout` segments (#14973). One line per
+# segment: "<cwd>\x1f<subcmd>\x1f<args>" (gh segments carry the subcmd marker
+# "gh-pr-checkout"). Threads `cd <dir>` across segments (same as
+# resolve_stash_cwd) and a `git -C <dir>` global option (relative -C joins the
+# running cwd). Leading `(`/`{`, `sudo`, and `VAR=val` env prefixes are
+# stripped; only a segment that STARTS with `git` or `gh pr checkout` counts,
+# so quoted text mentioning `git commit` is inert.
 resolve_primary_mutations() {
     printf '%s' "$1" | awk -v startcwd="$2" -v home="$HOME" "$_QSPLIT_AWK""$_CDEXPAND_AWK""$_CDQUOTE_AWK""$_MASKWS_AWK"'
     BEGIN { curcwd = startcwd }
@@ -5135,6 +5137,17 @@ resolve_primary_mutations() {
                     if (cdclass ~ /^\//) curcwd = cdarg
                     else if (curcwd != "") curcwd = curcwd "/" cdarg
                 }
+                continue
+            }
+            # `gh pr checkout <N>` (#14973): gh fetches the PR head into the
+            # checkout and moves it there. Resolved from the segment cwd (a
+            # `cd` prefix threads through above; gh has no -C option). Emitted
+            # with a marker subcmd the caller denies outright: gh has no
+            # path-restore or main/master-exception shape.
+            if (toks[1] == "gh" && m >= 3 && toks[2] == "pr" && toks[3] == "checkout") {
+                args = ""
+                for (j = 4; j <= m; j++) args = args (j > 4 ? " " : "") toks[j]
+                printf "%s\037gh-pr-checkout\037%s\n", curcwd, args
                 continue
             }
             if (toks[1] != "git") continue
@@ -7662,11 +7675,27 @@ fi
 # explicit literal path.
 # =============================================================================
 _RM_SPAN_MARK=$'\036'
+# `cd` provenance marks (#15112), emitted by _extract_rm_targets_scan() AFTER
+# the span mark: `$_RM_CD_MARK<dir>$_RM_CD_MARK<target>` carries the directory a
+# preceding `cd` put in effect; `$_RM_CDUNRES_MARK<why><target>` marks an
+# unresolved directory with a one-letter reason (#15218). Neither mark is IFS whitespace, so the caller's
+# `for target in $RM_TARGETS` word split is unaffected.
+_RM_CD_MARK=$'\037'
+_RM_CDUNRES_MARK=$'\035'
 
 extract_rm_targets() {
-    _extract_rm_targets_scan "$1" ""
+    _extract_rm_targets_scan "$1" "" "$CWD"
     heredoc_subst_span_text "$1"
-    [[ -n "$_HD_SPAN_TEXT" ]] && _extract_rm_targets_scan "$_HD_SPAN_TEXT" "$_RM_SPAN_MARK"
+    if [[ -n "$_HD_SPAN_TEXT" ]]; then
+        # An unquoted heredoc body's `$( … )` runs in whatever directory the
+        # OUTER command had reached by then. The span pass cannot see that
+        # state, so when the outer command contains any `cd` word it starts
+        # UNRESOLVED (relative span targets fail closed) instead of assuming
+        # the session cwd (#15169 review).
+        local _span_unres=0
+        printf '%s' "$1" | grep -qE '(^|[;&|({[:space:]])cd([[:space:]]|$)' && _span_unres=1
+        _extract_rm_targets_scan "$_HD_SPAN_TEXT" "$_RM_SPAN_MARK" "$CWD" "$_span_unres"
+    fi
     return 0
 }
 
@@ -7680,26 +7709,177 @@ _extract_rm_targets_scan() {
     # heredoc-substitution-span pass). It is a PREFIX and not a separate
     # channel so the caller's existing `for target in $RM_TARGETS` word split
     # keeps working unchanged.
-    printf '%s' "$1" | awk -v mark="$2" "$_QSPLIT_AWK"'
+    #
+    # $3 is the hook's session cwd, the starting point for `cd` tracking
+    # (#15112). A relative target that follows an earlier `cd <dir>` in the
+    # same command is judged against THAT directory, not the session cwd, so
+    # the scanner prefixes it with the directory in effect:
+    #   no `cd` seen before the rm       -> `<target>`                  (unchanged)
+    #   `cd` resolved to an absolute dir -> `$_RM_CD_MARK<dir>$_RM_CD_MARK<target>`
+    #   `cd` could not be resolved       -> `$_RM_CDUNRES_MARK<why><target>`
+    # where <why> is ONE non-whitespace letter naming the reason (#15218), so the
+    # deny can say what actually went wrong: a non-literal cd argument, a
+    # session cwd that is not a plain absolute path, an unknown directory for
+    # a heredoc substitution, unsupported cd syntax or unparsed separators,
+    # or (c) anything else, e.g. a target carrying an internal mark byte.
+    # The caller strips the prefix (after the #8217 span mark) and uses the
+    # directory in place of $CWD. A `cd` argument is resolvable only when it is
+    # a literal path (optionally quoted, `~`/`$HOME` expanded as the other
+    # cd-tracking scans do): a variable, command substitution, glob, `cd -`,
+    # bare `cd`, a path containing whitespace, or a relative path with no known
+    # base is left UNRESOLVED, which the caller fails closed on rather than
+    # guessing. A later resolvable ABSOLUTE `cd` makes the directory known again.
+    printf '%s' "$1" | awk -v mark="$2" -v startcwd="$3" -v startunres="${4:-0}" -v home="$HOME" "$_QSPLIT_AWK""$_CDEXPAND_AWK""$_CDQUOTE_AWK"'
+    BEGIN {
+        curcwd = startcwd; cdseen = 0; cdunres = 0; cdlink = 0; argbad = 0; brokebase = 0; cdwhy = ""
+        if (startunres == 1) { cdseen = 1; cdunres = 1; cdlink = 1; cdwhy = "h" }
+        sdepth = 0
+        CDM = sprintf("%c", 31); UNRM = sprintf("%c", 29); RSM = sprintf("%c", 30)
+        SQ = sprintf("%c", 39); DQ = sprintf("%c", 34); BS = sprintf("%c", 92)
+        BAD = "$`*?[ \t" SQ DQ BS CDM UNRM RSM
+    }
+    # True if `s` has a byte that makes a cd path non-literal (expansion, glob,
+    # quote, escape, whitespace) or collides with an output mark.
+    function nonliteral(s,   q) {
+        for (q = 1; q <= length(BAD); q++)
+            if (index(s, substr(BAD, q, 1)) > 0) return 1
+        return 0
+    }
+    # Resolve one `cd` segment (toks[1..m]); updates curcwd/cdunres/cdseen.
+    function track_cd(   k, arg, cls, bad, wasbroken) {
+        # A prior cd whose effect no longer reliably reaches this point (a `;`,
+        # newline, `|`, `||` or `&` followed it) makes a relative base unknowable.
+        wasbroken = (cdseen && !cdlink)
+        cdseen = 1
+        # argbad: keep the unresolved-directory deny for this cd. cdwhy
+        # carries its diagnostic. brokebase: the base of the literal path is
+        # untrusted (a `;`/newline/`|`/`||`/`&` broke the link), so the target
+        # falls back to the session-cwd verdict like main, not a false deny.
+        argbad = 0; brokebase = 0
+        k = 2
+        # Skip option words (`cd -P dir`); a lone `-` is `cd -`. `--` ends the
+        # options: whatever follows is the operand even if it looks like an
+        # option, and any other `-x` word is not a plain `cd <dir>`.
+        while (k <= m && toks[k] ~ /^-[LPe@]+$/) k++
+        if (k <= m && toks[k] == "--") k++
+        else if (k <= m && toks[k] ~ /^-./) { cdunres = 1; argbad = 1; cdwhy = "x"; return }
+        if (k > m || toks[k] == "-" || toks[k] == "") { cdunres = 1; argbad = 1; cdwhy = "a"; return }
+        arg = expand_cd_arg(toks[k], home)
+        cls = strip_cd_quoting(arg)
+        # Literal paths only: no expansion/quote/escape/glob/tilde-user/space,
+        # and no control bytes that collide with the output marks.
+        if (cls == "" || nonliteral(cls) || cls ~ /^~/) {
+            cdunres = 1; argbad = 1
+            cdwhy = (toks[k] ~ /^[0-9]*[<>]/ ? "x" : "a")
+            return
+        }
+        # Extra words (including a separate redirection operand) can make
+        # even a literal directory ambiguous to this scanner.
+        for (bad = k + 1; bad <= m; bad++)
+            if (toks[bad] != "" && toks[bad] !~ /^[0-9]*[<>&]/) { cdunres = 1; argbad = 1; cdwhy = "x"; return }
+        if (cls ~ /^\//) { curcwd = cls; cdunres = 0; return }
+        # A relative join needs a literal base: a session cwd with whitespace or
+        # quote/glob bytes would corrupt the word split in the caller.
+        if (wasbroken) { cdunres = 1; brokebase = 1; return }
+        # An earlier unresolved cd keeps ITS reason (cdwhy); only a fresh failure
+        # here, a literal relative cd whose session cwd is not a plain absolute
+        # literal path, is the base-is-bad reason "b" (#15218).
+        if (cdunres || curcwd == "" || curcwd !~ /^\// || nonliteral(curcwd)) {
+            if (!cdunres) cdwhy = "b"
+            cdunres = 1; argbad = 1; return
+        }
+        curcwd = curcwd "/" cls
+    }
     {
+        # A new input record is a newline boundary, i.e. a `;`: an earlier cd
+        # does not reliably move this record (#15169 review).
+        if (startunres != 1) cdlink = 0
         $0 = qsplit($0)   # quote-aware segmentation (#3755)
         n = split($0, segs, "\n")
+        # qsplit_op[k] is the operator between segments k and k+1, but a literal
+        # newline records none: when the counts disagree the operators cannot be
+        # trusted, so every cd below fails closed.
+        opsok = (qsplit_nops == n - 1)
         for (i = 1; i <= n; i++) {
             seg = segs[i]
+            # Only `&&` guarantees the previous segment (and so any cd in it)
+            # succeeded and ran in this shell; any other separator drops the
+            # cd link and the target falls back to the session-cwd verdict.
+            if (i > 1 && startunres != 1 && (!opsok || (qsplit_op[i - 1] != "&&" &&
+                !(qsplit_op[i - 1] == "&" && segs[i - 1] ~ /[<>][ \t]*$/)))) cdlink = 0
             sub(/^[ \t]+/, "", seg)
-            sub(/^sudo[ \t]+/, "", seg)
+            sudo = sub(/^sudo[ \t]+/, "", seg)
             sub(/^[ \t]+/, "", seg)
-            if (seg !~ /^rm([ \t]|$)/) continue
-            m = split(seg, toks, /[ \t]+/)
-            has_rf = 0
-            for (j = 2; j <= m; j++)
-                if (toks[j] ~ /^-/ && toks[j] ~ /[rRfF]/) has_rf = 1
-            if (!has_rf) continue
-            for (j = 2; j <= m; j++) {
-                if (toks[j] == "") continue
-                if (toks[j] ~ /^-/) continue
-                print mark toks[j]
+            # Grouping: `{ ` runs in the current shell (stripped); `(` and `$(`
+            # open a subshell whose cd never leaks out, so save the state on
+            # each open paren and restore it on each close (#12082 analogue).
+            # Quoted spans are blanked before counting.
+            while (seg ~ /^\{[ \t]/) sub(/^\{[ \t]+/, "", seg)
+            pq = segs[i]
+            gsub(/"[^"]*"/, "", pq)
+            gsub(/\047[^\047]*\047/, "", pq)
+            popen = gsub(/\(/, "", pq)
+            pclose = gsub(/\)/, "", pq)
+            # A leading `(` encloses this segment, so the state is saved before
+            # it; a `$(` later in the segment opens AFTER the segment own
+            # command ran in the outer shell, so that save happens after it.
+            lead = (seg ~ /^\(/ && seg !~ /^\(\(/) ? 1 : 0
+            npush = (popen - pclose > lead) ? popen - pclose : lead
+            if (npush > popen) npush = popen
+            npop = pclose - (popen - npush)
+            if (lead > npush) lead = npush
+            if (lead) {
+                sdepth++
+                st_cwd[sdepth] = curcwd; st_seen[sdepth] = cdseen; st_unres[sdepth] = cdunres; st_link[sdepth] = cdlink; st_why[sdepth] = cdwhy
             }
+            while (seg ~ /^\([ \t]*/ && seg !~ /^\(\(/) sub(/^\([ \t]*/, "", seg)
+            if (!sudo && seg ~ /^cd([ \t]|$)/) {
+                m = split(seg, toks, /[ \t]+/)
+                track_cd()
+                # Literal args but an untrusted base: unlink so the emit falls
+                # back to the bare token (the main-branch verdict), not a false deny.
+                cdlink = brokebase ? 0 : 1
+                # A cd on either side of `|` / `&` runs in a child shell, and one
+                # after `||` (or before it) may not run at all: it does not
+                # reliably move the next command, so fail closed.
+                if (!opsok || (i > 1 && (qsplit_op[i - 1] == "|" || qsplit_op[i - 1] == "||")) ||
+                    (i < n && (qsplit_op[i] == "|" || qsplit_op[i] == "||" ||
+                               (qsplit_op[i] == "&" && seg !~ /[<>]$/)))) {
+                    cdunres = 1
+                    # Literal args: separator adjacency alone -> the main-branch verdict.
+                    if (!argbad && opsok) cdlink = 0
+                    # Reason "s": a literal cd whose operators could not be parsed.
+                    if (!argbad && !brokebase) cdwhy = "s"
+                }
+            }
+            else if (seg ~ /^rm([ \t]|$)/) {
+                emit_rm()
+            }
+            for (q = lead; q < npush; q++) {
+                sdepth++
+                st_cwd[sdepth] = curcwd; st_seen[sdepth] = cdseen; st_unres[sdepth] = cdunres; st_link[sdepth] = cdlink; st_why[sdepth] = cdwhy
+            }
+            for (q = 0; q < npop && sdepth > 0; q++) {
+                curcwd = st_cwd[sdepth]; cdseen = st_seen[sdepth]; cdunres = st_unres[sdepth]; cdlink = st_link[sdepth]; cdwhy = st_why[sdepth]
+                sdepth--
+            }
+        }
+    }
+    function emit_rm(   j, has_rf) {
+        m = split(seg, toks, /[ \t]+/)
+        has_rf = 0
+        for (j = 2; j <= m; j++)
+            if (toks[j] ~ /^-/ && toks[j] ~ /[rRfF]/) has_rf = 1
+        if (!has_rf) return
+        for (j = 2; j <= m; j++) {
+            if (toks[j] == "") continue
+            if (toks[j] ~ /^-/) continue
+            if (cdlink && !cdunres && curcwd ~ /^\//)
+                print mark CDM curcwd CDM toks[j]
+            else if (cdlink || index(toks[j], CDM) > 0 || index(toks[j], UNRM) > 0)
+                print mark UNRM (cdlink && cdunres && cdwhy != "" ? cdwhy : "c") toks[j]
+            else
+                print mark toks[j]
         }
     }'
 }
@@ -9762,6 +9942,28 @@ if echo "$COMMAND_RM_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
                 ;;
         esac
 
+        # Strip the #15112 `cd` provenance prefix, if any: the directory an
+        # earlier `cd` in this command put in effect for this target
+        # (_rm_cd_dir), or a flag that such a `cd` could not be resolved
+        # (_rm_cd_unres). Everything downstream sees the plain token.
+        _rm_cd_dir=""
+        _rm_cd_unres=0
+        _rm_cd_why=""
+        case "$target" in
+            "$_RM_CD_MARK"*)
+                _rm_cd_dir="${target#"$_RM_CD_MARK"}"
+                _rm_cd_dir="${_rm_cd_dir%%"$_RM_CD_MARK"*}"
+                target="${target#"$_RM_CD_MARK"*"$_RM_CD_MARK"}"
+                ;;
+            "$_RM_CDUNRES_MARK"*)
+                _rm_cd_unres=1
+                target="${target#"$_RM_CDUNRES_MARK"}"
+                # One-letter reason the scanner attached (#15218).
+                _rm_cd_why="${target:0:1}"
+                target="${target:1}"
+                ;;
+        esac
+
         # Skip empty targets
         [[ -z "$target" ]] && continue
 
@@ -9808,6 +10010,30 @@ if echo "$COMMAND_RM_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
         ABS_PATH=""
         if [[ "$_rmclassify" = /* ]]; then
             ABS_PATH="$_rmclassify"
+        elif [[ -n "$_rm_cd_dir" ]]; then
+            # A preceding `cd <dir>` moved the shell: resolve against it, not
+            # the session cwd (#15112).
+            ABS_PATH="$_rm_cd_dir/$_rmclassify"
+        elif [[ "$_rm_cd_unres" == 1 ]] && rm_scope_repo_enabled; then
+            # The scanner could not establish a base for this relative target.
+            # Joining it to $CWD could produce a misleading path. Fail closed,
+            # unless the target is `$`-rooted: those take the variable
+            # fast-path/deny flow below, which never prints a cwd-joined path.
+            mark_expandable_dollars "$target"
+            if ! [[ "$_MARKED_TOKEN" == $'\001'* || "$_MARKED_TOKEN" == /$'\001'* ]]; then
+                # Name the condition that actually fired (#15218); the verdict
+                # and the tag are the same for every reason.
+                case "$_rm_cd_why" in
+                    a) _rm_cd_unres_why="An earlier cd in the same command has an argument that is not a plain literal path (a variable, command substitution, glob, 'cd -', a bare 'cd', or a path with whitespace), so where '${target}' lands is unknown. Use a literal cd path, or an absolute rm target." ;;
+                    b) _rm_cd_unres_why="The guard needs a plain absolute session working directory to resolve the relative cd path. Use an absolute cd path or an absolute rm target." ;;
+                    h) _rm_cd_unres_why="The command text contains the word 'cd', so the guard cannot establish the working directory of this heredoc command substitution. Use an absolute rm target." ;;
+                    x) _rm_cd_unres_why="The guard could not determine the directory from this cd syntax. Use an absolute rm target." ;;
+                    s) _rm_cd_unres_why="The guard could not parse the shell operators around cd to establish the working directory. Use an absolute rm target." ;;
+                    *) _rm_cd_unres_why="Use an absolute rm target." ;;
+                esac
+                deny "BLOCKED: rm target '${target}' is relative to a directory this guard could not resolve (guards.rmScope=repo). ${_rm_cd_unres_why}" "rm-scope-unresolved-var"  # scan-reads: COMMAND_ASK_SCAN
+            fi
+            [[ -n "$CWD" ]] && ABS_PATH="$CWD/$_rmclassify"
         elif [[ -n "$CWD" ]]; then
             ABS_PATH="$CWD/$_rmclassify"
         fi
@@ -12180,6 +12406,18 @@ index_mutation_unisolated() {
     return 1
 }
 
+# Is `$2` a target a `git checkout <path>` could restore — a path present in
+# the working tree, or a tracked one (the classic restore of a file deleted
+# from the worktree)? Resolved relative to `$1`, the cwd the git invocation
+# resolves to. Used by the primary-checkout mutation guard to keep file
+# restores allowed while denying checkout targets that are no ref and no path
+# (#14973).
+primary_checkout_target_is_path() {
+    local cwd="$1" pos="$2"
+    [[ -e "$cwd/$pos" ]] && return 0
+    (cd "$cwd" 2>/dev/null && git ls-files --error-unmatch -- "$pos" >/dev/null 2>&1)
+}
+
 # =============================================================================
 # PRIMARY-CHECKOUT MUTATION (#13589) — deny `git commit`, `git switch`,
 # `git checkout -b/-B/--detach`, and `git checkout <branch|sha>` when the
@@ -12195,15 +12433,24 @@ index_mutation_unisolated() {
 # Allowed shapes (legitimate primary-clone callers):
 #   - checkout/switch whose target is main or master (Auditor's
 #     `git checkout -B main origin/main`, `git checkout main`)
-#   - `git checkout -- <path>` / `git checkout <path>` (file restore) and -h
+#   - `git checkout -- <path>` / `git checkout <path>` (file restore: a path
+#     present in the working tree, or tracked — incl. one deleted from the
+#     worktree) and -h
 #   - anything inside a linked worktree, and all of worktree.sh,
 #     check-main-clean.sh, resync-installed.sh, merge-pr.sh, version.sh (their
 #     internal git calls are invisible to this hook; only the top-level command
 #     text is scanned).
+# Also denied (#14973): `git checkout <target>` whose target is no ref git can
+# name and no path — the shape of `git fetch origin pull/N/head:prN && git
+# checkout prN` and `git checkout FETCH_HEAD` after a fetch, which park the
+# primary checkout on a PR head — and `gh pr checkout <N>`, which does the
+# same via gh. A target like that has no successful git meaning (a pathspec
+# matching no tracked file is an error), so denying it costs no working
+# invocation.
 # Gated by primary_checkout_mutation_guard_enabled(), evaluated lazily.
 # =============================================================================
 if [[ -n "${LOOM_SWEEP_ID:-}${LOOM_WORKTREE_PATH:-}" ]] \
-   && echo "$COMMAND_NO_COMMENT" | grep -qE '(^|[;&|(`{]|[[:space:]])git[[:space:]].*(checkout|switch|commit)' \
+   && echo "$COMMAND_NO_COMMENT" | grep -qE '(^|[;&|(`{]|[[:space:]])((git[[:space:]].*(checkout|switch|commit))|(gh[[:space:]]+pr[[:space:]]+checkout))' \
    && primary_checkout_mutation_guard_enabled; then
     while IFS=$'\037' read -r _pcm_cwd _pcm_sub _pcm_args; do
         [[ -z "$_pcm_sub" ]] && continue
@@ -12240,8 +12487,12 @@ if [[ -n "${LOOM_SWEEP_ID:-}${LOOM_WORKTREE_PATH:-}" ]] \
         done
         [[ "$_pcm_help" == true ]] && continue
         _pcm_target="${_pcm_new:-$_pcm_pos}"
+        _pcm_cmd="git $_pcm_sub"
         case "$_pcm_sub" in
             commit) _pcm_deny=true ;;
+            gh-pr-checkout)
+                _pcm_deny=true
+                _pcm_cmd="gh pr checkout" ;;
             switch)
                 if [[ "$_pcm_target" == "main" || "$_pcm_target" == "master" ]]; then
                     [[ "$_pcm_makes" == true && -z "$_pcm_new" ]] && _pcm_deny=true
@@ -12257,10 +12508,20 @@ if [[ -n "${LOOM_SWEEP_ID:-}${LOOM_WORKTREE_PATH:-}" ]] \
                 elif [[ -n "$_pcm_pos" ]] \
                      && (cd "$_pcm_cwd" 2>/dev/null && git rev-parse --verify --quiet "${_pcm_pos}^{commit}" >/dev/null 2>&1); then
                     _pcm_deny=true   # a branch / sha, not a path
+                elif [[ -n "$_pcm_pos" ]] && primary_checkout_target_is_path "$_pcm_cwd" "$_pcm_pos"; then
+                    :   # a working-tree or tracked path: a file restore
+                elif [[ -n "$_pcm_pos" ]]; then
+                    # Not main/master, not a commit git can name, not a path:
+                    # a ref this same command is about to create (`git fetch
+                    # origin pull/N/head:prN && git checkout prN`), a
+                    # FETCH_HEAD after a fetch, or nothing git can act on at
+                    # all (#14973). git errors on a pathspec that matches no
+                    # tracked file, so denying costs no working invocation.
+                    _pcm_deny=true
                 fi ;;
         esac
         if [[ "$_pcm_deny" == true ]]; then
-            deny "Blocked: $COMMAND (git $_pcm_sub in the PRIMARY checkout $_pcm_top during an agent step — this moves the workspace off the default branch or commits onto it, which holds fleet sync (wrong-branch). Builder/Doctor work happens in a worktree: run './.loom/scripts/worktree.sh <issue-number>' and work in .loom/worktrees/issue-<N>. Switching back to main/master and file restores ('git checkout -- <path>') remain allowed. To opt out repo-wide set guards.primaryCheckoutMutation:false in .loom/config.json, or export LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION=0 in the agent's OWN environment before the session — an inline prefix does not reach this hook, which runs as a separate process)" "primary-checkout-mutation:$_pcm_sub"  # scan-reads: COMMAND_NO_COMMENT
+            deny "Blocked: $COMMAND ($_pcm_cmd in the PRIMARY checkout $_pcm_top during an agent step — this moves the workspace off the default branch or commits onto it, which holds fleet sync (wrong-branch). Builder/Doctor work happens in a worktree: run './.loom/scripts/worktree.sh <issue-number>' and work in .loom/worktrees/issue-<N>. Switching back to main/master and file restores ('git checkout -- <path>') remain allowed. To opt out repo-wide set guards.primaryCheckoutMutation:false in .loom/config.json, or export LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION=0 in the agent's OWN environment before the session — an inline prefix does not reach this hook, which runs as a separate process)" "primary-checkout-mutation:$_pcm_sub"  # scan-reads: COMMAND_NO_COMMENT
         fi
     done < <(resolve_primary_mutations "$COMMAND_NO_COMMENT" "$CWD")
 fi
