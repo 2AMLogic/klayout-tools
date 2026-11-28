@@ -712,6 +712,7 @@
         "klayout_tools.pdk_descriptor",
         "klayout_tools._pdk_descriptor_reader",
         "klayout_tools.pdk_diode_models",
+        "klayout_tools.pdk_em",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_model_aliases",
         "klayout_tools.pdk_models",
