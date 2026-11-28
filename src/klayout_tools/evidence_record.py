@@ -396,7 +396,7 @@ def _assert_wrapper_clean(record: Mapping[str, Any]) -> None:
     which stays the untouched report."""
     wrapper = {k: v for k, v in record.items() if k != "result"}
     try:
-        env_provenance._assert_no_leaks(wrapper)
+        env_provenance.assert_no_leaks(wrapper)
     except env_provenance.EnvironmentProvenanceError as exc:
         raise EvidenceRecordError(str(exc), CODE_LEAK) from exc
 

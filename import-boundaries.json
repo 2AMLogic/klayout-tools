@@ -2247,24 +2247,6 @@
       "reason": "Issue #5227: resolve_osdi_preload moved verbatim out of sim.py, which already imports this helper; promote to public with the other _paths importers."
     },
     {
-      "consumer": "klayout_tools.synthesize_x_scan",
-      "exporter": "klayout_tools.netlist_construct_scan",
-      "symbol": "_NETLIST_X_CONSTANT_RE",
-      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; the primitives live in the shared netlist_construct_scan module (place_and_route group, next to its only in-repo rejecter) -- grant retargeted there from place_and_route_request."
-    },
-    {
-      "consumer": "klayout_tools.synthesize_x_scan",
-      "exporter": "klayout_tools.netlist_construct_scan",
-      "symbol": "_blank_verilog_comments",
-      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; the primitives live in the shared netlist_construct_scan module (place_and_route group, next to its only in-repo rejecter) -- grant retargeted there from place_and_route_request."
-    },
-    {
-      "consumer": "klayout_tools.synthesize_x_scan",
-      "exporter": "klayout_tools.netlist_construct_scan",
-      "symbol": "_NETLIST_BEHAVIOURAL_LATCH_RE",
-      "reason": "Issue #5792: reuses the exact behavioural-latch regex place_and_route's netlist pre-flight rejects on, so the synthesize-time warning and the P&R rejection cannot drift; lives in the shared netlist_construct_scan module (place_and_route group) alongside the other two scanner primitives."
-    },
-    {
       "consumer": "klayout_tools.characterize_osdi",
       "exporter": "klayout_tools.sim",
       "symbol": "_OFFHOST_BACKENDS",
@@ -2275,12 +2257,6 @@
       "exporter": "klayout_tools.sim",
       "symbol": "_grade_corners",
       "reason": "Issue #4043: verdict re-derivation must match `klt sim` grading by construction; make it public or move it to a shared module when sim is next split."
-    },
-    {
-      "consumer": "klayout_tools.evidence_record",
-      "exporter": "klayout_tools.env_provenance",
-      "symbol": "_assert_no_leaks",
-      "reason": "Issue #4044: the evidence-record wrapper leak scan must match the provenance scrub exactly rather than duplicating its absolute-path/secret scanner."
     },
     {
       "consumer": "klayout_tools.corner_matrix",
@@ -2335,24 +2311,6 @@
       "exporter": "klayout_tools.sim",
       "symbol": "_expand_corners",
       "reason": "Issue #4045: the checker's whole contract is that its grid ids match what `klt sim` expands; reusing the private expander guarantees that. Make it public or move it to a shared module when sim is next split."
-    },
-    {
-      "consumer": "klayout_tools.place_and_route_portable",
-      "exporter": "klayout_tools.env_provenance",
-      "symbol": "_absolute_paths_in",
-      "reason": "Issue #3820: portable_paths reuses env_provenance's absolute-path scanner so response rewriting matches the provenance scrub exactly rather than duplicating the regex."
-    },
-    {
-      "consumer": "klayout_tools.tap_distance",
-      "exporter": "klayout_tools.erc",
-      "symbol": "_match_net_clusters",
-      "reason": "Issue #3009: reuse ERC net-label matching for the tap net filter rather than duplicating it."
-    },
-    {
-      "consumer": "klayout_tools.tap_distance",
-      "exporter": "klayout_tools.erc",
-      "symbol": "_register_label_layer",
-      "reason": "Issue #3009: reuse ERC label-layer registration for the tap net filter rather than duplicating it."
     },
     {
       "consumer": "klayout_tools.env_provenance",
@@ -2509,12 +2467,6 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_reject_unknown_keys",
       "reason": "Issue #7721: the --from-def entry point rejects unknown request keys against the same allowed-key list as load_request; promote to a public name when _paths is next reworked."
-    },
-    {
-      "consumer": "klayout_tools.place_and_route_merge_only",
-      "exporter": "klayout_tools.pdk_cells",
-      "symbol": "_default_variant_shipping",
-      "reason": "Issue #7721: the --from-def entry point resolves its PDK install with the full flow's own issue-#4204 default-variant substitution (first installed variant shipping the cell library when no explicit variant was chosen), so both entry points always merge from the same install; promote to a public name when pdk_cells is next reworked."
     },
     {
       "consumer": "klayout_tools.synthesize",
@@ -2754,12 +2706,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.cli.yield_campaign_cmd",
-        "exporter": "klayout_tools.cli.yield_cmd",
-        "symbol": "_print_text",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.decks.history",
         "exporter": "klayout_tools",
         "symbol": "_build_info",
@@ -2943,12 +2889,6 @@
         "consumer": "klayout_tools.layout_plan_execute",
         "exporter": "klayout_tools.gen_compose",
         "symbol": "_translate_bbox",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.lef_abstract",
-        "exporter": "klayout_tools.socket_check",
-        "symbol": "_load_descriptor",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

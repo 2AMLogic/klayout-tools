@@ -654,9 +654,9 @@ def _lvs_reference_carries_supplies(
     the row's full joined string -- exact-string equality would reject
     exactly the shape `klt lvs` produces for a real supply grid (issue
     #2405). This mirrors the alias-membership interpretation
-    ``_match_net_clusters`` already applies on the erc side of item 11
+    ``match_net_clusters`` already applies on the erc side of item 11
     (``erc.py``), keeping the two halves' notion of "the declared name
-    matches this net" consistent -- ``_match_net_clusters`` splits
+    matches this net" consistent -- ``match_net_clusters`` splits
     ``expanded_name()`` on KLayout's own ``,`` separator (the raw,
     un-escaped spelling ERC reads directly from ``pya``), while this
     function splits on ``|`` (the ``spice_safe_net_name``-escaped spelling

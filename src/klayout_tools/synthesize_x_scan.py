@@ -8,9 +8,9 @@ syntax error from a later stage."""
 from __future__ import annotations
 
 from .netlist_construct_scan import (
-    _NETLIST_BEHAVIOURAL_LATCH_RE,
-    _NETLIST_X_CONSTANT_RE,
-    _blank_verilog_comments,
+    NETLIST_BEHAVIOURAL_LATCH_RE,
+    NETLIST_X_CONSTANT_RE,
+    blank_verilog_comments,
 )
 
 #: Bound on how many offending netlist line numbers
@@ -48,8 +48,8 @@ def netlist_x_constant_warning(
     """
     hits = [
         (lineno, line.strip())
-        for lineno, line in enumerate(_blank_verilog_comments(netlist_text), start=1)
-        if _NETLIST_X_CONSTANT_RE.search(line)
+        for lineno, line in enumerate(blank_verilog_comments(netlist_text), start=1)
+        if NETLIST_X_CONSTANT_RE.search(line)
     ]
     if not hits:
         return {}
@@ -97,8 +97,8 @@ def netlist_behavioural_latch_warning(netlist_text: str) -> dict[str, str]:
     """
     hits = [
         (lineno, line.strip())
-        for lineno, line in enumerate(_blank_verilog_comments(netlist_text), start=1)
-        if _NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
+        for lineno, line in enumerate(blank_verilog_comments(netlist_text), start=1)
+        if NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
     ]
     if not hits:
         return {}

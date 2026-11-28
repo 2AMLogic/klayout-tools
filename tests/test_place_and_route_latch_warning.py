@@ -299,7 +299,7 @@ def test_preflight_pattern_is_a_superset_of_the_synthesize_latch_pattern(line):
     pre-flight uses the wider one. The wider pattern must never miss a line
     the narrow one flags -- that would be a netlist synthesize warns about but
     P&R silently accepts."""
-    assert netlist_construct_scan._NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
+    assert netlist_construct_scan.NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
     assert netlist_construct_scan._NETLIST_BEHAVIOURAL_RE.search(line)
 
 
@@ -315,5 +315,5 @@ def test_preflight_pattern_is_a_superset_of_the_synthesize_latch_pattern(line):
 def test_synthesize_latch_pattern_stays_narrow(line):
     """The shared synthesize-time latch pattern is unchanged by #6274: the
     SystemVerilog forms are the pre-flight's own, wider net."""
-    assert not netlist_construct_scan._NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
+    assert not netlist_construct_scan.NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
     assert netlist_construct_scan._NETLIST_BEHAVIOURAL_RE.search(line)

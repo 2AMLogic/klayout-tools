@@ -119,11 +119,6 @@
       "complexity": 18
     },
     {
-      "file": "src/klayout_tools/cli/yield_cmd.py",
-      "function": "_print_text",
-      "complexity": 12
-    },
-    {
       "file": "src/klayout_tools/components.py",
       "function": "_components_for_cell",
       "complexity": 13

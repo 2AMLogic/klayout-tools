@@ -311,7 +311,7 @@ def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
         return ""
 
 
-def _default_variant_shipping(
+def default_variant_shipping(
     cell_library: str,
     info: dict[str, Any],
     variant: str | None,
@@ -380,7 +380,7 @@ def resolve_liberty_for_cell_library(
     except PdkNotFoundError as exc:
         raise error_cls(str(exc)) from exc
 
-    info = _default_variant_shipping(cell_library, info, variant, root)
+    info = default_variant_shipping(cell_library, info, variant, root)
 
     mapped = _descriptor_liberty(info, cell_library, requested_corner, error_cls)
     if mapped is not None:

@@ -6218,7 +6218,7 @@ one electrical net — every alias is joined with `|`, e.g.
 `|`-split alias set and considers a declared supply name proven when it
 equals *any one* alias, not only when it equals the row's entire joined
 spelling — mirroring how `klt erc`'s own supply matching treats a net's
-comma-split `expanded_name()` as a label set (`_match_net_clusters`). A
+comma-split `expanded_name()` as a label set (`match_net_clusters`). A
 supply that is genuinely never paired to the reference (no alias contains
 the declared name) still renders `lvs_supply_unproven`.
 

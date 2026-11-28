@@ -52,7 +52,7 @@ def run(args: argparse.Namespace) -> int:
     except YieldError as exc:
         return emit_error("yield", str(exc), args.format)
 
-    emit_success(report, args.format, _print_text)
+    emit_success(report, args.format, print_yield_report)
 
     if report["status"] == "fail":
         return EXIT_TARGET_MISSED
@@ -101,7 +101,9 @@ def _print_negative_control(nc: dict | None) -> None:
         )
 
 
-def _print_text(report: dict) -> None:
+def print_yield_report(report: dict) -> None:
+    """The text form of a yield report -- shared with ``klt yield-campaign``,
+    which prints its own ``campaign`` header and then delegates here."""
     print(f"samples: {report['samples']}")
     if report.get("limits"):
         print(f"limits: {report['limits']}")
@@ -114,110 +116,7 @@ def _print_text(report: dict) -> None:
     print(f"status: {report['status']}  measurements: {report['measurement_count']}")
 
     for m in report["measurements"]:
-        unit = f" [{m['unit']}]" if m.get("unit") else ""
-        print()
-        print(f"{m['name']}{unit}  status: {m['status']}  N: {m['n']}")
-        limits = m["limits"]
-        min_op = ">" if limits.get("exclusive_min") else ">="
-        max_op = "<" if limits.get("exclusive_max") else "<="
-        print(
-            f"  limits: min({min_op})={_fmt(limits.get('min'))} "
-            f"max({max_op})={_fmt(limits.get('max'))} "
-            f"target_yield={_fmt(limits.get('target_yield'))}"
-        )
-        dist = m["distribution"]
-        print(
-            f"  fit ({dist['model']}): mean={_fmt(dist['mean'])} "
-            f"stddev={_fmt(dist['stddev'])} "
-            f"normality={dist['normality']['verdict']}"
-        )
-        emp = m["yield"]["empirical"]
-        print(
-            f"  yield (empirical, {emp['method']}): {emp['estimate']:.6f} "
-            f"[{emp['confidence_interval']['low']:.6f}, "
-            f"{emp['confidence_interval']['high']:.6f}] "
-            f"at {emp['confidence']:.0%}, N={emp['n']}"
-        )
-        norm = m["yield"]["normal"]
-        if norm is None:
-            print("  yield (normal fit): - (degenerate fit)")
-        else:
-            print(
-                f"  yield (normal, {norm['method']}): {norm['estimate']:.6f} "
-                f"[{norm['confidence_interval']['low']:.6f}, "
-                f"{norm['confidence_interval']['high']:.6f}] "
-                f"at {norm['confidence']:.0%}, N={norm['n']}"
-            )
-        vr = m["yield"]["variance_reduced"]
-        if vr is not None:
-            sampling = m["sampling"]
-            extra = (
-                f" replicates={sampling['replicates']}"
-                if sampling.get("replicates") is not None
-                else (
-                    f" effective_n={sampling['effective_sample_size']:.1f}"
-                    if sampling.get("effective_sample_size") is not None
-                    else ""
-                )
-            )
-            print(
-                f"  yield ({sampling['strategy']}, {vr['method']}): "
-                f"{vr['estimate']:.6f} "
-                f"[{vr['confidence_interval']['low']:.6f}, "
-                f"{vr['confidence_interval']['high']:.6f}] "
-                f"at {vr['confidence']:.0%}, N={vr['n']}{extra}"
-            )
-        cap = m["capability"]
-        cpk_ci = cap["cpk_confidence_interval"]
-        ci_text = (
-            "" if cpk_ci is None else f" [{cpk_ci['low']:.4f}, {cpk_ci['high']:.4f}]"
-        )
-        print(
-            f"  capability: cp={_fmt(cap['cp'], '.4f')} "
-            f"cpk={_fmt(cap['cpk'], '.4f')}{ci_text} "
-            f"sigma_to_spec={_fmt(cap['sigma_to_spec'], '.4f')} "
-            f"limiting={cap['limiting_side'] or '-'}"
-        )
-        _print_qualification(m)
-        ss = m["sample_size"]
-        print(
-            f"  sample size: {ss['verdict']} (N={ss['n']}, "
-            f"required>={ss['required_n']}, "
-            f"observed +/-{ss['observed_ci_halfwidth']:.6f} vs target "
-            f"+/-{ss['target_ci_halfwidth']})"
-        )
-        if limits.get("target_yield") is not None:
-            needed = ss["required_n_for_target"]
-            print(
-                "    to claim target_yield="
-                f"{limits['target_yield']}: "
-                + (
-                    f"N>={needed}"
-                    if needed is not None
-                    else "unreachable at the observed pass rate"
-                )
-            )
-        vr_ss = ss.get("variance_reduced")
-        if vr_ss is not None:
-            print(
-                f"    variance-reduced ({m['sampling']['strategy']}): "
-                f"{vr_ss['verdict']} "
-                f"(observed +/-{vr_ss['observed_ci_halfwidth']:.6f} vs target "
-                f"+/-{vr_ss['target_ci_halfwidth']})"
-            )
-        _print_negative_control(m.get("negative_control"))
-        check = m.get("analytic_cross_check")
-        if check is not None:
-            print(
-                f"  analytic cross-check ({check['kind']}): {check['verdict']} -- "
-                f"analytic stddev={check['analytic_stddev']:.6g} "
-                f"empirical stddev={check['empirical_stddev']:.6g} "
-                f"[{check['empirical_stddev_confidence_interval']['low']:.6g}, "
-                f"{check['empirical_stddev_confidence_interval']['high']:.6g}] "
-                f"(delta {check['stddev_relative_delta']:+.2%})"
-            )
-        for warning in m["warnings"]:
-            print(f"  warning: {warning}")
+        _print_measurement(m)
 
     warnings = report.get("warnings") or []
     if warnings:
@@ -225,3 +124,108 @@ def _print_text(report: dict) -> None:
         print("warnings:")
         for warning in warnings:
             print(f"  {warning}")
+
+
+def _print_measurement(m: dict) -> None:
+    unit = f" [{m['unit']}]" if m.get("unit") else ""
+    print()
+    print(f"{m['name']}{unit}  status: {m['status']}  N: {m['n']}")
+    limits = m["limits"]
+    min_op = ">" if limits.get("exclusive_min") else ">="
+    max_op = "<" if limits.get("exclusive_max") else "<="
+    print(
+        f"  limits: min({min_op})={_fmt(limits.get('min'))} "
+        f"max({max_op})={_fmt(limits.get('max'))} "
+        f"target_yield={_fmt(limits.get('target_yield'))}"
+    )
+    dist = m["distribution"]
+    print(
+        f"  fit ({dist['model']}): mean={_fmt(dist['mean'])} "
+        f"stddev={_fmt(dist['stddev'])} "
+        f"normality={dist['normality']['verdict']}"
+    )
+    emp = m["yield"]["empirical"]
+    print(
+        f"  yield (empirical, {emp['method']}): {emp['estimate']:.6f} "
+        f"[{emp['confidence_interval']['low']:.6f}, "
+        f"{emp['confidence_interval']['high']:.6f}] "
+        f"at {emp['confidence']:.0%}, N={emp['n']}"
+    )
+    norm = m["yield"]["normal"]
+    if norm is None:
+        print("  yield (normal fit): - (degenerate fit)")
+    else:
+        print(
+            f"  yield (normal, {norm['method']}): {norm['estimate']:.6f} "
+            f"[{norm['confidence_interval']['low']:.6f}, "
+            f"{norm['confidence_interval']['high']:.6f}] "
+            f"at {norm['confidence']:.0%}, N={norm['n']}"
+        )
+    vr = m["yield"]["variance_reduced"]
+    if vr is not None:
+        sampling = m["sampling"]
+        extra = (
+            f" replicates={sampling['replicates']}"
+            if sampling.get("replicates") is not None
+            else (
+                f" effective_n={sampling['effective_sample_size']:.1f}"
+                if sampling.get("effective_sample_size") is not None
+                else ""
+            )
+        )
+        print(
+            f"  yield ({sampling['strategy']}, {vr['method']}): "
+            f"{vr['estimate']:.6f} "
+            f"[{vr['confidence_interval']['low']:.6f}, "
+            f"{vr['confidence_interval']['high']:.6f}] "
+            f"at {vr['confidence']:.0%}, N={vr['n']}{extra}"
+        )
+    cap = m["capability"]
+    cpk_ci = cap["cpk_confidence_interval"]
+    ci_text = "" if cpk_ci is None else f" [{cpk_ci['low']:.4f}, {cpk_ci['high']:.4f}]"
+    print(
+        f"  capability: cp={_fmt(cap['cp'], '.4f')} "
+        f"cpk={_fmt(cap['cpk'], '.4f')}{ci_text} "
+        f"sigma_to_spec={_fmt(cap['sigma_to_spec'], '.4f')} "
+        f"limiting={cap['limiting_side'] or '-'}"
+    )
+    _print_qualification(m)
+    ss = m["sample_size"]
+    print(
+        f"  sample size: {ss['verdict']} (N={ss['n']}, "
+        f"required>={ss['required_n']}, "
+        f"observed +/-{ss['observed_ci_halfwidth']:.6f} vs target "
+        f"+/-{ss['target_ci_halfwidth']})"
+    )
+    if limits.get("target_yield") is not None:
+        needed = ss["required_n_for_target"]
+        print(
+            "    to claim target_yield="
+            f"{limits['target_yield']}: "
+            + (
+                f"N>={needed}"
+                if needed is not None
+                else "unreachable at the observed pass rate"
+            )
+        )
+    vr_ss = ss.get("variance_reduced")
+    if vr_ss is not None:
+        print(
+            f"    variance-reduced ({m['sampling']['strategy']}): "
+            f"{vr_ss['verdict']} "
+            f"(observed +/-{vr_ss['observed_ci_halfwidth']:.6f} vs target "
+            f"+/-{vr_ss['target_ci_halfwidth']})"
+        )
+    _print_negative_control(m.get("negative_control"))
+    check = m.get("analytic_cross_check")
+    if check is not None:
+        print(
+            f"  analytic cross-check ({check['kind']}): {check['verdict']} -- "
+            f"analytic stddev={check['analytic_stddev']:.6g} "
+            f"empirical stddev={check['empirical_stddev']:.6g} "
+            f"[{check['empirical_stddev_confidence_interval']['low']:.6g}, "
+            f"{check['empirical_stddev_confidence_interval']['high']:.6g}] "
+            f"(delta {check['stddev_relative_delta']:+.2%})"
+        )
+    for warning in m["warnings"]:
+        print(f"  warning: {warning}")

@@ -1,0 +1,21 @@
+samples: /tmp/samples.json
+source: sample_set  samples_analyzed: 612
+confidence: 0.95  target_ci_halfwidth: 0.01
+status: fail  measurements: 4
+
+vref [V]  status: pass  N: 200
+  limits: min(>=)=-2 max(<=)=2 target_yield=0.99
+  fit (normal): mean=0.0012 stddev=0.5 normality=consistent
+  yield (empirical, clopper-pearson): 0.995000 [0.972100, 0.999900] at 95%, N=200
+  yield (normal, analytic): 0.999900 [0.999000, 1.000000] at 95%, N=200
+  yield (latin_hypercube, control_variates): 0.996000 [0.980000, 1.000000] at 95%, N=200 replicates=20
+  capability: cp=1.3300 cpk=1.3100 [1.1000, 1.5200] sigma_to_spec=3.9200 limiting=max
+  sigma target: k=3 sigma_to_spec=3.9200 lower_bound=3.4100 -> met (lower bound clears k)
+  converged N: 198 of 200 requested (min 190) -> met
+  sample size: met (N=200, required>=150, observed +/-0.004200 vs target +/-0.01)
+    to claim target_yield=0.99: N>=260
+    variance-reduced (latin_hypercube): met (observed +/-0.002100 vs target +/-0.01)
+  negative control (forced offset): detected -- yield 0.610000 [0.550000, 0.670000] vs nominal 0.995000, N=200
+  analytic cross-check (mismatch_offset): consistent -- analytic stddev=0.0501 empirical stddev=0.0498 [0.047, 0.053] (delta -0.60%)
+  warning: sigma_to_spec below 4
+  warning: normal fit flagged

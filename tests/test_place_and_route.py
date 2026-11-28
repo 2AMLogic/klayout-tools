@@ -6910,13 +6910,13 @@ def test_preflight_leaves_the_real_corpus_netlist_alone(tmp_path):
 
 
 def test_blank_verilog_comments_preserves_line_numbering(tmp_path):
-    """`_blank_verilog_comments` replaces comment characters with spaces
+    """`blank_verilog_comments` replaces comment characters with spaces
     rather than deleting them, so a multi-line `/* ... */` does not collapse
     the line structure the caller reports line numbers against (which is
     exactly why `_strip_verilog_comments` cannot be reused here)."""
     text = "wire a;\n/* two\n   lines */ wire b;\nwire c; // trailing\n"
 
-    lines = place_and_route._blank_verilog_comments(text)
+    lines = place_and_route.blank_verilog_comments(text)
 
     assert len(lines) == 4
     assert lines[0] == "wire a;"

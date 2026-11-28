@@ -219,7 +219,7 @@ def run_socket_check(
     Raises :class:`SocketCheckError` if the layout file is missing/
     unreadable, the descriptor file is missing/unreadable/not valid JSON,
     ``top`` names a cell absent from the layout, or the descriptor fails the
-    documented shape validation (see :func:`_load_descriptor`).
+    documented shape validation (see :func:`load_socket_descriptor`).
     """
     layout = load_layout(layout_path, SocketCheckError)
     top_cells = _select_top_cells(layout, top, SocketCheckError)
@@ -232,7 +232,7 @@ def run_socket_check(
             cell.cell_index() for cell in cells_in_hierarchy(layout, top_cells[0])
         }
 
-    descriptor = _load_descriptor(descriptor_path)
+    descriptor = load_socket_descriptor(descriptor_path)
     if edge_band_um is not None and (not is_number(edge_band_um) or edge_band_um < 0):
         raise SocketCheckError("edge_band_um must be a non-negative number")
 
@@ -278,7 +278,7 @@ def _is_layer_pair(value: Any) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _load_descriptor(path: str) -> dict[str, Any]:
+def load_socket_descriptor(path: str) -> dict[str, Any]:
     """Read, parse, and validate a socket descriptor file.
 
     Validates against the shape documented in

@@ -186,12 +186,12 @@ def _tie_findings(
     # `load_layout`'s docstring) -- needed here for `kdb.Region(polygon)`.
     import klayout.db as kdb
 
-    from .erc import _bbox_dict, _finding, _match_net_clusters
+    from .erc import _bbox_dict, _finding, match_net_clusters
 
     findings: list[dict[str, Any]] = []
     for tie in tie_layers:
         tied_taps = kdb.Region()
-        for net in _match_net_clusters(circuit, tie["net"]):
+        for net in match_net_clusters(circuit, tie["net"]):
             tied_taps += l2n.polygons_of_net(net, tie["tap_index"])
         tied_taps = tied_taps.merged()
 

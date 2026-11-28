@@ -1,0 +1,135 @@
+{
+  "samples": "/tmp/samples.json",
+  "source": {
+    "kind": "sample_set",
+    "sample_count": 612
+  },
+  "confidence": 0.95,
+  "target_ci_halfwidth": 0.01,
+  "status": "fail",
+  "measurement_count": 4,
+  "measurements": [
+    {
+      "name": "vref",
+      "unit": "V",
+      "status": "pass",
+      "n": 200,
+      "limits": {
+        "min": -2.0,
+        "max": 2.0,
+        "target_yield": 0.99
+      },
+      "distribution": {
+        "model": "normal",
+        "mean": 0.0012,
+        "stddev": 0.5,
+        "normality": {
+          "verdict": "consistent"
+        }
+      },
+      "yield": {
+        "empirical": {
+          "method": "clopper-pearson",
+          "estimate": 0.995,
+          "confidence_interval": {
+            "low": 0.9721,
+            "high": 0.9999
+          },
+          "confidence": 0.95,
+          "n": 200
+        },
+        "normal": {
+          "method": "analytic",
+          "estimate": 0.9999,
+          "confidence_interval": {
+            "low": 0.999,
+            "high": 1.0
+          },
+          "confidence": 0.95,
+          "n": 200
+        },
+        "variance_reduced": {
+          "method": "control_variates",
+          "estimate": 0.996,
+          "confidence_interval": {
+            "low": 0.98,
+            "high": 1.0
+          },
+          "confidence": 0.95,
+          "n": 200
+        }
+      },
+      "sampling": {
+        "strategy": "latin_hypercube",
+        "replicates": 20
+      },
+      "capability": {
+        "cp": 1.33,
+        "cpk": 1.31,
+        "cpk_confidence_interval": {
+          "low": 1.1,
+          "high": 1.52
+        },
+        "sigma_to_spec": 3.92,
+        "limiting_side": "max"
+      },
+      "sigma_target": {
+        "met": true,
+        "k": 3.0,
+        "sigma_to_spec": 3.92,
+        "lower_bound": 3.41,
+        "reason": "lower bound clears k"
+      },
+      "converged_n": {
+        "n_converged": 198,
+        "n_requested": 200,
+        "min_converged_samples": 190,
+        "verdict": "met"
+      },
+      "sample_size": {
+        "verdict": "met",
+        "n": 200,
+        "required_n": 150,
+        "observed_ci_halfwidth": 0.0042,
+        "target_ci_halfwidth": 0.01,
+        "required_n_for_target": 260,
+        "variance_reduced": {
+          "verdict": "met",
+          "observed_ci_halfwidth": 0.0021,
+          "target_ci_halfwidth": 0.01
+        }
+      },
+      "negative_control": {
+        "verdict": "detected",
+        "description": "forced offset",
+        "yield": {
+          "empirical": {
+            "estimate": 0.61,
+            "confidence_interval": {
+              "low": 0.55,
+              "high": 0.67
+            }
+          }
+        },
+        "nominal_empirical_estimate": 0.995,
+        "n": 200
+      },
+      "analytic_cross_check": {
+        "kind": "mismatch_offset",
+        "verdict": "consistent",
+        "analytic_stddev": 0.0501,
+        "empirical_stddev": 0.0498,
+        "empirical_stddev_confidence_interval": {
+          "low": 0.047,
+          "high": 0.053
+        },
+        "stddev_relative_delta": -0.006
+      },
+      "warnings": [
+        "sigma_to_spec below 4",
+        "normal fit flagged"
+      ]
+    }
+  ],
+  "warnings": []
+}

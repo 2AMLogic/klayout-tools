@@ -44,7 +44,7 @@ from . import output_lock
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import content_hash
 from .pdk import PdkNotFoundError, find_pdk
-from .pdk_cells import _default_variant_shipping
+from .pdk_cells import default_variant_shipping
 from .place_and_route import (
     _ALLOWED_REQUEST_KEYS,
     _TECH_LEF_CORNERS,
@@ -208,7 +208,7 @@ def run_merge_from_def(
     # instead -- the same substitution `resolve_liberty_for_cell_library`
     # applies before the flow's LEF/GDS resolution below, so both entry
     # points always merge from the same install.
-    pdk_info = _default_variant_shipping(cell_library, pdk_info, pdk_variant, pdk_root)
+    pdk_info = default_variant_shipping(cell_library, pdk_info, pdk_variant, pdk_root)
 
     # Same view resolution the full flow performs after `_resolve_liberty`:
     # the LEF pair pinned to the resolved install (interconnect corner

@@ -435,7 +435,7 @@ def _is_allowed_prefix(match: str, allow_prefixes: tuple[str, ...]) -> bool:
     return False
 
 
-def _absolute_paths_in(text: str, allow_prefixes: tuple[str, ...]) -> list[str]:
+def absolute_paths_in(text: str, allow_prefixes: tuple[str, ...]) -> list[str]:
     """Every absolute host path in ``text`` not covered by ``allow_prefixes``,
     in order of appearance (empty list when clean).
 
@@ -487,7 +487,7 @@ def find_absolute_path_fields(
     prefixes = tuple(allow_prefixes)
     findings: list[dict[str, Any]] = []
     for field, text in walk_lintable_string_fields(payload):
-        for match in _absolute_paths_in(text, prefixes):
+        for match in absolute_paths_in(text, prefixes):
             findings.append({"field": field, "match": match})
     return findings
 
@@ -624,7 +624,7 @@ def environment_provenance(
         "paths": normalised_paths,
     }
 
-    _assert_no_leaks(report)
+    assert_no_leaks(report)
     return report
 
 
@@ -640,7 +640,7 @@ def _klayout_version() -> str | None:
     return resolve()
 
 
-def _assert_no_leaks(report: Mapping[str, Any]) -> None:
+def assert_no_leaks(report: Mapping[str, Any]) -> None:
     identifiers = _local_identifiers()
     # Unlike the old ``_string_values`` walk, ``walk_string_fields`` skips
     # non-``str`` keys; safe here (JSON keys are strings, docs/json-contract.md).

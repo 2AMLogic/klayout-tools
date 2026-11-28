@@ -435,6 +435,27 @@ def test_real_policy_covers_known_seeds():
     assert pol.kinds[g[k + "pdk_families"]] == "shared"
 
 
+def test_real_policy_grants_no_private_import_from_promoted_shared_helpers():
+    """Issue #8110 promoted the ten cross-group helpers these six modules
+    export to public names and deleted their grants; a grant re-adding a
+    private import from any of them would be stale the moment it landed."""
+    pol = cib.load_policy(REPO_ROOT / "import-boundaries.json")
+    k = "klayout_tools."
+    exporters = {
+        k + m
+        for m in (
+            "cli.yield_cmd",
+            "env_provenance",
+            "erc",
+            "netlist_construct_scan",
+            "pdk_cells",
+            "socket_check",
+        )
+    }
+    grants = pol.permissions | pol.private_exceptions
+    assert not sorted(t for t in grants if t[1] in exporters)
+
+
 def test_ci_runs_gate_without_continue_on_error():
     text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
     i = text.index("Verb-module import boundaries")

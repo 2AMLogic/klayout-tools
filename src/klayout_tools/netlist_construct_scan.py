@@ -10,10 +10,10 @@ warnings and the P&R rejection cannot drift apart. The one deliberate
 asymmetry (issue #6274): the pre-flight refuses a wider set of behavioural
 statements (:data:`_NETLIST_BEHAVIOURAL_RE`, a safety net for netlists that
 did not come from ``klt synthesize``) than ``klt synthesize``'s latch warning
-scans for (:data:`_NETLIST_BEHAVIOURAL_LATCH_RE`) -- always as a *superset*,
+scans for (:data:`NETLIST_BEHAVIOURAL_LATCH_RE`) -- always as a *superset*,
 never the reverse. The module lives in the place_and_route group, next to the
-only code that rejects on these constructs; ``synthesize_x_scan`` imports it
-across groups under exact ``shared_private_permissions`` grants
+only code that rejects on these constructs; ``synthesize_x_scan`` imports the
+public names it shares across groups under the ``allowed_group_edges`` policy
 (import-boundaries.json).
 """
 
@@ -29,7 +29,7 @@ def _strip_verilog_comments(text: str) -> str:
     return _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
 
 
-def _blank_verilog_comments(text: str) -> list[str]:
+def blank_verilog_comments(text: str) -> list[str]:
     """``text``'s lines with every comment blanked out but **line numbering
     preserved** -- one output entry per input line, comment characters
     replaced by spaces rather than deleted.
@@ -89,7 +89,7 @@ _NETLIST_SIGNED_DECL_RE = re.compile(
 #: digit, so an ordinary resolved constant (``1'b0``, ``16'd100``,
 #: ``8'hbe``) never matches -- only the unresolved bits OpenSTA turns into
 #: an unroutable ``GROUND``-typed net.
-_NETLIST_X_CONSTANT_RE = re.compile(
+NETLIST_X_CONSTANT_RE = re.compile(
     r"\d+'[sS]?[bBoOdDhH][0-9a-fA-F_]*[xX][0-9a-fA-FxX_]*"
 )
 
@@ -108,10 +108,10 @@ _NETLIST_X_CONSTANT_RE = re.compile(
 #: true for what ``write_verilog -noattr`` emits), so it is deliberately left
 #: narrow; the P&R pre-flight's own, wider net is
 #: :data:`_NETLIST_BEHAVIOURAL_RE`, which must stay a superset of this one.
-_NETLIST_BEHAVIOURAL_LATCH_RE = re.compile(r"^\s*(reg|always)\b")
+NETLIST_BEHAVIOURAL_LATCH_RE = re.compile(r"^\s*(reg|always)\b")
 
 #: Every behavioural statement the P&R pre-flight refuses (issues #5792,
-#: #6274): :data:`_NETLIST_BEHAVIOURAL_LATCH_RE`'s ``reg``/``always`` plus the
+#: #6274): :data:`NETLIST_BEHAVIOURAL_LATCH_RE`'s ``reg``/``always`` plus the
 #: SystemVerilog ``always_ff``/``always_comb``/``always_latch`` and ``initial``
 #: forms, which OpenSTA's structural reader rejects with the same bare
 #: ``[ERROR STA-0171] ... syntax error`` and which a netlist that did not come
@@ -135,7 +135,7 @@ _NETLIST_IF_BODY_RE = re.compile(r"^\s*if\s*\(")
 
 def _unmapped_latch_rendering_line(lines: list[str]) -> int | None:
     """The 1-based line of the first ``always @*`` block in ``lines``
-    (comment-blanked, as :func:`_blank_verilog_comments` returns them) that is
+    (comment-blanked, as :func:`blank_verilog_comments` returns them) that is
     Yosys's rendering of a gate-level latch that survived synthesis unmapped,
     else ``None`` (issue #6274).
 
