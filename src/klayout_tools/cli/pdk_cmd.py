@@ -34,12 +34,12 @@ Eleven subcommands, all emitting through the shared envelope helpers in
   table (:mod:`klayout_tools.pdk_stackup`) and the rest is derived live.
 
 The discovery logic itself lives in :mod:`klayout_tools.pdk`; these handlers
-only translate flags into library calls and render the result. ``pcell-check``
-and ``stackup`` are the exceptions: they defer to
-:func:`klayout_tools.pdk_pcell.list_pdk_pcells` and
-:func:`klayout_tools.pdk_stackup.stackup` respectively, since the PyCell-import
-probe and the curated stackup table each live alongside their own module's
-machinery, not in :mod:`klayout_tools.pdk`.
+only translate flags into library calls and render the result. ``pcell-check``,
+``stackup`` and ``em-limits`` are the exceptions: they defer to
+:func:`klayout_tools.pdk_pcell.list_pdk_pcells`,
+:func:`klayout_tools.pdk_stackup.stackup` and :func:`klayout_tools.pdk_em.em_limits`
+respectively, since the PyCell-import probe, the curated stackup table and the tech-LEF
+EM parser each live alongside their module's machinery, not in :mod:`klayout_tools.pdk`.
 """
 
 import argparse
@@ -51,7 +51,6 @@ from ..pdk import (
     PdkNotFoundError,
     alternative_variants_warning,
     drc_decks,
-    em_limits,
     find_pdk,
     list_corners,
     list_hard_macro_libraries,
@@ -60,6 +59,7 @@ from ..pdk import (
 from ..pdk_cells import list_cell_libraries
 from ..pdk_compat import compatibility_warning
 from ..pdk_descriptor import ASSET_KEYS
+from ..pdk_em import em_limits
 from ..pdk_pcell import PdkPCellError, list_pdk_pcells
 from ..pdk_stackup import PdkStackupError, stackup
 from ..pdk_store import store_evidence_lines
@@ -417,7 +417,7 @@ def _print_decks_text(report: dict) -> None:
 
 def _format_em_field(field: dict) -> str:
     """Render one ``dc_current_density``/``ac_current_density`` summary
-    (see :func:`klayout_tools.pdk.em_limits`) as a single text-table cell:
+    (see :func:`klayout_tools.pdk_em.em_limits`) as a single text-table cell:
     ``"not shipped"``, the agreed value, or the conservative pick flagged
     with every distinct value sources disagreed on."""
     if not field["shipped"]:

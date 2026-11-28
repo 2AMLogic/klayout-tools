@@ -13,7 +13,7 @@ stackup`` subcommand") asked for.
 Curated vs. derived: why this is not a pure live parse
 ------------------------------------------------------
 
-``klt pdk em-limits`` (:func:`klayout_tools.pdk.em_limits`) is a pure live
+``klt pdk em-limits`` (:func:`klayout_tools.pdk_em.em_limits`) is a pure live
 parse of the install's tech LEFs, and deliberately owns no table — the
 install's own files are the only place its data is stated. That is **not**
 true here. Verified against a real ``volare``-fetched ``sky130A``
@@ -30,11 +30,10 @@ So this module layers two sources, and says per field which is which:
 - **Derived, live, per run** — ``thickness_um``, ``sheet_resistance_ohm_per_sq``
   (routing layers), ``via_resistance_ohm`` (cut layers), read out of the
   resolved install's own tech LEFs via
-  :func:`klayout_tools.lef_header.parse_lef_header`, using the same
-  family-wide tech-LEF enumeration (:func:`klayout_tools.pdk._discover_tech_lefs`)
-  ``em_limits`` uses. These are **corner-dependent** in real installs (sky130's
-  ``met1`` sheet resistance is 0.105/0.125/0.145 Ω/□ at min/nom/max), hence
-  the ``corner`` argument.
+  :func:`klayout_tools.lef_header.parse_lef_header`, using the same family-wide tech-LEF
+  enumeration (:func:`klayout_tools.pdk_em.discover_tech_lefs`) ``em_limits`` uses.
+  These are **corner-dependent** in real installs (sky130's ``met1`` sheet resistance is
+  0.105/0.125/0.145 Ω/□ at min/nom/max), hence the ``corner`` argument.
 - **Curated, checked in here** — ``z0_um``/``z1_um`` elevation and dielectric
   ``permittivity``, which no tech LEF states. Each curated entry cites the
   published, open, non-NDA'd source it was transcribed from (see
@@ -52,7 +51,8 @@ from typing import Any
 
 from ._text import read_text as _read_text
 from .lef_header import parse_lef_header
-from .pdk import PdkNotFoundError, _discover_tech_lefs, find_pdk
+from .pdk import PdkNotFoundError, find_pdk
+from .pdk_em import discover_tech_lefs
 
 __all__ = [
     "PdkStackupError",
@@ -95,7 +95,7 @@ DEFAULT_THICKNESS_SOURCE = "curated"
 VACUUM_PERMITTIVITY_AF_PER_UM = 8.8541878128
 
 #: Tolerance for calling two tech LEFs' values for the same field "equal".
-#: Same rationale as :data:`klayout_tools.pdk._EM_VALUE_ABS_TOL`.
+#: Same rationale as :data:`klayout_tools.pdk_em._EM_VALUE_ABS_TOL`.
 _VALUE_ABS_TOL = 1e-9
 
 #: Tolerance for "the curated stack thickness and the tech LEF's declared
@@ -591,7 +591,7 @@ def _reduce(
     resistive** (pessimistic) reading, so a disagreement never silently
     flatters the resulting electrical model: ``"min"`` for a thickness (a
     thinner film is more resistive), ``"max"`` for a resistance. This mirrors
-    :func:`klayout_tools.pdk._summarize_em_field`'s ``conservative`` pick,
+    :func:`klayout_tools.pdk_em._summarize_em_field`'s ``conservative`` pick,
     which likewise resolves cross-library disagreement in the safe direction
     rather than by file ordering. The disagreement itself is always reported
     (``agrees``, plus a top-level warning), never only papered over.
@@ -701,7 +701,7 @@ def stackup(
     table = _resolve_family(info["variant"])
 
     libs_ref = info["assets"]["libs_ref"]
-    all_sources = _discover_tech_lefs(libs_ref) if libs_ref is not None else []
+    all_sources = discover_tech_lefs(libs_ref) if libs_ref is not None else []
     available_corners = sorted({source["corner"] for source in all_sources})
     sources = [source for source in all_sources if source["corner"] == corner]
 
