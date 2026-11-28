@@ -64,6 +64,7 @@ def test_invalid_limit_stops_before_transport(
     with pytest.raises(sim.SimError) as exc:
         sim.run_sim(path)
     assert exc.value.code == "batch_launch_attempts_invalid"
+    capsys.readouterr()
     assert main(["sim", path, "--dry-run", "--format", "json"]) == 1
     assert json.loads(capsys.readouterr().err)["error"]["code"] == exc.value.code
 
