@@ -43,6 +43,7 @@ from .post_route_sta_errors import PostRouteStaError as PostRouteStaError
 from .post_route_sta_path_groups import (
     _empty_path_record,
     _worst_path_record,
+    parse_path_fields,
 )
 
 #: Issue #5754: brackets the per-instance worst-path records
@@ -188,27 +189,12 @@ def _apply_instance_path_record(
     failure reason when the record is bad, else ``None``."""
     if parts[0] == "ERROR":
         return "engine path introspection failed: " + "\t".join(parts[2:]).strip()
-    if (
-        len(parts) != 8
-        or parts[2] not in instance_rows
-        or parts[3] not in ("max", "min")
-        or not all(parts[4:])
-    ):
+    if len(parts) < 3 or parts[2] not in instance_rows:
         return f"malformed instance path record: {line!r}"
-    try:
-        slack_s = float(parts[5])
-    except ValueError:
-        return f"malformed instance path slack: {line!r}"
-    if slack_s != slack_s or abs(slack_s) == float("inf"):
-        return f"non-finite instance path slack: {line!r}"
-    instance_rows[parts[2]][parts[3]].append(
-        {
-            "engine_check_role": parts[4],
-            "slack_ns": slack_s * 1e9,
-            "startpoint": parts[6],
-            "endpoint": parts[7],
-        }
-    )
+    side, row, reason = parse_path_fields(parts[3:], line, label="instance path")
+    if side is None or row is None:
+        return reason
+    instance_rows[parts[2]][side].append(row)
     return None
 
 
