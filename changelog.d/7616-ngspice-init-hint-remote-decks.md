@@ -1,1 +1,0 @@
-- **Remote corner reports and failed raw-deck units suggest checking ngspice init settings after a model-selection abort** (#7616, 2026-11-23). The conditional warning accompanies the original failure when the request has no declared init lines.

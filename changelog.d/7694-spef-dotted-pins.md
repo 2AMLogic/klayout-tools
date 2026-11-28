@@ -1,1 +1,0 @@
-- **FinFET SPEF extraction preserves dotted DEF net names** and their instance connections, including port nets whose design pin has a different name (#7694, 2026-11-24).

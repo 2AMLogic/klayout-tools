@@ -1197,7 +1197,7 @@ def _not_found_message(
     version: str | None = None,
 ) -> str:
     entries = _load_history()["entries"]
-    tags = sorted({str(e.get("git_tag")) for e in entries})
+    tags = list(dict.fromkeys(str(e.get("git_tag")) for e in entries))
     known_range = f"{tags[0]}..{tags[-1]}" if tags else "<empty>"
 
     if content_hash is not None:

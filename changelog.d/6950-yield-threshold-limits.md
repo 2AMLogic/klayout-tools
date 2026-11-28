@@ -1,1 +1,0 @@
-- **`klt yield-threshold` grades fitted sigma and measured separation margins** against the upper profile-likelihood bound at the requested confidence (#6950, 2026-11-21).

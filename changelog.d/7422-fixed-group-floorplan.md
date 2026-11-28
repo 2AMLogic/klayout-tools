@@ -1,1 +1,0 @@
-- `klt place-and-route` rejects a floorplan-only request that specifies a fixed instance-group origin. Select `place`, `cts`, or `route` to apply the placement (#7422).

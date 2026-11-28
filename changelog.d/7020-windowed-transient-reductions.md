@@ -1,1 +1,0 @@
-- `klt sim` accepts `measurements[].windowed` for minimum, maximum, mean, RMS and peak-to-peak reductions of an ngspice transient expression between two times (#7020).

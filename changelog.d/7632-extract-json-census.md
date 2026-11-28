@@ -1,1 +1,0 @@
-- **The JSON contract guide documents the curated FinFET and runset hierarchy counts** (#7632, 2026-11-23).

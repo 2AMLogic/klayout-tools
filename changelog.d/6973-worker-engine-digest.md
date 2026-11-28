@@ -1,1 +1,0 @@
-- `klt sim --backend batch` reports the captured worker ngspice executable SHA-256 when all shards agree. The sim guide documents numeric reproducibility across hosts and builds (#6973).

@@ -1,1 +1,0 @@
-- **STA reports clock uncertainty as unapplied when every supplied side is null** (#7124, 2026-11-21). The JSON report now agrees with the generated Tcl in single- and multi-corner runs. A numeric zero still applies a 0 ns constraint.

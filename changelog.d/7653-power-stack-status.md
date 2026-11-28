@@ -1,1 +1,0 @@
-- **Place-and-route reports `power_stack_repair.status: "violations"` when targets remain after repair** (#7653, 2026-11-23).

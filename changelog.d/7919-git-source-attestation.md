@@ -1,1 +1,0 @@
-- **Item 1 design-source attestations can bind a file in a separate Git repository by full commit ID, path and raw SHA-256.** Minting and grading read the pinned blob from a local checkout or bare repository (#7919).

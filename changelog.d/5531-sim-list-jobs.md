@@ -1,1 +1,0 @@
-- **`klt sim --list-jobs` shows pending and running fleet instances grouped by job, along with available instance and vCPU capacity** (#5531, 2026-11-24).

@@ -1,1 +1,0 @@
-- **File-size ledger mismatch messages identify the candidate file, its ledger entry, and the comparison revision** in local runs and CI (#6518, #6683, 2026-11-23).

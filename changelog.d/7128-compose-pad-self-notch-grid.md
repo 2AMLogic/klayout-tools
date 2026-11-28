@@ -1,1 +1,0 @@
-- **Gen-compose checks via landings on the written layout grid** (#7128, 2026-11-21). The own-block notch check now catches a 299 nm metal-3 gap on SKY130 while permitting the 300 nm boundary.

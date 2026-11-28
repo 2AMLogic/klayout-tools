@@ -1,1 +1,0 @@
-- **Signoff item 7 can require a manifest-declared PEX corner box** (#7649, 2026-11-23). Cited reports can jointly cover the required measurements. The report lists missing corners and preserves limit failures.

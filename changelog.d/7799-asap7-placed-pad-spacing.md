@@ -1,1 +1,0 @@
-- Repair two additional ASAP7 M1 spacing cases during the post-route merge. A placed V1 landing can grow opposite a long wire with another via outside the facing span, and a routed edge can grow opposite a partially exposed landing on the same conductor. (#7799)

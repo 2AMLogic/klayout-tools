@@ -1,1 +1,0 @@
-- **`klt signoff --attest` docs add the exec-wrapper `python3` PATH recipe for importing venv modules, and why a symlinked `python3` fails** (#6653, 2026-11-18).

@@ -1,1 +1,0 @@
-- **`klt signoff` grades configuration coverage for spec rows with a declared sweep extent** (#7006, 2026-11-21). Items 5 and 6 list missing slices and keep a partial campaign below T1.

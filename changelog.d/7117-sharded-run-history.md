@@ -1,1 +1,0 @@
-- **Sharded batch simulations report completion and observed launches across resume rounds** (#7117, 2026-11-23).

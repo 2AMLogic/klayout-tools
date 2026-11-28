@@ -1,1 +1,0 @@
-- Share the attestation error class across signoff checks and preserve its public import path (#7834).

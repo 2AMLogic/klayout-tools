@@ -1,1 +1,0 @@
-- **`klt synthesize` rejects a request-supplied ABC driving cell that matches a resolved `dont_use` pattern before running Yosys** (#6716, 2026-11-18).

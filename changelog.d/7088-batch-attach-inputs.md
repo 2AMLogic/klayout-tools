@@ -1,1 +1,0 @@
-- **Unsharded corner jobs submitted with a capacity override can be collected using the original request.** New batch receipts also verify the top-level netlist bytes before collection (#7088, 2026-11-21).

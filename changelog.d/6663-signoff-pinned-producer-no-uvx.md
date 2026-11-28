@@ -1,1 +1,0 @@
-- **The signoff guide shows how to re-attest evidence with CI’s pinned Git commit when `uvx` hangs** (#6663, 2026-11-18).

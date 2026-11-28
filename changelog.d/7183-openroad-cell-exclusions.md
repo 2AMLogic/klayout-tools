@@ -1,1 +1,0 @@
-- `klt place-and-route` accepts `library.dont_use` cell patterns, applies them in each post-floorplan OpenROAD stage, and reports the effective exclusions (#7183).

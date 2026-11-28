@@ -1,1 +1,0 @@
-- **`klt sim --require-pdk-match` grades each batch job against the expected worker PDK revision stamp** (#3462).

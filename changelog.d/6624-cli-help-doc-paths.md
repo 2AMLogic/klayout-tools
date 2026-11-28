@@ -1,1 +1,0 @@
-- **`klt --help` and subcommand help point to the installed CLI reference pages in wheel installations** (#6624, 2026-11-18).

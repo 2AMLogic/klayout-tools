@@ -1,1 +1,0 @@
-- Gate-level Verilog LVS reports saved with `portable_paths` can now replay PDK and repository pin-order inputs on the verifying host (#7589).

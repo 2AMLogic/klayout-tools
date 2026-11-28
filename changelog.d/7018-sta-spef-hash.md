@@ -1,1 +1,0 @@
-- **STA reports identify the input SPEF by its SHA-256 digest** (#7018, 2026-11-21). A shared SPEF has one top-level digest. Timing sweeps over an interconnect map record the selected file's digest on each corner.

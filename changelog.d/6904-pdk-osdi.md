@@ -1,1 +1,0 @@
-- **`klt pdk osdi` verifies a resolved installation's declared ngspice OSDI models** with portable file digests, optional exact pins and an isolated device-registration probe (#6904, 2026-11-21).

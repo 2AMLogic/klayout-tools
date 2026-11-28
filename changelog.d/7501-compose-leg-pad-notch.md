@@ -1,1 +1,0 @@
-- **Fixed** (#7501, 2026-11-23). `klt gen-compose` now rejects a route whose backbone forms a sub-minimum notch with its own landing pad. The rejection reports the measured gap and the deck spacing rule.

@@ -1,1 +1,0 @@
-- Synthesis preserves trailing comments when computing the banner-normalized netlist digest (#7355, 2026-11-22).
