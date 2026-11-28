@@ -6,7 +6,7 @@ ratchet. Holds the sampling half of #344's Monte Carlo decomposition (phase
 1, #348): the ``request.monte_carlo`` schema constants, validation of its
 sampling fields (``n``/``seed``/``vary``/``seed_scope``/``seed_mode``) and
 statistics fields (``quantiles``/``k_sigma``), the SHA-256 seed derivation
-(:func:`_derive_mc_seed`), and :func:`_expand_monte_carlo` -- N
+(:func:`derive_mc_seed`), and :func:`_expand_monte_carlo` -- N
 reproducibly-seeded :class:`~.sim_corner_point.CornerPoint` samples per
 corner point. The statistics half that reduces those samples to a verdict
 (phase 2, #349) is ``sim_monte_carlo_rollup``.
@@ -217,7 +217,7 @@ def _validate_mc_statistics_spec(
 _MC_SEED_MODULUS = 2_147_483_647
 
 
-def _derive_mc_seed(base_seed: int, *parts: object) -> int:
+def derive_mc_seed(base_seed: int, *parts: object) -> int:
     """Deterministically derive a reproducible integer seed from
     ``base_seed`` and ``parts``.
 
@@ -249,17 +249,17 @@ def _mc_sample_seed(
     :func:`_expand_monte_carlo`'s seed contract)."""
     seed, seed_scope, seed_mode = seeding
     vary_process, vary_mismatch = varies
-    process_seed = _derive_mc_seed(
+    process_seed = derive_mc_seed(
         seed, "process", scope_key, sample_index if vary_process else "fixed"
     )
-    mismatch_seed = _derive_mc_seed(
+    mismatch_seed = derive_mc_seed(
         seed, "mismatch", scope_key, sample_index if vary_mismatch else "fixed"
     )
     if seed_mode == "sequential":
         # Issue #4173: the caller pins the integer ngspice receives.
         rndseed = seed + sample_index
     else:
-        rndseed = _derive_mc_seed(seed, "rndseed", process_seed, mismatch_seed)
+        rndseed = derive_mc_seed(seed, "rndseed", process_seed, mismatch_seed)
     mc_seed: dict[str, Any] = {
         "process_seed": process_seed,
         "mismatch_seed": mismatch_seed,
@@ -295,7 +295,7 @@ def _expand_monte_carlo(
     :func:`_expand_corners` already guarantees for the PVT axes.
 
     **Seed contract.** Each sample derives two independent seed components
-    from ``mc_spec["seed"]`` via :func:`_derive_mc_seed` -- ``process_seed``
+    from ``mc_spec["seed"]`` via :func:`derive_mc_seed` -- ``process_seed``
     and ``mismatch_seed`` -- and a combined ``rndseed`` fed to ngspice (see
     ``_write_corner_deck``'s ``.options seed=`` card). A component only
     varies across ``sample_index`` when ``mc_spec["vary"]`` actually asks
@@ -315,7 +315,7 @@ def _expand_monte_carlo(
 
     Requesting the *same* ``mc_spec["seed"]`` again (same process, different
     process, doesn't matter) reproduces the exact same sequence of derived
-    seeds -- see :func:`_derive_mc_seed`.
+    seeds -- see :func:`derive_mc_seed`.
 
     ``injected`` (issue #2911) is ``(resolved, scale)`` from
     :func:`_resolve_injected`: each sample then also records its design-owned
