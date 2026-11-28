@@ -27,7 +27,7 @@ from test_pex import (
     _write_schematic_dut,
     _write_testbench,
 )
-from test_pex_dry_run import _REPORT_KEYS
+from test_pex_dry_run import _REPORT_KEYS, _tree
 from test_pex_multi_top import (
     _make_two_top_resistor_layout,
     _two_top_request,
@@ -383,30 +383,80 @@ def test_cli_pex_multi_top_refusal_is_a_clean_error_envelope(
 
 
 # --------------------------------------------------------------------------- #
-# `--dry-run` (issue #5464) is refused with two or more tops
+# `--dry-run` (issue #5511) validates a multi-top request without running it
 # --------------------------------------------------------------------------- #
 
 
-def test_dry_run_refuses_two_or_more_tops(bench):
-    """`klt pex --top` became repeatable in issue #5494, so this entry point
-    now receives a list. A dry run is **refused** with two or more tops
-    rather than silently validating only one of them: its report is singular
-    (`top`, one resolved cell name) and `_extraction_preflight` resolves one
-    top cell, so describing a multi-top request properly is a second additive
-    change to this command's own contract, tracked in #5511."""
-    with pytest.raises(PexError) as excinfo:
-        run_pex_dry_run(
-            bench["layout"],
-            [bench["request"]],
-            "sky130",
-            top=["RESA", "RESB"],
-        )
-    message = str(excinfo.value)
-    assert "--dry-run" in message
-    assert "RESA, RESB" in message
-    # It says what to do instead.
-    assert "dry-run each top on its own" in message
-    assert excinfo.value.code == MULTI_TOP_UNSUPPORTED_CODE
+def test_dry_run_multi_top_validates_and_preserves_order(
+    tmp_path, two_top_layout, monkeypatch
+):
+    import klayout_tools.pex_dry_run as dry_module
+    import klayout_tools.pex_runset as runset_module
+
+    monkeypatch.setattr(
+        runset_module, "run_extract", lambda *_a, **_k: pytest.fail("extracted")
+    )
+    real_sim, sim_kwargs = dry_module.run_sim, []
+    monkeypatch.setattr(
+        dry_module,
+        "run_sim",
+        lambda req, **kw: (sim_kwargs.append(kw), real_sim(req, **kw))[1],
+    )
+    req, before = str(_two_top_request(tmp_path)), _tree(tmp_path)
+    report = run_pex_dry_run(str(two_top_layout), [req], "sky130", top=["RESA", "RESB"])
+    assert set(report) == _REPORT_KEYS and report["status"] == "valid"
+    assert (report["top"], report["tops"]) == (
+        "RESA",
+        [{"top": "RESA"}, {"top": "RESB"}],
+    )
+    flipped = run_pex_dry_run(
+        str(two_top_layout), [req], "sky130", top=["RESB", "RESA"]
+    )
+    assert (flipped["top"], flipped["tops"]) == (
+        "RESB",
+        [{"top": "RESB"}, {"top": "RESA"}],
+    )
+    assert sim_kwargs and all(kw["dry_run"] is True for kw in sim_kwargs)
+    assert _tree(tmp_path) == before
+
+
+def _assert_dry_matches_real(layout, req: str, tmp_path, **kw) -> PexError:
+    before = _tree(tmp_path)
+    with pytest.raises(PexError) as dry_exc:
+        run_pex_dry_run(str(layout), [req], "sky130", **kw)
+    assert _tree(tmp_path) == before
+    out, art = str(tmp_path / "combined.spice"), str(tmp_path / "art")
+    with pytest.raises(PexError) as real_exc:
+        run_pex(str(layout), [req], "sky130", output=out, artifacts_dir=art, **kw)
+    assert str(dry_exc.value) == str(real_exc.value)
+    return dry_exc.value
+
+
+@pytest.mark.parametrize("tops", [["NOPE", "RESB"], ["RESA", "NOPE"]])
+def test_dry_run_multi_top_missing_stream_cell_matches_real_run(
+    tmp_path, two_top_layout, tops
+):
+    req = str(_two_top_request(tmp_path))
+    assert "NOPE" in str(
+        _assert_dry_matches_real(two_top_layout, req, tmp_path, top=tops)
+    )
+
+
+@pytest.mark.parametrize(("declared", "missing"), [("RESA", "RESB"), ("RESB", "RESA")])
+def test_dry_run_multi_top_missing_subckt_matches_real_run(
+    tmp_path, two_top_layout, monkeypatch, declared, missing
+):
+    import klayout_tools.pex as pex_module
+
+    monkeypatch.setattr(
+        pex_module, "run_sim", lambda *_a, **_k: pytest.fail("simulated")
+    )
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(f".SUBCKT {declared} RA RB\nR1 RA RB 289.2\n.ENDS {declared}\n")
+    tb = _write_two_top_testbench(tmp_path / "testbench.spice", dut)
+    req = str(_write_request(tmp_path / "request.json", tb, node="RD"))
+    exc = _assert_dry_matches_real(two_top_layout, req, tmp_path, top=["RESA", "RESB"])
+    assert missing in str(exc) and exc.code == MULTI_TOP_UNSUPPORTED_CODE
 
 
 def test_dry_run_rejects_a_repeated_top(bench):
@@ -416,35 +466,23 @@ def test_dry_run_rejects_a_repeated_top(bench):
         )
 
 
+def test_dry_run_multi_top_refuses_device_only_leg(tmp_path, two_top_layout):
+    req, before = str(_two_top_request(tmp_path)), _tree(tmp_path)
+    with pytest.raises(PexError) as excinfo:
+        run_pex_dry_run(
+            str(two_top_layout),
+            [req],
+            "sky130",
+            top=["RESA", "RESB"],
+            device_only_leg=True,
+        )
+    assert "--device-only-leg" in str(excinfo.value)
+    assert excinfo.value.code == MULTI_TOP_UNSUPPORTED_CODE
+    assert _tree(tmp_path) == before
+
+
 @pytest.mark.parametrize("top", [None, "RES", ["RES"]])
 def test_dry_run_single_top_is_unchanged_by_the_repeatable_flag(bench, top):
-    """Zero or one `--top`, in any of the three spellings the library now
-    accepts (absent, a bare string, a one-entry list), produces the same
-    report -- the dry run must not have acquired a new refusal."""
     report = run_pex_dry_run(bench["layout"], [bench["request"]], "sky130", top=top)
-    assert report["status"] == "valid"
-    assert set(report) == _REPORT_KEYS
-    assert report["top"] == "RES"
-
-
-def test_cli_dry_run_multi_top_refusal_exits_1(bench, capsys):
-    exit_code = main(
-        [
-            "pex",
-            bench["layout"],
-            bench["request"],
-            "--deck",
-            "sky130",
-            "--dry-run",
-            "--top",
-            "RESA",
-            "--top",
-            "RESB",
-            "--format",
-            "json",
-        ]
-    )
-    assert exit_code == 1
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["error"]["code"] == MULTI_TOP_UNSUPPORTED_CODE
-    assert "--dry-run" in payload["error"]["message"]
+    assert report["status"] == "valid" and set(report) == _REPORT_KEYS
+    assert report["top"] == "RES" and report["tops"] is None

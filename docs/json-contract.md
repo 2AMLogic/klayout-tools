@@ -3083,14 +3083,17 @@ report field is added and `provenance.input.content_hash` keeps meaning the top
 deck only. A stale include sets `citation.input_verified` to `false` without
 changing the item's status. See [`cli/signoff.md`](cli/signoff.md).
 
-### `klt pex --dry-run` (issue #5464)
+### `klt pex --dry-run` (issues #5464, #5511)
 
 `klt pex --dry-run` emits a **different payload** from a graded run, not a
 superset of one: `dry_run: true`, `status: "valid"`, `layout`, `deck`,
-`top`, `deck_options`, `declared_pins`, `legs`, `reference_netlist`,
-`testbenches[]` (each `{request, schematic_netlist, sim}`, where `sim` is
-the nested `klt sim --dry-run` report verbatim) and `not_checked[]`. It
-rides the same envelope at the same `SCHEMA_VERSION` (`2`) — **no bump**.
+`top`, `tops` (`null` on a zero- or one-`--top` dry run, or
+`[{"top": "<resolved cell name>"}, ...]` in `--top` order when two or more
+`--top` values are given; issue #5511), `deck_options`, `declared_pins`,
+`legs`, `reference_netlist`, `testbenches[]` (each `{request,
+schematic_netlist, sim}`, where `sim` is the nested `klt sim --dry-run`
+report verbatim) and `not_checked[]`. It rides the same envelope at the same
+`SCHEMA_VERSION` (`2`) — **no bump**.
 
 This is additive under the opt-in-flag rule above: the payload exists only
 when `--dry-run` is given, no field of the graded report changes name, type

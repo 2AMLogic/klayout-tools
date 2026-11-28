@@ -121,7 +121,6 @@ def reject_unsupported_flags(
     submit_only: bool = False,
     attach: str | None = None,
     resume: bool | None = None,
-    dry_run: bool = False,
     schematic_top: str | None = None,
     runset_engine: bool = False,
 ) -> None:
@@ -147,11 +146,6 @@ def reject_unsupported_flags(
     - ``--resume``: a sharded leg's resume fingerprint content-hashes the
       testbench *body*, not the extracted netlist its DUT ``.include`` names,
       so it cannot tell one ``--top`` list's shards from another's.
-    - ``--dry-run`` (issue #5464) reports one resolved ``top`` and validates
-      one extraction request, so it cannot describe a multi-top run yet --
-      the one refusal here with an obvious successor, tracked in #5511 (a
-      multi-top request is exactly what a caller most wants validated before
-      paying for it). Passed only by :mod:`klayout_tools.pex_dry_run`.
     """
     _reject_multi_top_conflicts(
         tops,
@@ -226,14 +220,6 @@ def reject_unsupported_flags(
                 "a sharded leg's resume fingerprint hashes the testbench "
                 "body, not the extracted netlist the DUT `.include` names, "
                 "so it cannot tell one --top list's shards from another's",
-            ),
-            (
-                dry_run,
-                "--dry-run",
-                "a dry run reports one resolved `top` and validates one "
-                "extraction request, so it cannot describe a multi-top run "
-                "yet; drop --dry-run to run the multi-top extraction, or "
-                "dry-run each top on its own",
             ),
         ),
     )
