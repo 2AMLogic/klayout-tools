@@ -81,7 +81,7 @@
     },
     {
       "path": "native/wave/src/fst.rs",
-      "lines": 683
+      "lines": 607
     },
     {
       "path": "native/wave/src/parser.rs",

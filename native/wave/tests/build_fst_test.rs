@@ -118,3 +118,98 @@ fn build_from_fst_rejects_a_signal_absent_from_the_trace() {
     assert_eq!(err.0, 1);
     assert!(err.1.contains("tb.no_such_clock"), "message was: {}", err.1);
 }
+
+/// `RealParameter` and `ShortReal` FST vars have no VCD keyword of their
+/// own. `build` must file them as `"real"`, not let them fall through to
+/// `"wire"`: the store keeps the keyword as its FST var type, so a `"wire"`
+/// comes back from `load_fst` as a bit-vector signal with `is_real == false`.
+#[test]
+fn build_from_fst_keeps_real_parameter_and_short_real_as_real() {
+    use fst_writer::{
+        open_fst, FstFileType, FstInfo, FstScopeType, FstSignalType, FstVarDirection, FstVarType,
+    };
+    use klt_wave_native::cache::ColumnCache;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let trace_path = tmp.path().join("real_variants.fst");
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9, // 1ns
+        version: "build_fst_test real-var variants".to_string(),
+        date: "2026-11-28".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut header = open_fst(&trace_path, &info).unwrap();
+    header.scope("tb", "tb", FstScopeType::Module).unwrap();
+    let real_param = header
+        .var(
+            "p",
+            FstSignalType::real(),
+            FstVarType::RealParameter,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let short_real = header
+        .var(
+            "s",
+            FstSignalType::real(),
+            FstVarType::ShortReal,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let plain_real = header
+        .var(
+            "r",
+            FstSignalType::real(),
+            FstVarType::Real,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let wire = header
+        .var(
+            "w",
+            FstSignalType::bit_vec(1),
+            FstVarType::Wire,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    header.up_scope().unwrap();
+    let mut body = header.finish().unwrap();
+    body.signal_change(real_param, &1.5f64.to_le_bytes())
+        .unwrap();
+    body.signal_change(short_real, &2.5f64.to_le_bytes())
+        .unwrap();
+    body.signal_change(plain_real, &3.5f64.to_le_bytes())
+        .unwrap();
+    body.signal_change(wire, b"0").unwrap();
+    body.finish().unwrap();
+
+    let request = format!(
+        r#"{{
+            "trace": {{ "path": {trace_path:?}, "format": "fst" }},
+            "signals": null,
+            "store": {{ "path": ".klt/wave/real_variants.klwave" }}
+        }}"#,
+    );
+    let request_path = write_request(tmp.path(), &request);
+    build::run(&request_path).expect("build should succeed");
+
+    let store_path = tmp.path().join(".klt/wave/real_variants.klwave");
+    let cache = ColumnCache::load_from_file(&store_path).expect("store should load");
+    let signal = |name: &str| {
+        cache
+            .signals
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("signal {name} missing from the store"))
+    };
+    for name in ["tb.p", "tb.s", "tb.r"] {
+        assert_eq!(signal(name).var_type, "real", "{name}");
+        assert_eq!(signal(name).width, 64, "{name}");
+    }
+    assert_eq!(signal("tb.w").var_type, "wire");
+}
