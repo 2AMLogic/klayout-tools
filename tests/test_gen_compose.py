@@ -7429,7 +7429,7 @@ def test_resolve_via_drop_layer_metal3_to_metal2_resolves_the_via():
 
 def test_resolve_route_layer_metal3_and_via2_roles():
     # `routing.layer_role`/the connecting via role resolve through the same
-    # `_PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
+    # `PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
     # deck directly -- confirming the router-facing role names (#508) match
     # the deck's own met2/via.drawing layers.
     assert gen_compose._resolve_route_layer("sky130A", "metal3") == (69, 20)
@@ -7463,7 +7463,7 @@ def test_resolve_via_drop_layer_two_hop_ladder_gf180mcu():
 
 def test_resolve_route_layer_metal3_and_via2_roles_gf180mcu():
     # `routing.layer_role`/the connecting via role resolve through the same
-    # `_PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
+    # `PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
     # deck directly -- confirming the router-facing role names (issue #1058)
     # match gf180mcu's own Metal3/Via2 layers.
     assert gen_compose._resolve_route_layer("gf180mcuA", "metal3") == (42, 0)
@@ -7603,7 +7603,7 @@ def test_resolve_via_drop_layer_three_hop_ladder_gf180mcu():
 
 def test_resolve_route_layer_metal4_and_via3_roles_gf180mcu():
     # `routing.layer_role`/the connecting via role resolve through the same
-    # `_PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
+    # `PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
     # deck directly -- confirming the router-facing role names (issue #1670)
     # match gf180mcu's own Metal4/Via3 layers, the layer a
     # `klt place-and-route`-produced macro's own top-level pins routinely
@@ -8011,7 +8011,7 @@ def test_resolve_cross_block_route_layer_gf180mcu_metal4():
 
 
 def test_resolve_cross_block_route_layer_sg13g2():
-    # Issue #1474: before this family's `_PDK_ROLE_LAYERS` entry gained
+    # Issue #1474: before this family's `PDK_ROLE_LAYERS` entry gained
     # "metal2"/"via1"/"metal3"/"via2", every `cross_block_layer_role`
     # request against "ihp-sg13g2" raised "not a known layer role" -- there
     # was no second plane to name at all. "metal" (Metal1, 8/0) and
@@ -8521,7 +8521,7 @@ def test_compose_cross_block_width_um_at_cross_floor_is_accepted_and_drc_clean(
 
 # --------------------------------------------------------------------------- #
 # sg13g2/sg13cmos5l second/third routing planes (issue #1474): before this
-# fix, `_PDK_ROLE_LAYERS["sg13g2"]`/`["sg13cmos5l"]` declared only the base
+# fix, `PDK_ROLE_LAYERS["sg13g2"]`/`["sg13cmos5l"]` declared only the base
 # `"metal"` role, so `routing.cross_block_layer_role` had no second plane to
 # name at all on either family -- every such request raised "not a known
 # layer role" before any routing was attempted. These two tests exercise the

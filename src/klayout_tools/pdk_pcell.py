@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
-from .gen import _PARAM_TYPE_NAMES, GenError, _coerce_param
+from .gen import PARAM_TYPE_NAMES, GenError, coerce_param
 from .pdk import (
     _PCELL_SHIM_ROOTS,
     PdkNotFoundError,
@@ -100,7 +100,7 @@ _FALLBACK_DBU_UM = 0.001
 _SETTABLE_PARAM_TYPES = frozenset({0, 1, 2, 3, 4, 6})
 
 #: ``TypeLayer``. Held as its own constant because it is the one settable type
-#: :func:`klayout_tools.gen._coerce_param` does not handle (no built-in
+#: :func:`klayout_tools.gen.coerce_param` does not handle (no built-in
 #: generator exposes a request-facing layer parameter -- all hidden, #6757).
 _TYPE_LAYER = 4
 
@@ -840,7 +840,7 @@ def _describe_params(declaration: Any) -> list[dict[str, Any]]:
     return [
         {
             "name": param.name,
-            "type": _PARAM_TYPE_NAMES.get(param.type, _type_name(param.type)),
+            "type": PARAM_TYPE_NAMES.get(param.type, _type_name(param.type)),
             "default": _jsonable(param.default),
             "description": param.description,
             "hidden": bool(param.hidden),
@@ -853,7 +853,7 @@ def _describe_params(declaration: Any) -> list[dict[str, Any]]:
 def _type_name(ptype: int) -> str:
     """Name the PCell parameter types no built-in generator uses.
 
-    ``_PARAM_TYPE_NAMES`` in :mod:`klayout_tools.gen` only covers the types
+    ``PARAM_TYPE_NAMES`` in :mod:`klayout_tools.gen` only covers the types
     klt's own generators declare; a vendor PCell may declare a layer, shape,
     or callback parameter too, and reporting ``"unknown"`` for a perfectly
     well-known ``TypeLayer`` would be misleading.
@@ -993,7 +993,7 @@ def _resolve_pcell_params(
             values[name] = _coerce_layer_param(ref, name, value)
         elif param.type in _SETTABLE_PARAM_TYPES:
             try:
-                values[name] = _coerce_param(ref, name, value, param.type)
+                values[name] = coerce_param(ref, name, value, param.type)
             except GenError as exc:
                 raise PdkPCellError(str(exc)) from exc
         else:

@@ -29,10 +29,10 @@ from .gen_compose_base import GenComposeError, orient_port
 from .gen_compose_draw import draw_routed_entry
 from .gen_compose_routing import (
     _min_width_um_for_layer,
-    _pdk_family,
     _resolve_label_layer,
     _resolve_landing_pad_sizes,
     _resolve_route_layer,
+    pdk_family,
     read_block_layer_geometry,
     route_two_pin,
 )
@@ -75,7 +75,7 @@ def _resolve_routing(req: dict[str, Any]) -> tuple[Any, Any, Any]:
     variant = req["variant"]
     try:
         route_layer = _resolve_route_layer(variant, req["layer_role"])
-        extraction_deck = get_extraction_deck(_pdk_family(variant))
+        extraction_deck = get_extraction_deck(pdk_family(variant))
     except (GenComposeError, GenError) as exc:
         raise RouteError(str(exc)) from exc
     floor = _min_width_um_for_layer(variant, route_layer)

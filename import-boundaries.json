@@ -2633,12 +2633,6 @@
     {
       "consumer": "klayout_tools.route_labelled",
       "exporter": "klayout_tools.gen_compose_routing",
-      "symbol": "_pdk_family",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose_routing",
       "symbol": "_resolve_label_layer",
       "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
     },
@@ -2874,69 +2868,15 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.gen_compose_via_cuts",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_cut_fixed_size_um",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.gen_compose_via_cuts",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_fixed_cut_side_um",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.gen_compose",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_pdk_family",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.gen_compose_layer_rules",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_PDK_ROLE_LAYERS",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767), relocated from the gen_compose_routing entry when issue #5426 moved the layer-rule resolvers that use it into this module verbatim; same debt, new file. Remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.gen_compose_layer_rules",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_pdk_family",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767), extended to this module when issue #5426 moved the layer-rule resolvers that use it out of gen_compose_routing verbatim; same debt, new file. Remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.gen_compose_routing",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_pdk_family",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.layout_plan",
         "exporter": "klayout_tools._paths",
         "symbol": "_resolve_relative",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.layout_plan",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_GENERATOR_SPECS",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.layout_plan_execute",
         "exporter": "klayout_tools._paths",
         "symbol": "_resolve_relative",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.layout_plan_execute",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_pdk_family",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.layout_plan_execute",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_resolve_expected_device_class",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -3088,18 +3028,6 @@
         "exporter": "klayout_tools.sim_request_overrides",
         "symbol": "_with_pdk_root_override",
         "reason": "Reviewed (issue #5751): op-lint folds a `--pdk-root` pin through the same helper the graded sim path uses so both paths resolve the pin by one rule and cannot drift; promote to a public name when sim_request_overrides is next reworked."
-      },
-      {
-        "consumer": "klayout_tools.pdk_pcell",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_PARAM_TYPE_NAMES",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.pdk_pcell",
-        "exporter": "klayout_tools.gen",
-        "symbol": "_coerce_param",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
         "consumer": "klayout_tools.pex",

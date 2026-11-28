@@ -21,7 +21,7 @@ from . import gen_compose_top_metal_floors as _top_metal_floors
 from ._jsonnum import is_int
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .decks.plain_rules import largest_plain_rule_um
-from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
+from .gen import PDK_ROLE_LAYERS, GenError, pdk_family
 from .gen_compose_base import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM, GenComposeError
 
 
@@ -29,7 +29,7 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     """Resolve ``routing.layer_role`` to a ``(layer, datatype)`` pair.
 
     Routing goes through the *same* per-PDK-family role-layer table every
-    ``klt gen`` generator already uses (:data:`klayout_tools.gen._PDK_ROLE_LAYERS`)
+    ``klt gen`` generator already uses (:data:`klayout_tools.gen.PDK_ROLE_LAYERS`)
     -- never a raw ``{layer, datatype}`` pair from the request, and never a
     second, private layer map (spike section 2, ``routing.layer_role``).
 
@@ -38,11 +38,11 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     for the role (``None`` entry).
     """
     try:
-        family = _pdk_family(variant)
+        family = pdk_family(variant)
     except GenError as exc:
         raise GenComposeError(str(exc)) from exc
 
-    family_roles = _PDK_ROLE_LAYERS[family]
+    family_roles = PDK_ROLE_LAYERS[family]
     if layer_role not in family_roles:
         available = ", ".join(sorted(family_roles))
         raise GenComposeError(
@@ -90,7 +90,7 @@ def _min_rule_um_for_layer(
     if layer is None:
         return None
     try:
-        family = _pdk_family(variant)
+        family = pdk_family(variant)
     except GenError:
         return None
     return largest_plain_rule_um(family, layer, check)
@@ -121,7 +121,7 @@ def _min_area_um2_for_layer(
     if layer is None:
         return None
     try:
-        family = _pdk_family(variant)
+        family = pdk_family(variant)
         deck_rules = get_deck(family)
         nominal_dbu_um = get_nominal_dbu(family)
     except (GenError, UnknownDeckError):
@@ -156,7 +156,7 @@ def _min_enclosing_margin_um_for_layer(
     if layer is None or other_layer is None:
         return None
     try:
-        family = _pdk_family(variant)
+        family = pdk_family(variant)
         deck_rules = get_deck(family)
         nominal_dbu_um = get_nominal_dbu(family)
     except (GenError, UnknownDeckError):
@@ -191,7 +191,7 @@ def _top_metal_width_floor_um(
     width_floor_um = _top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_UM.get(variant)
     if width_floor_um is None:
         return None
-    if layer != _PDK_ROLE_LAYERS[_pdk_family(variant)]["top_metal"]:
+    if layer != PDK_ROLE_LAYERS[pdk_family(variant)]["top_metal"]:
         return None
     return width_floor_um
 
@@ -213,7 +213,7 @@ def _top_metal_area_floor_side_um(
     area_floor_um2 = _top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_UM2.get(variant)
     if area_floor_um2 is None:
         return None
-    if layer != _PDK_ROLE_LAYERS[_pdk_family(variant)]["top_metal"]:
+    if layer != PDK_ROLE_LAYERS[pdk_family(variant)]["top_metal"]:
         return None
     return math.sqrt(area_floor_um2)
 
@@ -297,7 +297,7 @@ def _min_enclosing_adjacent_margin_um_for_layer(
     if layer is None or other_layer is None:
         return None
     try:
-        family = _pdk_family(variant)
+        family = pdk_family(variant)
         deck_rules = get_deck(family)
         nominal_dbu_um = get_nominal_dbu(family)
     except (GenError, UnknownDeckError):

@@ -30,9 +30,9 @@ from .gen_compose_base import GenComposeError
 from .gen_compose_pad_notch import _pad_introduced_notches_dbu
 from .gen_compose_routing import (
     _BACKBONE_OFF_METALS_REASON,
-    _pdk_family,
     _resolve_route_layer,
     _resolve_via_drop_layer,
+    pdk_family,
 )
 from .gen_compose_via_cuts import _array_extra_um, _stack_sizes, landing_pad_half_dbu
 from .gen_layer_params import mfg_grid_um
@@ -51,7 +51,7 @@ _REJECTION_SAMPLES = 3
 def _min_spacing_um(variant: str, layer: _LayerPair) -> float:
     """Tightest plain ``space`` rule (um) on ``layer``; ``0.0`` if none."""
     try:
-        family = _pdk_family(variant)
+        family = pdk_family(variant)
         rules = get_deck(family)
         dbu_um = get_nominal_dbu(family)
     except (GenError, UnknownDeckError):
@@ -82,7 +82,7 @@ def _array_pitches_um(
         return {}
     pitches: dict[_LayerPair, float] = {}
     for via, side in cuts_um.items():
-        unit = 2 * (mfg_grid_um(_pdk_family(variant), via) or dbu_um)
+        unit = 2 * (mfg_grid_um(pdk_family(variant), via) or dbu_um)
         raw = side + _min_spacing_um(variant, via)
         pitches[via] = math.ceil(raw / unit - 1e-9) * unit
     return pitches
@@ -374,7 +374,7 @@ def _search_landing(
     obstacles, self_region = _stack_obstacles(nets, net, pad_half, cut_half)
     keepout = _keepout_region(nets, access["keepout_layers"])
 
-    mfg = mfg_grid_um(_pdk_family(variant), net_layer) or dbu
+    mfg = mfg_grid_um(pdk_family(variant), net_layer) or dbu
     mfg_dbu = max(1, int(round(mfg / dbu)))
     wanted_dbu = int(
         round((access["grid_um"] or pads_um.get(net_layer, 0.0) / 4.0) / dbu)

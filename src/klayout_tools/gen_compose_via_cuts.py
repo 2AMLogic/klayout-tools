@@ -8,12 +8,12 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .gen import GenError, _cut_fixed_size_um, _fixed_cut_side_um
+from .gen import GenError, cut_fixed_size_um, fixed_cut_side_um
 from .gen_compose_base import _VIA_DROP_SIZE_UM, _drop_array_extra_um
 from .gen_compose_layer_rules import (
     _landing_pad_side_um_for_pair,
     _min_width_um_for_layer,
-    _pdk_family,
+    pdk_family,
 )
 from .gen_compose_plane_change import RouteConflict
 
@@ -23,15 +23,15 @@ _LayerPair = tuple[int, int]
 def _via_fixed_size_um(variant: str, via_layer: tuple[int, int]) -> float:
     """The fixed drawn side (um) of a via-drop cut on ``via_layer`` for the
     resolved PDK ``variant`` (issue #2585, see
-    :func:`klayout_tools.gen_layer_params._cut_fixed_size_um`), or ``0.0``
+    :func:`klayout_tools.gen_layer_params.cut_fixed_size_um`), or ``0.0``
     when the layer has no upper size bound or the family cannot be resolved
     at all -- an unresolvable family degrades to the unclamped via size,
     exactly like :func:`_min_width_um_for_layer`'s own floor lookup."""
     try:
-        family = _pdk_family(variant)
+        family = pdk_family(variant)
     except GenError:
         return 0.0
-    return _cut_fixed_size_um(family, via_layer)
+    return cut_fixed_size_um(family, via_layer)
 
 
 def _array_extra_um(array: tuple[int, int], pitch_um: float) -> float:
@@ -216,7 +216,7 @@ def via_drop_cut_side_um(variant: str, via_pair: tuple[int, int]) -> float:
     definition shared by the drawing side and the route-time own-block
     cut-clearance check (#5398), so the two cannot disagree."""
     floor = _min_width_um_for_layer(variant, via_pair)
-    return _fixed_cut_side_um(
+    return fixed_cut_side_um(
         max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
         _via_fixed_size_um(variant, via_pair),
     )

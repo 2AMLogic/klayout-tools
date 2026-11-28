@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from .gen_base import GenError
 from .gen_describe import _bjt_array_describe
-from .gen_layer_params import _bjt_layer_params, _pdk_family
+from .gen_layer_params import _bjt_layer_params, pdk_family
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -188,7 +188,7 @@ def bjt_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     """``bjt_array`` describe hook: HBT path on sg13g2, else base-layer."""
-    if _pdk_family(pdk_info["variant"]) == "sg13g2":
+    if pdk_family(pdk_info["variant"]) == "sg13g2":
         return describe_hbt_array(params, dbu, pdk_info)
     return _bjt_array_describe(params, dbu, pdk_info)
 
@@ -198,12 +198,12 @@ def bjt_array_layer_params(
 ) -> dict[str, Any]:
     """``bjt_array`` layer-params hook. sg13g2 draws no base layers (the PDK
     cell is placed instead); ``flavor`` is rejected on every other family."""
-    if _pdk_family(pdk_info["variant"]) == "sg13g2":
+    if pdk_family(pdk_info["variant"]) == "sg13g2":
         return {}
     if params.get("flavor"):
         raise GenError(
             "generator 'bjt_array': params.flavor is only supported on PDK "
-            f"family 'sg13g2' (resolved family: '{_pdk_family(pdk_info['variant'])}')"
+            f"family 'sg13g2' (resolved family: '{pdk_family(pdk_info['variant'])}')"
         )
     return _bjt_layer_params(pdk_info, params)
 

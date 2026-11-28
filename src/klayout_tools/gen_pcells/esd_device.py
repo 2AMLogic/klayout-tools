@@ -161,7 +161,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         default ``flavor="nfet"`` case).
 
         Draws two optional marker layers, neither DRC-checked by either
-        curated deck (see :data:`_PDK_ROLE_LAYERS`'s ``esd_mark``/
+        curated deck (see :data:`PDK_ROLE_LAYERS`'s ``esd_mark``/
         ``salicide_block`` role comments for citations and the sky130 gap):
         ``esd_mark`` (always drawn when the resolved family has one -- an
         unconditional device-class marker, mirroring ``bjt_mark``'s own

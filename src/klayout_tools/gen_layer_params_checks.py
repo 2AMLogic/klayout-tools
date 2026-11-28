@@ -61,14 +61,14 @@ def _moscap_marker_min_width_um(
     or ``None``. Issue #6170: the channel is ``w_um`` wide, so no S/D geometry
     can make a narrower capacitor pass this rule -- the floor is the rule's."""
     from .decks import UnknownDeckError, get_deck, get_nominal_dbu
-    from .gen_layer_params import _PDK_ROLE_LAYERS
+    from .gen_layer_params import PDK_ROLE_LAYERS
 
     try:
         rules = get_deck(family)
         dbu_um = get_nominal_dbu(family)
     except UnknownDeckError:
         return None
-    active = _PDK_ROLE_LAYERS[family]["active"]
+    active = PDK_ROLE_LAYERS[family]["active"]
     hits = [
         r
         for r in rules
@@ -89,9 +89,9 @@ def check_dogbone_width(family: str, params: dict[str, Any]) -> None:
     is the ``w_um`` floor (below the generator-side enclosed-contact floor)."""
     if not params.get("dogbone_terminals") or params.get("mos_cap"):
         return
-    from .gen_layer_params import _PDK_ROLE_LAYERS, _deck_min_width_um
+    from .gen_layer_params import PDK_ROLE_LAYERS, _deck_min_width_um
 
-    active_layer = _PDK_ROLE_LAYERS[family]["active"]
+    active_layer = PDK_ROLE_LAYERS[family]["active"]
     active_floor = _deck_min_width_um(family, active_layer) if active_layer else None
     if active_floor is None:
         raise GenError(

@@ -63,7 +63,7 @@ CAPABILITIES: Mapping[str, Capability] = MappingProxyType(
         "extraction": Capability(("decks._extraction_registry",)),
         "parasitics": Capability(("decks._parasitics_registry",), True),
         "default_mos_model_binding": Capability(("pdk_models._MOS_MODEL_TABLE",)),
-        "generator_layer_roles": Capability(("gen_layer_params._PDK_ROLE_LAYERS",)),
+        "generator_layer_roles": Capability(("gen_layer_params.PDK_ROLE_LAYERS",)),
         "corner_resolution": Capability(("pdk._CORNER_PDK_FAMILIES",)),
         "remote_ami_transport": Capability(("remote_launcher._AMI_PDK_FAMILIES",)),
         "mos_array_well_taps": Capability(

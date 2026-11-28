@@ -173,7 +173,7 @@ from typing import Any
 
 from ._jsonnum import is_number
 from ._paths import _resolve_relative
-from .gen import _GENERATOR_SPECS
+from .gen import GENERATOR_SPECS
 from .gen_compose_base import ORIENTATIONS as _ORIENTATIONS
 from .layout_plan_fields import (
     ingest_netlist,
@@ -556,8 +556,8 @@ def _validate_device_group_references(
     for group in groups:
         entry_where = f"request.device_groups (id '{group['id']}')"
 
-        if group["generator"] not in _GENERATOR_SPECS:
-            supported = ", ".join(sorted(_GENERATOR_SPECS))
+        if group["generator"] not in GENERATOR_SPECS:
+            supported = ", ".join(sorted(GENERATOR_SPECS))
             raise LayoutPlanError(
                 f"{entry_where}.generator '{group['generator']}' is not a "
                 f"generator klt gen supports -- supported: {supported}"

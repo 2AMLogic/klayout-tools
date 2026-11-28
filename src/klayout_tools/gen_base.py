@@ -12,8 +12,8 @@
 #: where the foundry rule is a minimum and a maximum: sky130's ``via``
 #: (0.15um) and sg13g2's ``Cont`` (0.16um)/``Via1``-``Via4`` (0.19um) would
 #: all be over their maximum at 0.22um. There the drawn cut is clamped down
-#: to the layer's fixed size (:func:`_cut_fixed_size_um`,
-#: :func:`_clamp_cut_boxes`, :func:`_fixed_cut_side_um`) *inside* the
+#: to the layer's fixed size (:func:`cut_fixed_size_um`,
+#: :func:`_clamp_cut_boxes`, :func:`fixed_cut_side_um`) *inside* the
 #: unchanged 0.22um-derived contact region -- so every pad, ring, port and
 #: ``klt gen describe`` coordinate stays exactly where it was and each cut's
 #: enclosure only grows.
@@ -36,7 +36,7 @@ MIN_SAME_LAYER_SPACING_UM = 0.4
 #: Margin (um) a well ring/tie keeps around the tap/comp region it encloses
 #: -- exceeds gf180mcu's ``nwell.enclosing.comp.1`` (0.12um). sky130's
 #: curated deck has no well-layer rule, so this only ever matters on
-#: gf180mcu (see :data:`_PDK_ROLE_LAYERS`'s ``"well"`` entries).
+#: gf180mcu (see :data:`PDK_ROLE_LAYERS`'s ``"well"`` entries).
 WELL_ENCLOSURE_MARGIN_UM = 0.15
 
 #: The four sides a ring gap (``ring_gap_side``) can be cut on, and the

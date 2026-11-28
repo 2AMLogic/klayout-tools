@@ -37,7 +37,7 @@ calling :func:`pdk_variant_family`.
    :func:`family_subset` so a reader (and CI) can tell "narrowed on
    purpose" from "typo'd or forgotten".
 
-``gen_layer_params._pdk_family`` already had this shape -- classify via the
+``gen_layer_params.pdk_family`` already had this shape -- classify via the
 authoritative helper, then check the result against a local support table --
 and is what the rest of the package now mirrors.
 
@@ -120,7 +120,7 @@ def pdk_variant_family(variant: str) -> str:
     This is the only variant->family classifier in the package; callers that
     additionally need to know whether *their* subsystem supports the result
     check it against their own :func:`family_subset` declaration afterwards
-    (the ``gen_layer_params._pdk_family`` pattern).
+    (the ``gen_layer_params.pdk_family`` pattern).
 
     Returns ``variant`` unchanged when it does not match any known family
     prefix or alias -- callers turn that into their own named error or

@@ -2,7 +2,7 @@
 
 Third and final slice of ``gen.py``'s per-family split (issue #2347). Each of
 the ten reference-generator families registered in ``gen.py``'s
-``_GENERATOR_SPECS`` wires up three callables, and the earlier two splits
+``GENERATOR_SPECS`` wires up three callables, and the earlier two splits
 already moved two of them out of the monolith:
 
 * issue #1875 moved every family's ``layer_params`` resolver into
@@ -56,7 +56,6 @@ from .gen_layer_params import (
     _MAX_METAL_RES_LEVEL,
     _METAL_RES_GEOMETRY_MIN_KEYS,
     _PDK_CAP_STACK_GEOMETRY_UM,
-    _PDK_ROLE_LAYERS,
     CONTACT_GAP_SAFE_UM,
     ESD_FINGER_WIDTH_MAX_UM,
     ESD_FINGER_WIDTH_MIN_UM,
@@ -65,6 +64,7 @@ from .gen_layer_params import (
     GUARD_RING_DEFAULT_WIDTH_UM,
     PAD_OPENING_GUIDELINE_MIN_UM,
     PAD_TOP_METAL_ENCLOSURE_MIN_UM,
+    PDK_ROLE_LAYERS,
     TAP_PAD_REACH_UM,
     UNIT_MIN_W_UM,
     _bjt_unit_implant_margin_um,
@@ -72,7 +72,6 @@ from .gen_layer_params import (
     _cap_geometry_min_um,
     _check_cap_stack_supported,
     _contact_gate_extra_offset_um,
-    _cut_fixed_size_um,
     _deck_min_width_um,
     _device_implant,
     _device_well_enclosure_um,
@@ -82,7 +81,6 @@ from .gen_layer_params import (
     _metal_res_geometry_min_um,
     _metal_res_layers,
     _mos_array_well_tap_role_layer,
-    _pdk_family,
     _reject_deferred_family,
     _res_flavor_layers,
     _res_flavor_min_width_um_floor,
@@ -90,7 +88,9 @@ from .gen_layer_params import (
     _ring_implant_margin_um,
     _role_layer_info,
     _tap_pads_wanted,
+    cut_fixed_size_um,
     mfg_grid_um,
+    pdk_family,
 )
 from .gen_pitch import _pitch_hints_and_warnings
 from .gen_res_head import _res_end_contact_um, _res_head_len_um, _res_head_note
@@ -430,7 +430,7 @@ def _mfg_grid_warnings(
 
     ``checks`` are the ``(param, role)`` pairs to check (issue #4203:
     ``res_array`` passes ``(("length_um", "poly"),)``)."""
-    roles = _PDK_ROLE_LAYERS[family]
+    roles = PDK_ROLE_LAYERS[family]
     warnings: list[str] = []
     for param, role in checks:
         grid_um = mfg_grid_um(family, roles.get(role))
@@ -566,7 +566,7 @@ def _mos_array_describe(
 ) -> dict[str, Any]:
     from .gen import _mos_array_layout
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     # Must match the same gate `_MosArrayPCell.produce_impl` uses (issue
     # #1473), so the reported `well_box_um`/well-tap port line up with the
     # geometry actually drawn.
@@ -613,8 +613,8 @@ def _mos_array_describe(
         dogbone_terminals=params["dogbone_terminals"],
     )
     unit = info["unit"]
-    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
-    poly_pair = _PDK_ROLE_LAYERS[family]["poly"]
+    metal_pair = PDK_ROLE_LAYERS[family]["metal"]
+    poly_pair = PDK_ROLE_LAYERS[family]["poly"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     poly_layer = {"layer": poly_pair[0], "datatype": poly_pair[1], "name": None}
     # #492: with `gate_contact` the gate terminal *is* a metal pad, so it is
@@ -738,7 +738,7 @@ def _mos_array_describe(
             "the target PDK's own poly minimum-width rule (e.g. sky130's "
             "poly.width.1 floor is 0.15um), which this generator does not check"
         )
-    if params["flavor"] == "pfet" and _PDK_ROLE_LAYERS[family]["well"] is None:
+    if params["flavor"] == "pfet" and PDK_ROLE_LAYERS[family]["well"] is None:
         notes.append(
             f"params.flavor is 'pfet' but the resolved PDK family ('{family}') has "
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
@@ -995,9 +995,9 @@ def _res_array_snap_length(
     below-floor length under ``short_length='refuse'``."""
     if params.get("metal_level", 0) or not params.get("snap", True):
         return None
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     requested = params["length_um"]
-    grid_um = mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("poly"))
+    grid_um = mfg_grid_um(family, PDK_ROLE_LAYERS[family].get("poly"))
     realised = requested
     reasons: list[str] = []
     if _mfg_grid_neighbours(grid_um, requested) is not None:
@@ -1057,7 +1057,7 @@ def _res_array_describe(
 ) -> dict[str, Any]:
     from .gen import _res_array_layout
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     metal_level = params.get("metal_level", 0)
     floors = (
         _metal_res_geometry_min_um(family, metal_level)
@@ -1086,13 +1086,13 @@ def _res_array_describe(
     # A metal-level resistor's own body layer (metN) is already a routing
     # metal, so its ports are reported there directly -- unlike the poly-body
     # case, where `"metal"` (li1) is the practically-routable layer one level
-    # *above* the raw poly terminal (see the module's own `_PDK_ROLE_LAYERS`
+    # *above* the raw poly terminal (see the module's own `PDK_ROLE_LAYERS`
     # "metal" role comment). Both are electrically the same net either way
     # once `klt extract` merges connectivity through the end contact/via.
     metal_pair = (
         _metal_res_layers(family, metal_level)["body"]
         if metal_level
-        else _PDK_ROLE_LAYERS[family]["metal"]
+        else PDK_ROLE_LAYERS[family]["metal"]
     )
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
 
@@ -1226,7 +1226,7 @@ def _cap_array_describe(
 ) -> dict[str, Any]:
     from .gen import _cap_array_layout
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     layers = _cap_family_layers(family)
     _check_cap_stack_supported(family, params)
     floors = _cap_geometry_min_um(family)
@@ -1276,7 +1276,7 @@ def _cap_array_describe(
     if stack is not None:
         # Stacked bank (issue #3332): the outer plates (met3 + met5, tied
         # outside the footprint) and the shared met4 middle plate.
-        outer_pair = _PDK_ROLE_LAYERS[family]["cap2_top_via_metal"]
+        outer_pair = PDK_ROLE_LAYERS[family]["cap2_top_via_metal"]
         assert outer_pair is not None  # guaranteed by _check_cap_stack_supported
         ports.append(
             {
@@ -1721,9 +1721,9 @@ def _guard_ring_describe(
 ) -> dict[str, Any]:
     from .gen import _ring_layout
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
-    contact_layer = _PDK_ROLE_LAYERS[family]["contact"]
+    contact_layer = PDK_ROLE_LAYERS[family]["contact"]
     info = _ring_layout(
         params["inner_width_um"],
         params["inner_height_um"],
@@ -1735,11 +1735,11 @@ def _guard_ring_describe(
         gap_contact_enclosure_um=_guard_ring_gap_contact_enclosure_um(family),
         dbu=dbu,
         mfg_grid_um=mfg_grid_um(family, contact_layer),
-        contact_fixed_size_um=_cut_fixed_size_um(family, contact_layer),
+        contact_fixed_size_um=cut_fixed_size_um(family, contact_layer),
     )
-    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
+    metal_pair = PDK_ROLE_LAYERS[family]["metal"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
-    well_supported = _PDK_ROLE_LAYERS[family]["well"] is not None
+    well_supported = PDK_ROLE_LAYERS[family]["well"] is not None
 
     ports = _ring_ports(
         info,
@@ -1917,7 +1917,7 @@ def _well_island_isolation(params: dict[str, Any], family: str) -> dict[str, Any
 
     notes: list[str] = []
     warnings: list[str] = []
-    well_supported = _PDK_ROLE_LAYERS[family].get("well") is not None
+    well_supported = PDK_ROLE_LAYERS[family].get("well") is not None
     rule_um = _PDK_WELL_ISOLATION_UM.get(family)
     regions = _parse_well_regions("well_island", "isolate_from", params["isolate_from"])
     own_net = params["net"] or None
@@ -2120,10 +2120,10 @@ def _well_island_validate(params: dict[str, Any]) -> None:
 def _well_island_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
     info = _well_island_ring(params)
-    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
+    metal_pair = PDK_ROLE_LAYERS[family]["metal"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     net = params["net"] or None
 
@@ -2150,7 +2150,7 @@ def _well_island_describe(
     )
     notes.extend(isolation["notes"])
 
-    label_present = _PDK_ROLE_LAYERS[family].get("metal_label") is not None
+    label_present = PDK_ROLE_LAYERS[family].get("metal_label") is not None
     if net is None:
         notes.append(
             "params.net is empty -- no net label was drawn, so the island's "
@@ -2212,7 +2212,7 @@ def _well_island_layer_params(
     """
     import klayout.db as kdb
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     _reject_deferred_family("well_island", family)
     well = _role_layer_info(family, "well")
     metal_label = _role_layer_info(family, "metal_label")
@@ -2221,8 +2221,8 @@ def _well_island_layer_params(
     return {
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "contact_fixed_size_um": _cut_fixed_size_um(
-            family, _PDK_ROLE_LAYERS[family].get("contact")
+        "contact_fixed_size_um": cut_fixed_size_um(
+            family, PDK_ROLE_LAYERS[family].get("contact")
         ),
         "metal_layer": _role_layer_info(family, "metal"),
         "metal_label_layer": (
@@ -2294,7 +2294,7 @@ def _bjt_array_describe(
 ) -> dict[str, Any]:
     from .gen import _bjt_array_layout
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     info = _bjt_array_layout(
         params["emitter_um"],
         params["rows"],
@@ -2308,12 +2308,12 @@ def _bjt_array_describe(
         _bjt_unit_implant_margin_um(family),
     )
     unit = info["unit"]
-    tap_pair = _PDK_ROLE_LAYERS[family]["tap"]
-    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
+    tap_pair = PDK_ROLE_LAYERS[family]["tap"]
+    metal_pair = PDK_ROLE_LAYERS[family]["metal"]
     tap_layer = {"layer": tap_pair[0], "datatype": tap_pair[1], "name": None}
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
-    well_supported = _PDK_ROLE_LAYERS[family]["well"] is not None
-    mark_supported = _PDK_ROLE_LAYERS[family]["bjt_mark"] is not None
+    well_supported = PDK_ROLE_LAYERS[family]["well"] is not None
+    mark_supported = PDK_ROLE_LAYERS[family]["bjt_mark"] is not None
 
     ports = []
     ex, ey = unit["e_xy"]
@@ -2443,7 +2443,7 @@ def _bond_pad_validate(params: dict[str, Any]) -> None:
 def _bond_pad_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     opening_um = params["opening_um"]
     enclosure_um = params["enclosure_um"]
 
@@ -2452,7 +2452,7 @@ def _bond_pad_describe(
     # net is the top-metal strap electrically, per PAD.4's own framing ("top
     # layer metal overlap of pad opening"); the opening is a process step,
     # not a separate net a `klt gen-compose` route would ever target.
-    top_metal_pair = _PDK_ROLE_LAYERS[family]["top_metal"]
+    top_metal_pair = PDK_ROLE_LAYERS[family]["top_metal"]
     top_metal_layer = {
         "layer": top_metal_pair[0],
         "datatype": top_metal_pair[1],
@@ -2606,7 +2606,7 @@ def _esd_device_describe(
 ) -> dict[str, Any]:
     from .gen import _esd_device_layout
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     info = _esd_device_layout(
         params["finger_width_um"],
         params["l_um"],
@@ -2623,8 +2623,8 @@ def _esd_device_describe(
         top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
-    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
-    poly_pair = _PDK_ROLE_LAYERS[family]["poly"]
+    metal_pair = PDK_ROLE_LAYERS[family]["metal"]
+    poly_pair = PDK_ROLE_LAYERS[family]["poly"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     poly_layer = {"layer": poly_pair[0], "datatype": poly_pair[1], "name": None}
     # #492 -- see the equivalent comment in `_mos_array_describe`.
@@ -2686,7 +2686,7 @@ def _esd_device_describe(
             "no tap ring drawn (params.add_guard_ring is false) -- substrate "
             "isolation from adjacent structures is the caller's responsibility"
         )
-    if _PDK_ROLE_LAYERS[family].get("esd_mark") is None:
+    if PDK_ROLE_LAYERS[family].get("esd_mark") is None:
         notes.append(
             f"the resolved PDK family ('{family}') has no citable ESD "
             "device-class marker layer in this repo's curated deck -- no "
@@ -2695,7 +2695,7 @@ def _esd_device_describe(
         )
     if (
         params["salicide_block"]
-        and _PDK_ROLE_LAYERS[family].get("salicide_block") is None
+        and PDK_ROLE_LAYERS[family].get("salicide_block") is None
     ):
         notes.append(
             f"params.salicide_block is true but the resolved PDK family "
@@ -2751,11 +2751,11 @@ def _diode_describe(
 ) -> dict[str, Any]:
     from .gen_diode import _diode_layout, diode_notes, diode_ports
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     info = _diode_layout(
         params["kind"], params["voltage_class"], params["width_um"], params["length_um"]
     )
-    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
+    metal_pair = PDK_ROLE_LAYERS[family]["metal"]
     assert metal_pair is not None
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     ports = diode_ports(info, metal_layer)

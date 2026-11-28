@@ -197,7 +197,7 @@ from .gen import (
     CONTACT_SIZE_UM,
     ENCLOSURE_MARGIN_UM,
     GenError,
-    _pdk_family,
+    pdk_family,
 )
 from .gen_compose_base import (
     _DIRECTION_VECTORS as _DIRECTION_VECTORS,
@@ -306,13 +306,13 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
-from .gen_compose_via_cuts import (
-    _cut_fixed_size_um as _cut_fixed_size_um,
-)
-from .gen_compose_via_cuts import (
-    _fixed_cut_side_um as _fixed_cut_side_um,
-)
 from .gen_compose_via_cuts import _via_fixed_size_um as _via_fixed_size_um
+from .gen_compose_via_cuts import (
+    cut_fixed_size_um as cut_fixed_size_um,
+)
+from .gen_compose_via_cuts import (
+    fixed_cut_side_um as fixed_cut_side_um,
+)
 from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
@@ -2694,7 +2694,7 @@ def _pdk_mfg_grid_um(pdk_info: dict[str, Any], layer: tuple[int, int] | None) ->
     """The manufacturing grid (um) for ``layer`` in ``pdk_info``'s PDK family,
     or ``0.0`` (no snap) when the family cannot be resolved (issue #2932)."""
     try:
-        return mfg_grid_um(_pdk_family(pdk_info["variant"]), layer)
+        return mfg_grid_um(pdk_family(pdk_info["variant"]), layer)
     except GenError:
         return 0.0
 
@@ -3181,7 +3181,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # Resolved once for the whole request (issue #454) -- route_two_pin's
         # via-drop check (5) consults this same ExtractionDeck.metals/.vias
         # stack per net, never a second, private via table.
-        extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
+        extraction_deck = get_extraction_deck(pdk_family(pdk_info["variant"]))
 
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(

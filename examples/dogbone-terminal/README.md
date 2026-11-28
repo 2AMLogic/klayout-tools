@@ -36,7 +36,7 @@ as your ordinary-width `klt gen mos_array`/`diff_pair` output:
 
 `generate.py` does exactly this with `klayout.db`, on the same
 `active`/`poly`/`contact`/`metal` role layers `klayout_tools.gen`'s
-`_PDK_ROLE_LAYERS` resolves `mos_array`/`diff_pair` to for `sky130`/
+`PDK_ROLE_LAYERS` resolves `mos_array`/`diff_pair` to for `sky130`/
 `gf180mcu` — so the hand-drawn device merges into the same layers a `klt
 extract` pass already recognises as this device role, and composes on equal
 footing with real `klt gen` output. The demonstrated device: `W = 0.30` µm

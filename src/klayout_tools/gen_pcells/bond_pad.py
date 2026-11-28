@@ -43,7 +43,7 @@ def _build_bond_pad_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         other generator in this family, a bond pad's strap is *not* the
         shared ``metal`` role (li1/Metal1) `mos_array`/`res_array`/
         `guard_ring`/`diff_pair`/`bjt_array` all draw on -- see
-        :data:`_PDK_ROLE_LAYERS`'s ``"top_metal"`` entries.
+        :data:`PDK_ROLE_LAYERS`'s ``"top_metal"`` entries.
 
         ``down_to`` currently supports only its default, ``"top_metal"`` --
         this generator does not yet draw a via stack connecting the pad down

@@ -254,9 +254,9 @@ def resolve_diode_voltage_class(
     union of every family's; ``spec.validate``'s generic union check stays as
     the backstop for families with no diode support (#6630).
     """
-    from .gen_layer_params import _pdk_family
+    from .gen_layer_params import pdk_family
 
-    family = _pdk_family(variant)
+    family = pdk_family(variant)
     allowed = DIODE_FAMILY_VOLTAGE_CLASSES.get(family)
     if allowed is None:
         return

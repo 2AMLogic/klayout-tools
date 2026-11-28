@@ -66,7 +66,7 @@ anything. Conclusion: sky130's official DRC deck has no analogue to
 gf180mcu's ``BJT.3`` bipolar device-mark separation rule; sky130's vertical
 PNP device relies on ``pnp.drawing`` for LVS/device-recognition purposes
 only, not DRC-level mark/separation checking. No rule was added here, and
-``_PDK_ROLE_LAYERS["sky130"]["bjt_mark"]`` in ``klayout_tools.gen`` remains
+``PDK_ROLE_LAYERS["sky130"]["bjt_mark"]`` in ``klayout_tools.gen`` remains
 ``None`` accordingly.
 
 Follow-up (issue #223): ``pnp.drawing`` (82/44) is now consumed for exactly
@@ -326,7 +326,7 @@ implant area rules (``n/psdm.10a``/``10b``) and the compound implant rules
 ``psdm``/``nsdm`` fields.
 
 tap (tie-layer) rule coverage (issue #2321, closing the gap the
-``difftap``-family notes above and ``_PDK_ROLE_LAYERS["sky130"]["tap"]``'s
+``difftap``-family notes above and ``PDK_ROLE_LAYERS["sky130"]["tap"]``'s
 own comment in ``gen_layer_params.py`` both recorded): before this, both of
 the deck's ``difftap``-family rules were scoped to ``diff.drawing`` (65/20)
 alone -- ``tap.drawing`` (65/44), the *other* half of the official

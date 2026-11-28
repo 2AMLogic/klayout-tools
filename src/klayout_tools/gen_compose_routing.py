@@ -55,7 +55,7 @@ from .decks import (
     ExtractionDeck,
     get_extraction_deck,
 )
-from .gen import RING_SIDE_DIRECTIONS, _pdk_family
+from .gen import RING_SIDE_DIRECTIONS, pdk_family
 from .gen_compose_base import (
     _DIRECTION_VECTORS,
     _ORIENTATION_KDB_ARGS,
@@ -386,7 +386,7 @@ def _resolve_cross_block_route_layer(
     move to a second layer, even for nets that never needed it. This resolves
     an optional *second*, higher metal role -- the one :func:`route_two_pin`
     retries a same-layer-short leg on instead of rejecting it outright -- via
-    the *same* ``_PDK_ROLE_LAYERS`` table :func:`_resolve_route_layer` reads
+    the *same* ``PDK_ROLE_LAYERS`` table :func:`_resolve_route_layer` reads
     (never a second, private layer map).
 
     Reuses :func:`_resolve_via_drop_layer` verbatim to confirm the two resolved layers
@@ -426,7 +426,7 @@ def _resolve_cross_block_route_layer(
             f"the same layer as routing.layer_role '{layer_role}' -- a "
             "cross-block bus layer must be a distinct metal"
         )
-    deck = get_extraction_deck(_pdk_family(variant))
+    deck = get_extraction_deck(pdk_family(variant))
     ladder, error = _resolve_via_drop_layer(deck, cross_layer, route_layer)
     if ladder is None:
         # #7957: a non-metals cross-block role keeps the generic wording (no pin here).
@@ -470,7 +470,7 @@ def _resolve_label_layer(
     ``poly_label`` -- the shape is still drawn, just without a net label for
     `klt extract` to promote into a pin (partial success, not an error).
     """
-    family = _pdk_family(variant)
+    family = pdk_family(variant)
     deck = get_extraction_deck(family)
     try:
         index = deck.metals.index(draw_layer)
@@ -1163,7 +1163,7 @@ def _ring_conductor_layers(
       alone would conclude a ``"metal"``-role (li1) backbone flies over a
       ring it in fact runs straight into. ``deck.metals[0]`` *is* the
       ``"metal"`` role for every supported family (sky130 li1 ``67/20``,
-      gf180mcu Metal1 ``34/0`` -- see ``_PDK_ROLE_LAYERS``), read off the
+      gf180mcu Metal1 ``34/0`` -- see ``PDK_ROLE_LAYERS``), read off the
       deck rather than re-derived from a second, private table.
 
     Empty only when ``block`` reports no ring port with a usable layer at

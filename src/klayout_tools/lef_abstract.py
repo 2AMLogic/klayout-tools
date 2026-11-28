@@ -17,7 +17,7 @@ Reuses ``socket_check.py``'s own descriptor loader/validator
 (``_load_descriptor``) rather than duplicating ~150 lines of shape
 validation -- an intentional cross-module import of a private helper, the
 same precedent ``gen_compose.py`` already set importing ``gen.py``'s
-``_PDK_ROLE_LAYERS``/``_pdk_family`` (each verb module stays self-contained
+``PDK_ROLE_LAYERS``/``pdk_family`` (each verb module stays self-contained
 for *its own* logic, but a shared, already-tested validator is reused rather
 than copy-pasted).
 

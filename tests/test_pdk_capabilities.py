@@ -94,7 +94,7 @@ def live_snapshot() -> dict[str, dict[str, OwnerDeclaration]]:
     }
     snapshot["pdk_models._MOS_MODEL_TABLE"] = _model_declarations()
     for module, name in (
-        (gen_layer_params, "_PDK_ROLE_LAYERS"),
+        (gen_layer_params, "PDK_ROLE_LAYERS"),
         (pdk, "_CORNER_PDK_FAMILIES"),
         (remote_launcher, "_AMI_PDK_FAMILIES"),
         (gen_layer_params, "_MOS_ARRAY_WELL_TAP_FAMILIES"),
@@ -125,7 +125,7 @@ def test_production_capabilities_match_live_owner_declarations():
         (decks, "_extraction_registry", "sky130", "extraction"),
         (decks, "_parasitics_registry", "sg13cmos5l", "parasitics"),
         (pdk_models, "_MOS_MODEL_TABLE", "sky130", "default_mos_model_binding"),
-        (gen_layer_params, "_PDK_ROLE_LAYERS", "sky130", "generator_layer_roles"),
+        (gen_layer_params, "PDK_ROLE_LAYERS", "sky130", "generator_layer_roles"),
         (pdk, "_CORNER_PDK_FAMILIES", "sky130", "corner_resolution"),
         (remote_launcher, "_AMI_PDK_FAMILIES", "sky130", "remote_ami_transport"),
         (

@@ -7,11 +7,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from .gen_layer_params import (
-    _PDK_ROLE_LAYERS,
-    _pdk_family,
+    PDK_ROLE_LAYERS,
     _ring_implant_margin_um,
     _ring_layer_params,
     mfg_grid_um,
+    pdk_family,
 )
 from .gen_snap import _GRID_DBU_UM, _snap_cut_box_dbu, _snap_square_box_um
 from .gen_spec import _GeneratorSpec
@@ -31,7 +31,7 @@ def _guard_ring_layer_params(
 ) -> dict[str, Any]:
     layers = _ring_layer_params(pdk_info, params)
     layers["gap_contact_enclosure_um"] = _guard_ring_gap_contact_enclosure_um(
-        _pdk_family(pdk_info["variant"])
+        pdk_family(pdk_info["variant"])
     )
     return layers
 
@@ -45,7 +45,7 @@ def _validate_guard_ring_implant_gap(
     side = params["ring_gap_side"]
     if (
         side not in RING_SIDE_DIRECTIONS
-        or _pdk_family(pdk_info["variant"]) != "gf180mcu"
+        or pdk_family(pdk_info["variant"]) != "gf180mcu"
     ):
         return
 
@@ -71,7 +71,7 @@ def _validate_guard_ring_implant_gap(
         params["ring_gap_offset_um"],
     )
     dbu = resolve_pdk_dbu(pdk_info) or default_dbu
-    grid_um = mfg_grid_um("gf180mcu", _PDK_ROLE_LAYERS["gf180mcu"]["contact"])
+    grid_um = mfg_grid_um("gf180mcu", PDK_ROLE_LAYERS["gf180mcu"]["contact"])
     snapped = _snap_ring_box_um(gap["box_um"], grid_um, dbu)
     axis = 0 if side in ("N", "S") else 1
     gap_dbu = round(snapped[axis + 2] / dbu) - round(snapped[axis] / dbu)
@@ -146,7 +146,7 @@ def _validate_device_ring_implant_gap(
     )
     from .gen_pcells.diff_pair import _diff_pair_pcell_layout
 
-    family = _pdk_family(pdk_info["variant"])
+    family = pdk_family(pdk_info["variant"])
     side = params["ring_gap_side"]
     supported = (family, spec.name) in {
         ("sg13g2", "mos_array"),

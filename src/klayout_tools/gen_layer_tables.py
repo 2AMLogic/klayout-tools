@@ -2,7 +2,7 @@
 
 Data-only sibling of :mod:`klayout_tools.gen_layer_params` (issue #3722), in
 the oversized-module split series (#1875, #3689): the geometry floors, the
-``_PDK_ROLE_LAYERS`` layer map and the cap-geometry floor tables. The
+``PDK_ROLE_LAYERS`` layer map and the cap-geometry floor tables. The
 resolver functions that read them stay in ``gen_layer_params``, which
 re-exports every name here so existing imports are unchanged. This module
 imports nothing from ``gen``.
@@ -140,7 +140,7 @@ GUARD_RING_DEFAULT_PADDING_UM = 0.5
 #: https://github.com/google/gf180mcu-pdk (Apache-2.0) commit `de3240d`,
 #: `docs/physical_verification/design_manual/tables_clear/29_BondPad1_70.csv`
 #: -- scoped to the 5LM variant that deck (and `bond_pad`'s own `top_metal`
-#: role, below) already exclusively models; see `_PDK_ROLE_LAYERS`'s
+#: role, below) already exclusively models; see `PDK_ROLE_LAYERS`'s
 #: `"top_metal"` entries. sky130's curated deck has no equivalent hard rule
 #: (only `pad.2`'s unrelated 1.27um pad-to-pad *spacing* check,
 #: `sky130.lydrc` line 695) -- like `WELL_ENCLOSURE_MARGIN_UM`, this constant
@@ -213,7 +213,7 @@ ESD_MAX_FINGERS_PER_RING = 32
 #: from "the layer doesn't exist" -- sky130's `well` entry below is a real
 #: GDS layer (`klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`), just one
 #: no curated *DRC* rule happens to check.
-_PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
+PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "sky130": {
         "active": (65, 20),  # diff.drawing
         "tap": (65, 44),  # tap.drawing -- width- and licon-enclosure-checked
@@ -571,7 +571,7 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # Unlike sky130/sg13g2, this stack needs three things beyond the four
         # plate/via roles, all of them per-family data rather than new
         # geometry code (see the tables immediately below
-        # :data:`_PDK_ROLE_LAYERS`):
+        # :data:`PDK_ROLE_LAYERS`):
         #
         # - the top plate is only *recognised* where `CAP_MK` (117/5) and
         #   `MIM_L_MK` (117/10) also cover it (that entry's
@@ -943,7 +943,7 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
 #:     `libs.tech/klayout/tech/drc/rule_decks/beol/6_11_mim.drc`, value
 #:     `drc_rules['Mim_c']` = 0.6 in that deck's `sg13g2_tech_default.json`).
 #:     This family's plate pair is `MIM` over `Metal5` (see
-#:     :data:`_PDK_ROLE_LAYERS`'s own sg13g2 `cap_top_plate`/
+#:     :data:`PDK_ROLE_LAYERS`'s own sg13g2 `cap_top_plate`/
 #:     `cap_bottom_plate` entries), so MIM.c governs exactly this margin, and
 #:     the generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) misses it by 0.1um --
 #:     every pre-#2576 sg13g2 `cap_array` stream carried that shortfall at

@@ -1646,7 +1646,7 @@ sg13g2's `cont.width.1`/`via1.width.1`–`via4.width.1` and sky130's
 (0.22 um), over the foundry maximum on all six layers, so enforcing the max
 half would have turned the generator/composer tests red — correctly, because
 that geometry really did violate the rule. Issue #2585 clamps cuts on these
-layers to their fixed size (`_cut_fixed_size_um` in `gen_layer_params.py`,
+layers to their fixed size (`cut_fixed_size_um` in `gen_layer_params.py`,
 which now reads the deck's `threshold_max_dbu` directly), and the six rules
 then took the field.
 
