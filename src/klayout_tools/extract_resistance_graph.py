@@ -11,7 +11,7 @@ of the module) solve a built graph by reusing
 :func:`klayout_tools.ir_solver.solve_ir_drop`; there is no second solver.
 The module is live and wired: ``klt extract --resistance-graph`` reaches
 :func:`build_resistance_graph` and :func:`terminal_resistance_matrix` through
-:func:`klayout_tools.extract_parasitics._resistance_graph_report`. The opt-in
+:func:`klayout_tools.extract_graph_ports.resistance_graph_report`. The opt-in
 ``resistance_graph`` output is additive -- no default output or JSON field changes.
 
 **Model (3.D2 steps 3-7).**
