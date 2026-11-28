@@ -53,7 +53,7 @@ _GENUINE_ABORT_LOG = "Error in netlist line no. 12:\nUndefined parameter [expr]\
 
 
 def test_benign_meas_substitute_in_completed_run_classifies_clean():
-    assert sim._classify_diagnostics(_BENIGN_LOG) == []
+    assert sim.classify_diagnostics(_BENIGN_LOG) == []
 
 
 def test_client_fatal_log_diagnostic_is_none_for_benign_log():
@@ -91,7 +91,7 @@ def test_client_fatal_log_diagnostic_genuine_abort_is_unchanged():
     ],
 )
 def test_netlist_line_error_variants_stay_fatal(log_text):
-    (diag,) = sim._classify_diagnostics(log_text)
+    (diag,) = sim.classify_diagnostics(log_text)
     assert diag["code"] == "ngspice_fatal"
     assert diag["severity"] == "error"
 
@@ -123,7 +123,7 @@ def test_netlist_line_error_variants_stay_fatal(log_text):
     ],
 )
 def test_other_fatal_alternatives_in_a_completed_run_stay_fatal(log_text):
-    (diag,) = sim._classify_diagnostics(log_text)
+    (diag,) = sim.classify_diagnostics(log_text)
     assert diag["code"] == "ngspice_fatal"
     assert diag["severity"] == "error"
 
@@ -172,7 +172,7 @@ def test_collected_large_log_matches_runner_and_keeps_preview_bounded(tmp_path, 
     assert len(note) < sb._BATCH_ENGINE_LOG_TAIL_CHARS + 100
     assert "ngspice-47 done" not in note
     assert "Simulation interrupted" not in note
-    runner_codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    runner_codes = [d["code"] for d in sim.classify_diagnostics(log)]
     assert runner_codes == (["ngspice_fatal"] if abort else [])
     assert [d["code"] for d in corner["diagnostics"]] == ["measurement", *runner_codes]
     assert ([diagnostic["code"]] if diagnostic else []) == runner_codes
@@ -187,7 +187,7 @@ def test_late_specific_fatal_and_banner_split_at_cutoff(tmp_path):
     text += "\n" * 2048 + "Error: Could not find include file missing.spice\n"
     (tmp_path / "ngspice.log").write_text(text)
     note, found = sb._engine_log_note(str(tmp_path))
-    assert found == sim._classify_diagnostics(text)[0]
+    assert found == sim.classify_diagnostics(text)[0]
     assert found["code"] == "missing_include"
     assert "missing.spice" not in note
 

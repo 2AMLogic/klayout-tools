@@ -48,7 +48,7 @@ def test_error_on_line_message_carries_model_binding_causes():
         "Error on line 12 or its substitute:\n"
         "Unable to find definition of model foo\n"
     )
-    (diag,) = sim._classify_diagnostics(log)
+    (diag,) = sim.classify_diagnostics(log)
     assert diag["code"] == "ngspice_fatal"
     assert diag["message"].startswith("Error on line 12")
     assert (
@@ -59,7 +59,7 @@ def test_error_on_line_message_carries_model_binding_causes():
 
 
 def test_error_on_line_without_cause_is_unchanged():
-    (diag,) = sim._classify_diagnostics("Error on line 42 or its substitute:\n")
+    (diag,) = sim.classify_diagnostics("Error on line 42 or its substitute:\n")
     assert diag["message"] == "Error on line 42 or its substitute:"
 
 
@@ -73,7 +73,7 @@ def test_error_on_line_message_carries_the_echoed_card_and_cause():
         "  could not find a valid modelname\n"
         "Simulation interrupted due to error!\n"
     )
-    (diag,) = sim._classify_diagnostics(log)
+    (diag,) = sim.classify_diagnostics(log)
     assert diag["code"] == "ngspice_fatal"
     message = diag["message"]
     assert message.startswith("Error on line 1204")
@@ -99,7 +99,7 @@ def test_error_on_line_context_is_bounded_and_excludes_following_blocks():
         "  m.x2 d g s b nfet w=1u l=0.15u\n"
         "  another cause\n"
     )
-    (diag,) = sim._classify_diagnostics(log)
+    (diag,) = sim.classify_diagnostics(log)
     message = diag["message"]
     assert card[:200] in message
     assert "could not find a valid modelname" in message
@@ -113,7 +113,7 @@ def test_error_on_line_prioritizes_card_and_cause_over_startup_warnings(warnings
     cause = "could not find a valid modelname"
     lines = [f"Warning: startup {n}" for n in range(warnings)]
     lines.extend(["Error on line 5 or its substitute:", card, cause])
-    (diag,) = sim._classify_diagnostics("\n".join(lines))
+    (diag,) = sim.classify_diagnostics("\n".join(lines))
     assert diag["message"].endswith(f"[cause: {card[:200]} | {cause}]")
 
 
@@ -129,6 +129,6 @@ def test_error_on_line_prioritizes_card_and_cause_over_startup_warnings(warnings
 def test_error_on_line_does_not_borrow_a_later_error(continuation, boundary):
     header = "Error on line 5 : m.x1 d g s b nfet w=1u l=0.15u"
     log = "\n".join([header, continuation, boundary, "unrelated cause"])
-    (diag,) = sim._classify_diagnostics(log)
+    (diag,) = sim.classify_diagnostics(log)
     expected = f"{header} [cause: {continuation}]" if continuation else header
     assert diag["message"] == expected

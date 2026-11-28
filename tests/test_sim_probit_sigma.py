@@ -141,7 +141,7 @@ def test_an_unevaluable_corner_prevents_grid_credit(change, reason):
     coverage = sim._build_coverage(
         [{"name": "lo"}, {"name": "hi"}], corners, grid_stats=[entry]
     )
-    graded = sim._grade_corners(corners, [entry], coverage)
+    graded = sim.grade_corners(corners, [entry], coverage)
     assert graded["status"] == ("error" if change == "error" else "inconclusive")
     assert graded["inconclusive"] == int(change == "diagnostic")
     assert {

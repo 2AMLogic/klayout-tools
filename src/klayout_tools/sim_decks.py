@@ -84,6 +84,7 @@ from typing import Any
 
 from . import (
     _provenance,
+    ngspice_build,
     remote_transport,
     sim_batch,
     sim_batch_async,
@@ -857,11 +858,7 @@ def run_deck_unit(
     for anything the *engine* did -- only evidence, statuses, and
     diagnostics.
     """
-    from .sim import (
-        _extract_engine_version,
-        _probe_engine_version,
-        _write_spiceinit,
-    )
+    from .sim import _probe_engine_version, _write_spiceinit
 
     shutil.rmtree(unit_dir, ignore_errors=True)
     os.makedirs(unit_dir, exist_ok=True)
@@ -906,7 +903,7 @@ def run_deck_unit(
     # `ngspice -b <deck>` prints no version banner, so the stdout extraction
     # finds nothing; ask the binary itself (issue #4543). A unit whose engine
     # never spawned has no engine to attribute and keeps `null`.
-    engine_version = _extract_engine_version(
+    engine_version = ngspice_build.engine_version(
         spawn.stdout.decode("utf-8", errors="replace")
     )
     if engine_version is None and spawn.exit_code is not None:
@@ -1171,10 +1168,10 @@ _ENGINE_FAILURE_TAIL_CHARS = 1500
 
 def _engine_failure_diagnostics(spawn: _EngineSpawn) -> list[dict[str, str]]:
     """Evidence for a non-zero engine exit (issue #4603): the ngspice
-    deck-abort diagnostics ``_classify_diagnostics`` finds in the captured
+    deck-abort diagnostics ``classify_diagnostics`` finds in the captured
     streams, else a bounded tail of stderr (then stdout) so the cause is
     never only in ``stderr.bin``. Evidence only -- grading is unchanged."""
-    from .sim import _NGSPICE_FATAL_CODES, _classify_diagnostics
+    from .sim import _NGSPICE_FATAL_CODES, classify_diagnostics
 
     def decode(payload: bytes) -> str:
         return payload[:_ENGINE_FAILURE_HEAD_BYTES].decode("utf-8", errors="replace")
@@ -1183,7 +1180,7 @@ def _engine_failure_diagnostics(spawn: _EngineSpawn) -> list[dict[str, str]]:
     combined = f"{stderr_text}\n{stdout_text}"
     fatal = [
         d
-        for d in _classify_diagnostics(combined)
+        for d in classify_diagnostics(combined)
         if d.get("code") in _NGSPICE_FATAL_CODES
     ]
     if fatal:

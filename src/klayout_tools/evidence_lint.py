@@ -228,7 +228,7 @@ def _rederive_status(result: Mapping[str, Any]) -> str | None:
     from . import sim  # heavy import, only needed here
 
     try:
-        return sim._grade_corners(corners, measurements, dict(coverage))["status"]
+        return sim.grade_corners(corners, measurements, dict(coverage))["status"]
     except (KeyError, TypeError):
         return None
 

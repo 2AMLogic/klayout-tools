@@ -2135,11 +2135,11 @@ def _fatal_log_diagnostic(
     Return None if the log contains no classified fatal diagnostic."""
     from .sim import (
         _NGSPICE_FATAL_CODES,
-        _classify_diagnostics,
         _mark_analysis_not_started,
+        classify_diagnostics,
     )
 
-    for diagnostic in _classify_diagnostics(log_text):
+    for diagnostic in classify_diagnostics(log_text):
         if diagnostic.get("code") in _NGSPICE_FATAL_CODES:
             _mark_analysis_not_started([diagnostic], log_text)
             return with_runner_hints(

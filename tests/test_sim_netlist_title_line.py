@@ -104,7 +104,7 @@ def test_title_line_is_the_only_cause_for_every_failing_shape(
     abort."""
     netlist = _write_netlist(tmp_path, title)
 
-    diagnostics = sim._classify_diagnostics(log_text, netlist)
+    diagnostics = sim.classify_diagnostics(log_text, netlist)
 
     assert [d["code"] for d in diagnostics] == ["netlist_title_line"]
     (cause,) = diagnostics
@@ -130,10 +130,10 @@ def test_model_bin_range_reading_of_the_same_abort_is_suppressed(tmp_path):
     netlist = _write_netlist(tmp_path, "my transient bench")
 
     # Without the netlist to compare against, this is the misleading reading.
-    assert [d["code"] for d in sim._classify_diagnostics(log_text)] == [
+    assert [d["code"] for d in sim.classify_diagnostics(log_text)] == [
         "model_bin_range"
     ]
-    assert [d["code"] for d in sim._classify_diagnostics(log_text, netlist)] == [
+    assert [d["code"] for d in sim.classify_diagnostics(log_text, netlist)] == [
         "netlist_title_line"
     ]
 
@@ -147,7 +147,7 @@ def test_unsupported_model_level_still_suppresses_model_bin_range(tmp_path):
     )
     netlist = _write_netlist(tmp_path, ".model nfet nmos level=72")
 
-    codes = [d["code"] for d in sim._classify_diagnostics(log_text, netlist)]
+    codes = [d["code"] for d in sim.classify_diagnostics(log_text, netlist)]
 
     assert codes == ["unsupported_model_level"]
 
@@ -158,7 +158,7 @@ def test_line_number_is_the_titles_own_line_not_line_one(tmp_path):
     netlist = _write_netlist(tmp_path, "my transient bench", lead="\n\n")
     log_text = _LOG_NO_VALID_MODELNAME.replace("on line 1", "on line 3")
 
-    (cause,) = sim._classify_diagnostics(log_text, netlist)
+    (cause,) = sim.classify_diagnostics(log_text, netlist)
 
     assert cause["code"] == "netlist_title_line"
     assert f"{netlist}:3" in cause["message"]
@@ -175,7 +175,7 @@ def test_echo_matches_through_ngspices_whitespace_folding(tmp_path):
         "could not find a valid modelname\n"
     )
 
-    (cause,) = sim._classify_diagnostics(log_text, netlist)
+    (cause,) = sim.classify_diagnostics(log_text, netlist)
 
     assert cause["code"] == "netlist_title_line"
 
@@ -190,9 +190,9 @@ def test_abort_on_another_line_is_classified_exactly_as_before(tmp_path):
     keeps its `ngspice_fatal` classification, message and all."""
     netlist = _write_netlist(tmp_path, "my transient bench")
 
-    with_netlist = sim._classify_diagnostics(_OTHER_LINE_ABORT, netlist)
+    with_netlist = sim.classify_diagnostics(_OTHER_LINE_ABORT, netlist)
 
-    assert with_netlist == sim._classify_diagnostics(_OTHER_LINE_ABORT)
+    assert with_netlist == sim.classify_diagnostics(_OTHER_LINE_ABORT)
     assert [d["code"] for d in with_netlist] == ["ngspice_fatal"]
 
 
@@ -214,7 +214,7 @@ def test_comment_dot_and_continuation_first_lines_never_fire(tmp_path, first_lin
         "Unable to find definition of model \n"
     )
 
-    codes = [d["code"] for d in sim._classify_diagnostics(log_text, netlist)]
+    codes = [d["code"] for d in sim.classify_diagnostics(log_text, netlist)]
 
     assert "netlist_title_line" not in codes
     assert codes == ["ngspice_fatal"]
@@ -227,7 +227,7 @@ def test_unreadable_netlist_falls_through_to_todays_codes(netlist_path):
     result exactly as it was -- the check never raises."""
     codes = [
         d["code"]
-        for d in sim._classify_diagnostics(_LOG_NO_VALID_MODELNAME, netlist_path)
+        for d in sim.classify_diagnostics(_LOG_NO_VALID_MODELNAME, netlist_path)
     ]
 
     assert codes == ["ngspice_fatal"]
@@ -256,7 +256,7 @@ def test_first_line_that_is_a_valid_card_is_indistinguishable(tmp_path):
     netlist = _write_netlist(tmp_path, "r2 vdd 0 1k")
     quiet_log = "Circuit: * top\nNo. of Data Rows : 1\n"
 
-    assert sim._classify_diagnostics(quiet_log, netlist) == []
+    assert sim.classify_diagnostics(quiet_log, netlist) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -274,7 +274,7 @@ def test_title_line_abort_marks_analysis_not_started(tmp_path):
     """Being in `_NGSPICE_FATAL_CODES` is what gives the cause
     `analysis_started: false` and collapses the measurement cascade."""
     netlist = _write_netlist(tmp_path, "my transient bench")
-    diagnostics = sim._classify_diagnostics(_LOG_NO_VALID_MODELNAME, netlist)
+    diagnostics = sim.classify_diagnostics(_LOG_NO_VALID_MODELNAME, netlist)
 
     assert sim._mark_analysis_not_started(diagnostics, _LOG_NO_VALID_MODELNAME)
 
