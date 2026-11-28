@@ -9,7 +9,7 @@ netlist, hierarchically ``force`` its ``D`` pin to the requested value
 (``x`` or one seeded-random bit), let the testbench's own clock take one
 full cycle so the flop captures it, then release. The flop list is derived
 from the netlist and the PDK cell models
-(:func:`klayout_tools.reset_coverage.sequential_elements`), never hand-built.
+(:func:`klayout_tools.verilog_cell_models.sequential_elements`), never hand-built.
 
 Only ``D`` is forced -- never the clock or an asynchronous control. Releasing
 a force on a net discards what the testbench deposited there meanwhile, and a
