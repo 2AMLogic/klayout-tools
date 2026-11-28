@@ -46,7 +46,7 @@ def _with_max_concurrent_override(
     }
 
 
-def _with_pdk_root_override(
+def with_pdk_root_override(
     request: dict[str, Any], pdk_root: str | None
 ) -> dict[str, Any]:
     """Fold the ``--pdk-root`` CLI override into ``request.models.pdk_root``

@@ -80,7 +80,7 @@ class CornerPoint:
       its *own* box, the same way it resolves ``models.lib`` itself, so
       this host's absolute paths must never be baked in here.
     - ``process_section_libs_resolved`` holds the absolute paths
-      :func:`_resolve_corner_section_libs` settled on for *this* host. It is
+      :func:`resolve_corner_section_libs` settled on for *this* host. It is
       deliberately **not** serialised -- it is a local execution detail, not
       part of the point's identity.
     """
@@ -152,7 +152,7 @@ class CornerPoint:
         """The library path the ``.lib`` card for ``process_sections[index]``
         must name: this bundle's per-section override when it declared one
         for that section (issue #2522 -- the absolute path resolved by
-        :func:`_resolve_corner_section_libs` when this run resolved it,
+        :func:`resolve_corner_section_libs` when this run resolved it,
         otherwise the ref exactly as declared, so a direct caller that never
         resolved still names what it asked for rather than silently binding
         ``models.lib``), else the request's own ``models.lib``.

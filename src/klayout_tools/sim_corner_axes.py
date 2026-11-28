@@ -184,7 +184,7 @@ def _parse_process_section(section: Any) -> tuple[str, str | None]:
     (``None`` library ref -- today's behaviour); an object
     ``{"lib": str, "section": str}`` names the model library that section is
     read from instead (issue #2522). The ref is returned exactly as declared;
-    :func:`_resolve_corner_section_libs` is what resolves and
+    :func:`resolve_corner_section_libs` is what resolves and
     existence-checks it.
     """
     if isinstance(section, str) and section:

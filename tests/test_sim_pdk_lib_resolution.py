@@ -30,7 +30,7 @@ def test_resolve_models_lib_via_flat_pdk_install(tmp_path):
     lib_path = lib_dir / "sg13g2.lib.spice"
     lib_path.write_text(".lib tt\n.endl tt\n")
 
-    resolved = sim._resolve_models_lib(
+    resolved = sim.resolve_models_lib(
         {
             "pdk": "sg13g2",
             "pdk_root": str(install_root),
@@ -86,7 +86,7 @@ def test_resolve_corner_section_libs_joins_relative_refs_against_flat_pdk_varian
         },
         [],
     )
-    libs = sim._resolve_corner_section_libs(
+    libs = sim.resolve_corner_section_libs(
         [point],
         {"pdk": "sg13g2", "pdk_root": str(install_root)},
         str(tmp_path),

@@ -1961,7 +1961,7 @@ def _prepare_dut_swapped_request(
     A ``models`` block that *does* carry ``pdk``/``pdk_root`` is copied
     through **unmodified** (issue #1395): in that shape a relative ``lib``
     is PDK-variant-relative, not request-dir-relative -- see
-    :func:`~klayout_tools.sim._resolve_models_lib`, the resolution both a
+    :func:`~klayout_tools.sim.resolve_models_lib`, the resolution both a
     standalone ``klt sim`` run and this command's own schematic-side leg
     use. Eagerly joining it against ``request_dir`` here produced a bogus
     ``<request-dir>/libs.tech/.../sky130.lib.spice`` absolute path (which,

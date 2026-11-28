@@ -2307,7 +2307,7 @@ def _prepared_models(tmp_path: Path, models: dict) -> tuple[dict, Path, Path]:
 def test_prepare_extracted_request_pdk_relative_lib_resolves_via_pdk(tmp_path):
     """Issue #1395: a `{"pdk": ..., "lib": "<relative>"}` models block must
     keep resolving against the *PDK-variant* directory on the extracted-side
-    leg, exactly as `sim._resolve_models_lib` does for the schematic-side
+    leg, exactly as `sim.resolve_models_lib` does for the schematic-side
     leg. Before the fix, `_prepare_extracted_request` unconditionally joined
     the relative `lib` against the *request file's* directory, producing
     `<request-dir>/libs.tech/combined/sky130.lib.spice` and a
@@ -2324,10 +2324,10 @@ def test_prepare_extracted_request_pdk_relative_lib_resolves_via_pdk(tmp_path):
 
     # The extracted-side copy must resolve to the same library the original
     # request does -- not to a request-dir-relative join.
-    assert sim._resolve_models_lib(
+    assert sim.resolve_models_lib(
         extracted_models, request_dir=str(work_dir)
-    ) == sim._resolve_models_lib(models, request_dir=str(request_dir))
-    assert sim._resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
+    ) == sim.resolve_models_lib(models, request_dir=str(request_dir))
+    assert sim.resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
         lib_path
     )
     assert str(request_dir) not in json.dumps(extracted_models)
@@ -2351,7 +2351,7 @@ def test_prepare_extracted_request_literal_relative_lib_still_resolved_eagerly(
     lib_path.write_text(".lib tt\n.endl tt\n")
 
     assert extracted_models["lib"] == str(lib_path)
-    assert sim._resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
+    assert sim.resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
         lib_path
     )
 
@@ -2369,14 +2369,14 @@ def test_prepare_extracted_request_env_var_lib_left_expandable(tmp_path, monkeyp
         tmp_path, {"lib": "$PDK_ROOT/sky130A/libs.tech/combined/sky130.lib.spice"}
     )
 
-    assert sim._resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
+    assert sim.resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
         lib_path
     )
 
 
 def test_prepare_extracted_request_absolute_lib_with_pdk_left_untouched(tmp_path):
     """An already-absolute `lib` alongside `models.pdk` must survive
-    verbatim (`_resolve_models_lib`'s own `os.path.isabs` check)."""
+    verbatim (`resolve_models_lib`'s own `os.path.isabs` check)."""
     install_root = tmp_path / "install"
     lib_path = _make_fake_pdk_install(install_root)
     models = {"pdk": "sky130A", "pdk_root": str(install_root), "lib": str(lib_path)}
@@ -2384,7 +2384,7 @@ def test_prepare_extracted_request_absolute_lib_with_pdk_left_untouched(tmp_path
     extracted_models, _request_dir, work_dir = _prepared_models(tmp_path, models)
 
     assert extracted_models["lib"] == str(lib_path)
-    assert sim._resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
+    assert sim.resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
         lib_path
     )
 
