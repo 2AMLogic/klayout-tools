@@ -1113,7 +1113,7 @@ def test_resume_reuses_a_completed_step_corner(tmp_path, monkeypatch):
     path = _write_request(tmp_path, request)
     artifacts = tmp_path / "artifacts"
     analysis, specs = _resolve(request)
-    points = sim._expand_corners(request["corners"], [])
+    points = sim.expand_corners(request["corners"], [])
     fingerprint = sim._checkpoint_fingerprint(
         netlist_path=str(body),
         models_lib=None,

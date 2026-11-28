@@ -44,7 +44,7 @@ def _rule(match: dict, args: str) -> dict:
 
 
 def _resolve(rules, corners=None, analysis=None, engine="ngspice"):
-    points = sim._expand_corners(corners or _CORNERS, [])
+    points = sim.expand_corners(corners or _CORNERS, [])
     validated = sim._validate_analysis_overrides(rules, analysis or _TRAN, engine)
     sim._apply_nodeset_rules(
         points, validated, label=sim._AO_LABEL, attr="analysis_args"
@@ -68,7 +68,7 @@ def test_rules_select_per_point_and_unmatched_keep_base_args():
         "1n 1u",
     ]
     assert [p.corner_id for p in points] == [
-        p.corner_id for p in sim._expand_corners(_CORNERS, [])
+        p.corner_id for p in sim.expand_corners(_CORNERS, [])
     ]
 
 
@@ -154,7 +154,7 @@ def test_worker_that_drops_the_window_fails_with_its_own_code():
 
 
 def test_nodeset_echo_check_still_handles_dict_maps():
-    points = sim._expand_corners({}, [])
+    points = sim.expand_corners({}, [])
     points[0].nodeset = {"a": 1.0}
     sim._require_nodeset_echo(points, [{"nodeset": {"a": 1.0}}], backend="remote")
 

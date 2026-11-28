@@ -19,7 +19,7 @@ def _legacy_corner(point: sim.CornerPoint) -> dict:
 
 def test_length_mismatch_error_says_zipped_and_lists_lengths():
     with pytest.raises(sim.SimError) as raised:
-        sim._expand_corners({"params": {"r": [1], "c": [1, 2, 3]}}, [])
+        sim.expand_corners({"params": {"r": [1], "c": [1, 2, 3]}}, [])
     message = str(raised.value)
     assert "zipped by index" in message
     assert "r=1" in message and "c=3" in message
@@ -27,7 +27,7 @@ def test_length_mismatch_error_says_zipped_and_lists_lengths():
 
 
 def test_echo_error_names_both_causes_and_job_identity():
-    points = sim._expand_corners({"params": {"r": [1, 2]}}, [])
+    points = sim.expand_corners({"params": {"r": [1, 2]}}, [])
     env = {"fleet": [{"job_id": "job-a"}, {"job_id": "job-b"}]}
     with pytest.raises(sim.SimError) as raised:
         sim._require_params_echo(points, [_legacy_corner(p) for p in points], env=env)

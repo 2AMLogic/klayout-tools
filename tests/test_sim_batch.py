@@ -7026,7 +7026,7 @@ def test_batch_and_remote_requests_carry_supply_waveforms(tmp_path):
     whole = sim_remote._build_remote_request(request, **kwargs)
     assert whole["corners"]["supply_waveforms"] == ["vdd"]
 
-    points = sim._expand_corners(request["corners"], [])
+    points = sim.expand_corners(request["corners"], [])
     shard = sim_remote._build_remote_request(request, explicit_points=points, **kwargs)
     assert [p["supply_waveforms"] for p in shard["_explicit_points"]] == [["vdd"]] * 2
     back = sim._corner_points_from_wire(shard["_explicit_points"])

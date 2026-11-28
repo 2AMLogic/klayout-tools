@@ -117,7 +117,6 @@ from .sim import (
     SimError,
     _classify_diagnostics,
     _corner_lib_lines,
-    _expand_corners,
     _extract_engine_version,
     _needs_models_lib,
     _resolve_corner_section_libs,
@@ -126,6 +125,7 @@ from .sim import (
     _resolve_param_file,
     _scale_supply_waveforms,
     _supply_alter_lines,
+    expand_corners,
 )
 from .sim_case_names import validate_request_measurements
 from .sim_request_overrides import _with_pdk_root_override
@@ -1470,7 +1470,7 @@ def run_op_sanity(
 
     corners_spec = request.get("corners") or {}
     try:
-        points = _expand_corners(corners_spec, request.get("exclude") or [])
+        points = expand_corners(corners_spec, request.get("exclude") or [])
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
     if not points:

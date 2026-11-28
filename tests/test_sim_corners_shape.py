@@ -12,11 +12,15 @@ def test_expand_corners_non_object_raises_sim_error(bad):
     with pytest.raises(
         sim.SimError, match=r"corners must be an object.*corners\.units"
     ):
-        sim._expand_corners(bad, [])
+        sim.expand_corners(bad, [])
 
 
 def test_expand_corners_empty_object_unchanged():
-    assert len(sim._expand_corners({}, [])) == 1
+    assert len(sim.expand_corners({}, [])) == 1
+
+
+def test_expand_corners_public_on_sim_is_the_sim_corners_function():
+    assert sim.expand_corners is sim_corners.expand_corners
 
 
 @pytest.mark.parametrize(

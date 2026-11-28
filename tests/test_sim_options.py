@@ -23,7 +23,7 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 
 def _expand(corners: dict, exclude: list | None = None) -> list[sim.CornerPoint]:
-    return sim._expand_corners(corners, exclude or [])
+    return sim.expand_corners(corners, exclude or [])
 
 
 # --------------------------------------------------------------------------- #

@@ -119,7 +119,7 @@ def _refuses(spec: dict, corners: dict, message: str, **request) -> None:
     with pytest.raises(SimError, match=message):
         sim_derive.validate_grid(
             with_source(spec),
-            sim._expand_corners(corners, []),
+            sim.expand_corners(corners, []),
             {"corners": corners, **request},
         )
 
@@ -158,7 +158,7 @@ def test_bare_supply_axis_needs_a_single_rail():
     _refuses(derive(axis="supply_v"), corners, "several supply rails")
     rail = derive(axis="supply_v.vdd", group_by=["params.code"])
     sim_derive.validate_grid(
-        with_source(rail), sim._expand_corners(corners, []), {"corners": corners}
+        with_source(rail), sim.expand_corners(corners, []), {"corners": corners}
     )
 
 
@@ -172,11 +172,11 @@ def test_from_must_name_a_per_corner_measurement(source):
     ]
     with pytest.raises(SimError, match=f"derive.from names {source!r}"):
         sim_derive.validate_grid(
-            specs, sim._expand_corners(corners, []), {"corners": corners}
+            specs, sim.expand_corners(corners, []), {"corners": corners}
         )
     specs[2]["derive"]["from"] = "vout"
     sim_derive.validate_grid(
-        specs, sim._expand_corners(corners, []), {"corners": corners}
+        specs, sim.expand_corners(corners, []), {"corners": corners}
     )
 
 
@@ -188,7 +188,7 @@ def test_a_request_without_derive_is_never_gated():
 def test_expected_axis_values_come_from_the_grid_before_exclude():
     spec = derive()
     corners = {"params": {"code": [0, 128, 255]}}
-    points = sim._expand_corners(corners, [{"params": {"code": 128}}])
+    points = sim.expand_corners(corners, [{"params": {"code": 128}}])
     assert [p.params["code"] for p in points] == [0, 255]
     sim_derive.validate_grid(with_source(spec), points, {"corners": corners})
     assert spec[sim_derive.EXPECTED_KEY] == [0, 128, 255]
@@ -368,7 +368,7 @@ def test_a_derive_entry_leaves_the_checkpoint_fingerprint_unchanged():
         netlist_path="x.spice",
         models_lib=None,
         analysis={"kind": "op", "args": ""},
-        corner_points=sim._expand_corners(CORNERS, []),
+        corner_points=sim.expand_corners(CORNERS, []),
         timeout_s=30,
         engine="ngspice",
     )

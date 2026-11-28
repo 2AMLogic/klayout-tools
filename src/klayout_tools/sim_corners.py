@@ -1,4 +1,4 @@
-"""Corner-matrix expansion: the JSON wire format, ``_expand_corners``, nodesets.
+"""Corner-matrix expansion: the JSON wire format, ``expand_corners``, nodesets.
 
 Moved verbatim out of ``sim.py`` (issue #5428) so that module stays under its
 per-file size ratchet. Holds the :class:`~.sim_corner_point.CornerPoint`
@@ -208,7 +208,7 @@ def _refuse_duplicate_corner_id(
     )
 
 
-def _expand_corners(
+def expand_corners(
     corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
 ) -> list[CornerPoint]:
     """Expand the declared axes into the deterministic, odometer-style corner list.

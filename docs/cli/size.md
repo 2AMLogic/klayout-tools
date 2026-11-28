@@ -349,7 +349,7 @@ choice of width holds it constant across a PVT matrix. So the top-level
 ```
 
 - `corners.declared` -- every expanded corner point, in the same
-  deterministic (process-outer, temperature-inner) order `_expand_corners`
+  deterministic (process-outer, temperature-inner) order `expand_corners`
   produces, echoed regardless of `status`.
 - `corners.sizing` -- the one declared point named by `corners.sizing`
   (request field) or its default (first expanded point) -- same shape as one

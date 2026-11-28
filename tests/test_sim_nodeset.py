@@ -38,7 +38,7 @@ _DIVIDER = "V1 in 0 1\nR1 in out 1k\nR2 out 0 1k\n"
 
 
 def _points(corners: dict, exclude: list | None = None) -> list[sim.CornerPoint]:
-    return sim._expand_corners(corners, exclude or [])
+    return sim.expand_corners(corners, exclude or [])
 
 
 def _rule(match: dict, **values: float) -> dict:

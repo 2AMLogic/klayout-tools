@@ -1074,7 +1074,7 @@ def test_resolve_models_lib_missing_file_raises(tmp_path):
 
 
 def test_expand_corners_defaults_to_single_point():
-    points = sim._expand_corners({}, [])
+    points = sim.expand_corners({}, [])
 
     assert len(points) == 1
     (point,) = points
@@ -1085,7 +1085,7 @@ def test_expand_corners_defaults_to_single_point():
 
 
 def test_expand_corners_cross_product_order():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {
             "process": ["tt", "ss"],
             "supply_v": {"vdd": [1.62, 1.98]},
@@ -1109,7 +1109,7 @@ def test_expand_corners_cross_product_order():
 
 
 def test_expand_corners_exclude_partial_match():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {"process": ["tt", "ss"], "temperature_c": [-40, 125]},
         [{"process": "ss", "temperature_c": -40}],
     )
@@ -1120,7 +1120,7 @@ def test_expand_corners_exclude_partial_match():
 
 
 def test_expand_corners_supply_rails_move_together():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {"supply_v": {"vdd": [1.62, 1.98], "vdda": [1.7, 2.0]}}, []
     )
 
@@ -1131,7 +1131,7 @@ def test_expand_corners_supply_rails_move_together():
 
 def test_expand_corners_mismatched_supply_lengths_raises():
     with pytest.raises(sim.SimError, match="same length"):
-        sim._expand_corners({"supply_v": {"vdd": [1.62, 1.98], "vdda": [1.7]}}, [])
+        sim.expand_corners({"supply_v": {"vdd": [1.62, 1.98], "vdda": [1.7]}}, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -1143,7 +1143,7 @@ def test_expand_corners_bare_string_process_is_unchanged():
     """Regression: a bare-string `corners.process` entry keeps producing a
     `CornerPoint` with `process_sections=None` -- the exact shape
     `_write_corner_deck` used before the bundle form existed."""
-    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    points = sim.expand_corners({"process": ["tt", "ss"]}, [])
 
     assert [p.process for p in points] == ["tt", "ss"]
     assert [p.process_sections for p in points] == [None, None]
@@ -1151,7 +1151,7 @@ def test_expand_corners_bare_string_process_is_unchanged():
 
 
 def test_expand_corners_bundle_process_entry():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {
             "process": [
                 "tt",
@@ -1191,8 +1191,8 @@ def test_expand_corners_bundle_single_section_matches_bare_string_shape():
     (see the issue's edge-case list) -- same `process`, same `corner_id`,
     just routed through the loop path in `_write_corner_deck` instead of the
     single-line path."""
-    (bare,) = sim._expand_corners({"process": ["tt"]}, [])
-    (bundle,) = sim._expand_corners(
+    (bare,) = sim.expand_corners({"process": ["tt"]}, [])
+    (bundle,) = sim.expand_corners(
         {"process": [{"name": "tt", "sections": ["tt"]}]}, []
     )
 
@@ -1216,14 +1216,14 @@ def test_expand_corners_bundle_single_section_matches_bare_string_shape():
 )
 def test_expand_corners_bundle_process_entry_validation(entry, match):
     with pytest.raises(sim.SimError, match=match):
-        sim._expand_corners({"process": [entry]}, [])
+        sim.expand_corners({"process": [entry]}, [])
 
 
 def test_expand_corners_exclude_matches_bundle_corner_by_name():
     """`corners.exclude[].process` compares against the bundle's `name`, not
     the raw `{"name", "sections"}` object -- an object `!=` a bare string
     would silently never match without this."""
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {
             "process": [
                 "tt",
@@ -1666,7 +1666,7 @@ def test_validate_monte_carlo_spec_accepts_every_vary_value():
 
 
 def test_expand_monte_carlo_produces_n_samples_per_corner():
-    corner_points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    corner_points = sim.expand_corners({"process": ["tt", "ss"]}, [])
     sampled, info = sim._expand_monte_carlo(
         corner_points, {"n": 3, "seed": 1, "vary": "both"}
     )
@@ -1695,7 +1695,7 @@ def _mc_by_corner(sampled):
 def test_seed_scope_default_is_bit_identical_to_pre_2899_seeds():
     # Concrete integers computed from the original positional derivation
     # (seed, axis, corner_index, sample_index-or-"fixed"); must never change.
-    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    points = sim.expand_corners({"process": ["tt", "ss"]}, [])
     for mc in (
         {"n": 2, "seed": 42, "vary": "mismatch"},
         {"n": 2, "seed": 42, "vary": "mismatch", "seed_scope": "per_corner"},
@@ -1726,7 +1726,7 @@ def test_seed_scope_rejects_unknown_value():
 
 
 def test_seed_scope_shared_pairs_samples_across_corners():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {"process": ["tt", "ss"], "temperature_c": [-40, 125]}, []
     )
     sampled, info = sim._expand_monte_carlo(
@@ -1747,7 +1747,7 @@ def test_seed_scope_shared_pairs_samples_across_corners():
 )
 @pytest.mark.parametrize("scope", ["per_corner", "shared", "point"])
 def test_seed_scope_keeps_negative_control(scope, vary, pinned):
-    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    points = sim.expand_corners({"process": ["tt", "ss"]}, [])
     sampled, _ = sim._expand_monte_carlo(
         points, {"n": 4, "seed": 3, "vary": vary, "seed_scope": scope}
     )
@@ -1763,7 +1763,7 @@ def test_seed_scope_point_is_split_and_order_stable():
         "supply_v": {"vdd": [1.62, 1.98]},
     }
     mc = {"n": 3, "seed": 45, "vary": "mismatch", "seed_scope": "point"}
-    full_points = sim._expand_corners(axes, [])
+    full_points = sim.expand_corners(axes, [])
     full, _ = sim._expand_monte_carlo(full_points, mc)
     full_by = _mc_by_corner(full)
     assert len(full_by) == 8
@@ -1781,7 +1781,7 @@ def test_seed_scope_point_is_split_and_order_stable():
 def test_checkpoint_fingerprint_changes_with_seed_scope(tmp_path):
     netlist = tmp_path / "n.cir"
     netlist.write_text("* x\n.end\n")
-    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    points = sim.expand_corners({"process": ["tt", "ss"]}, [])
 
     def fp(scope):
         sampled, _ = sim._expand_monte_carlo(
@@ -1804,7 +1804,7 @@ def test_checkpoint_fingerprint_changes_with_seed_scope(tmp_path):
 def test_points_to_push_resolves_non_default_scope_client_side():
     from klayout_tools import sim_remote
 
-    points = sim._expand_corners({"process": ["tt"]}, [])
+    points = sim.expand_corners({"process": ["tt"]}, [])
     base = {"monte_carlo": {"n": 1, "seed": 1, "vary": "both"}}
     assert sim_remote._points_to_push(base, points, None) is None
     shared = {"monte_carlo": {**base["monte_carlo"], "seed_scope": "shared"}}
@@ -1823,7 +1823,7 @@ def _mc_rndseeds(sampled):
 
 
 def test_seed_mode_derived_is_bit_identical_to_default():
-    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    points = sim.expand_corners({"process": ["tt", "ss"]}, [])
     mc = {"n": 2, "seed": 42, "vary": "mismatch"}
     base, base_info = sim._expand_monte_carlo(points, mc)
     derived, info = sim._expand_monte_carlo(points, {**mc, "seed_mode": "derived"})
@@ -1838,7 +1838,7 @@ def test_seed_mode_derived_is_bit_identical_to_default():
 
 @pytest.mark.parametrize("scope", ["per_corner", "shared", "point"])
 def test_seed_mode_sequential_is_seed_plus_index_at_every_corner(scope):
-    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    points = sim.expand_corners({"process": ["tt", "ss"]}, [])
     mc = {"n": 3, "seed": 20260909, "vary": "mismatch", "seed_scope": scope}
     sampled, info = sim._expand_monte_carlo(points, {**mc, "seed_mode": "sequential"})
     assert _mc_rndseeds(sampled) == [20260909, 20260910, 20260911] * 2
@@ -1852,7 +1852,7 @@ def test_seed_mode_sequential_is_seed_plus_index_at_every_corner(scope):
 
 
 def test_seed_mode_sequential_keeps_negative_control():
-    points = sim._expand_corners({"process": ["tt"]}, [])
+    points = sim.expand_corners({"process": ["tt"]}, [])
     sampled, _ = sim._expand_monte_carlo(
         points, {"n": 4, "seed": 3, "vary": "process", "seed_mode": "sequential"}
     )
@@ -1861,7 +1861,7 @@ def test_seed_mode_sequential_keeps_negative_control():
 
 
 def test_seed_mode_edge_cases():
-    points = sim._expand_corners({"process": ["tt"]}, [])
+    points = sim.expand_corners({"process": ["tt"]}, [])
     for seed, n in ((0, 1), (0, 3)):
         sampled, _ = sim._expand_monte_carlo(
             points, {"n": n, "seed": seed, "vary": "both", "seed_mode": "sequential"}
@@ -1889,7 +1889,7 @@ def test_seed_mode_sequential_rejects_out_of_range(seed, n):
 def test_checkpoint_fingerprint_changes_with_seed_mode(tmp_path):
     netlist = tmp_path / "n.cir"
     netlist.write_text("* x\n.end\n")
-    points = sim._expand_corners({"process": ["tt"]}, [])
+    points = sim.expand_corners({"process": ["tt"]}, [])
 
     def fp(extra):
         sampled, _ = sim._expand_monte_carlo(
@@ -1912,7 +1912,7 @@ def test_checkpoint_fingerprint_changes_with_seed_mode(tmp_path):
 def test_points_to_push_resolves_sequential_seed_mode_client_side():
     from klayout_tools import sim_remote
 
-    points = sim._expand_corners({"process": ["tt"]}, [])
+    points = sim.expand_corners({"process": ["tt"]}, [])
     base = {"monte_carlo": {"n": 1, "seed": 1, "vary": "both"}}
     derived = {"monte_carlo": {**base["monte_carlo"], "seed_mode": "derived"}}
     assert sim_remote._points_to_push(derived, points, None) is None
@@ -1947,7 +1947,7 @@ def test_mismatch_scale_resolves_per_family_param():
 
 
 def test_mismatch_scale_default_shape_is_unchanged():
-    points = sim._expand_corners({"process": ["tt"]}, [])
+    points = sim.expand_corners({"process": ["tt"]}, [])
     sampled, info = sim._expand_monte_carlo(
         points, {"n": 2, "seed": 1, "vary": "mismatch"}
     )
@@ -1956,7 +1956,7 @@ def test_mismatch_scale_default_shape_is_unchanged():
 
 
 def test_mismatch_scale_echo_and_deck_card_follows_the_lib(tmp_path):
-    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    points = sim.expand_corners({"process": ["tt_mm"]}, [])
     sampled, info = sim._expand_monte_carlo(
         points,
         {"n": 2, "seed": 1, "vary": "mismatch"},
@@ -1975,7 +1975,7 @@ def test_mismatch_scale_echo_and_deck_card_follows_the_lib(tmp_path):
 
 
 def test_mismatch_scale_zero_deck_card_is_integral(tmp_path):
-    points = sim._expand_corners({"process": ["typical"]}, [])
+    points = sim.expand_corners({"process": ["typical"]}, [])
     sampled, _ = sim._expand_monte_carlo(
         points,
         {"n": 1, "seed": 1, "vary": "mismatch"},
@@ -1985,7 +1985,7 @@ def test_mismatch_scale_zero_deck_card_is_integral(tmp_path):
 
 
 def test_mismatch_scale_without_declaration_adds_no_deck_card(tmp_path):
-    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    points = sim.expand_corners({"process": ["tt_mm"]}, [])
     sampled, _ = sim._expand_monte_carlo(
         points, {"n": 1, "seed": 1, "vary": "mismatch"}
     )
@@ -1993,7 +1993,7 @@ def test_mismatch_scale_without_declaration_adds_no_deck_card(tmp_path):
 
 
 def test_mismatch_scale_rides_the_fleet_wire():
-    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    points = sim.expand_corners({"process": ["tt_mm"]}, [])
     sampled, _ = sim._expand_monte_carlo(
         points,
         {"n": 1, "seed": 1, "vary": "mismatch"},
@@ -2007,7 +2007,7 @@ def test_mismatch_scale_rides_the_fleet_wire():
 def test_mismatch_scale_changes_checkpoint_fingerprint(tmp_path):
     netlist = tmp_path / "n.cir"
     netlist.write_text("* x\n.end\n")
-    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    points = sim.expand_corners({"process": ["tt_mm"]}, [])
 
     def fp(scale):
         declared = {} if scale is None else {"mismatch_scale": scale}
@@ -2032,13 +2032,13 @@ def test_mismatch_scale_changes_checkpoint_fingerprint(tmp_path):
 def test_points_to_push_resolves_mismatch_scale_client_side():
     from klayout_tools import sim_remote
 
-    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    points = sim.expand_corners({"process": ["tt_mm"]}, [])
     mc = {"n": 1, "seed": 1, "vary": "mismatch", "mismatch_scale": 0}
     assert sim_remote._points_to_push({"monte_carlo": mc}, points, None) is points
 
 
 def test_expand_monte_carlo_is_reproducible_given_the_same_seed():
-    corner_points = sim._expand_corners({"process": ["tt"]}, [])
+    corner_points = sim.expand_corners({"process": ["tt"]}, [])
     mc_spec = {"n": 5, "seed": 20260801, "vary": "both"}
 
     sampled_a, _ = sim._expand_monte_carlo(corner_points, mc_spec)
@@ -2052,7 +2052,7 @@ def test_expand_monte_carlo_is_reproducible_given_the_same_seed():
 
 
 def test_expand_monte_carlo_different_seed_diverges():
-    corner_points = sim._expand_corners({}, [])
+    corner_points = sim.expand_corners({}, [])
     sampled_a, _ = sim._expand_monte_carlo(
         corner_points, {"n": 3, "seed": 1, "vary": "both"}
     )
@@ -2075,7 +2075,7 @@ def test_expand_monte_carlo_negative_control(vary, varying_key, pinned_key):
     of a corner, while the requested axis actually varies -- a broken/no-op
     sampler that always returns the same seeds for both axes (or that
     varies both regardless of `vary`) fails this test."""
-    corner_points = sim._expand_corners({}, [])
+    corner_points = sim.expand_corners({}, [])
     sampled, _ = sim._expand_monte_carlo(
         corner_points, {"n": 4, "seed": 7, "vary": vary}
     )
@@ -2088,7 +2088,7 @@ def test_expand_monte_carlo_negative_control(vary, varying_key, pinned_key):
 
 
 def test_expand_monte_carlo_both_varies_every_axis():
-    corner_points = sim._expand_corners({}, [])
+    corner_points = sim.expand_corners({}, [])
     sampled, _ = sim._expand_monte_carlo(
         corner_points, {"n": 4, "seed": 7, "vary": "both"}
     )
@@ -2101,7 +2101,7 @@ def test_expand_monte_carlo_negative_control_is_per_corner():
     # different corners still derive independent (not globally identical)
     # pinned values -- the negative control isn't a single hard-coded
     # sentinel that would mask a broken corner_index derivation.
-    corner_points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    corner_points = sim.expand_corners({"process": ["tt", "ss"]}, [])
     sampled, _ = sim._expand_monte_carlo(
         corner_points, {"n": 3, "seed": 7, "vary": "process"}
     )
@@ -3073,7 +3073,7 @@ def test_run_sim_zero_corners_via_exclude_is_not_checked_never_pass(
                 }
             ],
             # No process/supply axis declared -- the one implicit default
-            # corner's temperature is 27C (see `_expand_corners`'s
+            # corner's temperature is 27C (see `expand_corners`'s
             # docstring), so excluding it leaves zero corners.
             "exclude": [{"temperature_c": 27}],
         },
@@ -8563,7 +8563,7 @@ def test_run_sim_bundle_process_corner_writes_one_lib_per_section(
     tmp_path, monkeypatch
 ):
     """End-to-end (stubbed ngspice): a `corners.process` bundle entry flows
-    from the request through `_expand_corners` and `_write_corner_deck`
+    from the request through `expand_corners` and `_write_corner_deck`
     into the actual generated deck on disk, gf180mcu-style (one `.lib` card
     per device-family section, in declaration order)."""
     _write_body(tmp_path)
@@ -12127,7 +12127,7 @@ def _write_family_lib(tmp_path: Path, name: str, section: str = "tt") -> Path:
 
 
 def test_expand_corners_bundle_per_section_libs():
-    (point,) = sim._expand_corners(
+    (point,) = sim.expand_corners(
         {
             "process": [
                 {
@@ -12154,7 +12154,7 @@ def test_expand_corners_bundle_per_section_libs():
 def test_expand_corners_bundle_mixes_bare_and_per_section_lib_entries():
     """The issue's edge case: a bare-string section (models.lib) and a
     per-section-lib object in the same `sections` array."""
-    (point,) = sim._expand_corners(
+    (point,) = sim.expand_corners(
         {
             "process": [
                 {
@@ -12174,7 +12174,7 @@ def test_expand_corners_bundle_of_bare_strings_declares_no_section_libs():
     """Regression: today's all-bare-string bundle keeps
     `process_section_libs=None` -- the shape every pre-#2522 caller produced,
     which `_write_corner_deck` renders against `models.lib` alone."""
-    (point,) = sim._expand_corners(
+    (point,) = sim.expand_corners(
         {"process": [{"name": "ss", "sections": ["ss", "bjt_ss"]}]}, []
     )
 
@@ -12196,14 +12196,14 @@ def test_expand_corners_bundle_of_bare_strings_declares_no_section_libs():
 )
 def test_expand_corners_bundle_per_section_lib_validation(section, match):
     with pytest.raises(sim.SimError, match=match):
-        sim._expand_corners(
+        sim.expand_corners(
             {"process": [{"name": "tt", "sections": [section]}]},
             [],
         )
 
 
 def test_corner_points_wire_round_trip_preserves_per_section_libs():
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {
             "process": [
                 "ff",
@@ -12237,7 +12237,7 @@ def test_corner_points_wire_round_trip_preserves_per_section_libs():
 def test_corner_points_wire_round_trip_without_per_section_libs():
     """A pre-#2522 corner list round-trips with `process_section_libs` null,
     and reconstructs the exact shape `_write_corner_deck` used before."""
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {"process": ["tt", {"name": "ss", "sections": ["ss", "bjt_ss"]}]}, []
     )
     wire = sim._corner_points_to_wire(points)
@@ -12331,7 +12331,7 @@ def test_write_xyce_deck_per_section_libs_emit_their_own_lib_file(tmp_path):
 
 def test_resolve_corner_section_libs_resolves_relative_to_the_request_dir(tmp_path):
     cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
-    (point,) = sim._expand_corners(
+    (point,) = sim.expand_corners(
         {
             "process": [
                 {"name": "tt", "sections": [{"lib": "cap.lib", "section": "cap_tt"}]}
@@ -12351,7 +12351,7 @@ def test_resolve_corner_section_libs_resolves_relative_to_the_request_dir(tmp_pa
 def test_resolve_corner_section_libs_expands_env_vars(tmp_path, monkeypatch):
     cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
     monkeypatch.setenv("PDK_ROOT", str(tmp_path))
-    (point,) = sim._expand_corners(
+    (point,) = sim.expand_corners(
         {
             "process": [
                 {
@@ -12381,7 +12381,7 @@ def test_resolve_corner_section_libs_joins_relative_refs_against_the_pdk_variant
     cap = variant_dir / "cap.lib"
     cap.write_text(".lib cap_tt\n.endl cap_tt\n")
 
-    (point,) = sim._expand_corners(
+    (point,) = sim.expand_corners(
         {
             "process": [
                 {
@@ -12407,7 +12407,7 @@ def test_resolve_corner_section_libs_joins_relative_refs_against_the_pdk_variant
 
 
 def test_resolve_corner_section_libs_missing_file_raises(tmp_path):
-    (point,) = sim._expand_corners(
+    (point,) = sim.expand_corners(
         {
             "process": [
                 {"name": "tt", "sections": [{"lib": "nope.lib", "section": "cap_tt"}]}
@@ -12423,7 +12423,7 @@ def test_resolve_corner_section_libs_missing_file_raises(tmp_path):
 def test_resolve_corner_section_libs_deduplicates_in_first_appearance_order(tmp_path):
     cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
     bjt = _write_family_lib(tmp_path, "bjt.lib", section="bjt_tt")
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {
             "process": [
                 {
@@ -12449,7 +12449,7 @@ def test_resolve_corner_section_libs_deduplicates_in_first_appearance_order(tmp_
 
 
 def test_resolve_corner_section_libs_leaves_ordinary_points_alone(tmp_path):
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {"process": ["tt", {"name": "ss", "sections": ["ss", "bjt_ss"]}]}, []
     )
 
@@ -12880,7 +12880,7 @@ def test_staged_worker_directory_reproduces_model_cards_and_provenance(
     local_decks = _capture_decks(monkeypatch)
     local_report = sim.run_sim(str(request_path))
 
-    points = sim._expand_corners(request["corners"], [])
+    points = sim.expand_corners(request["corners"], [])
     worker_seed = sim._build_remote_request(
         request,
         timeout_s=30.0,
@@ -14450,7 +14450,7 @@ def test_monte_carlo_block_has_no_absent_key_unless_optional(tmp_path, monkeypat
 
 
 def test_expand_corners_units_match_crossed_ids_in_record_order():
-    crossed = sim._expand_corners(
+    crossed = sim.expand_corners(
         {
             "process": ["tt", "ss"],
             "supply_v": {"vdd": [1.62, 1.98]},
@@ -14468,7 +14468,7 @@ def test_expand_corners_units_match_crossed_ids_in_record_order():
         for p in wanted
     ]
 
-    points = sim._expand_corners({"units": units}, [])
+    points = sim.expand_corners({"units": units}, [])
 
     assert [p.corner_id for p in points] == [p.corner_id for p in wanted]
 
@@ -14478,12 +14478,12 @@ def test_expand_corners_units_sparse_set_is_not_crossed():
         {"process": "tt", "supply_v": {"vdd": 1.8, "vin": 0.001 * i}}
         for i in range(810)
     ]
-    assert len(sim._expand_corners({"units": units}, [])) == 810
+    assert len(sim.expand_corners({"units": units}, [])) == 810
 
 
 def test_expand_corners_units_defaults_and_bundle():
     bundle = {"name": "b", "sections": ["s1", "s2"]}
-    points = sim._expand_corners(
+    points = sim.expand_corners(
         {"units": [{"temperature_c": 85}, {"process": bundle}]}, []
     )
 
@@ -14511,11 +14511,11 @@ def test_expand_corners_units_defaults_and_bundle():
 )
 def test_expand_corners_units_validation(corners, exclude, match):
     with pytest.raises(sim.SimError, match=match):
-        sim._expand_corners(corners, exclude)
+        sim.expand_corners(corners, exclude)
 
 
 def test_expand_corners_units_compose_with_monte_carlo():
-    points = sim._expand_corners({"units": [{"process": "tt"}, {"process": "ss"}]}, [])
+    points = sim.expand_corners({"units": [{"process": "tt"}, {"process": "ss"}]}, [])
     expanded, info = sim._expand_monte_carlo(
         points, {"n": 3, "seed": 7, "vary": "mismatch"}
     )

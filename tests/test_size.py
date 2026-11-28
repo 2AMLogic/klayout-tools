@@ -1167,7 +1167,7 @@ def test_parse_corner_set_per_section_lib_override_raises():
     """A bundle section naming its own model library (issue #2522, `klt sim`
     only) must be *refused* by `klt size`, not silently flattened.
 
-    `_expand_corners` is shared with `klt sim`, which learned to parse
+    `expand_corners` is shared with `klt sim`, which learned to parse
     `{"lib", "section"}` in #2522. This command resolves exactly one
     `models_lib` per request and binds every section to it, so accepting the
     shape would emit `.lib <models_lib> cap_tt` -- reading the named section

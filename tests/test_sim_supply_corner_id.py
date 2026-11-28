@@ -28,7 +28,7 @@ from klayout_tools.sim_corner_point import (
 
 
 def _expand(corners: dict, exclude: list | None = None) -> list[sim.CornerPoint]:
-    return sim._expand_corners(corners, exclude or [])
+    return sim.expand_corners(corners, exclude or [])
 
 
 def _patch_lossy_formatter(monkeypatch) -> None:

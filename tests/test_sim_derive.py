@@ -96,7 +96,7 @@ def on_grid(spec: dict, corners: dict | None = None, **request) -> dict:
     corners = CORNERS if corners is None else corners
     sim_derive.validate_grid(
         with_source(spec),
-        sim._expand_corners(corners, []),
+        sim.expand_corners(corners, []),
         {"corners": corners, **request},
     )
     return spec

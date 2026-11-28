@@ -30,7 +30,7 @@ def _rule(match: dict, **values: float) -> dict:
 
 
 def _resolve(corners: dict, rules: list):
-    points = sim._expand_corners(corners, [])
+    points = sim.expand_corners(corners, [])
     sim._apply_nodeset_rules(
         points,
         sim._validate_nodeset_rules(rules, label=sim._IC_LABEL),
@@ -76,7 +76,7 @@ def test_rules_select_per_point_and_do_not_touch_the_nodeset_map():
     assert [p.initial_conditions for p in points] == [{}, {"out": 0.5}]
     assert all(p.nodeset == {} for p in points)
     assert [p.corner_id for p in points] == [
-        p.corner_id for p in sim._expand_corners({"temperature_c": [27, 85]}, [])
+        p.corner_id for p in sim.expand_corners({"temperature_c": [27, 85]}, [])
     ]
 
 
@@ -189,7 +189,7 @@ def test_worker_that_drops_the_map_fails_with_its_own_code():
 
 
 def test_no_map_or_local_backend_is_never_gated():
-    plain = sim._expand_corners({}, [])
+    plain = sim.expand_corners({}, [])
     _check(plain, [])
     _check(_resolve({}, [_rule({}, out=1)]), [], backend="local")
 

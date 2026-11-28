@@ -361,10 +361,10 @@ def _validate_sources(measurements_spec: list[dict[str, Any]]) -> None:
 def _declared_points(corners_spec: dict[str, Any], fallback: list[Any]) -> list[Any]:
     """Every declared corner point, before ``exclude`` (the union across
     ``corners.units``): where the axis's expected values come from."""
-    from .sim_corners import _expand_corners
+    from .sim_corners import expand_corners
 
     try:
-        return _expand_corners(corners_spec, [])
+        return expand_corners(corners_spec, [])
     except SimError:
         # Only the un-excluded grid collides (exclude kept one of a set that
         # shares a corner_id): the dispatched points are what was declared.

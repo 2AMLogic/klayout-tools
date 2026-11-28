@@ -50,7 +50,7 @@ def _derive_envelope(min_limit: float = 0.20, **flags: bool) -> dict:
         else []
     )
     sim_derive.validate_grid(
-        specs, sim._expand_corners(corners_spec, exclude), {"corners": corners_spec}
+        specs, sim.expand_corners(corners_spec, exclude), {"corners": corners_spec}
     )
     values = {1.0: (0.80, 1.00, 1.15), 2.0: (1.80, 2.00, 2.30)}
     corners = [

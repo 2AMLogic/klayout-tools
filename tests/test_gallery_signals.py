@@ -110,12 +110,12 @@ def test_netlists_available_false_for_missing_root(tmp_path, monkeypatch):
 def test_corner_matrix_is_extremes_plus_nominal(slug):
     """3 process x (4 PVT extremes + 1 nominal point) = 15 corners, with the
     six half-mixed supply/temperature combinations excluded."""
-    from klayout_tools.sim import _expand_corners
+    from klayout_tools.sim import expand_corners
 
     cfg = gs.CELL_CONFIGS[slug]
     with tempfile.TemporaryDirectory() as work_dir:
         request = gs.build_request(cfg, work_dir)
-    points = _expand_corners(request["corners"], request["exclude"])
+    points = expand_corners(request["corners"], request["exclude"])
     ids = [p.corner_id for p in points]
 
     assert len(ids) == 15

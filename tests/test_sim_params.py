@@ -29,7 +29,7 @@ _BODY = ".param rload=1000\nV1 in 0 1\nR1 in 0 {rload}\n"
 
 
 def _expand(corners: dict, exclude: list | None = None) -> list[sim.CornerPoint]:
-    return sim._expand_corners(corners, exclude or [])
+    return sim.expand_corners(corners, exclude or [])
 
 
 def _write_body(tmp_path: Path, text: str = _BODY) -> Path:

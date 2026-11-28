@@ -68,7 +68,7 @@ def pdk_tree(tmp_path):
 
 
 def _resolve(scale, corner, sections=("mos_tt_mismatch",), pdk="ihp-sg13g2"):
-    points = sim._expand_corners({"process": list(sections)}, [])
+    points = sim.expand_corners({"process": list(sections)}, [])
     return sim._resolve_mismatch_scale(
         {"mismatch_scale": scale},
         pdk,
@@ -242,7 +242,7 @@ def test_rejects_bad_values_before_touching_the_filesystem(pdk_tree, value):
 
 
 def _sampled(pdk_tree, scale=2.5, n=1):
-    points = sim._expand_corners({"process": ["mos_tt_mismatch"]}, [])
+    points = sim.expand_corners({"process": ["mos_tt_mismatch"]}, [])
     return sim._expand_monte_carlo(
         points,
         {"n": n, "seed": 1, "vary": "mismatch"},
@@ -351,7 +351,7 @@ def test_mismatch_params_floor_is_its_first_release_segment():
 
 
 def test_a_switch_family_wire_does_not_claim_the_new_feature():
-    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    points = sim.expand_corners({"process": ["tt_mm"]}, [])
     sampled, _ = sim._expand_monte_carlo(
         points,
         {"n": 1, "seed": 1, "vary": "mismatch"},
@@ -365,7 +365,7 @@ def test_a_switch_family_wire_does_not_claim_the_new_feature():
 def test_points_to_push_still_resolves_a_scanned_scale_client_side(pdk_tree):
     from klayout_tools import sim_remote
 
-    points = sim._expand_corners({"process": ["mos_tt_mismatch"]}, [])
+    points = sim.expand_corners({"process": ["mos_tt_mismatch"]}, [])
     mc = {"n": 1, "seed": 1, "vary": "mismatch", "mismatch_scale": 2}
     assert sim_remote._points_to_push({"monte_carlo": mc}, points, None) is points
 
@@ -381,7 +381,7 @@ def _info(families, params=None, sections=("mos_tt_mismatch", "res_typ_mismatch"
         "mismatch_params": params or {"sg13g2_lv_nmos_delvto_mm": 0.0078},
         "family_mismatch": [{"family": f, "active": True} for f in families],
     }
-    return info, sim._expand_corners({"process": list(sections)}, [])
+    return info, sim.expand_corners({"process": list(sections)}, [])
 
 
 def test_diagnostic_names_a_varying_family_the_scale_did_not_reach():
@@ -446,7 +446,7 @@ def test_a_bare_string_process_corner_takes_models_lib():
 
 
 def test_refuses_when_no_library_resolves_for_the_section():
-    points = sim._expand_corners({"process": ["mos_tt_mismatch"]}, [])
+    points = sim.expand_corners({"process": ["mos_tt_mismatch"]}, [])
     with pytest.raises(sim.SimError, match="resolves none"):
         sim._resolve_mismatch_scale(
             {"mismatch_scale": 1},

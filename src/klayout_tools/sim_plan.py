@@ -3,7 +3,7 @@
 The planner is the producer side of :mod:`klayout_tools.sim_merge`: given one
 ``klt sim`` request it writes one request file per ``corners.process[]`` entry
 plus the shard manifest ``klt sim-merge`` consumes. Each manifest shard's
-``corners`` list comes from running :func:`klayout_tools.sim._expand_corners`
+``corners`` list comes from running :func:`klayout_tools.sim.expand_corners`
 on that shard's own narrowed request -- the very expansion ``klt sim`` runs --
 so the ids the merge matches reports against cannot drift from what the shard
 run will emit.
@@ -101,7 +101,7 @@ def plan_shards(request: dict[str, Any], axis: str = "process") -> list[dict[str
         shard_request = copy.deepcopy(request)
         shard_request["corners"]["process"] = [copy.deepcopy(entry)]
         try:
-            points = sim._expand_corners(
+            points = sim.expand_corners(
                 shard_request["corners"], shard_request.get("exclude") or []
             )
         except sim.SimError as exc:

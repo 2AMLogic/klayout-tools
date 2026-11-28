@@ -155,7 +155,7 @@ def test_bundle_entries_shard_by_entry_and_shard_order_is_axis_order():
         request["corners"]["process"][0]
     ]
     flat = [cid for s in shards for cid in s["corners"]]
-    whole = [p.corner_id for p in sim._expand_corners(request["corners"], [])]
+    whole = [p.corner_id for p in sim.expand_corners(request["corners"], [])]
     assert flat == whole
 
 
