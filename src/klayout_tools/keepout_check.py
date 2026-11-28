@@ -35,7 +35,14 @@ import math
 from typing import Any
 
 from ._jsonnum import is_finite_number
-from ._layout import bbox_um_dict, clip_box, load_layout, select_top_cells
+from ._layout import (
+    bbox_um_dict,
+    clip_box,
+    load_layout,
+    require_known_cells,
+    select_top_cells,
+    validate_cells,
+)
 
 #: Stable rule id carried by every violation this module emits.
 RULE_ID = "keepout.forbidden_shape"
@@ -99,23 +106,12 @@ def _validate_request(
     if not forbidden:
         raise KeepoutCheckError("layer set is empty: at least one layer required")
     _validate_margin(margin_um)
-    selected = _validate_cells(cells)
+    selected = validate_cells(cells, KeepoutCheckError)
     if selected is None and region_um is None:
         raise KeepoutCheckError(
             "no guard given: pass --cells and/or --region to say what to protect"
         )
     return selected
-
-
-def _require_known_cells(layout: Any, selected: list[str] | None) -> None:
-    """Raise unless every name in ``selected`` is a cell of ``layout``."""
-    if selected is None:
-        return
-    unknown = [name for name in selected if layout.cell(name) is None]
-    if unknown:
-        raise KeepoutCheckError(
-            "unknown cell(s) in --cells: " + ", ".join(repr(n) for n in unknown)
-        )
 
 
 def run_keepout_check(
@@ -172,7 +168,7 @@ def run_keepout_check(
     windows = _normalise_allow(allow, forbidden)
 
     layout = load_layout(layout_path, KeepoutCheckError)
-    _require_known_cells(layout, selected)
+    require_known_cells(layout, selected, KeepoutCheckError)
 
     import klayout.db as kdb
 
@@ -304,25 +300,6 @@ def _validate_margin(margin_um: Any) -> None:
         raise KeepoutCheckError(f"--margin must be a finite number, got {margin_um!r}")
     if margin_um < 0:
         raise KeepoutCheckError(f"--margin must be >= 0 micrometres, got {margin_um}")
-
-
-def _validate_cells(cells: list[str] | None) -> list[str] | None:
-    """Return ``cells`` de-duplicated (order preserved), or ``None`` if unset."""
-    if cells is None:
-        return None
-    if isinstance(cells, str) or not isinstance(cells, (list, tuple)):
-        raise KeepoutCheckError("--cells must be a list of cell names")
-    if not cells:
-        raise KeepoutCheckError("--cells is empty: at least one cell name required")
-    seen: list[str] = []
-    for name in cells:
-        if not isinstance(name, str) or not name.strip():
-            raise KeepoutCheckError(
-                f"malformed cell name in --cells: {name!r} (must be a non-empty string)"
-            )
-        if name not in seen:
-            seen.append(name)
-    return seen
 
 
 def _insert_cell_boxes(
