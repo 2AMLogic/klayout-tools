@@ -2193,18 +2193,6 @@
       "reason": "Issue #7787: after binding declared ports, merged PEX must recompute the same connectivity digest as the runset extractor from the effective device and net records."
     },
     {
-      "consumer": "klayout_tools.equiv",
-      "exporter": "klayout_tools._yosys_error_messages",
-      "symbol": "_yosys_error_message",
-      "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); equiv.py is at its file-size ratchet ceiling, so promote to public when it is next split."
-    },
-    {
-      "consumer": "klayout_tools.synthesize",
-      "exporter": "klayout_tools._yosys_error_messages",
-      "symbol": "_synthesis_error_message",
-      "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); synthesize.py is at its file-size ratchet ceiling, so promote to public when it is next split."
-    },
-    {
       "consumer": "klayout_tools.cli.pex_text",
       "exporter": "klayout_tools.cli.extract_text",
       "symbol": "_print_label_layers",
@@ -2425,30 +2413,6 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_deck_block",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.extract_resistance_graph",
-      "exporter": "klayout_tools.resistor_mesh",
-      "symbol": "_decompose_manhattan_polygon",
-      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
-    },
-    {
-      "consumer": "klayout_tools.extract_resistance_graph",
-      "exporter": "klayout_tools.resistor_mesh",
-      "symbol": "_rails_under_via",
-      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
-    },
-    {
-      "consumer": "klayout_tools.power",
-      "exporter": "klayout_tools.resistor_mesh",
-      "symbol": "_decompose_manhattan_polygon",
-      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
-    },
-    {
-      "consumer": "klayout_tools.power",
-      "exporter": "klayout_tools.resistor_mesh",
-      "symbol": "_rails_under_via",
-      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
     },
     {
       "consumer": "klayout_tools.sim_batch",
@@ -2715,12 +2679,6 @@
       "reason": "Issue #5711: the shared collect half of the batch lifecycle (`_batch_collect`) classifies a collected report / stderr envelope exactly as `sim_batch` does -- one classifier, not a copy per verb. Replaces the per-verb grants for `extract_batch` and `netlist_batch`."
     },
     {
-      "consumer": "klayout_tools.drc_klayout_app",
-      "exporter": "klayout_tools.build_identity",
-      "symbol": "_recorded_klayout_version_expected",
-      "reason": "Issue #5660: the binary-worded --engine klayout mismatch warning must quote the exact build-time expected KLayout version that _provenance (same shared-core group) used to compute klayout_version_mismatch, so the warning cannot name an expected version the envelope did not; both call sites read it via the build_identity attribute, exactly as _provenance does."
-    },
-    {
       "consumer": "klayout_tools.em",
       "exporter": "klayout_tools._paths",
       "symbol": "_load_request_json",
@@ -2757,12 +2715,6 @@
         "consumer": "klayout_tools.cli.yield_campaign_cmd",
         "exporter": "klayout_tools.cli.yield_cmd",
         "symbol": "_print_text",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.decks.history",
-        "exporter": "klayout_tools",
-        "symbol": "_build_info",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

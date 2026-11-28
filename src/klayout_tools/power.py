@@ -164,7 +164,7 @@ from ._provenance import INPUT_ROLE_LAYOUT, build_provenance, content_hash
 from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
-from .resistor_mesh import _decompose_manhattan_polygon, _rails_under_via
+from .resistor_mesh import decompose_manhattan_polygon, rails_under_via
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -923,7 +923,7 @@ def _nearest_endpoint(
     ``None`` when ``rails`` is empty.
 
     ``rails`` must be the merged polygon(s) the via **physically lands on**
-    (:func:`_rails_under_via`), never every rail the net owns on that layer:
+    (:func:`rails_under_via`), never every rail the net owns on that layer:
     scoped to the tapped polygon this only moves the tap to one of that
     polygon's own ends, but searched net-wide it rewires the via to an
     unrelated segment that merely happens to be closer (issue #2259)."""
@@ -1289,7 +1289,7 @@ def _build_island_network(
                     polygon.bbox(), entry, dbu, add_node, add_edge
                 )
             else:
-                cells, reason = _decompose_manhattan_polygon(
+                cells, reason = decompose_manhattan_polygon(
                     polygon, max_decomposition_cells
                 )
                 if cells is None:
@@ -1304,7 +1304,7 @@ def _build_island_network(
                 endpoints = _model_mesh_polygon(cells, entry, dbu, add_node, add_edge)
             if endpoints:
                 # `region`/`bbox` scope each via tap's endpoint search to the
-                # polygon it lands on (issue #2259) -- see `_rails_under_via`.
+                # polygon it lands on (issue #2259) -- see `rails_under_via`.
                 rails_by_layer[entry["name"]].append(
                     {
                         "endpoints": endpoints,
@@ -1332,10 +1332,10 @@ def _build_island_network(
             # role -- never the whole net's rails (issue #2259).
             via_region = kdb.Region(polygon)
             node_a = _nearest_endpoint(
-                _rails_under_via(rails_by_layer[layer_a], via_region, box), cx, cy
+                rails_under_via(rails_by_layer[layer_a], via_region, box), cx, cy
             )
             node_b = _nearest_endpoint(
-                _rails_under_via(rails_by_layer[layer_b], via_region, box), cx, cy
+                rails_under_via(rails_by_layer[layer_b], via_region, box), cx, cy
             )
             if node_a is None or node_b is None:
                 missing = layer_a if node_a is None else layer_b

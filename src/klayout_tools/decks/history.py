@@ -75,21 +75,6 @@ def known_deck_names() -> list[str]:
     return sorted({str(entry.get("deck")) for entry in entries})
 
 
-def _recorded_deck_hashes() -> dict[str, str] | None:
-    """``_build_info.DECK_HASHES`` as recorded by ``hatch_build.py`` at build
-    time, ``{}`` when this install carries a ``_build_info`` record without
-    usable deck hashes (built before issue #2451), or ``None`` when there is
-    no ``_build_info`` at all (an editable/source install, probed live)."""
-    try:
-        from .. import _build_info  # type: ignore[attr-defined]
-    except ImportError:
-        return None
-    recorded = getattr(_build_info, "DECK_HASHES", None)
-    if not isinstance(recorded, dict):
-        return {}
-    return {str(k): v for k, v in recorded.items() if isinstance(v, str)}
-
-
 def _drc_deck_path(name: str) -> str | None:
     """Path of ``<name>.drc`` beside the deck modules (issue #3826), or
     ``None`` for a deck that ships no standalone KLayout DRC deck file."""
@@ -127,7 +112,7 @@ def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str,
         ident = build_identity.identity()
         if ident.get("is_release") is not True:
             return []
-        recorded = _recorded_deck_hashes()
+        recorded = build_identity.recorded_deck_hashes()
         matches: list[dict[str, Any]] = []
         for name in deck_names():
             if deck is not None and name != deck:

@@ -495,7 +495,7 @@ def test_yosys_error_message_wasi_sandbox_script_not_found_hint(tmp_path):
         "reading: No such file or directory\n"
     )
 
-    message = equiv._yosys_error_message("", stderr, 1)
+    message = equiv.yosys_error_message("", stderr, 1)
 
     assert "yosys equivalence check failed:" in message
     assert "WASI-sandboxed build" in message
@@ -514,7 +514,7 @@ def test_yosys_error_message_missing_script_no_hint(tmp_path):
         "reading: No such file or directory\n"
     )
 
-    message = equiv._yosys_error_message("", stderr, 1)
+    message = equiv.yosys_error_message("", stderr, 1)
 
     assert message == (
         "yosys equivalence check failed: ERROR: Can't open script file "
@@ -603,7 +603,7 @@ def test_yosys_error_message_wasi_hint_tempdir_branch(tmp_path, monkeypatch, cas
         "reading: No such file or directory\n"
     )
 
-    message = equiv._yosys_error_message("", stderr, 1)
+    message = equiv.yosys_error_message("", stderr, 1)
 
     assert message.startswith("yosys equivalence check failed: ERROR: Can't open")
     _assert_wasi_hint(message, fake_tempdir, expect)
@@ -624,7 +624,7 @@ def test_yosys_error_message_missing_script_inside_tempdir_no_hint(
         "reading: No such file or directory\n"
     )
 
-    message = equiv._yosys_error_message("", stderr, 1)
+    message = equiv.yosys_error_message("", stderr, 1)
 
     assert "WASI" not in message
     assert "temp directory" not in message
@@ -639,7 +639,7 @@ def test_yosys_error_message_unrelated_error_inside_tempdir_no_hint(
     )
     stderr = f"ERROR: Syntax error in `{script}' near line 1\n"
 
-    message = equiv._yosys_error_message("", stderr, 1)
+    message = equiv.yosys_error_message("", stderr, 1)
 
     assert "WASI" not in message
     assert "temp directory" not in message

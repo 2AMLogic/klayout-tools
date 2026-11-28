@@ -267,7 +267,7 @@ def klayout_version() -> str | None:
     return getattr(klayout, "__version__", None)
 
 
-def _recorded_klayout_version_expected() -> str | None:
+def recorded_klayout_version_expected() -> str | None:
     """``_build_info.KLAYOUT_VERSION_EXPECTED`` (the ``klayout`` version this
     checkout's ``uv.lock`` pinned at build time -- see ``hatch_build.py``), or
     ``None`` when this install carries no such record."""
@@ -282,7 +282,7 @@ def _recorded_klayout_version_expected() -> str | None:
 def _checkout_klayout_version_expected(directory: str | None = None) -> str | None:
     """The ``klayout`` version pinned in the checkout's own ``uv.lock``,
     probed live -- the editable/source-install counterpart of
-    :func:`_recorded_klayout_version_expected`, mirroring
+    :func:`recorded_klayout_version_expected`, mirroring
     :func:`_checkout_identity`'s own build-time-vs-live-probe split.
 
     Applies the same "must be a git working tree with files this directory
@@ -320,10 +320,31 @@ def klayout_version_expected() -> str | None:
     made before this field existed, or a checkout with no reachable
     ``uv.lock`` (e.g. an unpacked sdist with no git history).
     """
-    recorded = _recorded_klayout_version_expected()
+    recorded = recorded_klayout_version_expected()
     if recorded is not None:
         return recorded
     return _checkout_klayout_version_expected()
+
+
+def recorded_deck_hashes() -> dict[str, str] | None:
+    """``_build_info.DECK_HASHES`` as recorded by ``hatch_build.py`` at build
+    time, ``{}`` when this install carries a ``_build_info`` record without
+    usable deck hashes (built before issue #2451), or ``None`` when there is
+    no ``_build_info`` at all (an editable/source install, probed live).
+
+    Read by ``decks/history.py``'s self-release lookup (issue #8103): an
+    installed distribution compares a deck hash against these per-deck
+    build-time hashes, never the current on-disk bytes. The import stays
+    inside the function so an editable install never fails at import time.
+    """
+    try:
+        from . import _build_info  # type: ignore[attr-defined]
+    except ImportError:
+        return None
+    recorded = getattr(_build_info, "DECK_HASHES", None)
+    if not isinstance(recorded, dict):
+        return {}
+    return {str(k): v for k, v in recorded.items() if isinstance(v, str)}
 
 
 def _grading_module_paths() -> list[str]:

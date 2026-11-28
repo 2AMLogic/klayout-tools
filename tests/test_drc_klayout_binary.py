@@ -137,7 +137,7 @@ def _expect(monkeypatch, version):
     from klayout_tools import build_identity
 
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: version
+        build_identity, "recorded_klayout_version_expected", lambda: version
     )
 
 
@@ -253,7 +253,7 @@ def test_build_provenance_override_pair_semantics(monkeypatch, capsys):
 
     monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.13")
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.12"
+        build_identity, "recorded_klayout_version_expected", lambda: "0.30.12"
     )
 
     default = _provenance.build_provenance(include_klayout_version_mismatch=True)

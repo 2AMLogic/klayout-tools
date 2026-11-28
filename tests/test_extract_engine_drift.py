@@ -18,7 +18,7 @@ def _force_engine_axis(monkeypatch, runtime: str | None, expected: str | None) -
 
     monkeypatch.setattr(_provenance, "_klayout_version", lambda: runtime)
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: expected
+        build_identity, "recorded_klayout_version_expected", lambda: expected
     )
 
 

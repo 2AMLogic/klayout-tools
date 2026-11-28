@@ -7,7 +7,7 @@ These were private helpers of :mod:`klayout_tools.power` (issues #2171,
 (:mod:`klayout_tools.extract_resistance_graph`, issue #2980, Stage 3.D of
 ``docs/design/extract-fidelity-roadmap.md``) can reuse them without importing
 ``klt power``. The moved functions are unchanged except that
-:func:`_decomposition_grid` / :func:`_decompose_manhattan_polygon` take
+:func:`_decomposition_grid` / :func:`decompose_manhattan_polygon` take
 optional extra cut coordinates, defaulting to none, which reproduces the
 original vertex grid exactly.
 """
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 def _polygon_cut_coordinates(polygon: kdb.Polygon) -> tuple[list[int], list[int]]:
     """The sorted, deduplicated x/y coordinates of every vertex of a merged
     polygon (hull **and** holes) -- the cut lines of the rectangular grid
-    :func:`_decompose_manhattan_polygon` carves it into."""
+    :func:`decompose_manhattan_polygon` carves it into."""
     xs: set[int] = set()
     ys: set[int] = set()
     for point in polygon.each_point_hull():
@@ -70,7 +70,7 @@ def _decomposition_grid(
     return xs, ys, None
 
 
-def _decompose_manhattan_polygon(
+def decompose_manhattan_polygon(
     polygon: kdb.Polygon,
     max_cells: int,
     extra_x: Iterable[int] = (),
@@ -125,7 +125,7 @@ def _decompose_manhattan_polygon(
     return cells, None
 
 
-def _rails_under_via(
+def rails_under_via(
     rails: list[dict[str, Any]], via_region: kdb.Region, via_box: kdb.Box
 ) -> list[dict[str, Any]]:
     """The rails (merged polygons of one metal role, as recorded by

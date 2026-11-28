@@ -259,7 +259,7 @@ from ._verilog_params import (
     validate_defines,
     validate_parameters,
 )
-from ._yosys_error_messages import _synthesis_error_message
+from ._yosys_error_messages import synthesis_error_message
 from .equiv import EquivError, run_equiv
 from .equiv_verdict import require_equivalence
 from .evidence_canonicalize import rerun_result_for
@@ -2782,7 +2782,7 @@ def _run_yosys(
     Never raises on a *successful* (exit 0) run; the caller validates that the
     declared output files appeared. Returns the captured ``stdout`` log text --
     Yosys's own ``Warning: `` lines land on stdout, never stderr (verified live;
-    matches :func:`_synthesis_error_message`'s stream-preference note for
+    matches :func:`synthesis_error_message`'s stream-preference note for
     ``ERROR:`` lines) -- so :func:`_compute_structural`/:func:`_summarize_warnings`
     (issue #1588) can parse it without a second Yosys invocation.
 
@@ -2826,7 +2826,7 @@ def _run_yosys(
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)
     if completed.returncode != 0:
-        raise SynthesizeError(_synthesis_error_message(completed))
+        raise SynthesizeError(synthesis_error_message(completed))
 
     return completed.stdout or ""
 

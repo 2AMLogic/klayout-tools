@@ -515,7 +515,7 @@ def test_recorded_klayout_version_expected_reads_build_info(monkeypatch):
     module.KLAYOUT_VERSION_EXPECTED = "0.30.10"
     monkeypatch.setitem(sys.modules, "klayout_tools._build_info", module)
 
-    assert build_identity._recorded_klayout_version_expected() == "0.30.10"
+    assert build_identity.recorded_klayout_version_expected() == "0.30.10"
 
 
 def test_recorded_klayout_version_expected_none_without_build_info(monkeypatch):
@@ -523,7 +523,7 @@ def test_recorded_klayout_version_expected_none_without_build_info(monkeypatch):
     # This editable/source checkout carries no `_build_info` module at all
     # (see this file's own docstring), so the real import fails -- the same
     # `ImportError` path `_recorded_identity` already exercises.
-    assert build_identity._recorded_klayout_version_expected() is None
+    assert build_identity.recorded_klayout_version_expected() is None
 
 
 def test_recorded_klayout_version_expected_tolerates_a_malformed_record(monkeypatch):
@@ -531,7 +531,7 @@ def test_recorded_klayout_version_expected_tolerates_a_malformed_record(monkeypa
     module.KLAYOUT_VERSION_EXPECTED = 17  # wrong type -- never fabricate a string
     monkeypatch.setitem(sys.modules, "klayout_tools._build_info", module)
 
-    assert build_identity._recorded_klayout_version_expected() is None
+    assert build_identity.recorded_klayout_version_expected() is None
 
 
 def test_checkout_klayout_version_expected_reads_uv_lock(tmp_path):
@@ -577,7 +577,7 @@ def test_checkout_klayout_version_expected_ignores_untracked_venv(tmp_path):
 
 def test_klayout_version_expected_prefers_recorded_over_live_probe(monkeypatch):
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+        build_identity, "recorded_klayout_version_expected", lambda: "0.30.10"
     )
 
     def _fail():  # pragma: no cover - must not be reached
@@ -590,7 +590,7 @@ def test_klayout_version_expected_prefers_recorded_over_live_probe(monkeypatch):
 
 def test_klayout_version_expected_falls_back_to_live_probe(monkeypatch):
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: None
+        build_identity, "recorded_klayout_version_expected", lambda: None
     )
     monkeypatch.setattr(
         build_identity, "_checkout_klayout_version_expected", lambda: "0.30.9"

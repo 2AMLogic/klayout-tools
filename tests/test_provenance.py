@@ -255,7 +255,7 @@ def test_build_provenance_mismatch_false_when_versions_agree(monkeypatch):
 
     monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.10")
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+        build_identity, "recorded_klayout_version_expected", lambda: "0.30.10"
     )
     prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
     assert prov["klayout_version_mismatch"] is False
@@ -266,7 +266,7 @@ def test_build_provenance_mismatch_true_when_versions_differ(monkeypatch, capsys
 
     monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.12")
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+        build_identity, "recorded_klayout_version_expected", lambda: "0.30.10"
     )
     prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
     assert prov["klayout_version_mismatch"] is True
@@ -287,7 +287,7 @@ def test_build_provenance_mismatch_false_when_expected_unresolvable(monkeypatch)
 
     monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.12")
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: None
+        build_identity, "recorded_klayout_version_expected", lambda: None
     )
     prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
     assert prov["klayout_version_mismatch"] is False
@@ -298,7 +298,7 @@ def test_build_provenance_mismatch_false_when_actual_unresolvable(monkeypatch):
 
     monkeypatch.setattr(_provenance, "_klayout_version", lambda: None)
     monkeypatch.setattr(
-        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+        build_identity, "recorded_klayout_version_expected", lambda: "0.30.10"
     )
     prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
     assert prov["klayout_version_mismatch"] is False
