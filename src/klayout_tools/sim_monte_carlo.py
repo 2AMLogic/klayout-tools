@@ -228,9 +228,21 @@ def _derive_mc_seed(base_seed: int, *parts: object) -> int:
     calls with identical arguments always return the same value, in any
     process, on any machine, forever -- this is the seed-reproducibility
     guarantee :func:`_expand_monte_carlo` and ``docs/cli/sim.md``'s "Monte
-    Carlo" section build on. ``parts`` disambiguates *what* is being
-    derived (axis name, corner index, sample index, ...) so unrelated
-    derivations from the same ``base_seed`` never collide by construction.
+    Carlo" section build on. ``parts`` name *what* is being derived (axis
+    name, corner index, sample index, ...). The guarantee is
+    reproducibility, never distinctness (issue #8087): identical arguments
+    -- or any arguments whose ``str()`` renderings join to the same
+    colon-separated string -- yield the same seed, and distinct inputs can
+    also land on the same value. The ``:`` join is ambiguous (``("a:b",)``
+    and ``("a", "b")`` both encode as ``"0:a:b"`` under ``base_seed`` ``0``,
+    as do the parts ``1`` and ``"1"``), and the result is a 31-bit value
+    (the digest's first four bytes, big-endian, modulo
+    :data:`_MC_SEED_MODULUS` = ``2**31 - 1``), a range in which distinct
+    payloads still collide by the birthday bound. A caller that needs two
+    derivations kept apart should give them distinct leading labels and
+    parts that cannot contain ``:`` -- which rules out the encoding
+    collisions, never the range ones -- rather than rely on this function
+    to separate them.
     """
     payload = ":".join(str(part) for part in (base_seed, *parts)).encode("utf-8")
     digest = hashlib.sha256(payload).digest()
