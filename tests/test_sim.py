@@ -478,7 +478,7 @@ def test_resolve_backend_precedence(monkeypatch):
 
 
 def test_yield_host_default_backend_only_overrides_env_sourced_offhost():
-    y = sim._yield_host_default_backend
+    y = sim.yield_host_default_backend
     assert y("batch", True, reason_ok=False) == "local"
     assert y("batch", True, reason_ok=True) == "batch"
     # An explicit choice is never second-guessed.

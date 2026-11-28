@@ -12,7 +12,7 @@ backend fills from the runner's own report (issue #5562).
 
 Both halves of that one invariant live here, next to each other, rather than
 a thousand lines apart inside ``sim``. ``sim`` owns the backend vocabulary
-(``_OFFHOST_BACKENDS``) and passes the classification in as ``offhost``, the
+(``OFFHOST_BACKENDS``) and passes the classification in as ``offhost``, the
 same way it hands :func:`sim_op_check.require_echo` the tuple.
 """
 
