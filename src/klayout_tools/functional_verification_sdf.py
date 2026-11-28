@@ -68,10 +68,19 @@ from .functional_verification_base import (
 )
 from .functional_verification_sdf_instance import (
     _describe_sdf_unresolvable_endpoints,
-    _parse_sdf_inventory_module,
+    _find_gate_level_module,
+    _load_sdf_scope_context,
 )
-from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
-from .functional_verification_sdf_unit_syntax import _sdf_syntax, _sdf_timescale
+from .functional_verification_sdf_rename import (
+    _sdf_divider,
+    _sdf_unresolvable_pin_tokens,
+    _split_sdf_path,
+)
+from .functional_verification_sdf_unit_syntax import (
+    _sdf_matching_paren,
+    _sdf_syntax,
+    _sdf_timescale,
+)
 from .request_paths import resolve_request_path
 
 
@@ -576,30 +585,6 @@ def _write_sdf_dut_wrapper(
 #: -- never an instance-pin reference (those are always ``<inst>.<pin>``, a
 #: shape this regex does not match at all).
 _SDF_BUS_PORT_TOKEN_RE = re.compile(r"^([A-Za-z_$][A-Za-z0-9_$]*)\[(\d+)\]$")
-
-
-def _sdf_matching_paren(text: str, open_index: int) -> int:
-    """Return the index of the ``)`` that closes the ``(`` at ``open_index``,
-    balancing nested parens -- used throughout this section instead of a
-    regex, since an SDF ``(DELAY (ABSOLUTE ...))`` clause nests arbitrarily
-    and a non-greedy regex would truncate at the first inner ``)``.
-    """
-    depth = 0
-    index = open_index
-    while index < len(text):
-        char = text[index]
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return index
-        index += 1
-    raise FunctionalVerificationError(
-        "options.sdf: unbalanced parentheses while scanning the SDF file for "
-        "bit-selected top-level-port INTERCONNECT entries (issue #1619) -- "
-        "the file is not well-formed SDF"
-    )
 
 
 def _sdf_top_level_clauses(text: str, start: int, end: int) -> list[tuple[int, int]]:
@@ -1344,23 +1329,8 @@ def _find_gate_level_instances(
     or a behavioral statement outside the gate-level grammar. Continuous
     assignments do not affect the inventory.
     """
-    chunk_re = re.compile(
-        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(hdl_toplevel)), re.DOTALL
-    )
-    for text in source_texts:
-        chunk_match = chunk_re.search(text)
-        if chunk_match is None:
-            continue
-        try:
-            modules = _parse_sdf_inventory_module(chunk_match.group(0))
-        except Exception:
-            # An unsupported module still has no reliable instance inventory.
-            return []
-        for module in modules:
-            if module["name"] == hdl_toplevel:
-                return list(module["instances"])
-        return []
-    return []
+    module = _find_gate_level_module(source_texts, hdl_toplevel)
+    return [] if module is None else list(module["instances"])
 
 
 def _collect_sdf_physical_only_instances(
@@ -1473,8 +1443,7 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
     text = _read_sdf_text(sdf_path)
     if text is None:
         return None
-    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
-    divider = divider_match.group(1) if divider_match else "."
+    divider = _sdf_divider(text)
 
     return _drop_sdf_interconnect_entries(
         text,
@@ -2109,39 +2078,31 @@ def _sdf_interconnect_entries(text: str) -> list[tuple[str, int, str]]:
 def _sdf_split_unescaped(path: str, divider: str) -> list[str]:
     """``path`` split at every ``divider`` not preceded by a backslash, with
     the remaining backslash escapes removed from each part."""
-    parts: list[str] = []
-    current: list[str] = []
-    index = 0
-    while index < len(path):
-        char = path[index]
-        if char == "\\" and index + 1 < len(path):
-            current.append(path[index + 1])
-            index += 2
-            continue
-        if char == divider:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(char)
-        index += 1
-    parts.append("".join(current))
-    return parts
+    return _split_sdf_path(path, divider, unescape=True)
 
 
 def _sdf_unresolvable_interconnect_endpoints(
-    text: str, names: set[str], divider: str
+    text: str,
+    names: set[str],
+    divider: str,
+    *,
+    entries: list[tuple[str, int, str]] | None = None,
 ) -> list[tuple[int, str]]:
     """``(line, token)`` for each top-cell ``INTERCONNECT`` endpoint whose
     path names no instance in ``names`` (see
-    :func:`_reject_sdf_unresolvable_interconnect_instances`)."""
+    :func:`_reject_sdf_unresolvable_interconnect_instances`). ``entries`` is
+    :func:`_sdf_interconnect_entries`' walk of ``text``, for a caller that
+    already holds it."""
 
     def resolves(parts: list[str]) -> bool:
         return any(
             divider.join(parts[:count]) in names for count in range(1, len(parts))
         )
 
+    if entries is None:
+        entries = _sdf_interconnect_entries(text)
     offenders: list[tuple[int, str]] = []
-    for cell_instance, entry_start, entry_text in _sdf_interconnect_entries(text):
+    for cell_instance, entry_start, entry_text in entries:
         if cell_instance not in ("", "*"):
             continue
         match = re.match(r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text)
@@ -2153,6 +2114,33 @@ def _sdf_unresolvable_interconnect_endpoints(
                 line = text.count("\n", 0, entry_start) + 1
                 offenders.append((line, token))
     return offenders
+
+
+def _raise_sdf_unresolvable_interconnect_instances(
+    text: str,
+    scope_module: str,
+    names: set[str],
+    divider: str,
+    *,
+    entries: list[tuple[str, int, str]] | None = None,
+) -> None:
+    """Raise over :func:`_sdf_unresolvable_interconnect_endpoints`'s
+    offenders (issue #3740); a no-op when there are none."""
+    offenders = _sdf_unresolvable_interconnect_endpoints(
+        text, names, divider, entries=entries
+    )
+    if not offenders:
+        return
+    shown = _describe_sdf_unresolvable_endpoints(offenders, divider)
+    raise FunctionalVerificationError(
+        "options.sdf: this SDF has an INTERCONNECT entry whose endpoint "
+        f"names an instance that is not in '{scope_module}' ({shown}). "
+        "Icarus Verilog cannot report such an endpoint: its $sdf_annotate "
+        "INTERCONNECT resolver aborts vvp "
+        "outright ('ERROR: NULL handle passed to vpi_scan.', SIGABRT). "
+        "Regenerate the SDF from the same netlist the simulation reads, and "
+        "write top-level ports as bare names (no design-name prefix)"
+    )
 
 
 def _reject_sdf_unresolvable_interconnect_instances(
@@ -2188,40 +2176,9 @@ def _reject_sdf_unresolvable_interconnect_instances(
       instance name or begins with ``<instance><DIVIDER>`` (hierarchy below a
       top-level instance is not inspected).
     """
-    try:
-        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-    except OSError:
-        return
-    source_texts = _read_verilog_source_texts(source_paths)
-    # With `options.sdf.scope` the SDF's paths are relative to the scoped
-    # instance's module, not to `hdl_toplevel` (issue #4521).
-    scope_module = _resolve_sdf_scope_module(source_texts, hdl_toplevel, scope)
-    if scope_module is None:
-        return
-    instances = _find_gate_level_instances(source_texts, scope_module)
-    names = {str(instance["name"]) for instance in instances}
-    if not names:
-        return
-    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
-    divider = divider_match.group(1) if divider_match else "."
-    if divider not in (".", "/"):
-        return
-
-    offenders = _sdf_unresolvable_interconnect_endpoints(text, names, divider)
-    if not offenders:
-        return
-
-    shown = _describe_sdf_unresolvable_endpoints(offenders, divider)
-    raise FunctionalVerificationError(
-        "options.sdf: this SDF has an INTERCONNECT entry whose endpoint "
-        f"names an instance that is not in '{scope_module}' ({shown}). "
-        "Icarus Verilog cannot report such an endpoint: its $sdf_annotate "
-        "INTERCONNECT resolver aborts vvp "
-        "outright ('ERROR: NULL handle passed to vpi_scan.', SIGABRT). "
-        "Regenerate the SDF from the same netlist the simulation reads, and "
-        "write top-level ports as bare names (no design-name prefix)"
-    )
+    context = _load_sdf_scope_context(sdf_path, source_paths, hdl_toplevel, scope)
+    if context is not None:
+        _raise_sdf_unresolvable_interconnect_instances(*context)
 
 
 def _resolve_sdf_scope_module(

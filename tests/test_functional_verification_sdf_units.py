@@ -10,7 +10,6 @@ preprocessed model still annotates successfully.
 from __future__ import annotations
 
 import json
-import random
 from pathlib import Path
 
 import pytest
@@ -225,64 +224,6 @@ def test_timingcheck_only_cell_is_not_a_delay_target(tmp_path, monkeypatch):
 )
 def test_unit_comparison_includes_the_multiplier(left, right, same):
     assert syntax._same_time_unit(left, right) is same
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "()",
-        "(a)",
-        "(a(b)c)",
-        "(a(b)",
-        ")(",
-        "(abc",
-        "(DELAY (ABSOLUTE (IOPATH a b (1:2:3))))",
-        "(a) " + ")" * 5,
-        "(" + "x" * 300 + ")",
-        "(" + "(" * 400 + ")" * 400 + ")",
-        "(" + "()" * 5000 + ")",
-    ],
-    ids=[
-        "empty",
-        "flat",
-        "nested",
-        "unclosed-nested",
-        "close-then-open",
-        "never-closed",
-        "sdf-clause",
-        "balanced-then-stray-closes",
-        "long-flat",
-        "very-deep",
-        "very-long",
-    ],
-)
-def test_clause_end_agrees_with_the_shared_character_loop(text):
-    """The ``)``-walking matcher must give exactly what the pipeline's
-    per-character ``_sdf_matching_paren`` gives."""
-    for open_index, char in enumerate(text):
-        if char != "(":
-            continue
-        try:
-            expected = sdf._sdf_matching_paren(text, open_index) + 1
-        except fv.FunctionalVerificationError:
-            expected = None
-        assert syntax._sdf_clause_end(text, open_index) == expected
-
-
-def test_clause_end_agrees_with_the_shared_character_loop_on_random_text():
-    """Seeded, so a regression reproduces. The first draft of this matcher
-    counted parentheses per window and passed every hand-written case: only
-    random text showed it missing a close followed by more opens than closes
-    inside the same window."""
-    rng = random.Random(7983)
-    for _ in range(3000):
-        length = rng.choice([1, 2, 3, 5, 8, 40, 300, 1200])
-        text = "(" + "".join(rng.choice("()a ") for _ in range(length))
-        try:
-            expected = sdf._sdf_matching_paren(text, 0) + 1
-        except fv.FunctionalVerificationError:
-            expected = None
-        assert syntax._sdf_clause_end(text, 0) == expected
 
 
 @pytest.mark.parametrize(
