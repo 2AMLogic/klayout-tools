@@ -85,7 +85,8 @@ def _what_uncited(c: dict) -> str:
 
 
 def _what_dependency_binding(c: dict) -> str:
-    return f"testbench {c['testbench']}: {c['declared']} dependencies declared"
+    noun = "dependency" if c["declared"] == 1 else "dependencies"
+    return f"testbench {c['testbench']}: {c['declared']} {noun} declared"
 
 
 def _what_citation(c: dict) -> str:

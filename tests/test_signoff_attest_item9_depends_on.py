@@ -396,7 +396,17 @@ def test_skip_local_only_still_hashes_dependencies(tmp_path, capsys):
     assert dep["content_hash"] == _hash(helper)
 
 
-def test_the_default_text_rendering_names_each_dependency_and_binding(tmp_path, capsys):
+@pytest.mark.parametrize(
+    ("depends_on", "expected_binding"),
+    [
+        ([], "0 dependencies declared"),
+        (["models/helpers.inc"], "1 dependency declared"),
+        (["models/helpers.inc", "tb/b.spice"], "2 dependencies declared"),
+    ],
+)
+def test_the_default_text_rendering_names_each_dependency_and_binding(
+    tmp_path, capsys, depends_on, expected_binding
+):
     """``--format`` defaults to text: the dependency and binding checks
     must render on the default output path of ``klt signoff --attest 9``
     (issue #5850), pinning the operator-visible wording."""
@@ -408,7 +418,7 @@ def test_the_default_text_rendering_names_each_dependency_and_binding(tmp_path, 
             {
                 "path": "tb/a.spice",
                 "cold_start": {"argv": OK_ARGV},
-                "depends_on": ["models/helpers.inc"],
+                "depends_on": depends_on,
             }
         ],
     )
@@ -416,5 +426,6 @@ def test_the_default_text_rendering_names_each_dependency_and_binding(tmp_path, 
     assert main(["signoff", "--attest", "9", "--inventory", inventory]) == 0
     rendered = capsys.readouterr().out
 
-    assert "[PASS] dependency models/helpers.inc of tb/a.spice present" in rendered
-    assert "[PASS] testbench tb/a.spice: 1 dependencies declared" in rendered
+    for path in depends_on:
+        assert f"[PASS] dependency {path} of tb/a.spice present" in rendered
+    assert f"[PASS] testbench tb/a.spice: {expected_binding}" in rendered
