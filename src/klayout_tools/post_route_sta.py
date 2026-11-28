@@ -45,9 +45,9 @@ cross-module import between verb modules in this repo is of a *public* name
 never a private one. ``run_openroad``, ``count_violations``,
 ``openroad_version``, ``write_script``, ``format_engine_error``,
 ``read_metrics``, and (issue #1703) the SPEF net-name-correlation Tcl
-helpers ``_tcl_net_list``/``_count_spef_nets_annotated`` do not break that
+helpers ``tcl_net_list``/``count_spef_nets_annotated`` do not break that
 convention: they were byte-identical (modulo exception class / label /
-docstring length, or -- for ``_count_spef_nets_annotated`` -- module-local
+docstring length, or -- for ``count_spef_nets_annotated`` -- module-local
 marker constants) between this module and ``place_and_route.py`` with no
 caller-visible behavioral difference worth preserving per-copy, so they
 were consolidated into the shared ``_openroad_engine``/``_openroad_io``/
@@ -55,8 +55,8 @@ were consolidated into the shared ``_openroad_engine``/``_openroad_io``/
 following the same precedent as ``_paths.py`` (issue #642). Those are
 shared utility modules, not verb modules, so calling their helpers -- public
 from ``_openroad_engine``/``_openroad_io`` since issue #8051 retired the
-last grandfathered private imports, still underscore-prefixed from
-``_paths.py`` -- does not violate the convention above. ``_resolve_liberty``
+last grandfathered private imports, and public from ``_paths.py`` since
+issue #8056 -- does not violate the convention above. ``_resolve_liberty``
 (this module's own thin wrapper, below) follows the same precedent one level
 further: its body is a one-line call into
 :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`, a *public* name
@@ -281,9 +281,9 @@ from ._openroad_engine import (
 from ._openroad_io import format_engine_error, read_metrics, write_script
 from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import (
-    _count_spef_nets_annotated,
-    _load_request_json,
-    _tcl_net_list,
+    count_spef_nets_annotated,
+    load_request_json,
+    tcl_net_list,
     validate_request_shape,
 )
 from ._power_activity import power_activity_lines as _power_activity_lines
@@ -592,7 +592,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     and rejects unknown fields, unreadable files and malformed JSON. After this
     check, :func:`run_sta` requires exactly one of ``def`` and ``verilog`` (#1825).
     """
-    request = _load_request_json(request_path, PostRouteStaError)
+    request = load_request_json(request_path, PostRouteStaError)
     request = validate_request_shape(
         request,
         "request file",
@@ -1714,7 +1714,7 @@ def _spef_annotation_block(
     stdout = completed.stdout or ""
     stderr = completed.stderr or ""
 
-    nets_check = _count_spef_nets_annotated(
+    nets_check = count_spef_nets_annotated(
         stdout,
         begin=_SPEF_NET_CHECK_BEGIN,
         end=_SPEF_NET_CHECK_END,
@@ -3113,7 +3113,7 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     The SPEF side counts every listed name found in the design. The design
     side skips empty or driver-only internal nets and samples missing names."""
     return [
-        f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
+        f"set klt_spef_nets [list {tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
         "foreach klt_spef_net $klt_spef_nets {",
         "    set klt_spef_have($klt_spef_net) 1",

@@ -536,7 +536,7 @@ def test_load_generator_report_arg_rejects_non_dict_non_str():
 
 def test_load_generator_report_arg_resolves_relative_to_request_dir(tmp_path):
     # A relative path resolves against request_dir (#328), not the process cwd
-    # -- mirrors klt lvs's load_request_arg/_resolve_relative convention.
+    # -- mirrors klt lvs's load_request_arg/resolve_relative convention.
     report = {"generator": "resistor_strip", "cell_name": "x", "gds_path": "x.gds"}
     request_dir = tmp_path / "some" / "dir"
     request_dir.mkdir(parents=True)

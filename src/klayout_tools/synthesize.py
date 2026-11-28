@@ -237,7 +237,7 @@ from . import synthesize_timeout as ytimeout
 from ._digest import netlist_digest_fields
 from ._engine_proc import run_in_group
 from ._jsonnum import is_finite_number, is_int, is_number
-from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
+from ._paths import load_request_json, reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
@@ -805,7 +805,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     matching ``klt lvs``/``klt sim``'s ``load_request`` (user-authored
     input, never emitted by this tool).
     """
-    request = _load_request_json(request_path, SynthesizeError)
+    request = load_request_json(request_path, SynthesizeError)
     request = validate_request_shape(
         request,
         "request file",
@@ -815,7 +815,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     # Issue #3466: an unrecognised top-level key used to be dropped in
     # silence, so a misspelt or unsupported field produced a plausible
     # default-configuration result. Reject it instead (`_comment` exempt).
-    _reject_unknown_keys(
+    reject_unknown_keys(
         request, _ALLOWED_REQUEST_KEYS, request_path, "", SynthesizeError
     )
     _validate_outputs(request, request_path)
@@ -829,7 +829,7 @@ def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
     outputs = request["outputs"]
     if not isinstance(outputs, dict):
         raise SynthesizeError("request.outputs must be an object")
-    _reject_unknown_keys(
+    reject_unknown_keys(
         outputs, _ALLOWED_OUTPUTS_KEYS, request_path, "outputs", SynthesizeError
     )
     if "dir" in outputs:
@@ -3433,7 +3433,7 @@ def _resolve_latch_map(request: dict[str, Any]) -> dict[str, dict[str, str]] | N
             "request.latch_map must be a non-empty object keyed by "
             f"{' and/or '.join(repr(k) for k in _LATCH_MAP_POLARITIES)}"
         )
-    _reject_unknown_keys(
+    reject_unknown_keys(
         latch_map,
         frozenset(_LATCH_MAP_POLARITIES),
         "request",
@@ -3448,7 +3448,7 @@ def _resolve_latch_map(request: dict[str, Any]) -> dict[str, dict[str, str]] | N
         where = f"request.latch_map.{polarity}"
         if not isinstance(entry, dict):
             raise SynthesizeError(f"{where} must be an object")
-        _reject_unknown_keys(
+        reject_unknown_keys(
             entry,
             frozenset(("cell", *_LATCH_MAP_PIN_KEYS)),
             "request",

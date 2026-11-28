@@ -46,7 +46,7 @@ import subprocess
 from typing import Any
 
 from ._native import find_cargo_binary
-from ._paths import _load_request_json, _resolve_relative, validate_request_shape
+from ._paths import load_request_json, resolve_relative, validate_request_shape
 from .equiv import EquivError, run_equiv
 from .equiv_verdict import require_equivalence
 
@@ -91,7 +91,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``load_request``. Does not require a ``schema`` field, matching those
     same commands (user-authored input, never emitted by this tool).
     """
-    request = _load_request_json(request_path, TechmapError)
+    request = load_request_json(request_path, TechmapError)
     return validate_request_shape(
         request,
         "request file",
@@ -174,7 +174,7 @@ def run_techmap(
     if not isinstance(liberty, str) or not liberty:
         raise TechmapError("request.liberty must be a non-empty string")
 
-    liberty_path = _resolve_relative(liberty, request_dir)
+    liberty_path = resolve_relative(liberty, request_dir)
     if not os.path.isfile(liberty_path):
         raise TechmapError(f"liberty file not found: {liberty}")
 

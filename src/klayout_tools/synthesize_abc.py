@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from ._paths import _reject_unknown_keys
+from ._paths import reject_unknown_keys
 from .synthesize_timeout import validate_budget
 
 FastMode = Literal["native", "inline"] | None
@@ -113,7 +113,7 @@ def resolve_mapping(
     spec = request["synthesis"]
     if not isinstance(spec, dict):
         raise error_cls("request.synthesis must be an object")
-    _reject_unknown_keys(
+    reject_unknown_keys(
         spec,
         ("abc_fast", "abc_script", "abc_timeout_s"),
         request_path,

@@ -180,7 +180,7 @@ from typing import Any
 from . import layout_plan, layout_plan_body_nets, layout_plan_ports
 from . import layout_plan_routing as nr
 from ._jsonnum import is_number
-from ._paths import _resolve_relative
+from ._paths import resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
 from .layout_plan_diff_pair import apply_diff_pair_unit_w_um, apply_strap_splits
@@ -1156,7 +1156,7 @@ def execute_layout_plan_document(
         )
 
     netlist_spec = layout_plan._parse_netlist(request["netlist"])
-    resolved_path = _resolve_relative(netlist_spec["path"], request_dir or os.getcwd())
+    resolved_path = resolve_relative(netlist_spec["path"], request_dir or os.getcwd())
 
     digest = ingest_netlist(netlist_spec, resolved_path)
 

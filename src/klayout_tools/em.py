@@ -29,7 +29,7 @@ from ._geode import (
     parse_capacitance_report as parse_capacitance_report,
 )
 from ._jsonnum import is_finite_number
-from ._paths import _load_request_json
+from ._paths import load_request_json
 from .env_provenance import find_repo_root
 
 SCHEMA_VERSION = 1
@@ -252,7 +252,7 @@ def _validate_options(raw: Any) -> dict[str, Any]:
 
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and validate a ``klt em`` request; raises :class:`EmError`."""
-    request = _load_request_json(request_path, EmError)
+    request = load_request_json(request_path, EmError)
     if not isinstance(request, dict):
         raise EmError(f"request '{request_path}' must be a JSON object")
 

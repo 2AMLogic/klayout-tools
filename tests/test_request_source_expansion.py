@@ -3,7 +3,7 @@
 ``klt functional-verification`` / ``synthesize`` / ``formal`` / ``equiv`` used to
 hand-roll ``isabs``/``join`` for ``sources``, so a committed request naming
 ``$PDK_ROOT/...`` could not run as-is. They now route through
-``request_paths.resolve_request_path`` (``_paths._resolve_relative`` plus a
+``request_paths.resolve_request_path`` (``_paths.resolve_relative`` plus a
 named error for an unset variable), matching ``klt lvs``/``drc``/``extract``/``sim``.
 """
 

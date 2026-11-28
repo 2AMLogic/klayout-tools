@@ -57,8 +57,8 @@ from ._layout import cells_in_hierarchy, load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import (
-    _load_spec_json,
-    _reject_unknown_keys,
+    load_spec_json,
+    reject_unknown_keys,
 )
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
@@ -2529,8 +2529,8 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     ties_disclosure, devices, spec_antenna_limits, keepouts)``; raises :class:`ErcError`
     on any defect.
     """
-    spec = _load_spec_json(spec_path, ErcError)
-    _reject_unknown_keys(
+    spec = load_spec_json(spec_path, ErcError)
+    reject_unknown_keys(
         spec, _SPEC_KEYS + (FLOATING_GATE_ALLOWED_KEY,), spec_path, "", ErcError
     )
     stackup = _validate_stackup(spec, spec_path)

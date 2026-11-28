@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import sim, sim_adapt
-from klayout_tools._paths import _resolve_relative
+from klayout_tools._paths import resolve_relative
 
 _FINFET = "Mn1 d g s b nmos_rvt L=20n W=0.1u NFIN=3\n"
 _CARD = ".model nmos_rvt nmos level = 72 version = 107 tfin = 6n\n"
@@ -92,7 +92,7 @@ def test_environment_entry_only_when_adapt(tmp_path):
         str(tmp_path),
         engine="ngspice",
         work_dir=str(tmp_path / "w"),
-        resolve=_resolve_relative,
+        resolve=resolve_relative,
     )
     assert same is request and env is None
     request["adapt"] = {"kind": "asap7_bsimcmg", "model_cards": {"tt": "tt.pm"}}
@@ -101,7 +101,7 @@ def test_environment_entry_only_when_adapt(tmp_path):
         str(tmp_path),
         engine="ngspice",
         work_dir=str(tmp_path / "w"),
-        resolve=_resolve_relative,
+        resolve=resolve_relative,
     )
     assert env["kind"] == "asap7_bsimcmg"
     assert env["model_cards"][0]["corner"] == "tt"

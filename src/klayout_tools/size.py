@@ -52,7 +52,7 @@ from typing import Any
 
 from . import design_centering, env_provenance
 from ._jsonnum import is_int, is_number
-from ._paths import _load_request_json, validate_request_shape
+from ._paths import load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
 from .ngspice_build import engine_version as _ngspice_engine_version
@@ -221,7 +221,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     (coupled multi-device mode, issue #768) -- the two modes are mutually
     exclusive, mirroring ``corner``/``corners``' own XOR rule).
     """
-    request = _load_request_json(request_path, SizeError)
+    request = load_request_json(request_path, SizeError)
     request = validate_request_shape(
         request,
         "request file",

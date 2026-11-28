@@ -43,7 +43,7 @@ from ._check_result import skipped as _skipped
 from ._jsonnum import is_int, is_number
 from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
-from ._paths import _load_request_json
+from ._paths import load_request_json
 
 #: Every check name this module runs, in report order. ``power_ports``
 #: (issue #2839) is appended last, so the original three keep their
@@ -295,7 +295,7 @@ def _load_descriptor(path: str) -> dict[str, Any]:
     Raises :class:`SocketCheckError` for a missing/unreadable file, invalid
     JSON, a non-object top level, or any field that fails validation.
     """
-    data = _load_request_json(path, SocketCheckError)
+    data = load_request_json(path, SocketCheckError)
 
     if not isinstance(data, dict):
         raise SocketCheckError("socket descriptor must decode to a JSON object")

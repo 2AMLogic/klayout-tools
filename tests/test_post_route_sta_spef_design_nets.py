@@ -7,7 +7,7 @@ import pytest
 
 from klayout_tools import place_and_route_sta as pnr_sta
 from klayout_tools import post_route_sta as sta
-from klayout_tools._paths import _count_spef_nets_annotated
+from klayout_tools._paths import count_spef_nets_annotated
 from klayout_tools._sta_request_diag import SPEF_SKIP_DRIVER_ONLY
 from klayout_tools.place_and_route import (
     _SPEF_NET_CHECK_BEGIN,
@@ -212,7 +212,7 @@ def test_in_flow_design_counts_skip_driver_only(tmp_path, nets, spef, counts, co
     output = subprocess.run(
         [tclsh, str(script)], text=True, capture_output=True, check=True
     )
-    parsed = _count_spef_nets_annotated(
+    parsed = count_spef_nets_annotated(
         output.stdout,
         begin=_SPEF_NET_CHECK_BEGIN,
         end=_SPEF_NET_CHECK_END,

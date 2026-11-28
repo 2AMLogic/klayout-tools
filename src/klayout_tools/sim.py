@@ -174,8 +174,8 @@ from . import sim_stepping_narration as sim_stepping_narration
 from . import sim_transient_noise as sim_tn
 from ._jsonnum import is_int, is_number
 from ._paths import (
-    _load_request_json,
-    _resolve_relative,
+    load_request_json,
+    resolve_relative,
     resolve_tool_binary,
     validate_request_shape,
 )
@@ -1277,7 +1277,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     validated in :func:`run_sim`, only for a ``corners.process`` axis (see
     ``_resolve_models_lib``). No ``schema`` field is required.
     """
-    request = _load_request_json(request_path, SimError)
+    request = load_request_json(request_path, SimError)
     if not isinstance(request, dict):  # #7720: guard before membership tests
         raise SimError("request file must contain a JSON object")
     if sim_commands.COMMANDS_FIELD in request or "decks" in request:
@@ -2542,11 +2542,11 @@ def _prepare_sim_request(
         engine,
         backend,
         backend_from_host_default,
-        _resolve_relative,
+        resolve_relative,
     )
 
     netlist_ref = request["netlist"]
-    netlist_path = _resolve_relative(netlist_ref, request_dir)
+    netlist_path = resolve_relative(netlist_ref, request_dir)
     if not os.path.isfile(netlist_path):
         raise SimError(f"netlist not found: {netlist_path}")
 

@@ -92,7 +92,7 @@ def _load_mutation_proposals_json(path: str) -> Any:
     """Read ``path`` and decode it as JSON, raising
     :class:`FunctionalVerificationError` for every failure mode a caller
     needs to report -- the `<proposals>`-specific analogue of
-    :func:`klayout_tools._paths._load_request_json`, kept separate only so
+    :func:`klayout_tools._paths.load_request_json`, kept separate only so
     the error text says "mutation proposals file", not "request file"."""
     if not os.path.exists(path):
         raise _fv.FunctionalVerificationError(

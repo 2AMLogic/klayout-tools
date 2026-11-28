@@ -37,7 +37,7 @@ import os
 from typing import Any
 
 from .._jsonnum import is_int, is_number
-from .._paths import _resolve_relative
+from .._paths import resolve_relative
 from .._request_fields import check_known_fields  # noqa: F401 (re-exported as reqdoc.check_known_fields)
 
 ErrorFactory = type[Exception]
@@ -141,7 +141,7 @@ def get_path(
     value = get_str(request, key, verb=verb, error_cls=error_cls)
     if value is None:
         return None
-    return _resolve_relative(value, base_dir)
+    return resolve_relative(value, base_dir)
 
 
 def annotate_missing_file(exc: Exception, request_arg: str, resolved: str) -> None:
@@ -157,7 +157,7 @@ def annotate_missing_file(exc: Exception, request_arg: str, resolved: str) -> No
     try:
         with open(request_arg, encoding="utf-8") as handle:
             raw = json.load(handle)["file"]
-        if resolved != _resolve_relative(raw, base_dir) or os.path.isabs(
+        if resolved != resolve_relative(raw, base_dir) or os.path.isabs(
             os.path.expanduser(os.path.expandvars(raw))
         ):
             return
@@ -239,7 +239,7 @@ def get_str_list(
         )
     if base_dir is None:
         return list(value)
-    return [_resolve_relative(entry, base_dir) for entry in value]
+    return [resolve_relative(entry, base_dir) for entry in value]
 
 
 def get_comma_joined(

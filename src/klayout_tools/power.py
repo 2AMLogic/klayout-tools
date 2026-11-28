@@ -153,10 +153,10 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import (
-    _load_spec_json,
-    _reject_unknown_keys,
-    _validate_via_entries,
+    load_spec_json,
     parse_layer_datatype,
+    reject_unknown_keys,
+    validate_via_entries,
 )
 from ._power_em_sections import em_edge_verdicts, island_section_densities
 from ._power_mesh import _cell_sides
@@ -274,7 +274,7 @@ def _parse_power_net_entry(entry: Any, index: int, spec_path: str) -> tuple[str,
     deliberately share a label.
     """
     if isinstance(entry, dict):
-        _reject_unknown_keys(
+        reject_unknown_keys(
             entry, _POWER_NET_KEYS, spec_path, f"power_nets[{index}]", PowerError
         )
         name = str(entry.get("name", "")).strip()
@@ -323,7 +323,7 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise PowerError(f"spec '{spec_path}': stackup[{i}] must be a JSON object")
-        _reject_unknown_keys(
+        reject_unknown_keys(
             entry, _STACKUP_KEYS, spec_path, f"stackup[{i}]", PowerError
         )
         for key in ("name", "layer", "sheet_resistance_ohm_per_sq"):
@@ -495,7 +495,7 @@ def _validate_vias(
     parasitics deck by :func:`_apply_deck_via_resistance`. An explicit value
     (including ``0``) is always kept as the spec's own."""
     entries: list[dict[str, Any]] = []
-    for i, entry, name, layer, between in _validate_via_entries(
+    for i, entry, name, layer, between in validate_via_entries(
         spec,
         spec_path,
         stackup_names,
@@ -680,7 +680,7 @@ def _validate_pads(
         field = f"pads[{i}]"
         if not isinstance(entry, dict):
             raise PowerError(f"spec '{spec_path}': {field} must be a JSON object")
-        _reject_unknown_keys(entry, _PAD_KEYS, spec_path, field, PowerError)
+        reject_unknown_keys(entry, _PAD_KEYS, spec_path, field, PowerError)
         if "net" not in entry:
             raise PowerError(f"spec '{spec_path}': {field} missing 'net'")
         net = str(entry["net"])
@@ -730,7 +730,7 @@ def _validate_activity(
     activity = entry["activity"]
     if not isinstance(activity, dict):
         raise PowerError(f"spec '{spec_path}': {field}.activity must be a JSON object")
-    _reject_unknown_keys(
+    reject_unknown_keys(
         activity, _ACTIVITY_KEYS, spec_path, f"{field}.activity", PowerError
     )
     activity_field = f"{field}.activity"
@@ -792,7 +792,7 @@ def _validate_current_model(
         return None
     if not isinstance(raw, dict):
         raise PowerError(f"spec '{spec_path}': 'current_model' must be a JSON object")
-    _reject_unknown_keys(
+    reject_unknown_keys(
         raw, _CURRENT_MODEL_KEYS, spec_path, "current_model", PowerError
     )
 
@@ -843,7 +843,7 @@ def _validate_current_model(
         field = f"current_model.instances[{i}]"
         if not isinstance(entry, dict):
             raise PowerError(f"spec '{spec_path}': {field} must be a JSON object")
-        _reject_unknown_keys(entry, _INSTANCE_KEYS, spec_path, field, PowerError)
+        reject_unknown_keys(entry, _INSTANCE_KEYS, spec_path, field, PowerError)
 
         name = str(entry.get("name", f"inst{i}"))
         if name in names:
@@ -2345,8 +2345,8 @@ def run_power(
     to at least one island).
     """
     corner = _resolve_resistance_corner(deck, resistance_corner)
-    spec = _load_spec_json(spec_path, PowerError)
-    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", PowerError)
+    spec = load_spec_json(spec_path, PowerError)
+    reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", PowerError)
     power_net_entries = _validate_power_nets(spec, spec_path)
     power_nets = [entry["name"] for entry in power_net_entries]
     stackup = _validate_stackup(spec, spec_path)

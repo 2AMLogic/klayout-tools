@@ -23,7 +23,7 @@ path in the R network, and the IR-drop and EM verdicts are computed on a
 rail that does not exist. So the schema fragment, its validation, the
 geometry subtraction, and the area accounting all live here, once, and a
 caller can hand the *same* ``devices[]`` declaration to either verb --
-following the precedent ``_paths.py``'s own ``_validate_via_entries``
+following the precedent ``_paths.py``'s own ``validate_via_entries``
 already set for the identically-shaped ``vias[]`` fragment. (The geometry
 half of this needs ``_layout.region``, and ``_paths.py`` is deliberately
 free of any ``klayout.db``/layout dependency -- hence a module of its own
@@ -50,7 +50,7 @@ from typing import Any
 
 from . import _warn
 from ._layout import region as _region
-from ._paths import _reject_unknown_keys, parse_layer_datatype
+from ._paths import parse_layer_datatype, reject_unknown_keys
 
 
 def _validate_device_entry(
@@ -65,7 +65,7 @@ def _validate_device_entry(
     complexity ratchet."""
     if not isinstance(entry, dict):
         raise error_cls(f"spec '{spec_path}': devices[{index}] must be a JSON object")
-    _reject_unknown_keys(
+    reject_unknown_keys(
         entry, ("name", "body_layer", "on"), spec_path, f"devices[{index}]", error_cls
     )
     for key in ("body_layer", "on"):

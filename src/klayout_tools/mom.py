@@ -27,7 +27,7 @@ from typing import Any
 from . import pdk_stackup
 from ._layout import load_layout, select_top_cells
 from ._native import _load_native_extension
-from ._paths import _load_spec_json, _reject_unknown_keys, parse_layer_datatype
+from ._paths import load_spec_json, parse_layer_datatype, reject_unknown_keys
 from .touchstone import TOUCHSTONE_VERSION, format_s2p
 
 #: Mirrors ``native/mom/src/contract.rs``'s ``DEFAULT_PANEL_SIZE_UM`` -- kept
@@ -97,17 +97,17 @@ def _validate_spec_keys(spec: dict[str, Any], spec_path: str) -> None:
     are checked by :func:`_parse_ports`, which ``run_mom`` also calls before
     reading the layout.
     """
-    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", MomError)
+    reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", MomError)
     explicit_stackup = spec.get("stackup")
     entries = explicit_stackup if isinstance(explicit_stackup, list) else []
     for i, entry in enumerate(entries):
         if isinstance(entry, dict):
-            _reject_unknown_keys(
+            reject_unknown_keys(
                 entry, _STACKUP_ENTRY_KEYS, spec_path, f"stackup[{i}]", MomError
             )
     stackup_from_pdk = spec.get("stackup_from_pdk")
     if isinstance(stackup_from_pdk, dict):
-        _reject_unknown_keys(
+        reject_unknown_keys(
             stackup_from_pdk,
             _STACKUP_FROM_PDK_KEYS,
             spec_path,
@@ -288,7 +288,7 @@ def _resolve_stackup_from_pdk(
     """
     if not isinstance(request, dict):
         raise MomError(f"spec '{spec_path}': 'stackup_from_pdk' must be an object")
-    _reject_unknown_keys(
+    reject_unknown_keys(
         request, _STACKUP_FROM_PDK_KEYS, spec_path, "stackup_from_pdk", MomError
     )
     if "pdk" not in request or "layers" not in request:
@@ -381,7 +381,7 @@ def _parse_ports(spec: dict[str, Any], spec_path: str) -> list[dict[str, float]]
                 f"spec '{spec_path}': ports[{i}] must be an object with a "
                 "'position_um' field"
             )
-        _reject_unknown_keys(entry, _PORT_KEYS, spec_path, f"ports[{i}]", MomError)
+        reject_unknown_keys(entry, _PORT_KEYS, spec_path, f"ports[{i}]", MomError)
         ports.append(
             {
                 "position_um": float(entry["position_um"]),
@@ -525,7 +525,7 @@ def run_mom(
     Returns a dict matching the documented ``klt mom`` JSON schema (see
     ``docs/cli/mom.md``), including ``schema_version``.
     """
-    spec = _load_spec_json(spec_path, MomError)
+    spec = load_spec_json(spec_path, MomError)
     _validate_spec_keys(spec, spec_path)
 
     explicit_stackup = spec.get("stackup")

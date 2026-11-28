@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._jsonnum import is_finite_number, is_int
-from ._paths import _reject_unknown_keys, _validate_via_entries, parse_layer_datatype
+from ._paths import parse_layer_datatype, reject_unknown_keys, validate_via_entries
 from .erc_spec_boxes import (  # -- _parse_um_boxes is re-exported
     _parse_isolation_boxes,
     _parse_tap_boxes,
@@ -174,7 +174,7 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise ErcError(f"spec '{spec_path}': stackup[{i}] must be a JSON object")
-        _reject_unknown_keys(entry, _STACKUP_KEYS, spec_path, f"stackup[{i}]", ErcError)
+        reject_unknown_keys(entry, _STACKUP_KEYS, spec_path, f"stackup[{i}]", ErcError)
         for key in ("name", "layer"):
             if key not in entry:
                 raise ErcError(f"spec '{spec_path}': stackup[{i}] missing {key!r}")
@@ -286,7 +286,7 @@ def _validate_antenna_limit_entry(
     """One ``antenna_limits[]`` entry: object shape, keys, then each field."""
     if not isinstance(entry, dict):
         raise ErcError(f"spec '{spec_path}': {where} must be a JSON object")
-    _reject_unknown_keys(entry, _ANTENNA_LIMIT_KEYS, spec_path, where, ErcError)
+    reject_unknown_keys(entry, _ANTENNA_LIMIT_KEYS, spec_path, where, ErcError)
     for key in _ANTENNA_LIMIT_KEYS:
         if key not in entry:
             raise ErcError(f"spec '{spec_path}': {where} missing {key!r}")
@@ -325,7 +325,7 @@ def _validate_vias(
 ) -> list[dict[str, Any]]:
     return [
         {"name": name, "layer": layer, "between": between}
-        for _, _, name, layer, between in _validate_via_entries(
+        for _, _, name, layer, between in validate_via_entries(
             spec, spec_path, stackup_names, ErcError
         )
     ]
@@ -399,7 +399,7 @@ def _validate_nets(
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise ErcError(f"spec '{spec_path}': nets[{i}] must be a JSON object")
-        _reject_unknown_keys(entry, _NET_KEYS, spec_path, f"nets[{i}]", ErcError)
+        reject_unknown_keys(entry, _NET_KEYS, spec_path, f"nets[{i}]", ErcError)
         if "name" not in entry:
             raise ErcError(f"spec '{spec_path}': nets[{i}] missing 'name'")
         name = str(entry["name"]).strip()
@@ -1039,7 +1039,7 @@ def _validate_ties(
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise ErcError(f"spec '{spec_path}': ties[{i}] must be a JSON object")
-        _reject_unknown_keys(entry, _TIE_KEYS, spec_path, f"ties[{i}]", ErcError)
+        reject_unknown_keys(entry, _TIE_KEYS, spec_path, f"ties[{i}]", ErcError)
         for key in ("well_layer", "tap_layer", "connect_to", "net"):
             if key not in entry:
                 raise ErcError(f"spec '{spec_path}': ties[{i}] missing {key!r}")
@@ -1212,7 +1212,7 @@ def _validate_ties_disclosure(
         return None
     if not isinstance(raw, dict):
         raise ErcError(f"spec '{spec_path}': 'ties_disclosure' must be a JSON object")
-    _reject_unknown_keys(
+    reject_unknown_keys(
         raw, _TIES_DISCLOSURE_KEYS, spec_path, "ties_disclosure", ErcError
     )
     reason = raw.get("reason")

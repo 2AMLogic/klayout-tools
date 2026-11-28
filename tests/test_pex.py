@@ -2359,7 +2359,7 @@ def test_prepare_extracted_request_literal_relative_lib_still_resolved_eagerly(
 def test_prepare_extracted_request_env_var_lib_left_expandable(tmp_path, monkeypatch):
     """Regression guard for the documented workaround shape
     (`"$PDK_ROOT/<variant>/<path>"`, no `models.pdk`): env-var expansion
-    happens in `_resolve_relative`, so the eagerly-resolved copy must still
+    happens in `resolve_relative`, so the eagerly-resolved copy must still
     point at the same absolute file."""
     install_root = tmp_path / "install"
     lib_path = _make_fake_pdk_install(install_root)
@@ -2537,7 +2537,7 @@ def test_run_pex_outdir_relative_with_dotdot_does_not_double_the_path(tmp_path):
     once. Before the fix, `work_dir` in `run_pex` was `artifacts_dir` used
     verbatim (never made absolute) -- the still-relative `../...` string got
     written into the extracted-request JSON's `netlist` field, then
-    `run_sim`/`_resolve_relative` re-joined it against an *already-resolved*
+    `run_sim`/`resolve_relative` re-joined it against an *already-resolved*
     request directory, doubling the `reports/klt-pex-artifacts/<name>`
     segment and raising "netlist not found". Resolving `work_dir` to an
     absolute path up front (mirroring the fallback branch, which already

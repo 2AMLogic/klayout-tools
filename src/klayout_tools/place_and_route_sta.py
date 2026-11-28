@@ -31,7 +31,7 @@ from ._openroad_engine import (
     write_sdf_line,
 )
 from ._openroad_io import read_metrics, write_script
-from ._paths import _count_spef_nets_annotated, _tcl_net_list
+from ._paths import count_spef_nets_annotated, tcl_net_list
 from ._sta_multicycle import multicycle_lines
 from ._sta_request_diag import SPEF_SKIP_DRIVER_ONLY
 from ._tcl import tcl_literal as _tcl_literal
@@ -265,7 +265,7 @@ def _spef_sta_script_lines(
       driver-only internal nets, as in standalone ``klt sta``):
       how many timed nets the SPEF names; ``annotation_complete`` keys on it.
 
-    Net names are embedded verbatim, not glob-escaped. ``_tcl_net_list``
+    Net names are embedded verbatim, not glob-escaped. ``tcl_net_list``
     wraps each in Tcl braces, and brace-quoting performs no backslash
     substitution -- so a backslash-escaped ``a\\[10\\]`` would reach
     ``get_nets`` still carrying its backslashes and match nothing, while the
@@ -310,7 +310,7 @@ def _spef_sta_script_lines(
     lines += clocks.delay_lines(input_delay_ns, output_delay_ns)
     lines += multicycle_lines(multicycle, mode="apply")
     lines += [
-        f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
+        f"set klt_spef_nets [list {tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
         "foreach klt_spef_net $klt_spef_nets {",
         "    set klt_spef_have($klt_spef_net) 1",
@@ -723,7 +723,7 @@ def _post_route_spef_metrics(
     hold_violation_count = count_violations(
         completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
     )
-    nets_check = _count_spef_nets_annotated(
+    nets_check = count_spef_nets_annotated(
         completed.stdout,
         begin=_SPEF_NET_CHECK_BEGIN,
         end=_SPEF_NET_CHECK_END,

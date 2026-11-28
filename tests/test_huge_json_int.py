@@ -28,9 +28,9 @@ import pytest
 
 from klayout_tools import gen_compose, op_sanity, signoff
 from klayout_tools._paths import (
-    _load_request_json,
-    _load_spec_json,
     load_request_arg,
+    load_request_json,
+    load_spec_json,
 )
 
 HUGE = 10**400
@@ -117,7 +117,7 @@ def test_load_request_json_file_form_names_the_path(tmp_path):
     path = tmp_path / "huge.json"
     path.write_text('{"x": ' + _over_limit_literal() + "}")
     with pytest.raises(_LoaderError, match=re.escape(str(path))) as excinfo:
-        _load_request_json(str(path), _LoaderError)
+        load_request_json(str(path), _LoaderError)
     assert "is not valid JSON" in str(excinfo.value)
 
 
@@ -125,7 +125,7 @@ def test_load_spec_json_file_form_names_the_path(tmp_path):
     path = tmp_path / "huge.json"
     path.write_text('{"x": ' + _over_limit_literal() + "}")
     with pytest.raises(_LoaderError, match=re.escape(str(path))) as excinfo:
-        _load_spec_json(str(path), _LoaderError)
+        load_spec_json(str(path), _LoaderError)
     assert "is not valid JSON" in str(excinfo.value)
 
 
@@ -137,7 +137,7 @@ def test_load_request_arg_stdin_form_names_the_source(monkeypatch):
             "-",
             error_cls=_LoaderError,
             required_fields=(),
-            load_request_fn=_load_request_json,
+            load_request_fn=load_request_json,
         )
 
 
@@ -148,7 +148,7 @@ def test_load_request_arg_inline_form_names_the_value():
             value,
             error_cls=_LoaderError,
             required_fields=(),
-            load_request_fn=_load_request_json,
+            load_request_fn=load_request_json,
         )
 
 
@@ -164,9 +164,9 @@ def test_at_limit_literal_still_parses(tmp_path, monkeypatch, form):
         path = tmp_path / "ok.json"
         path.write_text(document)
         if form == "file_request":
-            assert _load_request_json(str(path), _LoaderError)["x"] >= 0
+            assert load_request_json(str(path), _LoaderError)["x"] >= 0
         else:
-            assert _load_spec_json(str(path), _LoaderError)["x"] >= 0
+            assert load_spec_json(str(path), _LoaderError)["x"] >= 0
         return
     if form == "stdin":
         monkeypatch.setattr("sys.stdin", io.StringIO(document))
@@ -174,14 +174,14 @@ def test_at_limit_literal_still_parses(tmp_path, monkeypatch, form):
             "-",
             error_cls=_LoaderError,
             required_fields=(),
-            load_request_fn=_load_request_json,
+            load_request_fn=load_request_json,
         )
     else:
         request, _ = load_request_arg(
             document,
             error_cls=_LoaderError,
             required_fields=(),
-            load_request_fn=_load_request_json,
+            load_request_fn=load_request_json,
         )
     assert request["x"] >= 0
 
@@ -192,5 +192,5 @@ def test_malformed_json_still_gets_the_jsondecode_message(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("{not json")
     with pytest.raises(_LoaderError, match="is not valid JSON"):
-        _load_request_json(str(path), _LoaderError)
+        load_request_json(str(path), _LoaderError)
     assert json.loads('{"x": 1}') == {"x": 1}

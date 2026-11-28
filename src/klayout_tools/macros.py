@@ -96,7 +96,7 @@ from klayout_tools._macros_blackbox import (
     missing_lef_master_hint,  # noqa: F401 -- re-exported; macro_spec callers
     validate_blackbox_entry,
 )
-from klayout_tools._paths import _resolve_relative
+from klayout_tools._paths import resolve_relative
 from klayout_tools.lef_header import read_lef_header
 from klayout_tools.macro_blackbox import (
     check_blackbox_declares_cell,
@@ -149,7 +149,7 @@ def resolve_macro_path(value: str, request_dir: str) -> str:
     """``value`` as an absolute path, resolved against ``request_dir`` when
     relative -- the same "relative to the request file's own directory"
     convention every other path field in every ``klt`` request uses."""
-    return os.path.abspath(_resolve_relative(value, request_dir))
+    return os.path.abspath(resolve_relative(value, request_dir))
 
 
 def _require_non_empty_string(

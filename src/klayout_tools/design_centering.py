@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._paths import _load_request_json, validate_request_shape
+from ._paths import load_request_json, validate_request_shape
 
 #: Independently versioned from every other ``klt`` command's own
 #: ``schema_version``, per docs/json-contract.md's "per command, not
@@ -55,7 +55,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     size`` JSON payload, single-device or topology mode), and
     ``parameter_map`` (``{mismatch_parameter: instance_name}``).
     """
-    request = _load_request_json(request_path, DesignCenteringError)
+    request = load_request_json(request_path, DesignCenteringError)
     return validate_request_shape(
         request,
         "request file",

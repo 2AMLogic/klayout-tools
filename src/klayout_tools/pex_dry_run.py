@@ -42,7 +42,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import env_provenance, pex_async
-from ._paths import _resolve_relative
+from ._paths import resolve_relative
 from .decks import UnknownExtractionDeckError, get_parasitics_deck
 from .extract import ExtractError
 from .extract_pdk_resolve import resolve_pdk_and_model_bindings
@@ -223,7 +223,7 @@ def _resolve_testbenches(
         request = _load_testbench_request(testbench_path, timeout_s)
         schematic_probes(request)
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
-        schematic_body_path = _resolve_relative(request["netlist"], request_dir)
+        schematic_body_path = resolve_relative(request["netlist"], request_dir)
         if not os.path.isfile(schematic_body_path):
             raise PexError(
                 f"testbench '{testbench_path}': netlist not found: "

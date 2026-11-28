@@ -152,8 +152,8 @@ from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import region as _region
 from ._layout import region_expr as _region_expr
 from ._layout import texts as _texts
-from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import load_request_json
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     content_hash,
@@ -722,7 +722,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     (user-authored input, never emitted by this tool) -- when one *is*
     present, ``cli/extract_cmd.py`` checks it against :data:`REQUEST_SCHEMA`.
     """
-    request = _load_request_json(request_path, ExtractError)
+    request = load_request_json(request_path, ExtractError)
     return _validate_request_shape(request, "request file")
 
 

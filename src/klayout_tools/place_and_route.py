@@ -58,16 +58,7 @@ from ._openroad_engine import (
 )
 from ._openroad_io import format_engine_error, read_metrics, write_script
 from ._openroad_mount_hint import mount_namespace_hint
-from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
-from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
-from ._paths import _tcl_net_list as _tcl_net_list
-
-# `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
-# that only the STA subsystem calls after the issue #1808 split; they are
-# imported here purely so `klayout_tools.place_and_route.<name>` keeps
-# resolving for callers that reach them by that path (the test suite does).
-# Same intent -- and same redundant `X as X` alias form -- as the
-# `place_and_route_sta` re-export block below.
+from ._paths import load_request_json, reject_unknown_keys, validate_request_shape
 from ._power_activity import power_basis_block
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, content_hash
 from ._report_verify import (
@@ -573,7 +564,7 @@ def load_request(
     request_path: str, *, threads: int | str | None = None
 ) -> dict[str, Any]:
     """Validate the request envelope and apply an optional CLI thread override."""
-    request = _load_request_json(request_path, PlaceAndRouteError)
+    request = load_request_json(request_path, PlaceAndRouteError)
     request = validate_request_shape(
         request,
         "request file",
@@ -582,7 +573,7 @@ def load_request(
     )
     # Issue #4230: a misspelt or foreign top-level key used to be dropped in
     # silence (same hole `klt synthesize` closed in #3466). Reject it.
-    _reject_unknown_keys(
+    reject_unknown_keys(
         request, _ALLOWED_REQUEST_KEYS, request_path, "", PlaceAndRouteError
     )
     validate_threads(request, threads)
@@ -602,7 +593,7 @@ def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
     outputs = request["outputs"]
     if not isinstance(outputs, dict):
         raise PlaceAndRouteError("request.outputs must be an object")
-    _reject_unknown_keys(
+    reject_unknown_keys(
         outputs, _ALLOWED_OUTPUTS_KEYS, request_path, "outputs", PlaceAndRouteError
     )
     if "dir" in outputs:
