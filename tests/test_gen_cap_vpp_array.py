@@ -11,7 +11,7 @@ import json
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import pdk
+from klayout_tools import gen_cap_vpp, pdk
 from klayout_tools.cli import main
 from klayout_tools.gen import GenError, generate, list_generators
 
@@ -103,7 +103,28 @@ def test_cell_without_pins_states_so(pdk_root, tmp_path):
 def test_unknown_cell_lists_available(pdk_root, tmp_path):
     with pytest.raises(GenError) as exc:
         generate(_req(pdk_root, tmp_path, pdk_cell="nope"))
-    assert LABELLED in str(exc.value) and UNLABELLED in str(exc.value)
+    assert str(exc.value) == (
+        "generator 'cap_vpp_array': unknown params.pdk_cell 'nope' -- available: "
+        f"{LABELLED}, {UNLABELLED}"
+    )
+
+
+def test_layer_params_resolves_gds_path_once(pdk_root, monkeypatch):
+    calls = []
+    real = gen_cap_vpp._gds_path
+
+    def counting(pdk_info):
+        calls.append(pdk_info["variant"])
+        return real(pdk_info)
+
+    monkeypatch.setattr(gen_cap_vpp, "_gds_path", counting)
+    pdk_info = pdk.find_pdk(variant="sky130A", root=str(pdk_root))
+    params = {"pdk_cell": LABELLED, "num": 2, "pitch_um": 3.0}
+    expected = real(pdk_info)
+    assert gen_cap_vpp._cap_vpp_array_layer_params(pdk_info, params) == {
+        "vpp_gds_path": expected
+    }
+    assert calls == ["sky130A"]
 
 
 def test_single_instance(pdk_root, tmp_path):

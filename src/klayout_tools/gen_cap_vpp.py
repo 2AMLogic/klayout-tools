@@ -7,7 +7,9 @@ geometry of its own: the cell's GDS in the resolved PDK is the authoritative
 source, so this module only locates and inspects that cell. The PCell itself
 lives in :mod:`klayout_tools.gen_pcells.cap_vpp_array`.
 
-The cell is read from the PDK at request time and never vendored.
+The cell is read from the PDK at request time and never vendored. The array
+validation, lookup and inspection helpers are shared with ``pdk_cell``, which
+generalizes this generator to any fixed PDK cell (issue #8081).
 """
 
 from __future__ import annotations
@@ -108,43 +110,61 @@ def _inspect_gds(
     return cells
 
 
-def _cell_table(pdk_info: dict[str, Any]) -> dict[str, Any]:
-    path = _gds_path(pdk_info)
-    return _inspect_gds(path, os.stat(path).st_mtime_ns)
+def _table_at(path: str, prefix: str = CAP_VPP_PREFIX) -> dict[str, Any]:
+    """Inspect the GDS at ``path``, keyed on its mtime."""
+    return _inspect_gds(path, os.stat(path).st_mtime_ns, prefix)
+
+
+def _validate_array_params(generator_name: str, params: dict[str, Any]) -> None:
+    """Reject an empty row or a negative pitch (shared with ``pdk_cell``)."""
+    if params["num"] < 1:
+        raise GenError(f"generator '{generator_name}': params.num must be >= 1")
+    if params["pitch_um"] < 0:
+        raise GenError(f"generator '{generator_name}': params.pitch_um must be >= 0")
 
 
 def _cap_vpp_array_validate(params: dict[str, Any]) -> None:
-    if params["num"] < 1:
-        raise GenError("generator 'cap_vpp_array': params.num must be >= 1")
-    if params["pitch_um"] < 0:
-        raise GenError("generator 'cap_vpp_array': params.pitch_um must be >= 0")
+    _validate_array_params("cap_vpp_array", params)
 
 
-def _lookup(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, Any]:
-    """Return the named cell's info, rejecting unknown names / overlapping pitch."""
-    table = _cell_table(pdk_info)
+def _lookup_cell(
+    generator_name: str,
+    table: dict[str, Any],
+    params: dict[str, Any],
+    *,
+    scope: str = "",
+) -> dict[str, Any]:
+    """Return the named cell's entry in ``table``, rejecting an unknown name
+    (``scope`` suffixes that message, e.g. ``pdk_cell``'s library) or a pitch
+    narrower than the cell (its instances would overlap)."""
     entry = table.get(params["pdk_cell"])
     if entry is None:
         raise GenError(
-            "generator 'cap_vpp_array': unknown params.pdk_cell "
-            f"'{params['pdk_cell']}' -- available: {', '.join(sorted(table))}"
+            f"generator '{generator_name}': unknown params.pdk_cell "
+            f"'{params['pdk_cell']}'{scope} -- available: {', '.join(sorted(table))}"
         )
     width = entry["bbox_um"][2] - entry["bbox_um"][0]
     pitch = params["pitch_um"]
     if params["num"] > 1 and 0 < pitch < width - 1e-9:
         raise GenError(
-            f"generator 'cap_vpp_array': params.pitch_um ({pitch}um) is smaller "
+            f"generator '{generator_name}': params.pitch_um ({pitch}um) is smaller "
             f"than the cell width ({width:g}um) -- instances would overlap; use "
             "0 to abut or a pitch >= the cell width"
         )
     return entry
 
 
+def _lookup(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, Any]:
+    """Return the named cell's info, rejecting unknown names / overlapping pitch."""
+    return _lookup_cell("cap_vpp_array", _table_at(_gds_path(pdk_info)), params)
+
+
 def _cap_vpp_array_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
-    _lookup(params, pdk_info)
-    return {"vpp_gds_path": _gds_path(pdk_info)}
+    path = _gds_path(pdk_info)
+    _lookup_cell("cap_vpp_array", _table_at(path), params)
+    return {"vpp_gds_path": path}
 
 
 def effective_pitch_um(params: dict[str, Any], entry: dict[str, Any]) -> float:

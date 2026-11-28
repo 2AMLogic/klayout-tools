@@ -2,7 +2,9 @@
 
 Arrays one of a PDK's fixed, pre-drawn GDS cells. The geometry is copied from
 the PDK GDS at produce time (never vendored); request validation, cell lookup
-and port reporting live in :mod:`klayout_tools.gen_pdk_cell`.
+and port reporting live in :mod:`klayout_tools.gen_pdk_cell`. The PCell is the
+fixed-cell array ``cap_vpp_array`` shares, plus this generator's ``library``
+parameter (issue #8081).
 """
 
 from __future__ import annotations
@@ -12,51 +14,25 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import klayout.db as kdb
 
-from ._common_params import declare_vpp_gds_path
+from .cap_vpp_array import _build_fixed_cell_array_pcell
+
+
+def _declare_library(pcell: Any) -> None:
+    """Declare ``pdk_cell``'s leading ``library`` parameter."""
+    pcell.param(
+        "library",
+        pcell.TypeString,
+        "PDK library directory under libs.ref (e.g. sg13g2_io)",
+        default="",
+    )
 
 
 def _build_pdk_cell_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``pdk_cell`` PCell -- a row of one PDK fixed cell."""
-    import klayout.db as kdb
-
-    pcell_base: Any = kdb.PCellDeclarationHelper
-
-    class _PdkCellPCell(pcell_base):
-        """Row of ``num`` instances of one PDK fixed GDS cell."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.param(
-                "library",
-                self.TypeString,
-                "PDK library directory under libs.ref (e.g. sg13g2_io)",
-                default="",
-            )
-            self.param("pdk_cell", self.TypeString, "PDK fixed cell name", default="")
-            self.param(
-                "num", self.TypeInt, "Number of cell instances in the row", default=1
-            )
-            self.param(
-                "pitch_um",
-                self.TypeDouble,
-                "Instance pitch (um); 0 abuts at the cell's bbox width",
-                default=0.0,
-            )
-            declare_vpp_gds_path(self)
-
-        def display_text_impl(self) -> str:
-            return f"pdk_cell({self.pdk_cell},n={self.num})"
-
-        def produce_impl(self) -> None:
-            src = kdb.Layout()
-            src.read(self.vpp_gds_path)
-            src_cell = src.cell(self.pdk_cell)
-            dst = self.layout.create_cell(self.pdk_cell)
-            dst.copy_tree(src_cell)
-            bbox = dst.dbbox()
-            pitch = self.pitch_um if self.pitch_um > 0 else bbox.width()
-            for i in range(self.num):
-                disp = kdb.DVector(i * pitch - bbox.left, -bbox.bottom)
-                self.cell.insert(kdb.DCellInstArray(dst.cell_index(), kdb.DTrans(disp)))
-
-    return {"pdk_cell": _PdkCellPCell}
+    return _build_fixed_cell_array_pcell(
+        "pdk_cell",
+        pdk_cell_desc="PDK fixed cell name",
+        pdk_cell_default="",
+        num_default=1,
+        extra_params=_declare_library,
+    )
