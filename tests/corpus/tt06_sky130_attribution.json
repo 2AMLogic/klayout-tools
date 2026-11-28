@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "shuttle": "tt06",
+  "source_index": {
+    "repo": "https://github.com/TinyTapeout/tinytapeout-index",
+    "commit": "dfa8764c60911bd85ec42b9c30572c747cb81444",
+    "path": "index/tt06.json",
+    "sha256": "b133c63f2b78d345e7676abd76f71965af29c6efb4a8c8f9d4750286418d3703"
+  },
+  "note": "Credit for every design in the published Phase 2 sample (tt06_sky130_sample.json, tt_sky130_baseline.json, tt_sky130_optimized.json), joined by macro, repo and commit. Title and author are read from the pinned shuttle index, with whitespace around commas normalized. Each design's license is recorded in the baseline and results files as read from its own repository at the pinned commit.",
+  "designs": [
+    {
+      "macro": "tt_um_8bitALU",
+      "title": "8bit ALU",
+      "author": "David Parent, Chih-Kaun Ho, Edric Ong",
+      "repo": "https://github.com/EdricOngKhaiJieh/8bitALU_verilog",
+      "commit": "f9bcfd7d3cb6da2972d1678d9ec5e9402ae9eecb"
+    },
+    {
+      "macro": "tt_um_ALU",
+      "title": "3-bit ALU",
+      "author": "José Raña Gámez",
+      "repo": "https://github.com/JoseKaisen/ALU_3bits",
+      "commit": "aef5319d47e2f6644e4df935d932ae1136e0cc20"
+    },
+    {
+      "macro": "tt_um_CKPope_top",
+      "title": "X/Y Controller",
+      "author": "Charles Pope",
+      "repo": "https://github.com/CKPope/tt06-verilog-template",
+      "commit": "c93539faf09c864f1e4ed1ac31a8b16fcb5d7b73"
+    },
+    {
+      "macro": "tt_um_LFSR_shivam",
+      "title": "10-bit Linear feedback shift register",
+      "author": "Shivam Bhardwaj, Sachin Sharma, Pankaj Lodhi and Ambika Prasad Shah",
+      "repo": "https://github.com/beaprog/tt06-LFSR",
+      "commit": "6bffe5f606707446700dc5dc43db8fa4d6a74394"
+    }
+  ]
+}
