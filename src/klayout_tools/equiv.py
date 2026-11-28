@@ -62,10 +62,10 @@ from ._paths import _load_request_json, resolve_tool_binary, validate_request_sh
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
     INPUT_ROLE_SOURCE,
-    _combined_content_hash,
-    _yosys_version,
     build_provenance,
+    combined_content_hash,
     content_hash,
+    yosys_version,
 )
 from ._report_verify import (
     VOLATILE_FLOW_PATHS,
@@ -372,7 +372,7 @@ def run_equiv(
     # (`request.yosys_binary` > `$KLT_YOSYS_BINARY` > `yosys` on PATH),
     # rather than hardcoding the name `yosys` -- both engines (combinational
     # and "yosys-sequential") always invoke Yosys, so this is resolved once
-    # up front. The resolved path is what gets spawned, what `_yosys_version`
+    # up front. The resolved path is what gets spawned, what `yosys_version`
     # below re-derives its `engine_version` from, and what the returned
     # report's own `yosys_binary` field (alongside `engine_version`) records.
     yosys_binary = _resolve_yosys_binary(request_doc, request_dir)
@@ -457,7 +457,7 @@ def run_equiv(
     # Issue #2423: re-derive `engine_version` from the *same* binary that was
     # actually invoked above, so a `request.yosys_binary`/`$KLT_YOSYS_BINARY`
     # override never reports the bare-PATH `yosys`'s version (or `None`) instead.
-    engine_version = _yosys_version(yosys_binary)
+    engine_version = yosys_version(yosys_binary)
 
     status = "inconclusive"
     counterexample = None
@@ -1001,7 +1001,7 @@ def _equiv_input_hash(gold: dict[str, Any], gate: dict[str, Any]) -> str | None:
     all_sources = gold["sources"] + gate["sources"]
     if len(all_sources) == 1:
         return content_hash(all_sources[0])
-    return _combined_content_hash(all_sources)
+    return combined_content_hash(all_sources)
 
 
 def check_equiv_report(report_path: str, request: str) -> dict[str, Any]:

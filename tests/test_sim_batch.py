@@ -3730,7 +3730,7 @@ def _identity(runner_version) -> str:
 
 
 def _pin_client_version(monkeypatch, version: str = _CLIENT_VERSION) -> None:
-    monkeypatch.setattr(sb._provenance, "_klt_version", lambda: version)
+    monkeypatch.setattr(sb._provenance, "klt_version", lambda: version)
 
 
 def _run_one_job(tmp_path, monkeypatch, runner, **overrides):

@@ -88,7 +88,7 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
     monkeypatch.setenv(sim_batch.REGION_ENV, "us-east-1")
     for name in (eb.BACKEND_ENV, sim_batch.PROFILE_ENV, sim_batch.MAX_JOB_SECONDS_ENV):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: CLIENT_VERSION)
+    monkeypatch.setattr(_provenance, "klt_version", lambda: CLIENT_VERSION)
     keep = tmp_path / "uploads"
     keep.mkdir()
     runner = _FakeRunner(keep)

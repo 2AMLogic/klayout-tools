@@ -15939,7 +15939,7 @@ def test_check_lvs_report_klt_version_drift_advisory(tmp_path):
     advisories = {entry["field"]: entry for entry in result["advisories"]}
     assert advisories.keys() == {"provenance.klt_version"}
     assert advisories["provenance.klt_version"]["report"] == "0.0.1-forged"
-    assert advisories["provenance.klt_version"]["current"] == _provenance._klt_version()
+    assert advisories["provenance.klt_version"]["current"] == _provenance.klt_version()
 
 
 def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
@@ -15962,7 +15962,7 @@ def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
     assert advisories["provenance.klayout_version"]["report"] == "0.0.1-forged"
     assert (
         advisories["provenance.klayout_version"]["current"]
-        == _provenance._klayout_version()
+        == _provenance.klayout_version()
     )
 
 

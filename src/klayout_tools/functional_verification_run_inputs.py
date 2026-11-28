@@ -37,8 +37,8 @@ from typing import Any, NamedTuple
 
 from ._provenance import (
     INPUT_ROLE_SOURCE,
-    _combined_content_hash,
     build_provenance,
+    combined_content_hash,
     content_hash,
     sha256_file,
     sha256_file_required,
@@ -163,7 +163,7 @@ def resolve_run_inputs(
         digest = (
             content_hash(sources[0])
             if len(sources) == 1
-            else _combined_content_hash(sources)
+            else combined_content_hash(sources)
         )
         provenance["input"] = {"role": INPUT_ROLE_SOURCE, "content_hash": digest}
     return sources, RunInputs(

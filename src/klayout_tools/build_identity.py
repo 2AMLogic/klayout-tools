@@ -253,12 +253,12 @@ def klayout_version() -> str | None:
     """``klayout.__version__`` (the KLayout Python engine build actually
     resolved into this process), or ``None`` when unresolvable.
 
-    Duplicates ``_provenance._klayout_version`` (both are a three-line
-    try/import) rather than importing it, so this module carries no
-    dependency edge back onto ``_provenance`` -- which itself imports
+    The single implementation; ``_provenance.klayout_version`` delegates
+    here rather than the reverse, so this module carries no dependency edge
+    back onto ``_provenance`` -- which itself imports
     :func:`klayout_version_expected` from here to populate
-    ``provenance.klayout_version_mismatch`` (issue #1490); either direction
-    alone is fine, both together would be circular.
+    ``provenance.klayout_version_mismatch`` (issue #1490); both directions
+    together would be circular.
     """
     try:
         import klayout

@@ -602,6 +602,8 @@ def environment_provenance(
     contains any local identifier or home-shaped path -- the mechanism that
     makes the hygiene rule enforceable rather than merely documented.
     """
+    from ._provenance import klayout_version, klt_version
+
     if repo_root is None:
         repo_root = find_repo_root()
 
@@ -619,25 +621,13 @@ def environment_provenance(
             "machine": platform.machine() or None,
         },
         "python_version": platform.python_version(),
-        "klt_version": _klt_version(),
-        "klayout_version": _klayout_version(),
+        "klt_version": klt_version(),
+        "klayout_version": klayout_version(),
         "paths": normalised_paths,
     }
 
     _assert_no_leaks(report)
     return report
-
-
-def _klt_version() -> str | None:
-    from ._provenance import _klt_version as resolve
-
-    return resolve()
-
-
-def _klayout_version() -> str | None:
-    from ._provenance import _klayout_version as resolve
-
-    return resolve()
 
 
 def _assert_no_leaks(report: Mapping[str, Any]) -> None:

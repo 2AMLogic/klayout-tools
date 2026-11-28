@@ -106,7 +106,7 @@ def write_spef_block(
 ) -> str | None:
     import os
 
-    from ._provenance import _klt_version
+    from ._provenance import klt_version
     from .extract import (
         _remap_def_net_connections,
         _spef_warnings,
@@ -135,7 +135,7 @@ def write_spef_block(
         spef_skipped_nets = _write_spef(
             spef_path,
             design_name=top_cell_name,
-            klt_version=_klt_version(),
+            klt_version=klt_version(),
             parasitics_report=parasitics_report,
             port_names=(entry["name"] for entry in nets if entry["pin"]),
             # Issue #961: real cell-instance `*CONN`/`*RES` correlation from

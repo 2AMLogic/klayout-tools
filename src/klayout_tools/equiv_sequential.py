@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from ._provenance import _yosys_version
+from ._provenance import yosys_version
 from .equiv import (
     _build_report,
     _classify_sat_result,
@@ -893,7 +893,7 @@ def _run_sequential(
     record_path = stage_record_path(output_dir, 1)
 
     int_timeout = max(1, round(effective_timeout_s))
-    engine_version = _yosys_version(yosys_binary)
+    engine_version = yosys_version(yosys_binary)
     report_ctx = _SequentialReportContext(
         engine=engine,
         engine_version=engine_version,

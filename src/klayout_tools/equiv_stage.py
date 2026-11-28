@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from ._jsonnum import is_int
-from ._provenance import _combined_content_hash, content_hash
+from ._provenance import combined_content_hash, content_hash
 
 #: ``equiv_status``'s own exact success line (verified live against the
 #: pinned Yosys v0.67 this repo's own CI installs, `equiv_status.cc`'s
@@ -70,7 +70,7 @@ def stage_fingerprint(
     inputs (not just their paths -- an edited-in-place file at the same
     path must invalidate the record) alongside every run parameter that
     reaches the proof. Deliberately *path-independent* (the same property
-    ``_combined_content_hash`` documents for itself): the same request
+    ``combined_content_hash`` documents for itself): the same request
     checked out at a different path -- or pulled back from a remote host
     with the artifacts (``docs/guides/remote-evidence-runs.md``) -- is
     resumable, which a path-keyed fingerprint would silently forbid.
@@ -88,14 +88,14 @@ def stage_fingerprint(
         "engine": engine,
         "gold": {
             "top": gold["top"],
-            "sources_sha256": _combined_content_hash(gold["sources"]),
+            "sources_sha256": combined_content_hash(gold["sources"]),
             "liberty_sha256": (
                 content_hash(gold["liberty"]) if gold.get("liberty") else None
             ),
         },
         "gate": {
             "top": gate["top"],
-            "sources_sha256": _combined_content_hash(gate["sources"]),
+            "sources_sha256": combined_content_hash(gate["sources"]),
             "liberty_sha256": (
                 content_hash(gate["liberty"]) if gate.get("liberty") else None
             ),

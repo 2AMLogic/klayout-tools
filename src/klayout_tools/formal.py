@@ -43,8 +43,8 @@ from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import resolve_tool_binary, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
-    _combined_content_hash,
     build_provenance,
+    combined_content_hash,
     wasi_sandbox_hint_if_applicable,
 )
 from .request_paths import RequestPaths, resolve_readable_files
@@ -522,7 +522,7 @@ def _build_report(
     else:
         provenance = build_provenance()
         provenance["input"] = {
-            "content_hash": _combined_content_hash(inputs),
+            "content_hash": combined_content_hash(inputs),
             "role": INPUT_ROLE_SOURCE,
         }
     return {

@@ -109,7 +109,7 @@ souvenir:
   `pull_artifacts` copies bytes.
 - **Input identity is content, not location.** `provenance.input.
   content_hash` covers the request's gold/gate source *bytes* (combined,
-  order-independent — see `_provenance._combined_content_hash`), never
+  order-independent — see `_provenance.combined_content_hash`), never
   their paths. So the same request at `/home/ubuntu/job/` on the remote
   host and `~/design/` locally hashes identically, and the envelope pins
   the design, not the machine.

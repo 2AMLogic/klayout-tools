@@ -208,12 +208,12 @@ def _klayout_app_version(binary: str) -> str | None:
     """The standalone KLayout application's own reported version token
     (``<binary> -v``, parsed with :data:`_REPORTED_VERSION_RE`), or ``None``
     if unresolvable -- never raises. The issue #5660 counterpart of
-    ``_provenance._yosys_version`` (issue #2423): ``--engine klayout``
+    ``_provenance.yosys_version`` (issue #2423): ``--engine klayout``
     records this value as ``provenance.klayout_version`` so the envelope
     names the binary that ran the deck, never klt's own pip ``klayout``
     wheel. Fails soft on every failure mode (missing, failed, timed-out,
     unparseable) because it runs even when no ``--min-klayout-version``
-    floor was declared. Sits here rather than beside ``_yosys_version`` so
+    floor was declared. Sits here rather than beside ``yosys_version`` so
     it shares this module's regex and timeout instead of importing them
     across the ``drc`` -> ``_provenance`` edge.
     """

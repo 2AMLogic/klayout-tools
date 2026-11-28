@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools._provenance import _combined_content_hash
+from klayout_tools._provenance import combined_content_hash
 from klayout_tools.cli import main
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
@@ -261,7 +261,7 @@ def test_provenance_multi_source_digest_is_combined_and_order_independent(
 ):
     _setup_inputs(tmp_path)
     (tmp_path / "util.v").write_text("module util; endmodule\n")
-    expected = _combined_content_hash(
+    expected = combined_content_hash(
         [str(tmp_path / "gcd.v"), str(tmp_path / "util.v")]
     )
 
@@ -326,7 +326,7 @@ def test_provenance_digest_covers_user_sources_not_generated_wrappers(
 
     report, runner = _run_stubbed(tmp_path, monkeypatch, request)
 
-    assert report["provenance"]["input"]["content_hash"] == _combined_content_hash(
+    assert report["provenance"]["input"]["content_hash"] == combined_content_hash(
         [str(tmp_path / "gcd.v"), str(tmp_path / "macro.v")]
     )
     # The build list really was rewritten -- the digest is not merely
@@ -347,14 +347,14 @@ def test_provenance_digest_excludes_cocotb_testbench(tmp_path, monkeypatch):
     consistency` compares them)."""
     _setup_inputs(tmp_path)
     (tmp_path / "util.v").write_text("module util; endmodule\n")
-    expected = _combined_content_hash(
+    expected = combined_content_hash(
         [str(tmp_path / "gcd.v"), str(tmp_path / "util.v")]
     )
     report, _ = _run_stubbed(
         tmp_path, monkeypatch, _base_request(sources=["gcd.v", "util.v"])
     )
     assert report["provenance"]["input"]["content_hash"] == expected
-    assert expected != _combined_content_hash(
+    assert expected != combined_content_hash(
         [
             str(tmp_path / "gcd.v"),
             str(tmp_path / "util.v"),

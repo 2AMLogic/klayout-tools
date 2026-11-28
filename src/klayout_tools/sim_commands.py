@@ -475,7 +475,7 @@ def _build_report(
         "units": reports,
         "outdir": os.path.abspath(outdir),
         "environment": {
-            "klt_version": _provenance._klt_version(),
+            "klt_version": _provenance.klt_version(),
             "not_checked": NOT_CHECKED,
             **(environment or {}),
         },

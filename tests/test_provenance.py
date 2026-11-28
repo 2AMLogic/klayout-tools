@@ -253,7 +253,7 @@ def test_build_provenance_omits_mismatch_by_default():
 def test_build_provenance_mismatch_false_when_versions_agree(monkeypatch):
     from klayout_tools import build_identity
 
-    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.10")
+    monkeypatch.setattr(_provenance, "klayout_version", lambda: "0.30.10")
     monkeypatch.setattr(
         build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
     )
@@ -264,7 +264,7 @@ def test_build_provenance_mismatch_false_when_versions_agree(monkeypatch):
 def test_build_provenance_mismatch_true_when_versions_differ(monkeypatch, capsys):
     from klayout_tools import build_identity
 
-    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.12")
+    monkeypatch.setattr(_provenance, "klayout_version", lambda: "0.30.12")
     monkeypatch.setattr(
         build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
     )
@@ -285,7 +285,7 @@ def test_build_provenance_mismatch_false_when_expected_unresolvable(monkeypatch)
     `False` means "no *confirmed* mismatch", not "confirmed match"."""
     from klayout_tools import build_identity
 
-    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.12")
+    monkeypatch.setattr(_provenance, "klayout_version", lambda: "0.30.12")
     monkeypatch.setattr(
         build_identity, "_recorded_klayout_version_expected", lambda: None
     )
@@ -296,7 +296,7 @@ def test_build_provenance_mismatch_false_when_expected_unresolvable(monkeypatch)
 def test_build_provenance_mismatch_false_when_actual_unresolvable(monkeypatch):
     from klayout_tools import build_identity
 
-    monkeypatch.setattr(_provenance, "_klayout_version", lambda: None)
+    monkeypatch.setattr(_provenance, "klayout_version", lambda: None)
     monkeypatch.setattr(
         build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
     )
@@ -335,7 +335,7 @@ def test_klayout_version_mismatch_helper_is_a_plain_boolean():
 # deck.released (issue #1193)
 # --------------------------------------------------------------------------- #
 #
-# `_deck_block` delegates the actual lookup to
+# `deck_block` delegates the actual lookup to
 # `klayout_tools.decks.history.is_deck_hash_released`, already covered end to
 # end (including the missing/malformed-table degradation modes) in
 # `test_deck_history.py`. These tests just confirm `build_provenance` wires
@@ -572,7 +572,7 @@ def test_build_provenance_rejects_an_unknown_input_role(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# _combined_content_hash
+# combined_content_hash
 # --------------------------------------------------------------------------- #
 #
 # Shared by `equiv.py` and `synthesize.py` for their multi-source
@@ -588,7 +588,7 @@ def test_combined_content_hash_is_sha256_prefixed(tmp_path):
     a.write_bytes(b"module a; endmodule\n")
     b.write_bytes(b"module b; endmodule\n")
 
-    result = _provenance._combined_content_hash([str(a), str(b)])
+    result = _provenance.combined_content_hash([str(a), str(b)])
     assert result is not None
     assert result.startswith("sha256:")
 
@@ -599,8 +599,8 @@ def test_combined_content_hash_is_order_independent(tmp_path):
     a.write_bytes(b"module a; endmodule\n")
     b.write_bytes(b"module b; endmodule\n")
 
-    forward = _provenance._combined_content_hash([str(a), str(b)])
-    reverse = _provenance._combined_content_hash([str(b), str(a)])
+    forward = _provenance.combined_content_hash([str(a), str(b)])
+    reverse = _provenance.combined_content_hash([str(b), str(a)])
     assert forward == reverse
 
 
@@ -615,8 +615,8 @@ def test_combined_content_hash_is_path_independent(tmp_path):
     (src_dir / "top.v").write_bytes(b"module top; endmodule\n")
     (other_dir / "top_copy.v").write_bytes(b"module top; endmodule\n")
 
-    original = _provenance._combined_content_hash([str(src_dir / "top.v")])
-    copy = _provenance._combined_content_hash([str(other_dir / "top_copy.v")])
+    original = _provenance.combined_content_hash([str(src_dir / "top.v")])
+    copy = _provenance.combined_content_hash([str(other_dir / "top_copy.v")])
     assert original == copy
 
 
@@ -625,7 +625,7 @@ def test_combined_content_hash_none_when_any_file_unresolvable(tmp_path):
     existing.write_bytes(b"module a; endmodule\n")
     missing = tmp_path / "nope.v"
 
-    assert _provenance._combined_content_hash([str(existing), str(missing)]) is None
+    assert _provenance.combined_content_hash([str(existing), str(missing)]) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -741,7 +741,7 @@ def test_layout_geometry_digest_none_for_missing_unreadable_or_empty_path(tmp_pa
 
 
 # --------------------------------------------------------------------------- #
-# _yosys_version
+# yosys_version
 # --------------------------------------------------------------------------- #
 
 
@@ -750,7 +750,7 @@ def test_yosys_version_returns_none_when_binary_missing(monkeypatch):
         raise FileNotFoundError("no such file: yosys")
 
     monkeypatch.setattr(_provenance.subprocess, "run", _fake_run)
-    assert _provenance._yosys_version() is None
+    assert _provenance.yosys_version() is None
 
 
 def test_yosys_version_returns_none_on_timeout(monkeypatch):
@@ -758,7 +758,7 @@ def test_yosys_version_returns_none_on_timeout(monkeypatch):
         raise _provenance.subprocess.TimeoutExpired(cmd="yosys", timeout=10)
 
     monkeypatch.setattr(_provenance.subprocess, "run", _fake_run)
-    assert _provenance._yosys_version() is None
+    assert _provenance.yosys_version() is None
 
 
 def test_yosys_version_returns_none_on_nonzero_returncode(monkeypatch):
@@ -767,7 +767,7 @@ def test_yosys_version_returns_none_on_nonzero_returncode(monkeypatch):
         stdout = ""
 
     monkeypatch.setattr(_provenance.subprocess, "run", lambda *a, **k: _FakeCompleted())
-    assert _provenance._yosys_version() is None
+    assert _provenance.yosys_version() is None
 
 
 def test_yosys_version_parses_version_token(monkeypatch):
@@ -776,7 +776,7 @@ def test_yosys_version_parses_version_token(monkeypatch):
         stdout = "Yosys 0.68+48 (git sha1 abc123)\n"
 
     monkeypatch.setattr(_provenance.subprocess, "run", lambda *a, **k: _FakeCompleted())
-    assert _provenance._yosys_version() == "0.68+48"
+    assert _provenance.yosys_version() == "0.68+48"
 
 
 # --------------------------------------------------------------------------- #
@@ -807,12 +807,12 @@ def test_deck_source_path_feeds_a_stable_content_hash():
 def test_deck_block_path_envelope_is_opt_in():
     """Issue #3785: `path` appears only when a caller passes the envelope, so
     every other verb's deck block stays byte-identical."""
-    from klayout_tools._provenance import _deck_block
+    from klayout_tools._provenance import deck_block
 
-    plain = _deck_block("d", None)
+    plain = deck_block("d", None)
     assert "path" not in plain
     envelope = {"path": None, "scope": "external"}
-    with_path = _deck_block("d", None, path_envelope=envelope)
+    with_path = deck_block("d", None, path_envelope=envelope)
     assert with_path["path"] == envelope
     assert {k: v for k, v in with_path.items() if k != "path"} == plain
 

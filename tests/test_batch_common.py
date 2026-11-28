@@ -206,7 +206,7 @@ _TIMEOUT_S = 60.0
 def _backends(client_version: str | None = "0.9.0") -> dict[str, object]:
     """``name -> () -> BatchJobSpec`` for every batch backend, through each
     module's real ``build_job_spec``. ``client_version=None`` makes all five
-    fall back to ``_provenance._klt_version()`` (what ``place_and_route_batch``
+    fall back to ``_provenance.klt_version()`` (what ``place_and_route_batch``
     always does), so a test can patch one version for the whole set."""
     tree = nb.BatchTree(
         root="/repo",
@@ -315,7 +315,7 @@ def test_an_unpinnable_client_version_becomes_each_modules_error_class(monkeypat
     untranslated and nothing on the ``klt signoff`` path caught it, so it
     escaped as a Python traceback instead of ``docs/json-contract.md``'s
     error envelope."""
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: "not a version!!")
+    monkeypatch.setattr(_provenance, "klt_version", lambda: "not a version!!")
     expected = {
         "extract": ExtractError,
         "netlist": nb.NetlistError,

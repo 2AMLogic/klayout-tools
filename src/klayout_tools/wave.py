@@ -42,7 +42,7 @@ the binary's human-readable text summary.
 e.g. ``"0.1.0"`` -- an internal, unpublished crate version, not meaningful
 to an agent asking "which `klt` build produced this"). This module
 overrides that field with the installed `klayout-tools` build identity
-(:func:`klayout_tools._provenance._klt_version`) before returning either
+(:func:`klayout_tools._provenance.klt_version`) before returning either
 response. This includes the commit/dirty suffix or ``+unknown`` when it is
 not a confirmed release, matching every shared provenance block.
 """
@@ -55,7 +55,7 @@ import subprocess
 from typing import Any
 
 from ._native import find_cargo_binary
-from ._provenance import _klt_version
+from ._provenance import klt_version
 
 #: `native/wave/`'s crate directory, relative to this file -- two levels up
 #: from `src/klayout_tools/wave.py` is `src/`, three levels up is the repo
@@ -178,7 +178,7 @@ def _override_klt_version(response: dict[str, Any]) -> None:
     provenance = response.get("provenance")
     if not isinstance(provenance, dict):
         return
-    package_version = _klt_version()
+    package_version = klt_version()
     if package_version:
         provenance["klt_version"] = package_version
 

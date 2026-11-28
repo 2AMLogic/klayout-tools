@@ -71,7 +71,7 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
     monkeypatch.delenv(sim_batch.PROFILE_ENV, raising=False)
     monkeypatch.delenv(sim_batch.MAX_JOB_SECONDS_ENV, raising=False)
     monkeypatch.delenv(sgb.APPROVALS_ENV, raising=False)
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: CLIENT_VERSION)
+    monkeypatch.setattr(_provenance, "klt_version", lambda: CLIENT_VERSION)
     keep = tmp_path / "uploads"
     keep.mkdir()
     runner = _FakeRunner(keep, job_id="klt-signoff-gen-fake", tool="generator")

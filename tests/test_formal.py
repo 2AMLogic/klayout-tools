@@ -225,7 +225,7 @@ def test_multi_source_content_hash_matches_shared_hash_in_either_order(
     report = run_formal(_request(tmp_path, sby, sources=sources))
     reversed_report = run_formal(_request(tmp_path, sby, sources=sources[::-1]))
 
-    expected = _provenance._combined_content_hash(
+    expected = _provenance.combined_content_hash(
         [str(tmp_path / name) for name in sources]
     )
     assert expected is not None
