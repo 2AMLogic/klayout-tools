@@ -4,7 +4,7 @@
 :func:`klayout_tools.sim._run_sim_corners` assembles its report's
 ``environment`` block from a long ordered sequence of contributions. Most of
 them already came from small, individually testable ``*_environment(...)``
-helpers -- :func:`~klayout_tools.sim._portable_environment`,
+helpers -- :func:`~klayout_tools.sim_portable.portable_environment`,
 :func:`~klayout_tools.sim_param_file.param_file_environment` and friends --
 but eleven were still written inline in the sweep function's epilogue, as a
 flat append-point that every feature needing to disclose something extended

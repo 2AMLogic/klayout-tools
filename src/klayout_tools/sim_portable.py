@@ -24,6 +24,10 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterable
+from typing import Any
+
+from . import env_provenance
+from .sim_errors import SimError
 
 #: Token for the per-corner scratch directory (varies per corner, so it is
 #: added per corner rather than to the run-wide root list).
@@ -165,3 +169,101 @@ def rewrite_corner_artifacts(
             }
         ]
     return []
+
+
+# --------------------------------------------------------------------------- #
+# Driver entry points: option validation, run-wide roots and the report fragment
+# --------------------------------------------------------------------------- #
+
+
+def portable_artifacts_option(options: dict[str, Any]) -> bool:
+    """Validate ``options.portable_artifacts`` (issue #3052): a boolean, default off."""
+    value = options.get("portable_artifacts", False)
+    if not isinstance(value, bool):
+        raise SimError("request.options.portable_artifacts must be a boolean")
+    return value
+
+
+def portable_roots_for_run(
+    *,
+    portable_artifacts: bool,
+    keep_artifacts: bool,
+    request_dir: str,
+    artifacts_dir: str,
+    models_lib: str | None,
+    corner_points: list[Any],
+    osdi_preload: Any,
+) -> Roots | None:
+    """Run-wide substitution roots for ``options.portable_artifacts``, or ``None``.
+
+    Only active alongside ``keep_artifacts``: nothing is persisted otherwise.
+    """
+    if not (portable_artifacts and keep_artifacts):
+        return None
+    return build_roots(
+        request_dir=request_dir,
+        artifacts_dir=artifacts_dir,
+        models_lib=models_lib,
+        section_libs=[
+            lib
+            for point in corner_points
+            if point.process_sections is not None
+            for lib in (
+                point.section_lib(i, models_lib)
+                for i in range(len(point.process_sections))
+            )
+            if lib != models_lib
+        ],
+        osdi_preload=osdi_preload,
+    )
+
+
+def portable_environment(
+    roots: Roots | None,
+    *,
+    repo_root: str | None,
+    models_lib_sha256: str | None,
+) -> dict[str, Any]:
+    """``environment.portable_artifacts`` (additive/optional, issue #3052).
+
+    Only present when ``options.portable_artifacts`` rewrote the persisted
+    deck/log. Names what each token stood for; the inputs themselves stay
+    pinned by ``models_lib_sha256`` / ``netlist_closure``.
+    """
+    if roots is None:
+        return {}
+    return {
+        "portable_artifacts": {
+            "substitutions": _portable_substitutions(
+                roots, repo_root=repo_root, models_lib_sha256=models_lib_sha256
+            )
+        }
+    }
+
+
+def _portable_substitutions(
+    roots: Roots, *, repo_root: str | None, models_lib_sha256: str | None
+) -> list[dict[str, Any]]:
+    """``environment.portable_artifacts.substitutions``: one entry per token
+    (issue #3052), with the root it stood for normalised like every other
+    path this report echoes (so the report itself carries no host path),
+    plus ``$CORNER_DIR``, the per-corner scratch directory."""
+    out: list[dict[str, Any]] = [
+        {
+            "token": CORNER_DIR_TOKEN,
+            "stands_for": "per-corner artifact directory",
+        }
+    ]
+    seen: set[str] = set()
+    for token, root in roots:
+        if token in seen:
+            continue
+        seen.add(token)
+        entry: dict[str, Any] = {
+            "token": token,
+            "stands_for": env_provenance.repo_relative_path(root, repo_root=repo_root),
+        }
+        if token == "$MODELS_DIR" and models_lib_sha256 is not None:
+            entry["models_lib_sha256"] = models_lib_sha256
+        out.append(entry)
+    return out
