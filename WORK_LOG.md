@@ -10,9 +10,27 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-28
 
+- **PR #8010**: feat: report the bundle and layout that placed a PDK tree
+- **PR #8053**: refactor: share OpenROAD script/metrics/error helpers, publicize engine names
+- **PR #8052**: fix: drop Pplus-coincident NCOMP edges from the GF180 Nplus well-depth checks
+- **PR #8035**: fix(drc): cite the mpw_precheck runset for SKY130 MR rules
+- **PR #8048**: refactor: share gate-level cell-model and flat-netlist helpers
+- **PR #5781**: docs: clarify batch artifact collection and retention
+- **PR #8045**: fix: accept unit-neutral Icarus arguments in SDF time-unit checks
+- **PR #8043**: feat: gate Tiny Tapeout reductions on mapped netlist proofs
+- **PR #5523**: feat(pex): extract every --top into one combined netlist for a both-ends-extracted leg
 - **PR #6131**: feat: report klayout-runset DEVICE_LIST passthrough in reference_conversion
 - **PR #8041**: refactor: share the KLayout runset launcher across LVS and extract
 - **PR #8019**: feat(functional-verification): probe the CPython Icarus vvp loads before the build
+- **Issue #8007** (closed): klt sim and klt pdk find provenance do not say which store or manager placed the PDK tree
+- **Issue #8051** (closed): Consolidate OpenROAD error/metrics/script helpers into _openroad_engine and retire its 15 legacy private-import grants
+- **Issue #7987** (closed): nplus.enclosing.comp.1 still flags NCOMP edges butted to PCOMP inside an Nwell (NP.5di/NP.5dii drop them)
+- **Issue #8033** (closed): SKY130 rule provenance points 45 existing rules at a missing open-pdks source file
+- **Issue #8046** (closed): Promote gate-level cell-model loader and flat-netlist helpers out of reset_coverage into shared verilog_cell_models module
+- **Issue #5595** (closed): Remove the dead keep_artifacts parameter from _build_batch_job_spec
+- **Issue #8034** (closed): Accept -tvvp, -M, -P and -s in the Icarus SDF time-unit preflight
+- **Issue #8014** (closed): [Epic #520] Gate Tiny Tapeout optimization results on formal equivalence
+- **Issue #5494** (closed): klt pex: multi-top mode so one graded run can extract every drawn cell a link testbench instantiates
 - **Issue #5796** (closed): klt lvs (klayout-runset): no device map for subckt-call references — reference side converts ~nothing, silently
 - **Issue #8040** (closed): Promote KLayout runset launcher out of lvs_runset into shared runset_launch module
 - **Issue #8015** (closed): functional-verification: detect the cocotb libpython/interpreter mismatch before the simulation and name the resolved libpython
