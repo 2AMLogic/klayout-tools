@@ -1,0 +1,1 @@
+- Icarus SDF time-unit verification accepts `-tvvp`, `-M path`, `-P root.parameter=value`, and `-s root` (#8034).

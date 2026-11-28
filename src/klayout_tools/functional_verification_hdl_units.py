@@ -87,6 +87,7 @@ _UNIT_NEUTRAL_SWITCHES = {
     )
 } | {
     "-v",
+    "-tvvp",
     "-gspecify",
     "-ginterconnect",
     "-gsupported-assertions",
@@ -113,6 +114,9 @@ def _build_system_verilog(args: list[str]) -> bool:
     system_verilog = True  # both runners supply -g2012 before user options
     operands = iter(args)
     for option in operands:
+        # Dependency output, parameter override, and root module each take one operand.
+        if option in ("-M", "-P", "-s") and next(operands, None) is not None:
+            continue
         arg = option
         if arg in ("-D", "-I", "-T", "-W", "-g", "-p"):
             arg += next(operands, "")

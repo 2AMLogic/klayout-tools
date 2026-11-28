@@ -9693,9 +9693,9 @@ def test_cli_json_omits_ambiguous_sources_for_a_single_install(
 
     block = json.loads(capsys.readouterr().out)["provenance"]["pdk"]
     # The fixture stamp is not the declared open_pdks pin, so `compatibility`
-    # (issue #3427) is legitimately present; the point here is the absence of
-    # `ambiguous_sources`.
-    assert set(block) == {"name", "source", "version", "compatibility"}
+    # (#3427) is legitimately present, as is the install evidence of #8007.
+    expected = {"name", "source", "version", "compatibility", "install", "store_layout"}
+    assert set(block) == expected
 
 
 def test_cli_pinned_models_pdk_root_is_never_ambiguous(tmp_path, monkeypatch, capsys):

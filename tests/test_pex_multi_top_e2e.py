@@ -14,6 +14,8 @@ in ``test_pex_multi_top_runs.py``.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from klayout_tools._provenance import sha256_file
@@ -103,10 +105,27 @@ def test_integration_run_pex_multi_top_extracts_both_tops_and_grades(
     )
 
     # Both tops are defined in the one netlist the extracted leg included.
-    interfaces = _subckt_interfaces(combined.read_text())
+    combined_text = combined.read_text()
+    interfaces = _subckt_interfaces(combined_text)
     assert list(interfaces) == ["resa", "resb"]
     assert interfaces["resa"][1] == ["RA", "RB"]
     assert interfaces["resb"][1] == ["RC", "RD"]
+
+    # Issue #5997: each top's `.SUBCKT` keeps its own substrate DC-tie card on
+    # the one global `vsubs` -- concatenation de-duplicates only the repeated
+    # `.GLOBAL` card -- so the combined file carries one tie per top. That is
+    # what `docs/cli/pex.md`'s multi-top section discloses: a bench sees one
+    # tie per instantiated extracted cell (`R / N` for `N` live instances),
+    # not a tie fixed by the number of `--top` flags.
+    assert re.findall(r"^Rvsubs_dctie vsubs 0 (\S+)$", combined_text, re.M) == [
+        "1e+12",
+        "1e+12",
+    ]
+    assert len(re.findall(r"^\.GLOBAL vsubs$", combined_text, re.M)) == 1
+    assert (
+        report["extraction"]["substrate_dc_tie"]["nets"]
+        == [{"net": "vsubs", "device": "Rvsubs_dctie"}] * 2
+    )
 
     assert report["status"] == "pass"
     # The singular fields describe the combined netlist: counts are sums.

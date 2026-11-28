@@ -1907,11 +1907,10 @@ def _read_worker_environment(
 ) -> dict[str, Any]:
     """The ``worker_environment`` block of ``environment.remote`` (issue #2834).
 
-    Worker-observed: it describes what the job instance resolved, never the
-    submitter's values. Always present; ``capture`` is ``"ok"``, ``"absent"``
-    (legacy worker or no collected artifact) or ``"malformed"``, and a
-    non-ok capture carries ``None`` observations. Every field is
-    re-validated and bounded here -- the file is untrusted input.
+    Worker-observed: it describes what the job instance resolved, never the submitter's
+    values. Always present; ``capture`` is ``"ok"``, ``"absent"`` (legacy worker or no
+    artifact) or ``"malformed"``, and a non-ok capture carries ``None`` observations.
+    Every field is re-validated and bounded here -- the file is untrusted input.
     """
     unknown: dict[str, Any] = {
         "capture": "absent",
@@ -1957,6 +1956,7 @@ def _read_worker_environment(
             # image's tree, which staged models or a deck executing a
             # declared input make differ from the model bytes that ran.
             "stamp_scope": sim_batch_pdk.stamp_scope(pdk_in, request),
+            **sim_batch_pdk.bounded_store_evidence(pdk_in),  # issue #8007
         }
         manifest_in = doc.get("image_manifest")
         manifest: dict[str, Any] | None = None

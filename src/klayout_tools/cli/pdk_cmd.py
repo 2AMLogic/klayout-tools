@@ -62,6 +62,7 @@ from ..pdk_compat import compatibility_warning
 from ..pdk_descriptor import ASSET_KEYS
 from ..pdk_pcell import PdkPCellError, list_pdk_pcells
 from ..pdk_stackup import PdkStackupError, stackup
+from ..pdk_store import store_evidence_lines
 from .output import emit_error, emit_success, render_table
 from .pdk_expect import bundle_expectation, expectations_exit
 
@@ -230,9 +231,9 @@ def run_pcell_check(args: argparse.Namespace) -> int:
 def _print_find_text(report: dict) -> None:
     print(f"root: {report['root']}")
     print(f"variant: {report['variant']}")
-    version = report["version"]
-    print(f"version: {version if version is not None else '-'}")
+    print(f"version: {report['version'] or '-'}")
     print(f"resolved_via: {report['resolved_via']}")
+    print("\n".join(store_evidence_lines(report)))
     for shadowed in report.get("ambiguous_roots") or []:
         print(
             f"warning: shadowed same-variant install: {shadowed['root']} "
@@ -241,8 +242,7 @@ def _print_find_text(report: dict) -> None:
     print("assets:")
     assets = report["assets"]
     for key in ASSET_KEYS:
-        value = assets.get(key)
-        print(f"  {key}: {value if value is not None else '-'}")
+        print(f"  {key}: {assets.get(key) or '-'}")
     broken = report.get("broken_symlinks", [])
     if broken:
         print(f"broken_symlinks: {len(broken)} (see `klt pdk check` for detail)")
