@@ -1,44 +1,22 @@
-"""``klt pex --dry-run`` (issue #5464): validate a committed post-layout
-invocation and print its expansion, without extracting or simulating.
+"""``klt pex --dry-run`` (issues #5464, #5511): validate a committed
+post-layout invocation and print its expansion, without extracting or
+simulating.
 
-``klt sim --dry-run`` (issue #3064) gives a committed ``klt sim`` request a
-cheap cold-start check. ``klt pex`` had no equivalent, so a committed
-post-layout invocation could only be checked by paying for a full extraction
-plus both simulation legs -- and the obvious workaround (``klt sim <pex
-testbench> --dry-run``) checks the measurement request alone, skipping
-everything ``klt pex`` itself adds.
-
-This module runs, in :func:`klayout_tools.pex.run_pex`'s own order,
-every check that needs no extraction engine:
-
-1. the pre-extraction flag refusals (async flags, capacity wait, measure
-   mode, ``--resistance-graph`` with ``--distributed-rc``) -- minus the
-   output-directory lock, which a dry run must not take;
-2. the extraction preflight (PDK/model bindings, the parasitics deck,
-   ``validate_run_extract_args``, then
-   :func:`klayout_tools.extract_preflight.preflight_layout`'s file checks,
-   deck resolution, layout read, ``--top`` resolution and option refusals);
-3. the per-testbench DUT resolution that in a real run only happens *after*
-   extraction has already been paid for (request load, body netlist, the
-   single ``.include``, "does the target declare a circuit", one DUT for the
-   whole run) -- or, in ``--measure-command`` mode, the same check on
-   ``--reference-netlist``;
-4. one nested ``klt sim --dry-run`` per testbench.
-
-It reuses the helpers those steps already live in rather than copying them,
-so an error here is the error the real run gives for the same input. What it
-cannot see is named in the report's ``not_checked[]`` rather than implied to
-have passed.
-
-Nothing is written: no netlist at ``-o``, no ``.klt/pex/`` or ``--outdir``
-tree, no ``--envelope-out`` file from this module, and the output-directory
-lock is never taken.
+Runs, in :func:`klayout_tools.pex.run_pex`'s own order, every engine-free
+check: pre-extraction flag refusals (including multi-top's shared list, minus
+the output-directory lock), extraction preflight (once per ``--top`` in
+multi-top mode), per-testbench DUT resolution plus the multi-top per-top
+``.SUBCKT`` check, and one nested ``klt sim --dry-run`` per testbench. Reuses
+the real run's helpers so error messages match, names unverified stages in
+``not_checked[]``, and writes nothing (no ``-o``, ``--outdir`` or
+``--envelope-out``, and no output-directory lock).
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from . import env_provenance, pex_async
@@ -60,6 +38,7 @@ from .pex import (
     _resolve_reference_netlist_path,
     _validate_measure_mode,
 )
+from .pex_multi_top import _require_subckt_per_top
 from .pex_multi_top_flags import resolve_tops
 from .pex_resistance_graph import (
     _reject_resistance_graph_with_distributed_rc,
@@ -112,6 +91,7 @@ def _extraction_preflight(
     deck_name: str,
     *,
     options: PexExtractOptions,
+    for_top: str | None = None,
 ) -> str:
     """Every engine-free check ``run_extract`` makes, in its own order, for
     the ``parasitics=True`` call ``klt pex`` always issues. Returns the
@@ -208,8 +188,31 @@ def _extraction_preflight(
             flag="--tie-declared-pins",
         )
     except ExtractError as exc:
-        raise PexError(f"extraction failed: {exc}") from exc
+        prefix = (
+            f"extraction failed for --top {for_top}"
+            if for_top is not None
+            else "extraction failed"
+        )
+        raise PexError(f"{prefix}: {exc}") from exc
     return preflight.top_cell.name
+
+
+def _preflight_tops(
+    layout_path: str,
+    deck_name: str,
+    tops: Sequence[str],
+    options: PexExtractOptions,
+) -> tuple[str, list[dict[str, str]] | None]:
+    """Resolve ``options.top`` once, or every ``--top`` in order (#5511)."""
+    if len(tops) < 2:
+        return _extraction_preflight(layout_path, deck_name, options=options), None
+    resolved = [
+        _extraction_preflight(
+            layout_path, deck_name, options=replace(options, top=t), for_top=t
+        )
+        for t in tops
+    ]
+    return resolved[0], [{"top": name} for name in resolved]
 
 
 def _resolve_testbenches(
@@ -345,15 +348,22 @@ def run_pex_dry_run(
         device_only_leg=device_only_leg,
     )
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
-    # Issue #5494: `klt pex --top` is repeatable, so this entry point now
-    # receives a list too. A dry run is refused with two or more tops rather
-    # than silently validating only one of them: its own report is singular
-    # (`top`, one resolved cell name) and its `_extraction_preflight` resolves
-    # one top cell, so validating a multi-top request properly means a second
-    # additive change to *this* command's contract -- out of scope for the
-    # issue that made `--top` repeatable, and tracked in #5511. A
-    # zero-or-one-`--top` dry run is byte-identical to before.
-    tops = resolve_tops(top, dry_run=True)
+    # Issue #5494 / #5511: normalise `--top` and apply the shared multi-top
+    # flag refusals before reading the layout or testbenches.
+    tops = resolve_tops(
+        top,
+        flatten_schematic=flatten_schematic,
+        device_only_leg=device_only_leg,
+        tie_nets=tie_nets,
+        tie_declared_pins=tie_declared_pins,
+        mom_rlc_net=mom_rlc_net,
+        measure_command=measure_command,
+        extract_only=extract_only,
+        submit_only=submit_only,
+        attach=attach,
+        resume=resume,
+        schematic_top=schematic_top,
+    )
     _reject_resistance_network_without_graph(resistance_network, resistance_graph)
 
     repo_root = env_provenance.find_repo_root(
@@ -390,11 +400,7 @@ def run_pex_dry_run(
         mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
         mom_rlc_inductance_nh=mom_rlc_inductance_nh,
     )
-    resolved_top = _extraction_preflight(
-        layout_path,
-        deck_name,
-        options=options,
-    )
+    resolved_top, tops_block = _preflight_tops(layout_path, deck_name, tops, options)
 
     measured_reference_netlist = (
         _resolve_measured_reference(reference_netlist)
@@ -406,6 +412,8 @@ def run_pex_dry_run(
     )
 
     _bound_testbenches(schematic_top, resolved_top, reference_netlist_path, body_paths)
+    if len(tops) >= 2:
+        _require_subckt_per_top(reference_netlist_path, tops)
 
     # Issue #4616/#4624/#5280: the shard flags the schematic leg would pass,
     # so the nested dry run expands exactly the unit list a real leg would.
@@ -455,6 +463,7 @@ def run_pex_dry_run(
         ),
         "deck": deck_name,
         "top": resolved_top,
+        "tops": tops_block,
         "deck_options": _resolved_deck_options(deck_name, deck_options),
         "declared_pins": sorted(declared_pins) if declared_pins else None,
         # `--extract-only` measures nothing at all, so it plans no leg.
