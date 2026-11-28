@@ -2627,55 +2627,43 @@
     {
       "file": "src/klayout_tools/sim_decks.py",
       "code": "arg-type",
-      "message": "Argument \"region\" to \"RemoteLauncher\" has incompatible type \"Any | None\"; expected \"str\"",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/sim_decks.py",
-      "code": "arg-type",
       "message": "Argument 1 to \"_resolve_local_path\" has incompatible type \"Any | None\"; expected \"str\"",
       "count": 2
     },
     {
       "file": "src/klayout_tools/sim_decks.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"Callable[[list[str], float], CompletedProcess[str]] | None\"",
+      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, str]\"; expected \"Callable[[list[str], float], CompletedProcess[str]] | None\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/sim_decks.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"float\"",
+      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, str]\"; expected \"float\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/sim_decks.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"int\"",
+      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, str]\"; expected \"int\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/sim_decks.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"run_remote_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"Callable[[list[str], float], CompletedProcess[str]] | None\"",
+      "message": "Argument 1 to \"run_remote_job\" has incompatible type \"**dict[str, str]\"; expected \"Callable[[list[str], float], CompletedProcess[str]] | None\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/sim_decks.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"run_remote_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"int\"",
+      "message": "Argument 1 to \"run_remote_job\" has incompatible type \"**dict[str, str]\"; expected \"int\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/sim_decks.py",
       "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"float\", variable has type \"int\")",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/sim_remote.py",
-      "code": "arg-type",
-      "message": "Argument \"region\" to \"RemoteLauncher\" has incompatible type \"Any | None\"; expected \"str\"",
       "count": 1
     },
     {

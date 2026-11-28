@@ -63,6 +63,12 @@ from . import remote_fleet, remote_transport, sim_derive, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
 from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
+from .sim_remote_common import (
+    build_remote_environment,
+    build_remote_launcher,
+    require_remote_config,
+    wait_for_remote_ssh,
+)
 
 if TYPE_CHECKING:
     from .remote_launcher import RemoteLauncher
@@ -411,21 +417,6 @@ def _run_sharded(
     return corners, engine_version, remote_environment
 
 
-#: Default idle-poll interval for :func:`remote_transport.wait_for_ssh` when
-#: called from :func:`_run_remote` -- kept short so tests exercising a
-#: timeout don't stall, while still reasonable against real EC2 boot times.
-_REMOTE_SSH_POLL_INTERVAL_S = 5.0
-
-#: Default overall SSH-readiness budget. Originally 240s per the design
-#: note's documented 1-3 minute spin-up estimate plus slack (decision 3);
-#: raised to 600s after the first live run observed cold boots (AMI
-#: first-boot cloud-init, not just instance ``running``) taking longer than
-#: that budget on some instance types/regions -- see
-#: docs/design/remote-sim-backend-spike.md. Still overridable per-request via
-#: ``remote.ssh_ready_timeout_s``.
-_REMOTE_SSH_READY_TIMEOUT_S = 600.0
-
-
 def _run_remote(
     *,
     corner_points: list[CornerPoint],
@@ -507,48 +498,17 @@ def _run_remote(
     del analysis, measurements_spec, models_lib, max_workers  # see docstring
     del deadline, initial_ppid, checkpoint, probe_abort  # not yet honored
 
-    remote_spec = request.get("remote") or {}
-    region = remote_spec.get("region")
-    pdk = (request.get("models") or {}).get("pdk")
-    if not pdk:
-        raise SimError(
-            "backend 'remote' requires request.models.pdk (selects which "
-            "baked-AMI PDK to provision -- see "
-            "remote_launcher.SUPPORTED_PDKS and docs/cli/sim.md)"
-        )
-    ssh_key_path = remote_spec.get("ssh_key_path")
-    if not ssh_key_path:
-        raise SimError(
-            "backend 'remote' requires request.remote.ssh_key_path (local "
-            "private key matching request.remote.key_name, used to SSH/SCP "
-            "into the provisioned instance)"
-        )
-    ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
+    remote_spec, pdk, ssh_key_path, ssh_user = require_remote_config(request)
     _preflight_include_closure(request, netlist_path, request_dir)
     _assess_remote_runner_features(request, pdk, remote_spec)
 
     job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
-    launcher = RemoteLauncher(
-        region=region,
+    launcher = build_remote_launcher(
+        RemoteLauncher,
         pdk=pdk,
-        corner_count=len(corner_points),
+        unit_count=len(corner_points),
         job_id=job_id,
-        spot=remote_spec.get("spot", True),
-        max_hourly_cost_usd=remote_spec.get("max_hourly_cost_usd"),
-        launcher_cidr=remote_spec.get("launcher_cidr"),
-        launcher_cidrs=remote_spec.get("launcher_cidrs"),
-        security_group_id=remote_spec.get("security_group_id"),
-        key_name=remote_spec.get("key_name"),
-        subnet_id=remote_spec.get("subnet_id"),
-        # request.remote.ami_manifest is the explicit-override tier of
-        # remote_launcher's 4-step AMI manifest resolution order (issue
-        # #370); when absent (None), RemoteLauncher/load_ami_manifest fall
-        # through to $KLT_AMI_MANIFEST, then the user-scope manifest
-        # (~/.config/klt/remote-sim-ami-manifest.json -- written by
-        # scripts/aws/build-remote-sim-ami.sh alongside its repo-checkout
-        # copy), then the packaged default -- see
-        # remote_launcher._candidate_manifest_paths.
-        manifest_path=remote_spec.get("ami_manifest"),
+        remote_spec=remote_spec,
     )
 
     started = time.monotonic()
@@ -559,14 +519,11 @@ def _run_remote(
         with launcher:
             info = launcher.provision()
             public_ip = launcher.get_public_ip()
-            remote_transport.wait_for_ssh(
+            wait_for_remote_ssh(
                 public_ip,
-                user=ssh_user,
-                identity_file=ssh_key_path,
-                timeout_s=remote_spec.get(
-                    "ssh_ready_timeout_s", _REMOTE_SSH_READY_TIMEOUT_S
-                ),
-                poll_interval_s=_REMOTE_SSH_POLL_INTERVAL_S,
+                ssh_user=ssh_user,
+                ssh_key_path=ssh_key_path,
+                remote_spec=remote_spec,
             )
             spin_up_s = round(time.monotonic() - started, 3)
 
@@ -599,17 +556,7 @@ def _run_remote(
 
     assert info is not None and corners is not None  # provision()/run succeeded
 
-    remote_environment = {
-        "provider": info["provider"],
-        "region": info["region"],
-        "instance_type": info["instance_type"],
-        "instance_id": info["instance_id"],
-        "spot": info["spot"],
-        "estimated_hourly_cost_usd": info["estimated_hourly_cost_usd"],
-        "ami_id": info["ami_id"],
-        "pdk_snapshot": info["pdk_snapshot"],
-        "spin_up_s": spin_up_s,
-    }
+    remote_environment = build_remote_environment(info, spin_up_s=spin_up_s)
     if info.get("waves", 1) > 1:
         # Issue #2084: additive, present only for a multi-wave run.
         remote_environment["waves"] = info["waves"]
@@ -859,25 +806,10 @@ def _run_remote_fleet(
             "still be billed; use hosts <= corner/sample count"
         )
 
-    remote_spec = request.get("remote") or {}
-    region = remote_spec.get("region")
-    pdk = (request.get("models") or {}).get("pdk")
-    if not pdk:
-        raise SimError(
-            "backend 'remote' requires request.models.pdk (selects which "
-            "baked-AMI PDK to provision -- see "
-            "remote_launcher.SUPPORTED_PDKS and docs/cli/sim.md)"
-        )
-    if not region:
-        raise SimError("backend 'remote' requires request.remote.region")
-    ssh_key_path = remote_spec.get("ssh_key_path")
-    if not ssh_key_path:
-        raise SimError(
-            "backend 'remote' requires request.remote.ssh_key_path (local "
-            "private key matching request.remote.key_name, used to SSH/SCP "
-            "into every provisioned instance)"
-        )
-    ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
+    remote_spec, pdk, ssh_key_path, ssh_user = require_remote_config(
+        request, fleet=True
+    )
+    region = remote_spec["region"]
     _preflight_include_closure(request, netlist_path, request_dir)
     _assess_remote_runner_features(request, pdk, remote_spec)
 
@@ -888,14 +820,11 @@ def _run_remote_fleet(
         shard_index: int, launcher: RemoteLauncher, public_ip: str
     ) -> tuple[list[dict[str, Any]], str | None]:
         shard_points = shards[shard_index]
-        remote_transport.wait_for_ssh(
+        wait_for_remote_ssh(
             public_ip,
-            user=ssh_user,
-            identity_file=ssh_key_path,
-            timeout_s=remote_spec.get(
-                "ssh_ready_timeout_s", _REMOTE_SSH_READY_TIMEOUT_S
-            ),
-            poll_interval_s=_REMOTE_SSH_POLL_INTERVAL_S,
+            ssh_user=ssh_user,
+            ssh_key_path=ssh_key_path,
+            remote_spec=remote_spec,
         )
         shard_artifacts_dir = (
             os.path.join(artifacts_dir, f"shard{shard_index}")
@@ -959,17 +888,7 @@ def _run_remote_fleet(
             engine_version = shard_engine_version
         info = outcome.environment or {}
         fleet.append(
-            {
-                "provider": info.get("provider"),
-                "region": info.get("region"),
-                "instance_type": info.get("instance_type"),
-                "instance_id": info.get("instance_id"),
-                "spot": info.get("spot"),
-                "estimated_hourly_cost_usd": info.get("estimated_hourly_cost_usd"),
-                "ami_id": info.get("ami_id"),
-                "pdk_snapshot": info.get("pdk_snapshot"),
-                "attempts": outcome.attempts,
-            }
+            build_remote_environment(info, attempts=outcome.attempts, strict=False)
         )
 
     return corners, engine_version, {"fleet": fleet}
