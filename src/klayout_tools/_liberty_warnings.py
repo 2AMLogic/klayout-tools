@@ -228,7 +228,7 @@ def parse(
 ) -> dict[str, Any]:
     """One corner session's ``liberty_warnings`` block from its completed
     OpenROAD result (``completed`` is duck-typed: ``stdout``/``stderr``
-    strings, i.e. ``_openroad_engine._OpenRoadResult``)."""
+    strings, i.e. ``_openroad_engine.OpenRoadResult``)."""
     return scrubbed_liberty_warnings(
         completed.stdout, completed.stderr, decks, report_paths
     )

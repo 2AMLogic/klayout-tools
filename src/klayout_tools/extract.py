@@ -267,6 +267,9 @@ from .extract_mos_capacitor import _resolve_mos_capacitors
 
 # Moved out (issue #5481) and re-exported, so every existing
 # `from .extract import _resolve_netlist_target` still resolves.
+# `_default_output_path` is live through this shim: `pex_multi_top.py` imports
+# it from here under the `import-boundaries.json` grant (issue #5494).
+from .extract_netlist_target import _default_output_path as _default_output_path
 from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_target
 from .extract_netlist_target import (
     _validate_no_netlist_flags as _validate_no_netlist_flags,

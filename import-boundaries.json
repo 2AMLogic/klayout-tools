@@ -598,6 +598,7 @@
         "klayout_tools.lvs_replay",
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
+        "klayout_tools.lvs_runset_passthrough",
         "klayout_tools.lvs_runset_reference",
         "klayout_tools.lvs_runset_sg13g2_cards",
         "klayout_tools.lvs_runset_top",
@@ -723,7 +724,7 @@
     },
     "pex": {
       "kind": "verb",
-      "description": "`klt pex` implementation: core modules (including the SPICE-text subckt flattener behind --flatten-schematic) plus CLI adapter.",
+      "description": "`klt pex` implementation: core modules (including the SPICE-text subckt flattener behind --flatten-schematic and the repeatable-`--top` multi-top mode) plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
@@ -744,7 +745,10 @@
         "klayout_tools.cli.parser_pex",
         "klayout_tools.cli.parser_pex_extract",
         "klayout_tools.cli.pex_text",
-        "klayout_tools.pex_dry_run"
+        "klayout_tools.pex_dry_run",
+        "klayout_tools.pex_multi_top",
+        "klayout_tools.pex_multi_top_flags",
+        "klayout_tools.pex_multi_top_report"
       ]
     },
     "place_and_route": {
@@ -892,6 +896,7 @@
         "klayout_tools._macros_blackbox",
         "klayout_tools._native",
         "klayout_tools._openroad_engine",
+        "klayout_tools._openroad_io",
         "klayout_tools._openroad_logs",
         "klayout_tools._openroad_mount_hint",
         "klayout_tools._openroad_process",
@@ -938,10 +943,12 @@
         "klayout_tools.request_paths",
         "klayout_tools.resistor_mesh",
         "klayout_tools.touchstone",
+        "klayout_tools.verilog_cell_models",
         "klayout_tools.verilog_module_names",
         "klayout_tools.verilog_netlist",
         "klayout_tools.verilog_pin_bind",
-        "klayout_tools.runset_deck_vars"
+        "klayout_tools.runset_deck_vars",
+        "klayout_tools.runset_launch"
       ]
     },
     "signoff": {
@@ -1234,8 +1241,7 @@
       "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.reset_coverage_cmd",
-        "klayout_tools.reset_coverage",
-        "klayout_tools.reset_coverage_models"
+        "klayout_tools.reset_coverage"
       ]
     },
     "socket_check": {
@@ -1396,11 +1402,6 @@
       "consumer": "pdk",
       "exporter": "env_provenance",
       "reason": "PDK OSDI identity uses repo_root_for and repo_relative_path to emit the same portable path and scope as simulation model evidence (#6904)."
-    },
-    {
-      "consumer": "extract",
-      "exporter": "lvs",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` drives the *same* PDK-runset launcher `klt lvs --engine klayout-runset` built (binary resolution, -rd construction, timeout and error text), through lvs_runset's module-private helpers (`_resolve_klayout_binary`, `_run_runset`, `_application_version`, `_error_lines`) rather than a second copy, and converts its LvsError into an ExtractError. A copy would drift; the two engines must launch runsets identically."
     },
     {
       "consumer": "artifact",
@@ -1641,11 +1642,6 @@
       "consumer": "extract",
       "exporter": "power",
       "reason": "Issue #2981: the terminal-pair effective-resistance adapter in extract_resistance_graph is deliberately built on the public ir_solver.solve_ir_drop, so extraction and klt power share one resistor-network solver."
-    },
-    {
-      "consumer": "functional_verification",
-      "exporter": "reset_coverage",
-      "reason": "options.initial_state derives the gate-level flop list from reset_coverage's netlist/cell-model classification instead of re-parsing (issue #2998)."
     },
     {
       "consumer": "functional_verification",
@@ -1911,11 +1907,6 @@
       "consumer": "power_intent",
       "exporter": "cli-infra",
       "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
-    },
-    {
-      "consumer": "power_intent",
-      "exporter": "reset_coverage",
-      "reason": "Reuses reset_coverage's cell-model loader and netlist conventions instead of re-parsing (issue #4479)."
     },
     {
       "consumer": "reset_coverage",
@@ -2219,30 +2210,6 @@
       "reason": "`klt pex` prints the extraction leg's `--label-layer` echo with `klt extract`'s own renderer so the two text surfaces cannot drift. Was a grandfathered pex_cmd -> extract_cmd exception (issue #2767); issue #5464 moved the importing code to cli/pex_text.py and issue #5481 moved the renderer into cli/extract_text.py, so this records the same single-symbol dependency against both new homes."
     },
     {
-      "consumer": "klayout_tools.extract_runset",
-      "exporter": "klayout_tools.lvs_runset",
-      "symbol": "_resolve_klayout_binary",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
-    },
-    {
-      "consumer": "klayout_tools.extract_runset",
-      "exporter": "klayout_tools.lvs_runset",
-      "symbol": "_run_runset",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
-    },
-    {
-      "consumer": "klayout_tools.extract_runset",
-      "exporter": "klayout_tools.lvs_runset",
-      "symbol": "_application_version",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
-    },
-    {
-      "consumer": "klayout_tools.extract_runset",
-      "exporter": "klayout_tools.lvs_runset",
-      "symbol": "_error_lines",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
-    },
-    {
       "consumer": "klayout_tools.lvs_runset_reference",
       "exporter": "klayout_tools.netlist_normalize",
       "symbol": "_binding_known",
@@ -2301,36 +2268,6 @@
       "exporter": "klayout_tools.sim",
       "symbol": "_OFFHOST_BACKENDS",
       "reason": "Issue #4911: characterize forwards runner-resolved OSDI entries only for the same off-host backends klt sim recognises; promote to a public name when sim is next split."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_CAPTURE_PINS",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_CONST_NETS",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_CellModel",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_POWER_PINS",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
-    },
-    {
-      "consumer": "klayout_tools.power_intent",
-      "exporter": "klayout_tools.reset_coverage",
-      "symbol": "_read",
-      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
     },
     {
       "consumer": "klayout_tools.evidence_lint",
@@ -2745,6 +2682,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_default_batch_job_timeout_s",
       "reason": "Issue #5238: extract_batch and netlist_batch each wrapped this sim_batch timeout formula; the shared job_timeout_seconds helper now owns that one call so the backends cannot drift. Promote to a public name when sim_batch is next split."
+    },
+    {
+      "consumer": "klayout_tools.pex_multi_top",
+      "exporter": "klayout_tools.extract",
+      "symbol": "_default_output_path",
+      "reason": "Issue #5494: multi-top mode writes the combined `-o` netlist itself (`klt extract` writes one file per `--top` into a staging directory instead), so it resolves `-o`'s default with `klt extract`'s own helper rather than restating the `<layout>` + `.spice` convention and risking drift from the single-top default. Promote to public when extract.py is next split."
     },
     {
       "consumer": "klayout_tools._batch_common",
@@ -3165,36 +3108,6 @@
       },
       {
         "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_OpenRoadResult",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_count_violations",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_openroad_version",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_run_openroad",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_status",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
         "exporter": "klayout_tools._paths",
         "symbol": "_count_spef_nets_annotated",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -3218,30 +3131,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.place_and_route_script",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_violation_report_lines",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_count_violations",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_run_openroad",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_status",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.place_and_route_sta",
         "exporter": "klayout_tools._paths",
         "symbol": "_count_spef_nets_annotated",
@@ -3251,42 +3140,6 @@
         "consumer": "klayout_tools.place_and_route_sta",
         "exporter": "klayout_tools._paths",
         "symbol": "_tcl_net_list",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_OpenRoadResult",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_count_violations",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_openroad_version",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_run_openroad",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_status",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_violation_report_lines",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

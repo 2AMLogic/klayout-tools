@@ -281,7 +281,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 8791
+      "lines": 8794
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -413,7 +413,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 759
+      "lines": 613
     },
     {
       "path": "src/klayout_tools/macros.py",
@@ -477,7 +477,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 2488
+      "lines": 2443
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -505,7 +505,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4082
+      "lines": 4034
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -513,7 +513,7 @@
     },
     {
       "path": "src/klayout_tools/power_intent.py",
-      "lines": 595
+      "lines": 568
     },
     {
       "path": "src/klayout_tools/precheck.py",

@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .lvs_base import LvsError
+from .lvs_runset_passthrough import Passthrough
 from .lvs_runset_sg13g2_cards import PASSIVE_CARD_SHAPES, sg13g2_model_name
 from .lvs_runset_top import (
     prepare_reference_top,
@@ -177,7 +178,7 @@ def _protect_passthrough_calls(
     device_map: Any,
     *,
     sg13g2_reference: str | None = None,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, str], Passthrough]:
     """Issue #5402: hide ``X`` cards that call a ``passthrough`` subcircuit
     no curated/``device_map`` binding claims (curated wins) behind comment
     markers, so the conversion leaves them for the runset's own reader."""
@@ -193,25 +194,27 @@ def _protect_passthrough_calls(
     if sg13g2_reference is not None:
         text, kept = _sg13g2_reference_cards(text, sg13g2_reference, binding, explicit)
     saved: dict[str, str] = {}
+    callees: list[str] = []
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if line.strip()[:1] not in ("X", "x"):
             continue
         positional, _ = _split_params(_tokenize(line)[1:])
         name = positional[-1] if positional else ""
-        if i in kept or (
-            name.upper() in passthrough and not _binding_known(name, binding)
-        ):
-            marker = f"* __klt_passthrough_{i}__"
-            saved[marker] = line
-            lines[i] = marker
-    return "\n".join(lines), saved
+        if i not in kept:
+            if name.upper() not in passthrough or _binding_known(name, binding):
+                continue
+            callees.append(name)
+        marker = f"* __klt_passthrough_{i}__"
+        saved[marker] = line
+        lines[i] = marker
+    return "\n".join(lines), saved, Passthrough(sorted(set(callees)), len(callees))
 
 
 def prepare_reference(
     reference: str, request: dict[str, Any], work_dir: str, deck_file: str
-) -> tuple[str, str | None, str | None]:
-    """Prepare ``reference`` in ``work_dir``; return ``(path, scan_top, ref_top)``."""
+) -> tuple[str, str | None, str | None, Passthrough]:
+    """Return the prepared path, scan top, source top and DEVICE_LIST passthrough."""
     from .lvs_runset import _deck_device_list
     from .netlist_normalize import NormalizeError, convert_reference_netlist
 
@@ -231,14 +234,15 @@ def prepare_reference(
     )
     rename = bool(layout_top and effective_top and layout_top != effective_top)
     scan_top = source_top and (layout_top or effective_top)
+    passthrough = Passthrough([], 0)
     if not subckt_call and not rename and not top_changed:
-        return reference, scan_top, source_top
+        return reference, scan_top, source_top, passthrough
     # The converted copy lives in work_dir: keep relative .include paths valid.
     text = resolve_relative_includes(text, os.path.dirname(os.path.abspath(reference)))
     converted = text
     if subckt_call:
         deck, device_map = ref_spec.get("deck"), ref_spec.get("device_map")
-        text, saved = _protect_passthrough_calls(
+        text, saved, passthrough = _protect_passthrough_calls(
             text,
             _deck_device_list(deck_file),
             deck,
@@ -264,7 +268,7 @@ def prepare_reference(
     out = os.path.join(work_dir, "reference_converted.sp")
     with open(out, "w", encoding="utf-8") as handle:
         handle.write(converted)
-    return out, scan_top, source_top
+    return out, scan_top, source_top, passthrough
 
 
 def convert_reference(

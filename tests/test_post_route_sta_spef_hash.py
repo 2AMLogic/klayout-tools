@@ -98,7 +98,7 @@ def test_replacing_spef_between_liberty_corners_rejects_run(
 ):
     request = _setup_matrix_env(tmp_path, monkeypatch, spef)
     scripts = _stub_openroad_matrix(monkeypatch)
-    run_engine = post_route_sta._run_openroad
+    run_engine = post_route_sta.run_openroad
     replacement = tmp_path / "new.spef"
     replacement.write_text(_spef_text("rst"), encoding="utf-8")
 
@@ -108,7 +108,7 @@ def test_replacing_spef_between_liberty_corners_rejects_run(
             replacement.replace(tmp_path / "nom.spef")
         return result
 
-    monkeypatch.setattr(post_route_sta, "_run_openroad", replace_after_first_corner)
+    monkeypatch.setattr(post_route_sta, "run_openroad", replace_after_first_corner)
     with pytest.raises(PostRouteStaError, match="SPEF input.*changed") as error:
         run_sta(request)
     assert "<outside repo>" in str(error.value)
@@ -143,7 +143,7 @@ def test_metadata_only_change_between_liberty_corners_keeps_run(
 ):
     request = _setup_matrix_env(tmp_path, monkeypatch, spef)
     scripts = _stub_openroad_matrix(monkeypatch)
-    run_engine = post_route_sta._run_openroad
+    run_engine = post_route_sta.run_openroad
     target = tmp_path / "nom.spef"
     digest = _sha256_of(target)
     moved = []
@@ -157,7 +157,7 @@ def test_metadata_only_change_between_liberty_corners_keeps_run(
             moved.append(_sta_spef_inputs._file_state(str(target)) != before)
         return result
 
-    monkeypatch.setattr(post_route_sta, "_run_openroad", mutate_after_first_corner)
+    monkeypatch.setattr(post_route_sta, "run_openroad", mutate_after_first_corner)
     report = run_sta(request)
 
     assert moved == [True]
@@ -175,7 +175,7 @@ def test_switching_spef_symlink_keeps_engine_on_original_target(tmp_path, monkey
     link.symlink_to("nom.spef")
     (tmp_path / "max.spef").write_text(_spef_text("rst"), encoding="utf-8")
     scripts = _stub_openroad_matrix(monkeypatch)
-    run_engine = post_route_sta._run_openroad
+    run_engine = post_route_sta.run_openroad
 
     def switch_target(*args, **kwargs):
         result = run_engine(*args, **kwargs)
@@ -183,7 +183,7 @@ def test_switching_spef_symlink_keeps_engine_on_original_target(tmp_path, monkey
         link.symlink_to("max.spef" if len(scripts) == 1 else "nom.spef")
         return result
 
-    monkeypatch.setattr(post_route_sta, "_run_openroad", switch_target)
+    monkeypatch.setattr(post_route_sta, "run_openroad", switch_target)
     report = run_sta(request)
     target = tmp_path / "nom.spef"
     assert report["spef_content_hash"] == _sha256_of(target)
