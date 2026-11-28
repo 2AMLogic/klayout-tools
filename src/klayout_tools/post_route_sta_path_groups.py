@@ -11,7 +11,10 @@ file-size ceiling, the same way :mod:`klayout_tools.post_route_sta_electrical`
 was (issues #3005, #5241). The Tcl producers are
 :func:`~klayout_tools.post_route_sta_stages._worst_path_lines` and
 :func:`~klayout_tools.post_route_sta._port_path_lines`. This module defines
-the markers they emit and parses the rows between them.
+the markers they emit and parses the rows between them, and hosts the row
+parsers every STA path query shares (issue #8106): :func:`parse_path_fields`
+for one row's path payload and :func:`parse_side_path_block` for a whole
+``{"max": [...], "min": [...]}`` marker block.
 """
 
 from __future__ import annotations
@@ -69,43 +72,101 @@ def _empty_path_record(status: str, reason: str | None) -> dict[str, Any]:
     }
 
 
+def parse_path_fields(
+    fields: list[str],
+    line: str,
+    *,
+    label: str,
+    extra_keys: tuple[str, ...] = (),
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """Validate and convert the
+    ``<max|min>\\t<check_role>\\t<slack_s>\\t<startpoint>\\t<endpoint>``
+    payload every timing-path row carries (issue #8106; shared by the
+    ``PATH``, per-port ``PATH``, ``IPATH`` and ``VPATH`` parsers):
+    ``(side, row, None)`` with the slack scaled to ``slack_s * 1e9``, or
+    ``(None, None, reason)`` -- ``reason`` is set exactly when ``side`` and
+    ``row`` are ``None``.
+
+    ``fields`` is the tab-split payload *without* the row's own leading
+    columns, so ``len(fields)`` must be ``5 + len(extra_keys)`` and each
+    ``extra_keys`` name takes the column after ``endpoint``. ``label`` names
+    the row kind in the three ``reason`` strings, which are JSON ``reason``
+    fields: a wrong field count, a side other than ``max``/``min`` or an
+    empty field is a ``malformed {label} record``, an unparseable slack a
+    ``malformed {label} slack``, and a NaN or infinite one a ``non-finite
+    {label} slack``."""
+    if (
+        len(fields) != 5 + len(extra_keys)
+        or fields[0] not in ("max", "min")
+        or not all(fields[1:])
+    ):
+        return None, None, f"malformed {label} record: {line!r}"
+    try:
+        slack_s = float(fields[2])
+    except ValueError:
+        return None, None, f"malformed {label} slack: {line!r}"
+    if slack_s != slack_s or abs(slack_s) == float("inf"):
+        return None, None, f"non-finite {label} slack: {line!r}"
+    row: dict[str, Any] = {
+        "engine_check_role": fields[1],
+        "slack_ns": slack_s * 1e9,
+        "startpoint": fields[3],
+        "endpoint": fields[4],
+    }
+    row.update(zip(extra_keys, fields[5:], strict=True))
+    return fields[0], row, None
+
+
+def parse_side_path_block(
+    stdout: str,
+    *,
+    begin: str,
+    end: str,
+    row_prefix: str,
+    label: str,
+    error_prefix: str,
+    extra_keys: tuple[str, ...] = (),
+) -> tuple[dict[str, list[dict[str, Any]]] | None, str | None]:
+    """``({"max": [...], "min": [...]}, None)`` from the marker block
+    bracketed by ``begin`` / ``end``, whose ``row_prefix`` rows each carry the
+    :func:`parse_path_fields` payload right after their side column, or
+    ``(None, reason)`` when the block is absent, reports an engine error
+    (``error_prefix`` + the ``ERROR`` row's message), or carries a malformed
+    row -- so a bad block is never partially reported. Lines that are neither
+    ``row_prefix`` nor ``ERROR`` rows (stray engine warnings) are ignored --
+    they can never be mistaken for a path."""
+    block = _extract_block(stdout, begin, end)
+    if block is None:
+        return None, f"{label} records absent from engine output"
+    rows: dict[str, list[dict[str, Any]]] = {"max": [], "min": []}
+    for line in block.splitlines():
+        if line.startswith("ERROR\t"):
+            return None, error_prefix + line[len("ERROR\t") :].strip()
+        if not line.startswith(row_prefix + "\t"):
+            continue
+        side, row, reason = parse_path_fields(
+            line.split("\t")[1:], line, label=label, extra_keys=extra_keys
+        )
+        if side is None or row is None:
+            return None, reason
+        rows[side].append(row)
+    return rows, None
+
+
 def _parse_worst_path_rows(
     stdout: str,
 ) -> tuple[dict[str, list[dict[str, Any]]] | None, str | None]:
     """``({"max": [...], "min": [...]}, None)`` from
-    :func:`_worst_path_lines`' block, or ``(None, reason)`` when the block is
-    absent, reports an engine error, or carries a malformed ``PATH`` row.
-    Lines that are neither ``PATH`` nor ``ERROR`` rows (stray engine
-    warnings) are ignored -- they can never be mistaken for a path."""
-    block = _extract_block(stdout, _WORST_PATHS_BEGIN, _WORST_PATHS_END)
-    if block is None:
-        return None, "worst-path records absent from engine output"
-    rows: dict[str, list[dict[str, Any]]] = {"max": [], "min": []}
-    for line in block.splitlines():
-        if line.startswith("ERROR\t"):
-            return None, (
-                "engine path introspection failed: " + line[len("ERROR\t") :].strip()
-            )
-        if not line.startswith("PATH\t"):
-            continue
-        parts = line.split("\t")
-        if len(parts) != 6 or parts[1] not in rows or not all(parts[2:]):
-            return None, f"malformed worst-path record: {line!r}"
-        try:
-            slack_s = float(parts[3])
-        except ValueError:
-            return None, f"malformed worst-path slack: {line!r}"
-        if slack_s != slack_s or abs(slack_s) == float("inf"):
-            return None, f"non-finite worst-path slack: {line!r}"
-        rows[parts[1]].append(
-            {
-                "engine_check_role": parts[2],
-                "slack_ns": slack_s * 1e9,
-                "startpoint": parts[4],
-                "endpoint": parts[5],
-            }
-        )
-    return rows, None
+    :func:`_worst_path_lines`' block, or ``(None, reason)`` when it is
+    absent, reports an engine error, or carries a malformed ``PATH`` row."""
+    return parse_side_path_block(
+        stdout,
+        begin=_WORST_PATHS_BEGIN,
+        end=_WORST_PATHS_END,
+        row_prefix="PATH",
+        label="worst-path",
+        error_prefix="engine path introspection failed: ",
+    )
 
 
 def _worst_path_record(
@@ -261,22 +322,10 @@ def _apply_port_record(
             return f"malformed port record: {line!r}"
         directions[port] = "inout" if parts[2] == "bidirect" else parts[2]
         return None
-    if len(parts) != 7 or parts[2] not in ("max", "min") or not all(parts[3:]):
-        return f"malformed port path record: {line!r}"
-    try:
-        slack_s = float(parts[4])
-    except ValueError:
-        return f"malformed port path slack: {line!r}"
-    if slack_s != slack_s or abs(slack_s) == float("inf"):
-        return f"non-finite port path slack: {line!r}"
-    port_rows[parts[2]].append(
-        {
-            "engine_check_role": parts[3],
-            "slack_ns": slack_s * 1e9,
-            "startpoint": parts[5],
-            "endpoint": parts[6],
-        }
-    )
+    side, row, reason = parse_path_fields(parts[2:], line, label="port path")
+    if side is None or row is None:
+        return reason
+    port_rows[side].append(row)
     return None
 
 

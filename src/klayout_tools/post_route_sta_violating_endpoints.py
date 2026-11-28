@@ -17,9 +17,8 @@ from __future__ import annotations
 from typing import Any
 
 from ._jsonnum import is_int
-from ._sta_request_diag import extract_block as _extract_block
 from .post_route_sta_errors import PostRouteStaError
-from .post_route_sta_path_groups import _path_group_entry
+from .post_route_sta_path_groups import _path_group_entry, parse_side_path_block
 
 #: Issue #7418: brackets the bounded violating-endpoint list
 #: (:func:`_violating_endpoint_lines`), emitted only when the request set
@@ -119,37 +118,15 @@ def _parse_violating_endpoint_rows(
     ``VPATH`` row -- the same contract as ``_parse_worst_path_rows``, so a
     bad block is never partially reported. Lines that are neither ``VPATH``
     nor ``ERROR`` rows (stray engine warnings) are ignored."""
-    block = _extract_block(stdout, _VIOLATING_ENDPOINTS_BEGIN, _VIOLATING_ENDPOINTS_END)
-    if block is None:
-        return None, "violating-endpoint records absent from engine output"
-    rows: dict[str, list[dict[str, Any]]] = {"max": [], "min": []}
-    for line in block.splitlines():
-        if line.startswith("ERROR\t"):
-            return None, (
-                "engine violating-endpoint introspection failed: "
-                + line[len("ERROR\t") :].strip()
-            )
-        if not line.startswith("VPATH\t"):
-            continue
-        parts = line.split("\t")
-        if len(parts) != 7 or parts[1] not in rows or not all(parts[2:]):
-            return None, f"malformed violating-endpoint record: {line!r}"
-        try:
-            slack_s = float(parts[3])
-        except ValueError:
-            return None, f"malformed violating-endpoint slack: {line!r}"
-        if slack_s != slack_s or abs(slack_s) == float("inf"):
-            return None, f"non-finite violating-endpoint slack: {line!r}"
-        rows[parts[1]].append(
-            {
-                "engine_check_role": parts[2],
-                "slack_ns": slack_s * 1e9,
-                "startpoint": parts[4],
-                "endpoint": parts[5],
-                "path_group": parts[6],
-            }
-        )
-    return rows, None
+    return parse_side_path_block(
+        stdout,
+        begin=_VIOLATING_ENDPOINTS_BEGIN,
+        end=_VIOLATING_ENDPOINTS_END,
+        row_prefix="VPATH",
+        label="violating-endpoint",
+        error_prefix="engine violating-endpoint introspection failed: ",
+        extra_keys=("path_group",),
+    )
 
 
 def _violating_endpoint_entry(row: dict[str, Any]) -> dict[str, Any]:
