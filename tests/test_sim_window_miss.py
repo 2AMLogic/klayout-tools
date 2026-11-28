@@ -25,13 +25,13 @@ _OUT_OF_INTERVAL_LOG = (
 
 
 def test_out_of_interval_alone_is_not_ngspice_fatal():
-    codes = [d["code"] for d in sim._classify_diagnostics(_OUT_OF_INTERVAL_LOG)]
+    codes = [d["code"] for d in sim.classify_diagnostics(_OUT_OF_INTERVAL_LOG)]
     assert "ngspice_fatal" not in codes
 
 
 def test_out_of_interval_with_real_abort_stays_ngspice_fatal():
     log = _OUT_OF_INTERVAL_LOG + "Simulation interrupted due to error!\n"
-    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    codes = [d["code"] for d in sim.classify_diagnostics(log)]
     assert "ngspice_fatal" in codes
 
 

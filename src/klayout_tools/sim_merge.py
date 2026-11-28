@@ -13,7 +13,7 @@ tool's own rollup code instead of leaving every consumer to re-implement it:
   counters, ``metrics``, ``diagnostic_counts`` and the report ``status`` are
   *recomputed* over that union by the helpers :func:`klayout_tools.sim.run_sim`
   itself uses (``_rollup_measurements``, ``_build_coverage``,
-  ``_grade_corners``, ``_diagnostic_counts``) -- ``coverage.checked`` ids
+  ``grade_corners``, ``_diagnostic_counts``) -- ``coverage.checked`` ids
   carry corner indices local to one report, so the recomputation re-bases
   them;
 * fields that describe one report (``environment.netlist_sha256``,
@@ -389,7 +389,7 @@ def _merge(manifest: dict[str, Any], reports: list[dict[str, Any]]) -> dict[str,
 
     measurements = sim._rollup_measurements(specs, corners, None)
     coverage = sim._build_coverage(measurements, corners)
-    graded = sim._grade_corners(corners, measurements, coverage)
+    graded = sim.grade_corners(corners, measurements, coverage)
 
     merged: dict[str, Any] = copy.deepcopy(reports[0])
     merged.update(

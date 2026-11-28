@@ -98,6 +98,7 @@ from . import _spice_number as spice_number
 from . import (
     _warn,
     env_provenance,
+    ngspice_build,
     output_lock,
     sim_ac_waveform,
     sim_batch_history,
@@ -195,9 +196,6 @@ from .coverage import (
 )
 from .metrics import is_registered
 from .ngspice_build import ENGINE_BANNER_MAX
-from .ngspice_build import (
-    engine_version as _extract_engine_version,
-)
 from .ngspice_build import (
     probe_engine_build as _probe_engine_build,
 )
@@ -946,7 +944,7 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # `level = 72` on a stock ngspice (`Only MOS device levels
         # 1-6,8-10,14,49,54-58,60,68,73 are supported in this binary`,
         # issue #2814). It is a missing *capability*, not a netlist or bin
-        # problem, so it gets its own code and (see `_classify_diagnostics`)
+        # problem, so it gets its own code and (see `classify_diagnostics`)
         # suppresses the misleading `model_bin_range` follow-on error.
         "unsupported_model_level",
         re.compile(
@@ -991,7 +989,7 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # netlist line no. N, new internal line no. M:` (issue #4603).
         # Last on purpose: every specific
         # pattern above names a cause, so this one is only the fallback cause
-        # (`_classify_diagnostics` drops it when a specific fatal code was
+        # (`classify_diagnostics` drops it when a specific fatal code was
         # already classified). The message is the first matching log line.
         "ngspice_fatal",
         re.compile(
@@ -1161,7 +1159,7 @@ def _probe_engine_version(engine: str, binary: str) -> str | None:
         return None
     text = (proc.stdout or "") + (proc.stderr or "")
     if engine == "ngspice":
-        return _extract_engine_version(text)
+        return ngspice_build.engine_version(text)
     match = re.search(r"Release\s+([\w.]+)", text)
     return match.group(1) if match else None
 
@@ -3857,7 +3855,7 @@ def _run_sim_corners(
         measurements_rollup, corners, capture_only=capture_only, grid_stats=grid_stats
     )
     measurements_rollup.extend(grid_stats)
-    graded = _grade_corners(corners, measurements_rollup, coverage)
+    graded = grade_corners(corners, measurements_rollup, coverage)
     passed = graded["passed"]
     failed = graded["failed"]
     errored = graded["errored"]
@@ -4123,7 +4121,7 @@ def _diagnostic_counts(corners: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _grade_corners(
+def grade_corners(
     corners: list[dict[str, Any]],
     measurements_rollup: list[dict[str, Any]],
     coverage: dict[str, Any],
@@ -5952,7 +5950,7 @@ def _classify_engine_diagnostics(
     for ngspice."""
     if engine == "xyce":
         return _classify_xyce_diagnostics(log_text)
-    return _classify_diagnostics(log_text, netlist_path)
+    return classify_diagnostics(log_text, netlist_path)
 
 
 #: ngspice's reply to an ``alterparam`` whose target is not a ``.param`` it
@@ -6358,7 +6356,7 @@ def _run_corner(
             # on stdout, read below); the log is read either way.
             engine_version = _extract_xyce_version(log_text)
         elif not timed_out:
-            engine_version = _extract_engine_version(stdout_text)
+            engine_version = ngspice_build.engine_version(stdout_text)
 
         if timed_out:
             diagnostics.append(
@@ -6552,7 +6550,7 @@ def _run_corner(
         # diagnostic, always at `severity: "error"`, reported alongside (not
         # instead of) the per-measurement ones. Appended before
         # `disqualifying` is sampled so `fail_on_diagnostic` can name it.
-        aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
+        aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else SIMULATION_ABORTED_RE
         aborted_diagnostic = _analysis_aborted_diagnostic(log_text, aborted_re)
         if aborted_diagnostic is not None:
             diagnostics.append(aborted_diagnostic)
@@ -7822,7 +7820,7 @@ _XYCE_DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 def _classify_xyce_diagnostics(log_text: str) -> list[dict[str, str]]:
     """Classify structured diagnostics from a Xyce log, per
     ``_XYCE_DIAGNOSTIC_PATTERNS`` (one match per code, same shape and
-    severity conventions as :func:`_classify_diagnostics`).
+    severity conventions as :func:`classify_diagnostics`).
     """
     diagnostics: list[dict[str, str]] = []
     for code, pattern in _XYCE_DIAGNOSTIC_PATTERNS:
@@ -8112,7 +8110,7 @@ def _run_calibration_probe(
 
         if not timed_out and error is None:
             log_text = _read_log_file(log_path)
-            if _SIMULATION_ABORTED_RE.search(log_text):
+            if SIMULATION_ABORTED_RE.search(log_text):
                 # The probe's own (shortened) analysis never completed cleanly
                 # -- e.g. a genuine convergence failure at this corner, not the
                 # probe window being too generous. Its wall time is not a
@@ -8338,9 +8336,7 @@ def _par_call_cap_preflight(deck_path: str, is_xyce: bool) -> list[dict[str, str
     ]
 
 
-def _classify_diagnostics(
-    log_text: str, netlist_path: str = ""
-) -> list[dict[str, Any]]:
+def classify_diagnostics(log_text: str, netlist_path: str = "") -> list[dict[str, Any]]:
     """Classify structured diagnostics from ``log_text``, per this module's
     ordered ``_DIAGNOSTIC_PATTERNS`` (most specific first, one match per
     code). ``netlist_path``, when provided, also lets two codes read the
@@ -8504,14 +8500,14 @@ def _diagnose_modelname_error(netlist_path: str) -> str | None:
 
 #: ngspice's own "analysis never completed" trailer (issue #205); the one
 #: definition lives with the stepping-code pair it qualifies (issue #7906).
-_SIMULATION_ABORTED_RE = sim_stepping_narration.SIMULATION_ABORTED_RE
+SIMULATION_ABORTED_RE = sim_stepping_narration.SIMULATION_ABORTED_RE
 
 
 def _recovered_from_stepping(
     measurements_spec: list[dict[str, Any]],
     measurement_results: list[dict[str, Any]],
     log_text: str,
-    aborted_re: re.Pattern[str] = _SIMULATION_ABORTED_RE,
+    aborted_re: re.Pattern[str] = SIMULATION_ABORTED_RE,
     waveform_complete: bool = False,
 ) -> bool:
     """True when a ``singular_matrix``/``nonconvergence`` classification for

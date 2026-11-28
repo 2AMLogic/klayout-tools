@@ -137,7 +137,7 @@ def _netlist_title_line(log_text: str, netlist_path: str) -> tuple[int, str] | N
     ``None``, leaving classification exactly as it was.
 
     ``sim._title_line_cause`` turns a hit into the **seed** of
-    ``_classify_diagnostics``'s list rather than appending it at the end, for
+    ``classify_diagnostics``'s list rather than appending it at the end, for
     two reasons: the cause then reads as ``diagnostics[0]``, and the generic
     ``ngspice_fatal`` reading of the same abort is dropped by that function's
     existing "a specific fatal code already matched" rule without needing a

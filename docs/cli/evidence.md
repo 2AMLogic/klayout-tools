@@ -75,7 +75,7 @@ klt evidence lint [ROOT] [--base REF] [--schema FILE.json]
 | Append-only: `git diff --name-status REF...HEAD` — any status but `A` under the evidence dir (`HEAD` pointer files exempt). `--base` defaults to `origin/main` | `append_only_violation` |
 | Supersession: targets exist, share `<block>/<scope>`, no forks, no cycles, a second record for a scope must supersede; `HEAD` file names an unsuperseded record | `supersedes_missing_target`, `supersedes_scope_mismatch`, `supersession_fork`, `supersession_cycle`, `supersedes_omitted`, `head_mismatch` |
 | Sidecar: files named by `artifacts.corners[]` exist; an optional `deck_sha256` / `log_sha256` must match | `sidecar_missing`, `sidecar_hash_mismatch` |
-| Verdict: `result.status` is re-derived from the embedded corners with `klt sim`'s own grading rule (`sim._grade_corners`); pex records are not re-derived | `verdict_mismatch` |
+| Verdict: `result.status` is re-derived from the embedded corners with `klt sim`'s own grading rule (`sim.grade_corners`); pex records are not re-derived | `verdict_mismatch` |
 | Repo schema (`--schema`) | `schema_violation` |
 
 `--schema FILE.json` is flat and declarative (no code hooks):

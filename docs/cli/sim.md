@@ -10635,7 +10635,7 @@ physically implausible operating point — a compact model evaluated far
 outside its fitted range, or an extrapolation branch — without emitting any
 log-level diagnostic: this is a *silent* failure mode, distinct from
 everything "Failure classification" below catches, because there is no
-distinguishing log text for `_classify_diagnostics` to match. A `.meas` card
+distinguishing log text for `classify_diagnostics` to match. A `.meas` card
 sampling that node still returns an ordinary-looking numeric value (observed:
 orders of magnitude outside the deck's own declared supply rails), which the
 ordinary `limits` comparison then grades exactly as it would a legitimate

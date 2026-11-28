@@ -28,9 +28,9 @@ def test_off_host_expr_failure_gains_runner_hint(tmp_path):
 
 
 def test_local_classify_expr_failure_has_no_runner_hint():
-    from klayout_tools.sim import _classify_diagnostics
+    from klayout_tools.sim import classify_diagnostics
 
-    found = _classify_diagnostics(_EXPR_LOG)
+    found = classify_diagnostics(_EXPR_LOG)
     assert [d["code"] for d in found] == ["ngspice_fatal"]
     assert "runner_klt_version" not in found[0]["message"]
 

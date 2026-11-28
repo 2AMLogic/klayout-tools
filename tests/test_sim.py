@@ -2154,19 +2154,19 @@ def test_parse_measurements_ignores_unrelated_lines():
 
 def test_classify_diagnostics_singular_matrix():
     log = "Warning: singular matrix:  check node b\n"
-    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    codes = [d["code"] for d in sim.classify_diagnostics(log)]
     assert codes == ["singular_matrix"]
 
 
 def test_classify_diagnostics_nonconvergence():
     log = "Warning: Dynamic gmin stepping failed\n"
-    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    codes = [d["code"] for d in sim.classify_diagnostics(log)]
     assert "nonconvergence" in codes
 
 
 def test_classify_diagnostics_netlist_error():
     log = "Error: unknown subckt: foo\n"
-    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    codes = [d["code"] for d in sim.classify_diagnostics(log)]
     assert "netlist" in codes
 
 
@@ -2181,7 +2181,7 @@ def test_classify_diagnostics_missing_include():
         "    While reading /home/ubuntu/job/netlist.cir\n"
         "Error: no such device or model name vtail\n"
     )
-    diagnostics = sim._classify_diagnostics(log)
+    diagnostics = sim.classify_diagnostics(log)
     codes = [d["code"] for d in diagnostics]
     assert "missing_include" in codes
     (diag,) = [d for d in diagnostics if d["code"] == "missing_include"]
@@ -2200,7 +2200,7 @@ def test_classify_diagnostics_no_such_vector():
         "Error: no such vector as v(mid).\n"
         " .meas dc mout_val find v(mid) at=0 failed!\n"
     )
-    diagnostics = sim._classify_diagnostics(log)
+    diagnostics = sim.classify_diagnostics(log)
     codes = [d["code"] for d in diagnostics]
     assert "no_such_vector" in codes
     (diag,) = [d for d in diagnostics if d["code"] == "no_such_vector"]
@@ -2210,7 +2210,7 @@ def test_classify_diagnostics_no_such_vector():
 
 def test_classify_diagnostics_clean_log_is_empty():
     log = "Note: Transient op finished successfully\nngspice-46 done\n"
-    assert sim._classify_diagnostics(log) == []
+    assert sim.classify_diagnostics(log) == []
 
 
 def test_classify_diagnostics_does_not_false_positive_on_title_text():
@@ -2220,7 +2220,7 @@ def test_classify_diagnostics_does_not_false_positive_on_title_text():
         "Circuit: * a singular matrix test circuit\n"
         "Note: Transient op finished successfully\n"
     )
-    assert sim._classify_diagnostics(log) == []
+    assert sim.classify_diagnostics(log) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -2234,7 +2234,7 @@ _NO_LEVEL72_LOG = (
 
 
 def test_unsupported_model_level_names_the_missing_capability():
-    diagnostics = sim._classify_diagnostics(_NO_LEVEL72_LOG)
+    diagnostics = sim.classify_diagnostics(_NO_LEVEL72_LOG)
     codes = [d["code"] for d in diagnostics]
     # The follow-on modelname error is a consequence, not a bin range.
     assert codes == ["unsupported_model_level"]
@@ -2247,7 +2247,7 @@ def test_unsupported_model_level_names_the_missing_capability():
 
 def test_osdi_abi_mismatch_names_the_missing_capability():
     log = 'NGSPICE only supports OSDI v0.3 but "bsimcmg.osdi" targets v0.4!\n'
-    (diag,) = sim._classify_diagnostics(log)
+    (diag,) = sim.classify_diagnostics(log)
     assert diag["code"] == "osdi_abi_mismatch"
     assert diag["severity"] == "error"
     assert "prerequisite missing" in diag["message"]
@@ -2261,7 +2261,7 @@ def test_osdi_load_failure_names_the_missing_capability():
         'Error opening osdi lib "x.osdi": no such file\n'
         "Error: Library x.osdi couldn't be loaded!\n"
     )
-    (diag,) = sim._classify_diagnostics(log)
+    (diag,) = sim.classify_diagnostics(log)
     assert diag["code"] == "osdi_load_failed"
     assert "prerequisite missing" in diag["message"]
     assert "fetch-sg13g2-sim-toolchain.sh" in diag["message"]
@@ -2304,9 +2304,9 @@ _MODELNAME_LOG = "Error: could not find a valid modelname\n"
 def test_classify_diagnostics_modelname_without_netlist_falls_back_to_raw_line():
     # No netlist_path provided (matches every pre-#1214 caller/test) --
     # falls back to ngspice's own raw, uninformative line.
-    codes = [d["code"] for d in sim._classify_diagnostics(_MODELNAME_LOG)]
+    codes = [d["code"] for d in sim.classify_diagnostics(_MODELNAME_LOG)]
     assert codes == ["model_bin_range"]
-    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG)
+    (diag,) = sim.classify_diagnostics(_MODELNAME_LOG)
     assert diag["message"] == "Error: could not find a valid modelname"
     assert diag["severity"] == "error"
 
@@ -2315,7 +2315,7 @@ def test_classify_diagnostics_modelname_with_wide_w_names_culprit(tmp_path):
     netlist = tmp_path / "netlist.spice"
     netlist.write_text("X5 d g s b nfet_06v0 w=150u l=0.6u nf=1 m=1\n")
 
-    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
+    (diag,) = sim.classify_diagnostics(_MODELNAME_LOG, str(netlist))
 
     assert diag["code"] == "model_bin_range"
     assert diag["severity"] == "error"
@@ -2330,7 +2330,7 @@ def test_classify_diagnostics_modelname_with_wide_nf_names_culprit(tmp_path):
     netlist = tmp_path / "netlist.spice"
     netlist.write_text("X5 d g s b nfet_06v0 w=128u l=0.6u nf=64 m=1\n")
 
-    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
+    (diag,) = sim.classify_diagnostics(_MODELNAME_LOG, str(netlist))
 
     assert diag["code"] == "model_bin_range"
     assert "nf=64" in diag["message"]
@@ -2345,7 +2345,7 @@ def test_classify_diagnostics_modelname_with_m_workaround_finds_no_culprit(tmp_p
     netlist = tmp_path / "netlist.spice"
     netlist.write_text("X5 d g s b nfet_06v0 w=50u l=0.6u m=450\n")
 
-    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
+    (diag,) = sim.classify_diagnostics(_MODELNAME_LOG, str(netlist))
 
     assert diag["code"] == "model_bin_range"
     assert diag["message"] == "Error: could not find a valid modelname"
@@ -2355,13 +2355,13 @@ def test_classify_diagnostics_modelname_narrow_width_finds_no_culprit(tmp_path):
     netlist = tmp_path / "netlist.spice"
     netlist.write_text("M1 d g s b nfet_06v0 w=5u l=0.6u\n")
 
-    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
+    (diag,) = sim.classify_diagnostics(_MODELNAME_LOG, str(netlist))
 
     assert diag["message"] == "Error: could not find a valid modelname"
 
 
 def test_classify_diagnostics_modelname_missing_netlist_file_falls_back(tmp_path):
-    (diag,) = sim._classify_diagnostics(
+    (diag,) = sim.classify_diagnostics(
         _MODELNAME_LOG, str(tmp_path / "does-not-exist.spice")
     )
     assert diag["message"] == "Error: could not find a valid modelname"
@@ -2528,7 +2528,7 @@ def test_nonconvergence_pattern_alone_misses_ngspice_timestep_text():
 
 
 def test_classify_diagnostics_timestep_too_small_structured_fields():
-    (diagnostic,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG)
+    (diagnostic,) = sim.classify_diagnostics(_TIMESTEP_ABORT_LOG)
     assert diagnostic["code"] == "timestep_too_small"
     assert diagnostic["severity"] == "error"
     assert diagnostic["time_s"] == pytest.approx(1.0001e-09)
@@ -2547,7 +2547,7 @@ def test_classify_diagnostics_timestep_too_small_structured_fields():
     ],
 )
 def test_classify_diagnostics_timestep_too_small_without_detail(line):
-    (diagnostic,) = sim._classify_diagnostics(line + "\n")
+    (diagnostic,) = sim.classify_diagnostics(line + "\n")
     assert diagnostic["code"] == "timestep_too_small"
     assert diagnostic["time_s"] is None
     assert diagnostic["timestep_s"] is None
@@ -2561,8 +2561,8 @@ def test_classify_diagnostics_timestep_trnoise_hint_only_when_netlist_uses_it(
     noisy.write_text("Vn n 0 trnoise(1m 1n 0 0)\nVctl ctl 0 PWL(0 0 1n 1)\n")
     quiet = tmp_path / "quiet.spice"
     quiet.write_text("Vctl ctl 0 PWL(0 0 1n 1)\n")
-    (with_hint,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG, str(noisy))
-    (without_hint,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG, str(quiet))
+    (with_hint,) = sim.classify_diagnostics(_TIMESTEP_ABORT_LOG, str(noisy))
+    (without_hint,) = sim.classify_diagnostics(_TIMESTEP_ABORT_LOG, str(quiet))
     assert "trnoise()" in with_hint["message"]
     assert "trnoise" not in without_hint["message"]
 
@@ -2572,7 +2572,7 @@ def test_classify_diagnostics_timestep_beside_recovered_stepping_narration():
     # noise on its own) plus the terminal transient abort -- both classify,
     # each under its own code.
     log = "Warning: Dynamic gmin stepping failed\n" + _TIMESTEP_ABORT_LOG
-    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    codes = [d["code"] for d in sim.classify_diagnostics(log)]
     assert codes == ["timestep_too_small", "nonconvergence"]
 
 
@@ -3809,7 +3809,7 @@ def test_bare_fatal_error_message_carries_cause_lines():
         "Error: third " + "x" * 500 + "\n"
         "fatal error in ngspice, exit(1)\n"
     )
-    (diag,) = sim._classify_diagnostics(log)
+    (diag,) = sim.classify_diagnostics(log)
     assert diag["code"] == "ngspice_fatal"
     assert diag["message"].startswith("fatal error in ngspice, exit(1)")
     assert "can't find model 'nfet'" in diag["message"]
@@ -3818,7 +3818,7 @@ def test_bare_fatal_error_message_carries_cause_lines():
 
 
 def test_bare_fatal_error_without_cause_is_unchanged():
-    (diag,) = sim._classify_diagnostics("fatal error in ngspice, exit(1)\n")
+    (diag,) = sim.classify_diagnostics("fatal error in ngspice, exit(1)\n")
     assert diag["message"] == "fatal error in ngspice, exit(1)"
 
 
@@ -10828,7 +10828,7 @@ _EXPECTED_INDIRECT_CODE_SITES = {
     # `for code, pattern in _DIAGNOSTIC_PATTERNS` / `_XYCE_DIAGNOSTIC_PATTERNS`
     # -- the loop variable; the tables themselves are rule 1.
     ("klayout_tools.sim", "_classify_xyce_diagnostics", "code"),
-    ("klayout_tools.sim", "_classify_diagnostics", "code"),
+    ("klayout_tools.sim", "classify_diagnostics", "code"),
     # `code` is this function's own parameter; its call sites are rule 3.
     ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
     # The probe supplies its own code. The two schedulers use a nullable
@@ -13766,7 +13766,7 @@ def test_expand_netlist_includes_plain_netlist_untouched(tmp_path):
 
 
 def test_classify_diagnostics_missing_include_ngspice42_wording():
-    diagnostics = sim._classify_diagnostics("Error: .include filename missing\n")
+    diagnostics = sim.classify_diagnostics("Error: .include filename missing\n")
     assert "missing_include" in [d["code"] for d in diagnostics]
 
 
@@ -15529,7 +15529,7 @@ def test_analysis_aborted_is_error_even_when_all_measurements_returned(
 def test_analysis_aborted_absent_without_trailer():
     assert (
         sim._analysis_aborted_diagnostic(
-            _RECOVERED_SINGULAR_MATRIX_LOG, sim._SIMULATION_ABORTED_RE
+            _RECOVERED_SINGULAR_MATRIX_LOG, sim.SIMULATION_ABORTED_RE
         )
         is None
     )
@@ -15598,7 +15598,7 @@ def test_param_brace_in_step_analysis_args_rejected():
 
 def test_par_call_cap_log_classified():
     log = "Circuit: x\nERROR: More than 99 function calls to par()\n"
-    diagnostics = sim._classify_diagnostics(log)
+    diagnostics = sim.classify_diagnostics(log)
     par = [d for d in diagnostics if d["code"] == "par_call_cap"]
     assert len(par) == 1
     assert par[0]["severity"] == "error"
@@ -15616,7 +15616,7 @@ def test_par_call_cap_real_ngspice_46_log_classified():
         "  Limited to 99 per input file\n\n"
         "ERROR: fatal error in ngspice, exit(1)\n"
     )
-    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    codes = [d["code"] for d in sim.classify_diagnostics(log)]
     assert codes.count("par_call_cap") == 1
 
 

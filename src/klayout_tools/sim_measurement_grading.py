@@ -78,7 +78,7 @@ def _within_plausible_range(value: float, plausible_range: dict[str, float]) -> 
     comparison (:func:`_evaluate_limits`). Deliberately not a
     log-text classification: an implausible-but-numerically-valid solve
     (a compact model evaluated far outside its fitted range) produces no
-    distinguishing ngspice log line for ``_classify_diagnostics`` to catch
+    distinguishing ngspice log line for ``classify_diagnostics`` to catch
     -- this is a purely numeric check the tool performs on the measured
     value itself.
     """
@@ -173,7 +173,7 @@ def _grade_measurement_value(
     ngspice Newton solve can converge onto a numerically valid but
     physically implausible operating point (a compact model evaluated far
     outside its fitted range) without emitting any distinguishing log line
-    for :func:`_classify_diagnostics` to match -- so the only thing standing
+    for :func:`classify_diagnostics` to match -- so the only thing standing
     between that solve and an ordinary-looking ``pass``/``fail`` verdict is
     this check running before :func:`_evaluate_limits`. A second grading
     path that reached :func:`_evaluate_limits` without passing through here

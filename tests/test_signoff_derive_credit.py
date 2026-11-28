@@ -79,7 +79,7 @@ def _derive_envelope(min_limit: float = 0.20, **flags: bool) -> dict:
     failed = sum(c["status"] == "fail" for c in corners)
     return {
         **SIM_PASS_ENVELOPE,
-        "status": sim._grade_corners(corners, measurements, coverage)["status"],
+        "status": sim.grade_corners(corners, measurements, coverage)["status"],
         "corner_count": len(corners),
         "passed": len(corners) - failed,
         "failed": failed,

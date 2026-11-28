@@ -73,7 +73,7 @@ netlist alone, so they are still reported when the ``.op`` itself fails to
 converge (``status: "error"``) -- which is the case where an agent most
 needs them. The simulation-side counterpart of "floating node" (ngspice's
 singular-matrix / gmin-stepping narration) is not re-implemented here:
-``sim.py``'s existing ``_classify_diagnostics``/#205 recovery logic is
+``sim.py``'s existing ``classify_diagnostics``/#205 recovery logic is
 called directly, so the two never disagree.
 
 Exit codes (mirrored in ``cli/sim_cmd.py`` -- see ``docs/cli/sim.md``):
@@ -100,7 +100,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _spice_number as spice_number
-from . import env_provenance, op_sanity_diagnostics, sim_osdi_pin
+from . import env_provenance, ngspice_build, op_sanity_diagnostics, sim_osdi_pin
 from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
@@ -111,17 +111,16 @@ from ._provenance import build_provenance, sha256_file
 from ._spice_text import logical_lines as _logical_lines
 from .op_sanity_pdk import resolve_lint_pdk
 from .sim import (
-    _SIMULATION_ABORTED_RE,
     DEFAULT_TIMEOUT_S,
+    SIMULATION_ABORTED_RE,
     CornerPoint,
     SimError,
-    _classify_diagnostics,
     _expand_corners,
-    _extract_engine_version,
     _needs_models_lib,
     _resolve_corner_section_libs,
     _resolve_models_lib,
     _resolve_param_file,
+    classify_diagnostics,
     corner_lib_lines,
     resolve_netlist_include,
     scale_supply_waveforms,
@@ -1350,9 +1349,9 @@ def _other_corner_entry(
     )
     other_resolved, other_voltages = _parse_op_log(other_log, other_devices)
     other_diagnostics = list(other_launch)
-    other_diagnostics.extend(_classify_diagnostics(other_log, netlist_path))
+    other_diagnostics.extend(classify_diagnostics(other_log, netlist_path))
     produced = bool(other_voltages or other_resolved)
-    if produced and not _SIMULATION_ABORTED_RE.search(other_log):
+    if produced and not SIMULATION_ABORTED_RE.search(other_log):
         for diagnostic in other_diagnostics:
             if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
                 diagnostic["severity"] = "warning"
@@ -1524,7 +1523,7 @@ def run_op_sanity(
     resolved, node_voltages = _parse_op_log(log_text, parsed.devices)
 
     diagnostics = list(launch_diagnostics)
-    diagnostics.extend(_classify_diagnostics(log_text, netlist_path))
+    diagnostics.extend(classify_diagnostics(log_text, netlist_path))
 
     # Issue #205, applied to an `op` run: ngspice narrates its own
     # gmin/source-stepping recovery attempts with `singular matrix` /
@@ -1534,7 +1533,7 @@ def run_op_sanity(
     # measurement came back" for the same judgement, and the same
     # `simulation(s) aborted` trailer still vetoes recovery.
     produced_values = bool(node_voltages) or bool(resolved)
-    if produced_values and not _SIMULATION_ABORTED_RE.search(log_text):
+    if produced_values and not SIMULATION_ABORTED_RE.search(log_text):
         for diagnostic in diagnostics:
             if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
                 diagnostic["severity"] = "warning"
@@ -1764,7 +1763,7 @@ def _run_op(
                 text=True,
                 timeout=timeout_s,
             )
-            engine_version = _extract_engine_version(completed.stdout)
+            engine_version = ngspice_build.engine_version(completed.stdout)
         except subprocess.TimeoutExpired:
             diagnostics.append(
                 {
