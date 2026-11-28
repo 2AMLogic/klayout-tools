@@ -1,0 +1,286 @@
+{
+  "issue": 8080,
+  "design": "examples/asap7-lvs-keepout/keepout.v",
+  "variants": {
+    "baseline": {
+      "synthesize": {
+        "constraints.dont_use": [],
+        "cell_exclusions": {
+          "mode": "additive",
+          "requested": [],
+          "library_defaults": [],
+          "effective": [],
+          "validated": null,
+          "engine_supports_dont_use": null
+        },
+        "instance_count": 66,
+        "area_um2": 9.9144,
+        "mapped": {
+          "instances": 66,
+          "pinned": {
+            "A2O1A1O1Ixp25_ASAP7_75t_R": 1
+          }
+        }
+      },
+      "place-and-route": {
+        "library.dont_use": [],
+        "cell_exclusions": null,
+        "stage_reached": "route",
+        "as_built": {
+          "instances": 70,
+          "pinned": {
+            "A2O1A1O1Ixp25_ASAP7_75t_R": 1
+          }
+        },
+        "routed_def": {
+          "instances": 555,
+          "pinned": {
+            "A2O1A1O1Ixp25_ASAP7_75t_R": 1
+          }
+        }
+      },
+      "lvs": {
+        "status": "mismatch",
+        "exit_code": 3,
+        "error_count": 9,
+        "category_counts": {
+          "device.finfet_bulk_tied": 46,
+          "device.unmatched": 3,
+          "net.supply_fragmented": 23,
+          "topology": 6,
+          "topology.flattened": 2,
+          "topology.known_limitation": 1,
+          "topology.top_level_pins_anchored": 1
+        },
+        "counts": {
+          "nets": {
+            "layout": 435,
+            "reference": 435,
+            "matched": 429
+          },
+          "devices": {
+            "layout": 798,
+            "reference": 798,
+            "matched": 795
+          },
+          "pins": {
+            "layout": 23,
+            "reference": 21,
+            "matched": 23
+          }
+        },
+        "known_limitation": [
+          {
+            "side": "both",
+            "cell": "A2O1A1O1Ixp25_ASAP7_75t_R",
+            "limitation": "series-order",
+            "layout_count": 1,
+            "reference_count": 1
+          }
+        ],
+        "power_connectivity": "unchecked",
+        "layout_sha256": "92cec224a4f7c873c2db7956260b52645c76305ccd4d8c7dc2f292b7b8896888",
+        "reference_sha256": "f70b1258d32849d518152a55bb3dcace6f48f9ee78015cf2f335e7bd636f7f4f"
+      }
+    },
+    "keepout": {
+      "synthesize": {
+        "constraints.dont_use": {
+          "count": 17,
+          "equals": "sorted(KNOWN_UNSUPPORTED_ASAP7_CELLS)"
+        },
+        "cell_exclusions": {
+          "mode": "additive",
+          "requested": {
+            "count": 17,
+            "equals": "sorted(KNOWN_UNSUPPORTED_ASAP7_CELLS)"
+          },
+          "library_defaults": [],
+          "effective": {
+            "count": 17,
+            "equals": "sorted(KNOWN_UNSUPPORTED_ASAP7_CELLS)"
+          },
+          "validated": true,
+          "engine_supports_dont_use": true
+        },
+        "instance_count": 67,
+        "area_um2": 9.94356,
+        "mapped": {
+          "instances": 67,
+          "pinned": {}
+        }
+      },
+      "place-and-route": {
+        "library.dont_use": {
+          "count": 17,
+          "equals": "sorted(KNOWN_UNSUPPORTED_ASAP7_CELLS)"
+        },
+        "cell_exclusions": {
+          "requested": {
+            "count": 17,
+            "equals": "sorted(KNOWN_UNSUPPORTED_ASAP7_CELLS)"
+          },
+          "library_defaults": [],
+          "effective": {
+            "count": 17,
+            "equals": "sorted(KNOWN_UNSUPPORTED_ASAP7_CELLS)"
+          },
+          "validated": true
+        },
+        "stage_reached": "route",
+        "as_built": {
+          "instances": 71,
+          "pinned": {}
+        },
+        "routed_def": {
+          "instances": 554,
+          "pinned": {}
+        }
+      },
+      "lvs": {
+        "status": "match",
+        "exit_code": 0,
+        "error_count": 0,
+        "category_counts": {
+          "device.finfet_bulk_tied": 48,
+          "net.supply_fragmented": 24,
+          "topology.flattened": 2,
+          "topology.top_level_pins_anchored": 1
+        },
+        "counts": {
+          "nets": {
+            "layout": 436,
+            "reference": 436,
+            "matched": 436
+          },
+          "devices": {
+            "layout": 800,
+            "reference": 800,
+            "matched": 800
+          },
+          "pins": {
+            "layout": 23,
+            "reference": 21,
+            "matched": 23
+          }
+        },
+        "known_limitation": [],
+        "power_connectivity": "match",
+        "layout_sha256": "0ed9058fc84c3eb0f4d829e4152a9d36db0051857d92ab0e6d5d76906f70e6ca",
+        "reference_sha256": "8b3613aca583b44553758222d73d0055bb2f2b8b6eb4dd8792253944ce5d3dd0"
+      }
+    }
+  },
+  "environment": {
+    "klt_version": "0.9.3.dev5974+g571830333aa6.dirty",
+    "klt_git_commit": "571830333aa64a71de152c33cbaa4ac0ae225ace",
+    "klt_version_note": "the .dirty suffix reflects uncommitted example and doc files only; src/ was identical to 571830333aa6, and two earlier clean-tree runs of the same requests produced GDS and Verilog with the layout/reference sha256 values recorded under variants",
+    "yosys": "0.67+post",
+    "openroad": "26Q3-1510-g6cb3f2b704",
+    "klayout": "0.30.13",
+    "deck": {
+      "name": "asap7",
+      "content_hash": "sha256:5c58a50e5f6a9099810b3fde37eaa8d93b0897653cb6597a831baac1f5ebee76",
+      "released": true
+    },
+    "asap7_root": {
+      "script": "scripts/assemble-asap7-pdk-root.py",
+      "commits": {
+        ".": "d24f8b857ff74cf5b21ab18a7e1b11a3954c449b",
+        "asap7_pdk_r1p7": "58d72c9d291e186a77468586ab0c43d8a21eda6a",
+        "asap7sc7p5t_28": "f970bd3c3292b79ae4d022a3ec80533534614066"
+      },
+      "normalizations": {
+        "asap7sc7p5t_28/LIB/NLDM/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib.7z": {
+          "default_max_transition": {
+            "from": 4000,
+            "to": 320
+          },
+          "pins_with_inherited_limit_made_explicit": 58
+        }
+      }
+    },
+    "pinned_corpus": {
+      "lambdapdk": "0.2.17",
+      "cdl_sha256": "sha256:3e3e2548fb8f571c2e373dcbf565ecb0288e6433e803fbf06561cb16b70caf53",
+      "gds_sha256_uncompressed": "sha256:f43d5b33df635cf9e66cbca66b6bdd05364f824d8040cd21528b9e12808b9263"
+    },
+    "yosys_sha1": "b8e7da6f40ae8f552c116bf6c359b07c6533e159"
+  },
+  "commands": [
+    "klt synthesize <dir>/synthesize.json --pdk asap7 --pdk-root $ASAP7_ROOT --format json",
+    "klt place-and-route <dir>/place-and-route.json --pdk asap7 --pdk-root $ASAP7_ROOT --format json",
+    "klt lvs <dir>/lvs.json --format json",
+    "python examples/asap7-lvs-keepout/count_pinned.py <mapped.v> <as_built.v> <routed.def>"
+  ],
+  "failure_modes": {
+    "engine_without_abc_dont_use": {
+      "how": "a yosys on PATH whose `help abc` omits -dont_use, otherwise the real build",
+      "cell_exclusions": {
+        "requested": 17,
+        "effective": 0,
+        "validated": true,
+        "engine_supports_dont_use": false
+      },
+      "warnings.by_category": {
+        "dont_use_unsupported": 1
+      },
+      "mapped": {
+        "instances": 66,
+        "pinned": {
+          "A2O1A1O1Ixp25_ASAP7_75t_R": 1
+        }
+      }
+    },
+    "single_family_liberty": {
+      "how": "the request above against an install whose TT liberty is only asap7sc7p5t_OA_RVT_TT_nldm.lib (34 cells, 3 of the 17)",
+      "exit_code": 1,
+      "error": "request.constraints.dont_use pattern 'A2O1A1O1Ixp25_ASAP7_75t_R' matches no cell in the resolved liberty 'asap7sc7p5t_rvt__TT.lib' (34 cells) -- an exclusion that matches nothing silently changes nothing"
+    },
+    "pre_existing_instance": {
+      "how": "the keep-out place-and-route request fed the baseline mapped netlist (which already holds the pinned instance)",
+      "cell_exclusions": {
+        "requested": 17,
+        "effective": 17,
+        "validated": true
+      },
+      "set_dont_use_lines_in_place_tcl": 17,
+      "as_built": {
+        "instances": 70,
+        "pinned": {
+          "A2O1A1O1Ixp25_ASAP7_75t_R": 1
+        }
+      }
+    }
+  },
+  "residual": {
+    "issue": 8084,
+    "permutation_dependent_cells": [
+      "AND4x1_ASAP7_75t_R",
+      "AO21x1_ASAP7_75t_R",
+      "AO21x2_ASAP7_75t_R",
+      "AOI32xp33_ASAP7_75t_R",
+      "FAx1_ASAP7_75t_R",
+      "OAI31xp33_ASAP7_75t_R",
+      "OAI31xp67_ASAP7_75t_R",
+      "OAI322xp33_ASAP7_75t_R",
+      "OAI32xp33_ASAP7_75t_R",
+      "OAI33xp33_ASAP7_75t_R",
+      "XOR2x2_ASAP7_75t_R"
+    ],
+    "wider_fixture": {
+      "design": "an 8-bit registered ALU slice (and, or, xor, add, sub, concatenate, min) with the recipe applied",
+      "lvs_status": "mismatch",
+      "device.unmatched": 47,
+      "instances_with_unmatched_devices": {
+        "AO21x1_ASAP7_75t_R": 8,
+        "OAI31xp33_ASAP7_75t_R": 3,
+        "AOI21xp33_ASAP7_75t_R": 2,
+        "NAND3xp33_ASAP7_75t_R": 2,
+        "NOR2xp33_ASAP7_75t_R": 1,
+        "OAI22xp33_ASAP7_75t_R": 1,
+        "AND3x1_ASAP7_75t_R": 1
+      }
+    }
+  }
+}

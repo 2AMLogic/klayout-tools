@@ -944,6 +944,94 @@ Corpus tests live in `tests/test_asap7_finfet.py` (unit tests in `tests/test_lvs
 explicit reason when the pinned PDK is not fetched and write only to temp
 paths.
 
+#### Keeping the 17 masters out of a routed block (issue #8080)
+
+The warning names the problem; it does not remove it. `klt place-and-route`
+has no built-in ASAP7 exclusion, and its sizing and buffering choose from
+the whole Liberty, so a synthesis-time exclusion alone does not keep a pinned
+master out of the routed layout. The opt-in recipe puts one array, derived
+from the pinned table, into `constraints.dont_use` of the `klt synthesize`
+request and `library.dont_use` of the `klt place-and-route` request, and
+leaves every other request setting as it is:
+
+```sh
+uv run python - synthesize.json:constraints place-and-route.json:library <<'PY'
+import json, sys
+from pathlib import Path
+from klayout_tools.lvs_known_limits import KNOWN_UNSUPPORTED_ASAP7_CELLS
+
+keep_out = sorted(KNOWN_UNSUPPORTED_ASAP7_CELLS)
+for argument in sys.argv[1:]:
+    path, section = argument.rsplit(":", 1)
+    document = json.loads(Path(path).read_text())
+    settings = dict(document.get(section) or {})
+    settings["dont_use"] = list(dict.fromkeys([*settings.get("dont_use", []), *keep_out]))
+    document[section] = settings
+    Path(path).write_text(json.dumps(document, indent=2) + "\n")
+PY
+```
+
+The names keep the library's mixed-case spelling and `_ASAP7_75t_R` suffix
+because both tools match patterns case-sensitively.
+
+**Check that it took effect.** Read both reports before trusting a netlist:
+
+- `klt synthesize`'s `cell_exclusions.engine_supports_dont_use` must be `true`
+  and its `effective` must hold all 17 names. `false` means the resolved
+  Yosys build's `abc` has no `-dont_use`: the request is dropped, `effective`
+  is `[]`, a `dont_use_unsupported` warning lists the patterns, and the
+  mapped netlist can still hold the masters.
+- Both reports' `validated` must be `true`: every requested pattern matched
+  a cell of the resolved Liberty. This needs a complete RVT Liberty view.
+  Against a single family file (34 cells, 3 of the 17) `klt synthesize`
+  exits 1 with `pattern 'A2O1A1O1Ixp25_ASAP7_75t_R' matches no cell in the
+  resolved liberty`. `null` means nothing was checked.
+- `klt place-and-route`'s `cell_exclusions` is present only when
+  `library.dont_use` is supplied; its `effective` is the built-in list (empty
+  for ASAP7 RVT) followed by the request's patterns.
+- Count the masters where they are instantiated: `klt synthesize`'s
+  `instance_counts_by_type` for the mapped netlist, and the as-built
+  `verilog_path` or routed DEF for what was actually built
+  (`examples/asap7-lvs-keepout/count_pinned.py` reads either). An exclusion
+  stops a tool from *selecting* a master; a netlist synthesized without it
+  keeps its pinned instances through place-and-route even when
+  `library.dont_use` is set.
+
+**Worked result (2026-11-28).**
+[`examples/asap7-lvs-keepout/`](../../examples/asap7-lvs-keepout/README.md)
+synthesizes, places and routes a 6-bit registered adder/subtractor twice
+from the same RTL and settings, then compares each routed GDS with
+`reference.form: "gate-level-verilog"` against its own as-built
+`verilog_path`, the pinned CDL as `reference.pin_order_files`, and
+`options.finfet_bulk` with `flatten_layout: true`:
+
+| | baseline | keep-out |
+|---|---|---|
+| `klt synthesize` `cell_exclusions` | `effective` [], `validated` null | `engine_supports_dont_use` true, `effective` 17, `validated` true |
+| mapped netlist | 66 instances, `A2O1A1O1Ixp25_ASAP7_75t_R` x1 | 67 instances, none of the 17 |
+| as-built netlist / routed DEF | 70 / 555 instances, pinned x1 | 71 / 554 instances, none of the 17 |
+| `klt lvs` | `mismatch`: 3 `device.unmatched`, all in the pinned instance, plus one `topology.known_limitation` warning | `match`: 436/436 nets, 800/800 devices |
+
+Tools: klayout-tools 0.9.3.dev5974+g571830333aa6, Yosys 0.67+post, OpenROAD
+26Q3-1510-g6cb3f2b704, KLayout 0.30.13. PDK: an ASAP7 root from
+`scripts/assemble-asap7-pdk-root.py` (superproject `d24f8b857ff7`, RVT at
+TT), whose GDS and LEF are byte-identical to the pinned lambdapdk views, and
+the pinned CDL above. Commands and hashes are in the example's README and
+`results.json`.
+
+**What the keep-out does not fix.** Eleven further masters pass the
+single-cell compare above only because the comparer swaps commutative pins
+(`AO21x1` and `AO21x2` `A1`↔`A2`; `OAI31xp33`, `OAI31xp67` and
+`OAI322xp33` `A1`↔`A3`; `AOI32xp33` and `OAI32xp33` `B1`↔`B2`;
+`OAI33xp33` `B1`↔`B3`; `XOR2x2` and `FAx1` `A`↔`B`; `AND4x1` `A`↔`D` and
+`B`↔`C`). Forced to pair each port with itself, all eleven report
+`device.unmatched` on their series stack, and a block cannot swap nets that
+other cells share. An 8-bit ALU slice built the same way still reported
+`mismatch` with the recipe applied, on every `AO21x1` instance it held. They
+are not in the pinned table, so the block-level warning does not name them;
+#8084 tracks them. `status: match` is reachable for a block that
+instantiates none of either set.
+
 ## Scope: schematic-equivalent, topological compare only
 
 Per the phase 1 spike's resolution (section 4, "Resolving the

@@ -84,6 +84,11 @@ directory has its own README, start there.
 - [`yield-sensitivity/`](yield-sensitivity/) — a synthetic, seeded 200-sample
   campaign for `klt yield-sensitivity` (issue #923); `generate.py`
   regenerates. See its README.
+- [`asap7-lvs-keepout/`](asap7-lvs-keepout/) — a 6-bit ASAP7 RVT
+  adder/subtractor synthesized, placed, routed and compared with `klt lvs`
+  twice, with and without the keep-out that keeps the 17 LVS-limited masters
+  out of a block: requests, the recipe, a pinned-instance counter and the
+  recorded counts and verdicts (issue #8080). See its README.
 
 Running an example in place may write generated artifacts (e.g. `.klt/`)
 next to its request document — those are gitignored, see the root
