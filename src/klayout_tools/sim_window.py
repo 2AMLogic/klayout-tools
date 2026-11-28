@@ -5,9 +5,11 @@
 transient: each takes a ``from``/``to`` (or ``sample_at``) time, each has to
 reject a bound that is not a time, and the two that integrate over the window
 (``energy``, ``stress``) also refuse a window the ``tran`` analysis never
-reaches. Those rules are identical across the forms, so they live here instead
-of once per form module -- the forms differ in what they *compute* from the
-window, not in how they parse or police it.
+reaches -- at validation, against the declared sweep, and again at
+reduction, against the samples the simulator actually saved. Those rules are
+identical across the forms, so they live here instead of once per form
+module -- the forms differ in what they *compute* from the window, not in how
+they parse or police it.
 
 Every diagnostic raised here names the **caller's own form** (``form=``), so a
 bad ``cycle_mean.from`` is reported as a ``cycle_mean`` problem rather than
@@ -153,3 +155,37 @@ def value_at(scale: list[float], values: list[float], t: float) -> float:
     return values[index - 1] + (values[index] - values[index - 1]) * (
         (t - t0) / (t1 - t0)
     )
+
+
+def resolve_sample_window(
+    scale: list[float],
+    count: int,
+    *,
+    start: float | None = None,
+    stop: float | None = None,
+) -> tuple[float, float, str | None]:
+    """Resolve the ``[start, stop]`` window of a reduction over the first
+    ``count`` samples of ``scale`` to ``(lo, hi, error)``.
+
+    ``count`` is how many of ``scale``'s samples the caller can use (the
+    shortest of its vectors); the default window is the whole of them.
+    ``error`` is ``None`` when the window is usable and ``lo``/``hi`` are the
+    edges to reduce over; otherwise it is the per-measurement reason (fewer
+    than two samples, a window the saved samples do not reach within
+    :data:`EDGE_TOLERANCE`, or one that holds no time) and both edges are
+    ``0.0``.
+    """
+    if count < 2:
+        return 0.0, 0.0, "fewer than two samples"
+    lo = scale[0] if start is None else start
+    hi = scale[count - 1] if stop is None else stop
+    slack = EDGE_TOLERANCE * max(abs(scale[count - 1] - scale[0]), abs(hi), 1e-30)
+    if lo < scale[0] - slack or hi > scale[count - 1] + slack:
+        outside = (
+            f"window [{lo!r}, {hi!r}] s is outside the saved samples "
+            f"[{scale[0]!r}, {scale[count - 1]!r}] s"
+        )
+        return 0.0, 0.0, outside
+    if not hi > lo:
+        return 0.0, 0.0, f"window [{lo!r}, {hi!r}] s is empty"
+    return lo, hi, None

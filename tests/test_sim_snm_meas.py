@@ -242,6 +242,16 @@ def test_value_is_graded_and_carries_the_eye_breakdown(tmp_path, monkeypatch):
     assert report["status"] == "fail"
 
 
+def test_scalar_snm_without_eye_breakdown_echoes_only_the_selectors():
+    entry, diagnostics = sim_snm_meas.snm_measurement_result(
+        _DECL, sim_snm_meas.SnmOutcome(value=0.25), save_mode="all"
+    )
+
+    assert entry["value"] == 0.25
+    assert entry["snm"] == _BODY
+    assert diagnostics == []
+
+
 def test_monte_carlo_statistics_carry_the_value(tmp_path, monkeypatch):
     request = _request(
         tmp_path,

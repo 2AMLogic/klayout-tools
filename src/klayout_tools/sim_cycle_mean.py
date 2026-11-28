@@ -93,18 +93,13 @@ def cycle_mean_measurements(
 def validate_cycle_mean_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].cycle_mean`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'cycle_mean' must be an object, e.g. "
-            '{"signal": "v(out)", "align": "v(clk)", "level": 0.9, '
-            '"cycles": 8}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown cycle_mean key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="cycle_mean",
+        allowed_keys=_ALLOWED_KEYS,
+        example=('{"signal": "v(out)", "align": "v(clk)", "level": 0.9, "cycles": 8}'),
+    )
     for key in ("signal", "align"):
         sim_crossings._validate_signal(name, body.get(key))
     sim_crossings._validate_level(name, body.get("level"))

@@ -31,7 +31,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_measurement_kind, sim_snm
-from .sim_errors import SimError
 from .sim_forms import normalize_selector as normalize_selector
 from .sim_forms import other_forms, validate_exclusive_form
 from .sim_measurement_grading import _vector_measurement_result
@@ -69,12 +68,9 @@ def unique_triples(
 ) -> list[tuple[str, str, str]]:
     """Distinct normalized ``(x, y1, y2)`` triples, in first-declared order --
     also the order their deck lines and rawfiles are numbered in."""
-    triples: list[tuple[str, str, str]] = []
-    for spec in snm_measurements(measurements_spec):
-        triple = _triple(spec)
-        if triple not in triples:
-            triples.append(triple)
-    return triples
+    return sim_measurement_kind.unique_keys(
+        snm_measurements(measurements_spec), _triple
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -95,24 +91,14 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
 
 
 def validate_snm_spec(name: Any, body: Any) -> None:
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'snm' must be an object, e.g. "
-            '{"x": "v(in)", "y1": "v(out_a)", "y2": "v(out_b)"}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown snm key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
-    for key in _KEYS:
-        if normalize_selector(body.get(key)) is None:
-            raise SimError(
-                f"measurement '{name}': snm.{key} must be a single-ended "
-                f'"v(node)" selector with one node token (no whitespace, '
-                f"comma or parenthesis); got {body.get(key)!r}"
-            )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="snm",
+        allowed_keys=_ALLOWED_KEYS,
+        example='{"x": "v(in)", "y1": "v(out_a)", "y2": "v(out_b)"}',
+    )
+    sim_measurement_kind.require_voltage_selectors(name, body, _KEYS, form="snm")
 
 
 def validate_snm_context(

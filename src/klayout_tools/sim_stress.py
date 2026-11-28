@@ -71,17 +71,13 @@ def stress_measurements(
 def validate_stress_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].stress`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'stress' must be an object, e.g. "
-            '{"a": "d1", "b": "s1"}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown stress key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="stress",
+        allowed_keys=_ALLOWED_KEYS,
+        example='{"a": "d1", "b": "s1"}',
+    )
     a = body.get("a")
     if not isinstance(a, str) or not _NODE_RE.match(a):
         raise SimError(
@@ -188,22 +184,11 @@ def reduce_stress(
     edges. Requires ``scale`` ascending with at least two samples and a
     window inside it."""
     count = min(len(scale), len(diff))
-    if count < 2:
-        return StressOutcome(error="fewer than two samples")
-    lo = scale[0] if start is None else start
-    hi = scale[count - 1] if stop is None else stop
-    slack = sim_window.EDGE_TOLERANCE * max(
-        abs(scale[count - 1] - scale[0]), abs(hi), 1e-30
+    lo, hi, error = sim_window.resolve_sample_window(
+        scale, count, start=start, stop=stop
     )
-    if lo < scale[0] - slack or hi > scale[count - 1] + slack:
-        return StressOutcome(
-            error=(
-                f"window [{lo!r}, {hi!r}] s is outside the saved samples "
-                f"[{scale[0]!r}, {scale[count - 1]!r}] s"
-            )
-        )
-    if not hi > lo:
-        return StressOutcome(error=f"window [{lo!r}, {hi!r}] s is empty")
+    if error is not None:
+        return StressOutcome(error=error)
     candidates: list[tuple[float, float]] = []
     for index in range(1, count):
         t0, t1 = scale[index - 1], scale[index]

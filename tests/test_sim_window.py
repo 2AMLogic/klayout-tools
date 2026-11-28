@@ -179,6 +179,63 @@ def test_value_at_interpolates_and_clamps():
     assert sim_window.value_at([0.0, 1.0, 1.0], [0.0, 5.0, 7.0], 1.0) == 5.0
 
 
+def test_resolve_sample_window_defaults_to_the_whole_of_scale():
+    scale = [0.0, 1.0, 2.0, 3.0]
+    assert sim_window.resolve_sample_window(scale, 4) == (0.0, 3.0, None)
+    assert sim_window.resolve_sample_window(scale, 4, start=1.0, stop=2.0) == (
+        1.0,
+        2.0,
+        None,
+    )
+    # Only the first ``count`` samples exist, however long ``scale`` is.
+    assert sim_window.resolve_sample_window(scale, 3) == (0.0, 2.0, None)
+
+
+def test_resolve_sample_window_fills_each_missing_edge_from_the_scale():
+    scale = [0.0, 1.0, 2.0]
+    assert sim_window.resolve_sample_window(scale, 3, start=1.0) == (1.0, 2.0, None)
+    assert sim_window.resolve_sample_window(scale, 3, stop=1.0) == (0.0, 1.0, None)
+
+
+@pytest.mark.parametrize("scale", [[0.0], []])
+def test_resolve_sample_window_refuses_fewer_than_two_samples(scale):
+    assert sim_window.resolve_sample_window(scale, len(scale)) == (
+        0.0,
+        0.0,
+        "fewer than two samples",
+    )
+
+
+def test_resolve_sample_window_refuses_a_window_the_samples_do_not_reach():
+    scale = [0.0, 1.0, 2.0]
+    assert sim_window.resolve_sample_window(scale, 3, start=-0.5) == (
+        0.0,
+        0.0,
+        "window [-0.5, 2.0] s is outside the saved samples [0.0, 2.0] s",
+    )
+    assert sim_window.resolve_sample_window(scale, 3, stop=2.5) == (
+        0.0,
+        0.0,
+        "window [0.0, 2.5] s is outside the saved samples [0.0, 2.0] s",
+    )
+    # A hair past the last timepoint is float round-off, not a bad window.
+    assert sim_window.resolve_sample_window(scale, 3, stop=2.0 + 1e-12) == (
+        0.0,
+        2.0 + 1e-12,
+        None,
+    )
+
+
+def test_resolve_sample_window_refuses_an_empty_window():
+    assert sim_window.resolve_sample_window(
+        [0.0, 1.0, 2.0], 3, start=1.0, stop=1.0
+    ) == (
+        0.0,
+        0.0,
+        "window [1.0, 1.0] s is empty",
+    )
+
+
 def test_window_and_eye_validation_leave_sim_runner_unloaded():
     code = """
 import sys

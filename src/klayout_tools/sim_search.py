@@ -186,19 +186,17 @@ def _validate_options(name: Any, body: dict[str, Any]) -> None:
 
 
 def validate_search_spec(name: Any, body: Any) -> None:
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'search' must be an object, e.g. "
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="search",
+        allowed_keys=_ALLOWED_KEYS,
+        example=(
             '{"source": "Ibl", "lo": 0, "hi": 1e-4, "tol": 1e-7, '
             '"max_iter": 20, "analysis": {"kind": "tran", "args": "10p 5n"}, '
             '"predicate": {"expr": "v(q) > 0.5"}}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown search key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+        ),
+    )
     missing = [key for key in _KEYS if body.get(key) is None]
     if missing:
         raise SimError(

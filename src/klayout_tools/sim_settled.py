@@ -145,19 +145,17 @@ def _validate_tracked(name: Any, key: str, body: Any) -> None:
 def validate_settled_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].settled`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'settled' must be an object, e.g. "
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="settled",
+        allowed_keys=_ALLOWED_KEYS,
+        example=(
             '{"clock": "v(clk)", "level": 0.9, "cycles": 8, '
             '"mean": {"signal": "v(vout)", "tol_pct": 1.0}, '
             '"peak": {"signal": "i(l1)", "tol_pct": 5.0}}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown settled key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+        ),
+    )
     sim_crossings._validate_signal(name, body.get("clock"))
     sim_crossings._validate_level(name, body.get("level"))
     edge = body.get("edge", "rise")

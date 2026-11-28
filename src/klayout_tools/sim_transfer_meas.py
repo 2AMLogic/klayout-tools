@@ -100,12 +100,9 @@ def _pair(spec: dict[str, Any]) -> tuple[str, str]:
 def unique_pairs(measurements_spec: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """Distinct normalized ``(num, den)`` pairs, in first-declared order --
     also the order their deck lines and rawfiles are numbered in."""
-    pairs: list[tuple[str, str]] = []
-    for spec in transfer_measurements(measurements_spec):
-        pair = _pair(spec)
-        if pair not in pairs:
-            pairs.append(pair)
-    return pairs
+    return sim_measurement_kind.unique_keys(
+        transfer_measurements(measurements_spec), _pair
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -126,24 +123,16 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
 
 
 def validate_transfer_spec(name: Any, body: Any) -> None:
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'transfer' must be an object, e.g. "
-            '{"num": "v(out)", "den": "v(in)", "metric": "phase_margin_deg"}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown transfer key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
-    for key in ("num", "den"):
-        if normalize_selector(body.get(key)) is None:
-            raise SimError(
-                f"measurement '{name}': transfer.{key} must be a single-ended "
-                f'"v(node)" selector with one node token (no whitespace, '
-                f"comma or parenthesis); got {body.get(key)!r}"
-            )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="transfer",
+        allowed_keys=_ALLOWED_KEYS,
+        example='{"num": "v(out)", "den": "v(in)", "metric": "phase_margin_deg"}',
+    )
+    sim_measurement_kind.require_voltage_selectors(
+        name, body, ("num", "den"), form="transfer"
+    )
     if body.get("metric") not in ALL_METRICS:
         raise SimError(
             f"measurement '{name}': transfer.metric must be one of "

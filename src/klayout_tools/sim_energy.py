@@ -95,17 +95,13 @@ def energy_measurements(
 def validate_energy_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].energy`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'energy' must be an object, e.g. "
-            '{"source": "vdd", "voltage": "v(a)"}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown energy key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="energy",
+        allowed_keys=_ALLOWED_KEYS,
+        example='{"source": "vdd", "voltage": "v(a)"}',
+    )
     source = body.get("source")
     if not isinstance(source, str) or not _SOURCE_RE.match(source):
         raise SimError(
@@ -229,22 +225,11 @@ def integrate_energy(
     trapezoidal rule described in the module docstring. Requires ``scale``
     ascending with at least two samples and a window inside it."""
     count = min(len(scale), len(voltage), len(current))
-    if count < 2:
-        return EnergyOutcome(error="fewer than two samples")
-    lo = scale[0] if start is None else start
-    hi = scale[count - 1] if stop is None else stop
-    slack = sim_window.EDGE_TOLERANCE * max(
-        abs(scale[count - 1] - scale[0]), abs(hi), 1e-30
+    lo, hi, error = sim_window.resolve_sample_window(
+        scale, count, start=start, stop=stop
     )
-    if lo < scale[0] - slack or hi > scale[count - 1] + slack:
-        return EnergyOutcome(
-            error=(
-                f"window [{lo!r}, {hi!r}] s is outside the saved samples "
-                f"[{scale[0]!r}, {scale[count - 1]!r}] s"
-            )
-        )
-    if not hi > lo:
-        return EnergyOutcome(error=f"window [{lo!r}, {hi!r}] s is empty")
+    if error is not None:
+        return EnergyOutcome(error=error)
     outcome = EnergyOutcome(start=lo, stop=hi)
     for index in range(1, count):
         t0, t1 = scale[index - 1], scale[index]

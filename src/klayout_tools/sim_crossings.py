@@ -99,17 +99,13 @@ def crossings_measurements(
 def validate_crossings_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].crossings`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'crossings' must be an object, e.g. "
-            '{"signal": "v(out)", "level": 0.9, "edge": "rise"}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown crossings key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
+    sim_measurement_kind.validate_form_object(
+        name,
+        body,
+        form="crossings",
+        allowed_keys=_ALLOWED_KEYS,
+        example='{"signal": "v(out)", "level": 0.9, "edge": "rise"}',
+    )
     _validate_signal(name, body.get("signal"))
     _validate_crossings_level(name, body.get("level"))
     edge = body.get("edge", "rise")
