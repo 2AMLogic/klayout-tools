@@ -576,3 +576,21 @@ the same commit and source archive. Seven paid launches produced all 216
 stage records. The outcomes,
 per-design durations, provenance, cost estimates and defect links are in
 [`docs/reports/tt-gf180mcu-corpus-run.md`](../../docs/reports/tt-gf180mcu-corpus-run.md).
+
+## Tiny Tapeout synthesis benchmark (Epic #520 Phases 2 and 3)
+
+The Phase 2 data and its attribution are checked in here. They are digests
+and counts, not vendored design source.
+
+- `tt06_sky130_sample.json` pins the four `tt06` sky130A designs.
+- `tt06_sky130_attribution.json` records each design's title and author.
+- `tt_sky130_baseline.json` records the baseline instance counts and the
+  tool pins.
+- `tt_sky130_optimized.json` records the proof-gated result of one ABC
+  configuration per design, or the reason the design is excluded.
+
+[`docs/guides/tinytapeout-benchmark.md`](../../docs/guides/tinytapeout-benchmark.md)
+is the harness README: the exact commands, pins and tool versions that
+reproduce a reported number, the attribution of every design, and the status
+of the upstream offers. `tests/test_tt_benchmark_attribution.py` keeps that
+page and these files in agreement.
